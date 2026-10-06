@@ -1,0 +1,127 @@
+{
+	"name": "Quest 1 Touch legacy bindings",
+	"description": "Touch controllers (driver_quest1) for applications that use the legacy OpenVR input API",
+	"controller_type": "oculus_touch",
+	"bindings": {
+		"/actions/legacy": {
+			"poses": [
+				{ "output": "/actions/legacy/in/Left_Pose", "path": "/user/hand/left/pose/raw" },
+				{ "output": "/actions/legacy/in/Right_Pose", "path": "/user/hand/right/pose/raw" }
+			],
+			"haptics": [
+				{ "output": "/actions/legacy/out/left_haptic", "path": "/user/hand/left/output/haptic" },
+				{ "output": "/actions/legacy/out/right_haptic", "path": "/user/hand/right/output/haptic" }
+			],
+			"sources": [
+				{
+					"path": "/user/hand/left/input/joystick",
+					"mode": "joystick",
+					"inputs": {
+						"position": { "output": "/actions/legacy/in/left_axis0_value" },
+						"click": { "output": "/actions/legacy/in/left_axis0_press" },
+						"touch": { "output": "/actions/legacy/in/left_axis0_touch" }
+					}
+				},
+				{
+					"path": "/user/hand/left/input/trigger",
+					"mode": "trigger",
+					"parameters": { "haptic_amplitude": "0" },
+					"inputs": {
+						"pull": { "output": "/actions/legacy/in/left_axis1_value" },
+						"click": { "output": "/actions/legacy/in/left_axis1_press" },
+						"touch": { "output": "/actions/legacy/in/left_axis1_touch" }
+					}
+				},
+				{
+					"path": "/user/hand/left/input/grip",
+					"mode": "trigger",
+					"parameters": { "haptic_amplitude": "0" },
+					"inputs": {
+						"pull": { "output": "/actions/legacy/in/left_axis2_value1" },
+						"click": { "output": "/actions/legacy/in/left_axis2_press" },
+						"touch": { "output": "/actions/legacy/in/left_axis2_touch" }
+					}
+				},
+				{
+					"path": "/user/hand/left/input/grip",
+					"mode": "button",
+					"parameters": { "haptic_amplitude": "0" },
+					"inputs": {
+						"click": { "output": "/actions/legacy/in/left_grip_press" },
+						"touch": { "output": "/actions/legacy/in/left_grip_touch" }
+					}
+				},
+				{
+					"path": "/user/hand/left/input/x",
+					"mode": "button",
+					"inputs": {
+						"click": { "output": "/actions/legacy/in/left_a_press" },
+						"touch": { "output": "/actions/legacy/in/left_a_touch" }
+					}
+				},
+				{
+					"path": "/user/hand/left/input/y",
+					"mode": "button",
+					"inputs": {
+						"click": { "output": "/actions/legacy/in/left_applicationmenu_press" },
+						"touch": { "output": "/actions/legacy/in/left_applicationmenu_touch" }
+					}
+				},
+				{
+					"path": "/user/hand/right/input/joystick",
+					"mode": "joystick",
+					"inputs": {
+						"position": { "output": "/actions/legacy/in/right_axis0_value" },
+						"click": { "output": "/actions/legacy/in/right_axis0_press" },
+						"touch": { "output": "/actions/legacy/in/right_axis0_touch" }
+					}
+				},
+				{
+					"path": "/user/hand/right/input/trigger",
+					"mode": "trigger",
+					"parameters": { "haptic_amplitude": "0" },
+					"inputs": {
+						"pull": { "output": "/actions/legacy/in/right_axis1_value" },
+						"click": { "output": "/actions/legacy/in/right_axis1_press" },
+						"touch": { "output": "/actions/legacy/in/right_axis1_touch" }
+					}
+				},
+				{
+					"path": "/user/hand/right/input/grip",
+					"mode": "trigger",
+					"parameters": { "haptic_amplitude": "0" },
+					"inputs": {
+						"pull": { "output": "/actions/legacy/in/right_axis2_value1" },
+						"click": { "output": "/actions/legacy/in/right_axis2_press" },
+						"touch": { "output": "/actions/legacy/in/right_axis2_touch" }
+					}
+				},
+				{
+					"path": "/user/hand/right/input/grip",
+					"mode": "button",
+					"parameters": { "haptic_amplitude": "0" },
+					"inputs": {
+						"click": { "output": "/actions/legacy/in/right_grip_press" },
+						"touch": { "output": "/actions/legacy/in/right_grip_touch" }
+					}
+				},
+				{
+					"path": "/user/hand/right/input/a",
+					"mode": "button",
+					"inputs": {
+						"click": { "output": "/actions/legacy/in/right_a_press" },
+						"touch": { "output": "/actions/legacy/in/right_a_touch" }
+					}
+				},
+				{
+					"path": "/user/hand/right/input/b",
+					"mode": "button",
+					"inputs": {
+						"click": { "output": "/actions/legacy/in/right_applicationmenu_press" },
+						"touch": { "output": "/actions/legacy/in/right_applicationmenu_touch" }
+					}
+				}
+			]
+		}
+	}
+}

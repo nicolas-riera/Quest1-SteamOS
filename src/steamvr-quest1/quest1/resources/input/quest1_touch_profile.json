@@ -1,0 +1,100 @@
+{
+	"jsonid": "input_profile",
+	"controller_type": "oculus_touch",
+	"device_class": "TrackedDeviceClass_Controller",
+	"resource_root": "quest1",
+	"driver_name": "quest1",
+	"legacy_binding": "{quest1}/input/quest1_touch_legacy_bindings.json",
+	"input_bindingui_mode": "controller_handed",
+	"should_show_binding_errors": false,
+	"input_source": {
+		"/input/system": {
+			"type": "button",
+			"click": true,
+			"touch": false,
+			"order": 0
+		},
+		"/input/trigger": {
+			"type": "trigger",
+			"value": true,
+			"touch": true,
+			"order": 1
+		},
+		"/input/joystick": {
+			"type": "joystick",
+			"click": true,
+			"touch": true,
+			"order": 2
+		},
+		"/input/grip": {
+			"type": "trigger",
+			"value": true,
+			"touch": true,
+			"order": 3
+		},
+		"/input/a": {
+			"type": "button",
+			"side": "right",
+			"click": true,
+			"touch": true,
+			"order": 4
+		},
+		"/input/b": {
+			"type": "button",
+			"side": "right",
+			"click": true,
+			"touch": true,
+			"order": 5
+		},
+		"/input/x": {
+			"type": "button",
+			"side": "left",
+			"click": true,
+			"touch": true,
+			"order": 4
+		},
+		"/input/y": {
+			"type": "button",
+			"side": "left",
+			"click": true,
+			"touch": true,
+			"order": 5
+		},
+		"/input/thumbrest": {
+			"type": "button",
+			"click": false,
+			"touch": true
+		},
+		"/output/haptic": {
+			"type": "vibration"
+		},
+		"/pose/raw": {
+			"type": "pose"
+		},
+		"/pose/base": {
+			"type": "pose"
+		},
+		"/pose/handgrip": {
+			"type": "pose"
+		},
+		"/pose/tip": {
+			"type": "pose"
+		},
+		"/pose/openxr_aim": {
+			"type": "pose"
+		},
+		"/pose/openxr_grip": {
+			"type": "pose"
+		}
+	},
+	"mirror_mappings": [
+		["/user/hand/left/input/x", "/user/hand/right/input/a"],
+		["/user/hand/left/input/y", "/user/hand/right/input/b"]
+	],
+	"default_bindings": [
+		{
+			"app_key": "openvr.component.vrcompositor",
+			"binding_url": "quest1_touch_vrcompositor_bindings.json"
+		}
+	]
+}

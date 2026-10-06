@@ -38,6 +38,7 @@
 #include <unistd.h>
 
 #include "../vklayer-steamvr/quest1_display_proto.h"
+#include "controllers.h"
 
 #include <atomic>
 #include <chrono>
@@ -193,6 +194,11 @@ class XrBackend
 public:
 	bool Init();
 	void Shutdown();
+	//! what the Touch controllers need of the session (controllers.cpp)
+	ControllerXr ControllerContext()
+	{
+		return {pxrGetInstanceProcAddr, instance, session, local, [this] { return Now(); }, headHeight};
+	}
 
 	// tracking: the pose only changes when vrcompositor presents a frame. At each present of
 	// frame k, the display socket thread calls onPresent, which publishes a new pose (predicted, no
@@ -1389,10 +1395,12 @@ public:
 		hmd = new Quest1Hmd(xr);
 		if (!VRServerDriverHost()->TrackedDeviceAdded("QUEST1-SteamOS", TrackedDeviceClass_HMD, hmd))
 			return VRInitError_Driver_Failed;
+		controllers.Init(xr.ControllerContext());
 		return VRInitError_None;
 	}
 	void Cleanup() override
 	{
+		controllers.Shutdown();
 		xr.Shutdown();
 		delete hmd;
 		hmd = nullptr;
@@ -1402,8 +1410,8 @@ public:
 	void RunFrame() override
 	{
 		VREvent_t e;
-		while (VRServerDriverHost()->PollNextEvent(&e, sizeof(e))) {
-		}
+		while (VRServerDriverHost()->PollNextEvent(&e, sizeof(e)))
+			controllers.OnEvent(e);
 	}
 	bool ShouldBlockStandbyMode() override { return false; }
 	void EnterStandby() override {}
@@ -1412,6 +1420,7 @@ public:
 private:
 	XrBackend xr;
 	Quest1Hmd *hmd = nullptr;
+	Quest1Controllers controllers;
 };
 
 static Quest1Provider g_provider;
