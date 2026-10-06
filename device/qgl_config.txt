@@ -1,0 +1,14 @@
+; Qualcomm Vulkan driver (vulkan.msm8998.so) overrides: extensions the A5xx device class hides
+; but the driver implements (docs/adreno-vk-extensions.md). Read by every Vulkan process from
+; /data/vendor/gpu/qgl_config.txt (then /data/misc/gpu/), so Monado sees them too.
+; Format: KEY=VALUE, no spaces around '='. Keys are hashes of the extension names.
+; Applied overrides appear in the journal between "BEGIN/END DUMP OF OVERRIDDEN SETTINGS".
+;
+; NOT installed by default: never exercised on the A540; test with a small Vulkan program first.
+; VK_KHR_timeline_semaphore (0x4c45e5a6) must stay OFF: our 4.4 KGSL has no timeline ioctls, so
+; creating one fails, and Monado would try to use it once exposed.
+0xa0b0665d=1   ; VK_KHR_image_format_list      (low risk)
+0x5c029c11=1   ; VK_EXT_host_query_reset       (low risk)
+0x5ad1c414=1   ; VK_EXT_custom_border_color
+0x2f4e28ec=1   ; VK_EXT_extended_dynamic_state
+0xf9b17f24=1   ; VK_EXT_sample_locations

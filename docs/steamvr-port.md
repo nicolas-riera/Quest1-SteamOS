@@ -123,7 +123,7 @@ The 16-byte `{name, found}` entries are filtered with `strcmp` against the avail
 | VK_KHR_image_format_list | **required** | **missing**. Trivial to fake in a layer (strip the struct). |
 | VK_KHR_create_renderpass2 | **required** | yes |
 | VK_KHR_dedicated_allocation, VK_KHR_get_memory_requirements2 | **required** | yes |
-| VK_KHR_external_memory(_fd), VK_KHR_external_semaphore(_fd) | **required** | yes (OPAQUE_FD) |
+| VK_KHR_external_memory(_fd), VK_KHR_external_semaphore(_fd) | **required** | memory: yes (OPAQUE_FD); semaphores: **SYNC_FD only**, no OPAQUE_FD export/import (docs/adreno-vk-extensions.md) |
 | **VK_KHR_timeline_semaphore** | **required** | **missing** |
 | VK_EXT_host_query_reset | **required** | **missing** (emulate `vkResetQueryPool` with a command buffer) |
 | VK_EXT_custom_border_color | **required** | **missing** (fake: strip the struct, use the nearest standard border) |
