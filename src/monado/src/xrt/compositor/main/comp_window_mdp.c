@@ -151,6 +151,31 @@ close_fd(int *fd)
  * showing frames; msm-adreno-tz never ramps up without Android's services.
  * Call with vsync_thread's mutex held.
  */
+/*!
+ * mdss brings the panels back at its default backlight (127 of 255) on every unblank, while the
+ * LED class keeps showing the last value written: rewriting that same value does nothing. Write
+ * a different level first, then QUEST1_BRIGHTNESS (default 255).
+ */
+static void
+set_brightness(void)
+{
+	const char *e = getenv("QUEST1_BRIGHTNESS");
+	int level = e ? atoi(e) : 255;
+	if (level <= 0 || level > 255) {
+		return;
+	}
+	int fd = open("/sys/class/leds/lcd-backlight/brightness", O_WRONLY | O_CLOEXEC);
+	if (fd < 0) {
+		return;
+	}
+	char buf[8];
+	int n = snprintf(buf, sizeof(buf), "%d", level > 1 ? level - 1 : 2);
+	if (write(fd, buf, n) < 0 || (n = snprintf(buf, sizeof(buf), "%d", level), write(fd, buf, n) < 0)) {
+		U_LOG_W("mdp: cannot set the backlight: %s", strerror(errno));
+	}
+	close(fd);
+}
+
 static void
 set_panels_locked(struct mdp_target *t, bool on)
 {
@@ -174,6 +199,7 @@ set_panels_locked(struct mdp_target *t, bool on)
 	if (on) {
 		unsigned int vsync_on = 1;
 		ioctl(t->fb_fd, MSMFB_OVERLAY_VSYNC_CTRL, &vsync_on);
+		set_brightness();
 	}
 	t->unblanked = on;
 	U_LOG_I("mdp: panels %s", on ? "on" : "off");
