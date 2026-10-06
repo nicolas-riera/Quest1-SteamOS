@@ -344,7 +344,6 @@ int main(int argc, char **argv)
 
 	struct xwd x;
 	xwd_open(path, &x);
-	int prox_fd = open("/dev/syncboss_powerstate0", O_RDONLY | O_CLOEXEC | O_NONBLOCK);
 	printf("xscreen: %s %ux%u, %.2f m wide at %.2f m\n", path, x.width, x.height, width_m, dist);
 
 	const char *exts[] = {XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME};
@@ -374,6 +373,10 @@ int main(int argc, char **argv)
 	sci.systemId = sys;
 	XrSession session;
 	XR(xrCreateSession(xi, &sci, &session));
+	// Open the proximity events only now: Monado's IMU stream is running. If the first powerstate
+	// handle comes before SyncBoss streams, the kernel driver starts streaming itself and pushes
+	// "prox wakeup disabled" last, so no prox event ever arrives until every handle is closed.
+	int prox_fd = open("/dev/syncboss_powerstate0", O_RDONLY | O_CLOEXEC | O_NONBLOCK);
 	if (!gamepad_init(xi, session))
 		fprintf(stderr, "xscreen: no controller gamepad\n");
 

@@ -28,6 +28,35 @@ static uint32_t qd_width = 2448, qd_height = 1360, qd_mhz = 72000;
 //! the vblank whose display-event fences were signaled last: vrcompositor starts a frame there
 static _Atomic uint64_t qd_frame_tick;
 
+// frame timing, logged every 5 s: where vrcompositor's frame period goes
+static struct
+{
+	uint64_t since, last_return, n;
+	uint64_t app, acquire, gpu, posed; //!< summed ns
+} qd_stats;
+
+static void qd_stats_present(uint64_t entry, uint64_t gpu_done, uint64_t posed_done)
+{
+	if (qd_stats.last_return)
+		qd_stats.app += entry - qd_stats.last_return;
+	qd_stats.gpu += gpu_done - entry;
+	qd_stats.posed += posed_done - gpu_done;
+	qd_stats.n++;
+	qd_stats.last_return = posed_done;
+	if (!qd_stats.since) {
+		qd_stats.since = posed_done;
+	} else if (posed_done - qd_stats.since > 5000000000ull) {
+		double n = (double)qd_stats.n;
+		LOG("display: %.1f fps; per frame: vrcompositor %.2f ms (of which acquire %.2f), gpu wait %.2f, "
+		    "pose wait %.2f\n",
+		    n * 1e9 / (posed_done - qd_stats.since), qd_stats.app / n / 1e6, qd_stats.acquire / n / 1e6,
+		    qd_stats.gpu / n / 1e6, qd_stats.posed / n / 1e6);
+		uint64_t keep = qd_stats.last_return;
+		memset(&qd_stats, 0, sizeof(qd_stats));
+		qd_stats.since = qd_stats.last_return = keep;
+	}
+}
+
 // QUEST1_DISPLAY_TRACE=1: log the first display calls with their time (ms within the second)
 static void qd_trace(const char *what)
 {
@@ -759,6 +788,7 @@ static VkResult qd_acquire(struct qd_swapchain *sc, uint64_t timeout, VkSemaphor
 		deadline.tv_sec += timeout / 1000000000ull + ns / 1000000000ull;
 		deadline.tv_nsec = ns % 1000000000ull;
 	}
+	uint64_t t0 = now_ns();
 	pthread_mutex_lock(&sc->mutex);
 	int found = -1;
 	for (;;) {
@@ -781,6 +811,7 @@ static VkResult qd_acquire(struct qd_swapchain *sc, uint64_t timeout, VkSemaphor
 	sc->app_owned[found] = true;
 	sc->frame_tick[found] = atomic_load(&qd_frame_tick);
 	sc->next = (found + 1) % sc->count;
+	qd_stats.acquire += now_ns() - t0;
 	pthread_mutex_unlock(&sc->mutex);
 
 	// the transition to PRESENT_SRC doubles as the acquire signal operation
@@ -838,6 +869,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL qd_QueuePresentKHR(VkQueue queue, const Vk
 			r = ((PFN_vkQueuePresentKHR)d->gdpa(d->handle, "vkQueuePresentKHR"))(queue, &one);
 		} else {
 			uint32_t idx = pi->pImageIndices[s];
+			uint64_t t_entry = now_ns(), t_gpu;
 			// wait for rendering, hand the image over in TRANSFER_SRC, then tell the driver
 			VkPipelineStageFlags stages[16];
 			for (uint32_t i = 0; i < pi->waitSemaphoreCount && i < 16; i++)
@@ -853,6 +885,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL qd_QueuePresentKHR(VkQueue queue, const Vk
 				wait_fence(sc->d, sc->device, sc->fence);
 				sc->d->ResetFences(sc->device, 1, &sc->fence);
 			}
+			t_gpu = now_ns();
 			pthread_mutex_lock(&sc->mutex);
 			sc->app_owned[idx] = false;
 			if (sc->sock >= 0) {
@@ -878,6 +911,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL qd_QueuePresentKHR(VkQueue queue, const Vk
 			}
 			pthread_cond_broadcast(&sc->cond);
 			pthread_mutex_unlock(&sc->mutex);
+			qd_stats_present(t_entry, t_gpu, now_ns());
 		}
 		waited = true;
 		if (pi->pResults)

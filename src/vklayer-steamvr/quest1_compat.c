@@ -156,6 +156,12 @@ struct device
 	pthread_mutex_t queue_mutex; //!< serialises real queue calls with the app's
 	VkFence fence_pool[32];
 	uint32_t fence_pool_count;
+
+	// timeline signals of submitted, not yet completed jobs, each with a binary semaphore the GPU
+	// also signals: a later wait on them from this process becomes a GPU wait (under mutex)
+	struct timeline_op *pending[256];
+	uint32_t npending;
+	uint64_t stat_since, gpu_waits, cpu_waits, cpu_wait_ns;
 };
 
 #define MAX_OBJS 8
@@ -454,6 +460,9 @@ struct timeline_op
 {
 	struct tsem *sem;
 	uint64_t value;
+	VkPipelineStageFlags stage; //!< waits: the app's stage mask
+	VkSemaphore bin;            //!< signals: binary semaphore signaled along; waits: the one waited on
+	bool consumed;              //!< signals: a later submission waits on bin
 };
 
 struct batch
@@ -474,7 +483,7 @@ struct submit_job
 	struct batch *batches;
 	uint32_t nbatches;
 	VkFence app_fence;
-	VkFence fence; // internal, when there are timeline signals
+	VkFence fence; // internal, when there are timeline signals or binary semaphores to recycle
 	bool has_signals;
 };
 
@@ -509,10 +518,11 @@ static struct submit_job *job_build(VkQueue queue, uint32_t n, const VkSubmitInf
 		struct batch *x = &j->batches[b];
 		const VkTimelineSemaphoreSubmitInfo *tl =
 		    find_struct(s->pNext, VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO);
+		// room for a binary semaphore per timeline wait and signal (see worker_main)
 		x->wait_sems = calloc(s->waitSemaphoreCount + 1, sizeof(VkSemaphore));
 		x->wait_stages = calloc(s->waitSemaphoreCount + 1, sizeof(VkPipelineStageFlags));
 		x->waits = calloc(s->waitSemaphoreCount + 1, sizeof(struct timeline_op));
-		x->signal_sems = calloc(s->signalSemaphoreCount + 1, sizeof(VkSemaphore));
+		x->signal_sems = calloc(2 * s->signalSemaphoreCount + 1, sizeof(VkSemaphore));
 		x->signals = calloc(s->signalSemaphoreCount + 1, sizeof(struct timeline_op));
 		x->cmds = calloc(s->commandBufferCount + 1, sizeof(VkCommandBuffer));
 		memcpy(x->cmds, s->pCommandBuffers, s->commandBufferCount * sizeof(VkCommandBuffer));
@@ -522,6 +532,7 @@ static struct submit_job *job_build(VkQueue queue, uint32_t n, const VkSubmitInf
 			struct tsem *t = tsem_get(s->pWaitSemaphores[i]);
 			if (t) {
 				x->waits[x->nwaits].sem = t;
+				x->waits[x->nwaits].stage = s->pWaitDstStageMask[i];
 				x->waits[x->nwaits++].value =
 				    tl && i < tl->waitSemaphoreValueCount ? tl->pWaitSemaphoreValues[i] : 0;
 			} else {
@@ -595,27 +606,80 @@ static void *worker_main(void *arg)
 			d->tail = NULL;
 		pthread_mutex_unlock(&d->mutex);
 
-		// timeline waits are resolved on the CPU: the blob cannot wait for a value on the GPU
-		for (uint32_t b = 0; b < j->nbatches; b++)
-			for (uint32_t i = 0; i < j->batches[b].nwaits; i++)
-				counter_wait(j->batches[b].waits[i].sem->sh, j->batches[b].waits[i].value, UINT64_MAX);
+		// Timeline waits: the blob cannot wait for a value on the GPU. When an earlier submission of
+		// this process signals the value and is still in flight, wait on the binary semaphore it
+		// signals along (once: a binary wait consumes it); otherwise wait on the CPU. A CPU wait
+		// drains the GPU and costs a thread round trip, a GPU wait keeps the queues busy.
+		bool owns_bins = false;
+		for (uint32_t b = 0; b < j->nbatches; b++) {
+			struct batch *x = &j->batches[b];
+			for (uint32_t i = 0; i < x->nwaits; i++) {
+				struct timeline_op *w = &x->waits[i];
+				struct shared_counter *sh = w->sem->sh;
+				pthread_mutex_lock(&d->mutex);
+				struct timeline_op *src = NULL;
+				if (atomic_load(&sh->value) < w->value)
+					for (uint32_t k = 0; k < d->npending && !src; k++) {
+						struct timeline_op *o = d->pending[k];
+						if (o->sem->sh == sh && o->value >= w->value && !o->consumed)
+							src = o;
+					}
+				if (src) {
+					src->consumed = true;
+					w->bin = src->bin;
+					x->wait_sems[x->info.waitSemaphoreCount] = w->bin;
+					x->wait_stages[x->info.waitSemaphoreCount++] = w->stage;
+					owns_bins = true;
+					d->gpu_waits++;
+				}
+				pthread_mutex_unlock(&d->mutex);
+				if (!src && atomic_load(&sh->value) < w->value) {
+					uint64_t t0 = now_ns();
+					counter_wait(sh, w->value, UINT64_MAX);
+					d->cpu_waits++;
+					d->cpu_wait_ns += now_ns() - t0;
+				}
+			}
+			// every timeline signal also signals a fresh binary semaphore, for later GPU waits
+			for (uint32_t i = 0; i < x->nsignals; i++) {
+				VkSemaphoreCreateInfo ci = {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+				if (d->CreateSemaphore(d->handle, &ci, NULL, &x->signals[i].bin) == VK_SUCCESS)
+					x->signal_sems[x->info.signalSemaphoreCount++] = x->signals[i].bin;
+			}
+		}
 
 		VkSubmitInfo infos[64];
 		uint32_t n = j->nbatches < 64 ? j->nbatches : 64;
 		for (uint32_t b = 0; b < n; b++)
 			infos[b] = j->batches[b].info;
-		if (j->has_signals)
+		bool fenced = j->has_signals || owns_bins;
+		if (fenced)
 			j->fence = fence_take(d);
 
 		pthread_mutex_lock(&d->queue_mutex);
-		VkResult r = d->QueueSubmit(j->queue, n, infos, j->has_signals ? j->fence : j->app_fence);
-		if (r == VK_SUCCESS && j->has_signals && j->app_fence != VK_NULL_HANDLE)
+		VkResult r = d->QueueSubmit(j->queue, n, infos, fenced ? j->fence : j->app_fence);
+		if (r == VK_SUCCESS && fenced && j->app_fence != VK_NULL_HANDLE)
 			r = d->QueueSubmit(j->queue, 0, NULL, j->app_fence);
 		pthread_mutex_unlock(&d->queue_mutex);
 		if (r != VK_SUCCESS)
 			LOG("vkQueueSubmit failed: %d\n", r);
 
 		pthread_mutex_lock(&d->mutex);
+		// the signals are on the GPU now: later submissions may wait on their binary semaphores
+		for (uint32_t b = 0; b < n && r == VK_SUCCESS; b++)
+			for (uint32_t i = 0; i < j->batches[b].nsignals; i++)
+				if (j->batches[b].signals[i].bin != VK_NULL_HANDLE && d->npending < 256)
+					d->pending[d->npending++] = &j->batches[b].signals[i];
+		uint64_t now = now_ns();
+		if (!d->stat_since) {
+			d->stat_since = now;
+		} else if (now - d->stat_since > 5000000000ull) {
+			LOG("timeline waits in 5 s: %llu on the GPU, %llu on the CPU (%.2f ms each)\n",
+			    (unsigned long long)d->gpu_waits, (unsigned long long)d->cpu_waits,
+			    d->cpu_waits ? d->cpu_wait_ns / (double)d->cpu_waits / 1e6 : 0.0);
+			d->stat_since = now;
+			d->gpu_waits = d->cpu_waits = d->cpu_wait_ns = 0;
+		}
 		j->next = NULL;
 		if (d->done_tail)
 			d->done_tail->next = j;
@@ -646,13 +710,33 @@ static void *completer_main(void *arg)
 			d->done_tail = NULL;
 		pthread_mutex_unlock(&d->mutex);
 
-		if (j->has_signals) {
+		if (j->fence != VK_NULL_HANDLE) {
 			wait_fence(d, d->handle, j->fence);
 			for (uint32_t b = 0; b < j->nbatches; b++)
 				for (uint32_t i = 0; i < j->batches[b].nsignals; i++)
 					counter_signal(j->batches[b].signals[i].sem->sh, j->batches[b].signals[i].value);
 			fence_give(d, j->fence);
 		}
+		// Binary semaphores: one this job signaled that nobody waits on is idle now; one a later
+		// job consumed is destroyed by that job; the ones this job waited on are done.
+		pthread_mutex_lock(&d->mutex);
+		for (uint32_t b = 0; b < j->nbatches; b++) {
+			struct batch *x = &j->batches[b];
+			for (uint32_t i = 0; i < x->nsignals; i++) {
+				struct timeline_op *o = &x->signals[i];
+				for (uint32_t k = 0; k < d->npending; k++)
+					if (d->pending[k] == o) {
+						d->pending[k] = d->pending[--d->npending];
+						break;
+					}
+				if (o->bin != VK_NULL_HANDLE && !o->consumed)
+					d->DestroySemaphore(d->handle, o->bin, NULL);
+			}
+			for (uint32_t i = 0; i < x->nwaits; i++)
+				if (x->waits[i].bin != VK_NULL_HANDLE)
+					d->DestroySemaphore(d->handle, x->waits[i].bin, NULL);
+		}
+		pthread_mutex_unlock(&d->mutex);
 		job_free(j);
 
 		pthread_mutex_lock(&d->mutex);
