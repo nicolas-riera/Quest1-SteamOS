@@ -3,12 +3,14 @@
 // The headset is already driven by Monado (IMU fusion, lens distortion, panel scan-out, proximity
 // sensor). This driver is an OpenXR client of Monado:
 //   - poses: xrLocateSpace(VIEW in LOCAL) at 250 Hz -> TrackedDevicePoseUpdated
-//   - frames (IVRVirtualDisplay): the HMD declares an identity distortion, so vrcompositor
-//     composites every layer into an undistorted side-by-side backbuffer and passes its shared
-//     resource id to Present(). The driver gets the backbuffer memory as an OPAQUE_FD through
-//     IVRIPCResourceManagerClient (RefResource + ReceiveSharedFd), imports it into its own Vulkan
-//     device, blits each half into an OpenXR swapchain and submits a projection layer; Monado
-//     then distorts and scans out.
+//   - frames: the HMD declares an identity distortion, so vrcompositor composites every layer into
+//     an undistorted side-by-side image. vrcompositor always presents through a direct-mode
+//     display, which the compat Vulkan layer simulates (src/vklayer-steamvr/quest1_display.c): its
+//     swapchain images reach this driver over a unix socket as OPAQUE_FD memory, are imported into
+//     the driver's Vulkan device, each half is blitted into an OpenXR swapchain and submitted as a
+//     projection layer; Monado then distorts and scans out.
+//     QUEST1_VIRTUAL_DISPLAY=1 uses IVRVirtualDisplay instead (backbuffer through
+//     IVRIPCResourceManagerClient); vrcompositor 2.17 still needs a working direct-mode window then.
 //   - pacing: a frame thread runs xrWaitFrame; its wake-ups are the "vsyncs" that
 //     GetTimeSinceLastVsync reports, and WaitForPresent returns once a frame was handed to Monado.
 //
@@ -31,10 +33,15 @@
 
 #include <dlfcn.h>
 #include <pthread.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
+
+#include "../vklayer-steamvr/quest1_display_proto.h"
 
 #include <atomic>
 #include <chrono>
+#include <cerrno>
 #include <cmath>
 #include <condition_variable>
 #include <cstdarg>
@@ -197,13 +204,19 @@ public:
 	void Present(SharedTextureHandle_t backbuffer);
 	void WaitForPresent();
 	bool TimeSinceLastVsync(float *seconds, uint64_t *counter);
+	bool useVirtualDisplay = false;
 
 private:
 	bool InitVulkan();
 	bool InitSession();
 	bool CreateSwapchains();
 	Backbuffer *Import(SharedTextureHandle_t handle);
-	bool BlitHalves(const Backbuffer &bb, const uint32_t index[2]);
+	bool BlitHalves(const Backbuffer &bb, uint32_t srcWidth, uint32_t srcHeight, VkImageLayout srcLayout,
+	                const uint32_t index[2]);
+	// simulated display (quest1_display.c in vrcompositor)
+	void DisplayThread();
+	void ImportDisplay();
+	void ReleaseDisplayImage(int index);
 	void FrameThread();
 	XrTime Now();
 
@@ -238,6 +251,17 @@ private:
 	std::thread frameThread;
 	std::atomic<bool> running{false};
 	bool sessionRunning = false;
+
+	// simulated display: the socket thread fills these under frameMutex, the frame thread imports
+	std::thread displayThread;
+	int listenFd = -1, clientFd = -1;
+	qd_msg displayDesc{};
+	int displayFds[QD_MAX_IMAGES] = {-1, -1, -1, -1};
+	bool displayChanged = false;
+	int presentedIndex = -1;
+	// frame thread only
+	Backbuffer displayImages[QD_MAX_IMAGES];
+	uint32_t displayCount = 0, displayWidth = 0, displayHeight = 0;
 };
 
 XrTime XrBackend::Now()
@@ -255,6 +279,8 @@ bool XrBackend::Init()
 		backbufferFormat = (VkFormat)atoi(f);
 	if (const char *w = getenv("QUEST1_VD_WAITIDLE"))
 		waitIdle = atoi(w) != 0;
+	if (const char *v = getenv("QUEST1_VIRTUAL_DISPLAY"))
+		useVirtualDisplay = atoi(v) != 0;
 	if (!LoadLibraries())
 		return false;
 
@@ -282,6 +308,28 @@ bool XrBackend::Init()
 	if (!InitVulkan() || !InitSession() || !CreateSwapchains())
 		return false;
 
+	// xrLocateViews is only valid once the session has begun: wait for READY here (the frame
+	// thread handles the later state changes)
+	for (int i = 0; i < 500 && !sessionRunning; i++) {
+		XrEventDataBuffer ev{XR_TYPE_EVENT_DATA_BUFFER};
+		while (!sessionRunning && pxrPollEvent(instance, &ev) == XR_SUCCESS) {
+			if (ev.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED &&
+			    ((XrEventDataSessionStateChanged *)&ev)->state == XR_SESSION_STATE_READY) {
+				XrSessionBeginInfo sbi{XR_TYPE_SESSION_BEGIN_INFO};
+				sbi.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+				XR_CHECK(pxrBeginSession(session, &sbi));
+				sessionRunning = true;
+			}
+			ev = {XR_TYPE_EVENT_DATA_BUFFER};
+		}
+		if (!sessionRunning)
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	}
+	if (!sessionRunning) {
+		Log("quest1: the OpenXR session never became READY\n");
+		return false;
+	}
+
 	// FOV and IPD from the views (fixed for this HMD)
 	XrViewLocateInfo vli{XR_TYPE_VIEW_LOCATE_INFO};
 	vli.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
@@ -301,6 +349,8 @@ bool XrBackend::Init()
 
 	running = true;
 	frameThread = std::thread(&XrBackend::FrameThread, this);
+	if (!useVirtualDisplay)
+		displayThread = std::thread(&XrBackend::DisplayThread, this);
 	return true;
 }
 
@@ -532,7 +582,8 @@ Backbuffer *XrBackend::Import(SharedTextureHandle_t handle)
 	return &(backbuffers[handle] = bb);
 }
 
-bool XrBackend::BlitHalves(const Backbuffer &bb, const uint32_t index[2])
+bool XrBackend::BlitHalves(const Backbuffer &bb, uint32_t srcWidth, uint32_t srcHeight, VkImageLayout srcLayout,
+                           const uint32_t index[2])
 {
 	if (waitIdle)
 		pvkDeviceWaitIdle(device);
@@ -547,9 +598,10 @@ bool XrBackend::BlitHalves(const Backbuffer &bb, const uint32_t index[2])
 		b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
 		b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 	}
-	// backbuffer: written by vrcompositor (another process, external queue family)
+	// source: written by vrcompositor (another process, external queue family). A display image
+	// arrives in TRANSFER_SRC_OPTIMAL; for the virtual-display backbuffer the layout is unknown.
 	bar[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-	bar[0].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; // contents of an external image stay valid
+	bar[0].oldLayout = srcLayout;
 	bar[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 	bar[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
 	bar[0].dstQueueFamilyIndex = queueFamily;
@@ -563,21 +615,22 @@ bool XrBackend::BlitHalves(const Backbuffer &bb, const uint32_t index[2])
 	pvkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
 	                      nullptr, 3, bar);
 
+	bool scaled = srcWidth != eyeWidth * 2 || srcHeight != eyeHeight;
 	for (int eye = 0; eye < 2; eye++) {
 		VkImageBlit blit{};
 		blit.srcSubresource = blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-		blit.srcOffsets[0] = {(int32_t)(eye * eyeWidth), 0, 0};
-		blit.srcOffsets[1] = {(int32_t)((eye + 1) * eyeWidth), (int32_t)eyeHeight, 1};
+		blit.srcOffsets[0] = {(int32_t)(eye * srcWidth / 2), 0, 0};
+		blit.srcOffsets[1] = {(int32_t)((eye + 1) * srcWidth / 2), (int32_t)srcHeight, 1};
 		blit.dstOffsets[1] = {(int32_t)eyeWidth, (int32_t)eyeHeight, 1};
 		pvkCmdBlitImage(cmd, bb.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, images[eye][index[eye]].image,
-		                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_NEAREST);
+		                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, scaled ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
 	}
 
 	// backbuffer back to vrcompositor, swapchain images to the OpenXR runtime
 	bar[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
 	bar[0].dstAccessMask = 0;
 	bar[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-	bar[0].newLayout = VK_IMAGE_LAYOUT_GENERAL;
+	bar[0].newLayout = srcLayout == VK_IMAGE_LAYOUT_UNDEFINED ? VK_IMAGE_LAYOUT_GENERAL : srcLayout;
 	bar[0].srcQueueFamilyIndex = queueFamily;
 	bar[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
 	for (int eye = 0; eye < 2; eye++) {
@@ -593,9 +646,12 @@ bool XrBackend::BlitHalves(const Backbuffer &bb, const uint32_t index[2])
 	si.commandBufferCount = 1;
 	si.pCommandBuffers = &cmd;
 	VK_CHECK(pvkQueueSubmit(queue, 1, &si, fence));
-	VK_CHECK(pvkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX));
-	VK_CHECK(pvkResetFences(device, 1, &fence));
-	return true;
+	// the Adreno blob returns VK_TIMEOUT at once for UINT64_MAX (overflow): wait in finite steps
+	VkResult r;
+	while ((r = pvkWaitForFences(device, 1, &fence, VK_TRUE, 100000000ull)) == VK_TIMEOUT)
+		;
+	pvkResetFences(device, 1, &fence);
+	return r == VK_SUCCESS;
 }
 
 void XrBackend::Present(SharedTextureHandle_t backbuffer)
@@ -604,6 +660,190 @@ void XrBackend::Present(SharedTextureHandle_t backbuffer)
 	pending = backbuffer;
 	presentCount++;
 	frameCond.notify_all();
+}
+
+// --- simulated display receiver ---------------------------------------------------------------------------
+
+void XrBackend::DisplayThread()
+{
+	pthread_setname_np(pthread_self(), "quest1 display");
+	char path[108];
+	if (const char *p = getenv("QUEST1_DISPLAY_SOCKET"))
+		snprintf(path, sizeof(path), "%s", p);
+	else
+		snprintf(path, sizeof(path), "%s/quest1-display.sock",
+		         getenv("XDG_RUNTIME_DIR") ? getenv("XDG_RUNTIME_DIR") : "/tmp");
+	listenFd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+	sockaddr_un a{};
+	a.sun_family = AF_UNIX;
+	snprintf(a.sun_path, sizeof(a.sun_path), "%s", path);
+	unlink(path);
+	if (listenFd < 0 || bind(listenFd, (sockaddr *)&a, sizeof(a)) != 0 || listen(listenFd, 1) != 0) {
+		Log("quest1: cannot listen on %s: %s\n", path, strerror(errno));
+		return;
+	}
+	Log("quest1: display receiver listening on %s\n", path);
+
+	while (running) {
+		int fd = accept4(listenFd, nullptr, nullptr, SOCK_CLOEXEC);
+		if (fd < 0)
+			break; // Shutdown() closed the socket
+		{
+			std::lock_guard<std::mutex> lock(frameMutex);
+			clientFd = fd;
+		}
+		Log("quest1: vrcompositor display connected\n");
+		for (;;) {
+			qd_msg m;
+			char ctrl[CMSG_SPACE(sizeof(int) * QD_MAX_IMAGES)];
+			iovec iov{&m, sizeof(m)};
+			msghdr h{};
+			h.msg_iov = &iov;
+			h.msg_iovlen = 1;
+			h.msg_control = ctrl;
+			h.msg_controllen = sizeof(ctrl);
+			ssize_t n = recvmsg(fd, &h, MSG_CMSG_CLOEXEC);
+			if (n != (ssize_t)sizeof(m))
+				break;
+			std::lock_guard<std::mutex> lock(frameMutex);
+			if (m.type == QD_SWAPCHAIN) {
+				cmsghdr *c = CMSG_FIRSTHDR(&h);
+				int nfd = c && c->cmsg_type == SCM_RIGHTS ? (int)((c->cmsg_len - CMSG_LEN(0)) / sizeof(int)) : 0;
+				for (int &old : displayFds)
+					if (old >= 0) {
+						close(old);
+						old = -1;
+					}
+				if (m.count > QD_MAX_IMAGES || nfd != (int)m.count) {
+					Log("quest1: bad display swapchain message (%u images, %d fds)\n", m.count, nfd);
+					continue;
+				}
+				memcpy(displayFds, CMSG_DATA(c), sizeof(int) * nfd);
+				displayDesc = m;
+				displayChanged = true;
+				presentedIndex = -1;
+			} else if (m.type == QD_PRESENT && m.index < QD_MAX_IMAGES) {
+				// a newer frame replaces one the frame thread has not taken yet
+				if (presentedIndex >= 0) {
+					qd_msg r{};
+					r.type = QD_RELEASE;
+					r.index = presentedIndex;
+					send(fd, &r, sizeof(r), MSG_NOSIGNAL);
+				}
+				presentedIndex = (int)m.index;
+				presentCount++;
+				frameCond.notify_all();
+			}
+		}
+		std::lock_guard<std::mutex> lock(frameMutex);
+		close(fd);
+		clientFd = -1;
+		presentedIndex = -1;
+		Log("quest1: vrcompositor display disconnected\n");
+	}
+}
+
+void XrBackend::ReleaseDisplayImage(int index)
+{
+	std::lock_guard<std::mutex> lock(frameMutex);
+	if (clientFd < 0 || index < 0)
+		return;
+	qd_msg r{};
+	r.type = QD_RELEASE;
+	r.index = (uint32_t)index;
+	send(clientFd, &r, sizeof(r), MSG_NOSIGNAL);
+}
+
+// Frame thread: (re)import the images of a new display swapchain. The fds are taken under frameMutex.
+void XrBackend::ImportDisplay()
+{
+	qd_msg m;
+	int fds[QD_MAX_IMAGES];
+	{
+		std::lock_guard<std::mutex> lock(frameMutex);
+		m = displayDesc;
+		memcpy(fds, displayFds, sizeof(fds));
+		for (int &fd : displayFds)
+			fd = -1;
+		displayChanged = false;
+	}
+	pvkDeviceWaitIdle(device);
+	for (uint32_t i = 0; i < displayCount; i++) {
+		pvkDestroyImage(device, displayImages[i].image, nullptr);
+		pvkFreeMemory(device, displayImages[i].memory, nullptr);
+		displayImages[i] = {};
+	}
+	displayCount = 0;
+
+	VkPhysicalDeviceMemoryProperties mp;
+	pvkGetPhysicalDeviceMemoryProperties(phys, &mp);
+	VkFormat viewFormats[4];
+	for (uint32_t i = 0; i < m.view_format_count && i < 4; i++)
+		viewFormats[i] = (VkFormat)m.view_formats[i];
+	for (uint32_t i = 0; i < m.count; i++) {
+		// the same description as the exporting image (quest1_display.c)
+		VkImageFormatListCreateInfo fl{VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO};
+		fl.viewFormatCount = m.view_format_count;
+		fl.pViewFormats = viewFormats;
+		VkExternalMemoryImageCreateInfo emi{VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO};
+		emi.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+		emi.pNext = m.view_format_count ? &fl : nullptr;
+		VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+		ici.pNext = &emi;
+		ici.flags = m.flags;
+		ici.imageType = VK_IMAGE_TYPE_2D;
+		ici.format = (VkFormat)m.format;
+		ici.extent = {m.width, m.height, 1};
+		ici.mipLevels = ici.arrayLayers = 1;
+		ici.samples = VK_SAMPLE_COUNT_1_BIT;
+		ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+		ici.usage = m.usage;
+		ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		Backbuffer &bb = displayImages[i];
+		VkResult r = pvkCreateImage(device, &ici, nullptr, &bb.image);
+		VkMemoryRequirements mr{};
+		if (r == VK_SUCCESS)
+			pvkGetImageMemoryRequirements(device, bb.image, &mr);
+		uint32_t type = 0;
+		for (uint32_t t = 0; t < mp.memoryTypeCount; t++)
+			if ((mr.memoryTypeBits & (1u << t)) && (mp.memoryTypes[t].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+				type = t;
+				break;
+			}
+		VkImportMemoryFdInfoKHR imp{VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR};
+		imp.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+		imp.fd = fds[i];
+		VkMemoryDedicatedAllocateInfo ded{VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO};
+		ded.pNext = &imp;
+		ded.image = bb.image;
+		VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+		mai.pNext = &ded;
+		mai.allocationSize = m.size[i];
+		mai.memoryTypeIndex = type;
+		if (r == VK_SUCCESS)
+			r = pvkAllocateMemory(device, &mai, nullptr, &bb.memory);
+		if (r == VK_SUCCESS) {
+			fds[i] = -1; // owned by the memory object now
+			r = pvkBindImageMemory(device, bb.image, bb.memory, 0);
+		}
+		if (r != VK_SUCCESS) {
+			Log("quest1: importing display image %u failed (%d)\n", i, (int)r);
+			for (uint32_t k = i; k < m.count; k++)
+				if (fds[k] >= 0)
+					close(fds[k]);
+			if (bb.memory)
+				pvkFreeMemory(device, bb.memory, nullptr);
+			if (bb.image)
+				pvkDestroyImage(device, bb.image, nullptr);
+			bb = {};
+			displayCount = i;
+			return;
+		}
+	}
+	displayCount = m.count;
+	displayWidth = m.width;
+	displayHeight = m.height;
+	Log("quest1: display swapchain imported: %u images %ux%u format %u\n", m.count, m.width, m.height, m.format);
 }
 
 void XrBackend::WaitForPresent()
@@ -669,15 +909,33 @@ void XrBackend::FrameThread()
 
 		// SteamVR paces itself on our "vsyncs"; give its frame most of the period to arrive.
 		SharedTextureHandle_t handle = 0;
+		int displayIndex = -1;
+		bool importDisplay = false;
 		{
 			std::unique_lock<std::mutex> lock(frameMutex);
 			auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(8);
-			frameCond.wait_until(lock, deadline, [&] { return pending != 0 || !running; });
+			frameCond.wait_until(lock, deadline,
+			                     [&] { return pending != 0 || presentedIndex >= 0 || displayChanged || !running; });
 			handle = pending;
 			pending = 0;
+			displayIndex = presentedIndex;
+			presentedIndex = -1;
+			importDisplay = displayChanged;
 		}
+		if (importDisplay)
+			ImportDisplay();
 
-		Backbuffer *bb = handle ? Import(handle) : nullptr;
+		Backbuffer *bb = nullptr;
+		uint32_t srcW = eyeWidth * 2, srcH = eyeHeight;
+		VkImageLayout srcLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		if (displayIndex >= 0 && (uint32_t)displayIndex < displayCount) {
+			bb = &displayImages[displayIndex];
+			srcW = displayWidth;
+			srcH = displayHeight;
+			srcLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+		} else if (handle) {
+			bb = Import(handle);
+		}
 		if (bb && fs.shouldRender) {
 			uint32_t idx[2];
 			XrSwapchainImageWaitInfo wi{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
@@ -686,7 +944,7 @@ void XrBackend::FrameThread()
 				pxrAcquireSwapchainImage(swapchain[eye], nullptr, &idx[eye]);
 				pxrWaitSwapchainImage(swapchain[eye], &wi);
 			}
-			BlitHalves(*bb, idx);
+			BlitHalves(*bb, srcW, srcH, srcLayout, idx);
 			for (int eye = 0; eye < 2; eye++)
 				pxrReleaseSwapchainImage(swapchain[eye], nullptr);
 
@@ -703,6 +961,7 @@ void XrBackend::FrameThread()
 			haveLayer = true;
 			shown++;
 		}
+		ReleaseDisplayImage(displayIndex); // the blit waited for its fence
 		{
 			std::lock_guard<std::mutex> lock(frameMutex);
 			consumedCount = presentCount;
@@ -735,6 +994,22 @@ void XrBackend::Shutdown()
 		pxrRequestExitSession(session);
 	if (frameThread.joinable())
 		frameThread.join();
+	if (listenFd >= 0) {
+		shutdown(listenFd, SHUT_RDWR);
+		close(listenFd);
+	}
+	{
+		std::lock_guard<std::mutex> lock(frameMutex);
+		if (clientFd >= 0)
+			shutdown(clientFd, SHUT_RDWR);
+	}
+	if (displayThread.joinable())
+		displayThread.join();
+	for (uint32_t i = 0; i < displayCount; i++) {
+		pvkDestroyImage(device, displayImages[i].image, nullptr);
+		pvkFreeMemory(device, displayImages[i].memory, nullptr);
+	}
+	displayCount = 0;
 	IVRIPCResourceManagerClient *rm = VRIPCResourceManager();
 	for (auto &kv : backbuffers) {
 		pvkDestroyImage(device, kv.second.image, nullptr);
@@ -809,7 +1084,7 @@ public:
 	{
 		if (!strcmp(name, IVRDisplayComponent_Version))
 			return static_cast<IVRDisplayComponent *>(this);
-		if (!strcmp(name, IVRVirtualDisplay_Version))
+		if (!strcmp(name, IVRVirtualDisplay_Version) && xr.useVirtualDisplay)
 			return static_cast<IVRVirtualDisplay *>(this);
 		return nullptr;
 	}
@@ -826,7 +1101,7 @@ public:
 		return lastPose;
 	}
 
-	// IVRDisplayComponent: a virtual display; Monado applies the lens distortion
+	// IVRDisplayComponent: the (simulated) direct-mode display; Monado applies the lens distortion
 	void GetWindowBounds(int32_t *x, int32_t *y, uint32_t *w, uint32_t *h) override
 	{
 		*x = *y = 0;
@@ -834,7 +1109,7 @@ public:
 		*h = xr.eyeHeight;
 	}
 	bool IsDisplayOnDesktop() override { return false; }
-	bool IsDisplayRealDisplay() override { return false; }
+	bool IsDisplayRealDisplay() override { return !xr.useVirtualDisplay; }
 	void GetRecommendedRenderTargetSize(uint32_t *w, uint32_t *h) override
 	{
 		*w = xr.eyeWidth;

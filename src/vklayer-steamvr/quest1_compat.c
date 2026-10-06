@@ -31,6 +31,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
@@ -62,11 +63,16 @@ static const char *default_fake[] = {
     VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME,
     VK_EXT_SHADER_VIEWPORT_INDEX_LAYER_EXTENSION_NAME,
     VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME,
+    // vrcompositor requires these; it never presents through a swapchain as a virtual display
+    VK_KHR_PRESENT_ID_EXTENSION_NAME,
+    VK_KHR_PRESENT_WAIT_EXTENSION_NAME,
 };
 static const uint32_t default_fake_spec[] = {
     VK_KHR_TIMELINE_SEMAPHORE_SPEC_VERSION,
     VK_EXT_SHADER_VIEWPORT_INDEX_LAYER_SPEC_VERSION,
     VK_EXT_EXTENDED_DYNAMIC_STATE_3_SPEC_VERSION,
+    VK_KHR_PRESENT_ID_SPEC_VERSION,
+    VK_KHR_PRESENT_WAIT_SPEC_VERSION,
 };
 static char fake_names[16][VK_MAX_EXTENSION_NAME_SIZE];
 static uint32_t fake_spec[16];
@@ -128,6 +134,9 @@ struct device
 	PFN_vkDestroySemaphore DestroySemaphore;
 	PFN_vkQueueSubmit QueueSubmit;
 	PFN_vkQueueWaitIdle QueueWaitIdle;
+	PFN_vkCreateShaderModule CreateShaderModule;
+	PFN_vkCreateGraphicsPipelines CreateGraphicsPipelines;
+	PFN_vkCreateComputePipelines CreateComputePipelines;
 	PFN_vkDeviceWaitIdle DeviceWaitIdle;
 	PFN_vkCreateFence CreateFence;
 	PFN_vkDestroyFence DestroyFence;
@@ -253,6 +262,16 @@ static bool counter_wait(struct shared_counter *c, uint64_t v, uint64_t deadline
 		struct timespec ts = {(time_t)(left / 1000000000ull), (long)(left % 1000000000ull)};
 		syscall(SYS_futex, &c->seq, FUTEX_WAIT, seq, &ts, NULL, 0);
 	}
+}
+
+// The blob returns VK_TIMEOUT at once for an UINT64_MAX timeout (it overflows converting it), so wait
+// in finite steps.
+static VkResult wait_fence(struct device *d, VkDevice device, VkFence fence)
+{
+	VkResult r;
+	while ((r = d->WaitForFences(device, 1, &fence, VK_TRUE, 100000000ull)) == VK_TIMEOUT)
+		;
+	return r;
 }
 
 static const void *find_struct(const void *chain, VkStructureType type)
@@ -628,7 +647,7 @@ static void *completer_main(void *arg)
 		pthread_mutex_unlock(&d->mutex);
 
 		if (j->has_signals) {
-			d->WaitForFences(d->handle, 1, &j->fence, VK_TRUE, UINT64_MAX);
+			wait_fence(d, d->handle, j->fence);
 			for (uint32_t b = 0; b < j->nbatches; b++)
 				for (uint32_t i = 0; i < j->batches[b].nsignals; i++)
 					counter_signal(j->batches[b].signals[i].sem->sh, j->batches[b].signals[i].value);
@@ -728,6 +747,10 @@ static void fill_fake_features(VkPhysicalDeviceFeatures2 *f)
 	for (VkBaseOutStructure *s = (VkBaseOutStructure *)f->pNext; s; s = s->pNext) {
 		if (s->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES)
 			((VkPhysicalDeviceTimelineSemaphoreFeatures *)s)->timelineSemaphore = VK_TRUE;
+		else if (s->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR)
+			((VkPhysicalDevicePresentIdFeaturesKHR *)s)->presentId = VK_TRUE;
+		else if (s->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR)
+			((VkPhysicalDevicePresentWaitFeaturesKHR *)s)->presentWait = VK_TRUE;
 		else if (s->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT) {
 			VkPhysicalDeviceExtendedDynamicState3FeaturesEXT *e = (void *)s;
 			void *next = e->pNext;
@@ -735,6 +758,24 @@ static void fill_fake_features(VkPhysicalDeviceFeatures2 *f)
 			e->sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT;
 			e->pNext = next;
 		}
+	}
+}
+
+// Structures the blob (or the Android loader) does not know: loader chain links, the debug messenger of
+// the stripped VK_EXT_debug_utils, and the feature/property structures of the advertised-only extensions.
+static bool is_unknown_struct(VkStructureType t)
+{
+	switch (t) {
+	case VK_STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO:
+	case VK_STRUCTURE_TYPE_LOADER_DEVICE_CREATE_INFO:
+	case VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT:
+	case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES:
+	case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_PROPERTIES:
+	case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT:
+	case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_PROPERTIES_EXT:
+	case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR:
+	case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR: return true;
+	default: return false;
 	}
 }
 
@@ -747,10 +788,7 @@ static void fill_fake_features(VkPhysicalDeviceFeatures2 *f)
 		VkBaseOutStructure *prev = (VkBaseOutStructure *)(head_ptr);                                           \
 		for (VkBaseOutStructure *s = prev->pNext; s && ns < 16;) {                                             \
 			VkBaseOutStructure *next = s->pNext;                                                           \
-			if (s->sType == VK_STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO ||                               			    s->sType == VK_STRUCTURE_TYPE_LOADER_DEVICE_CREATE_INFO ||                                 			    s->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES ||               \
-			    s->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_PROPERTIES ||             \
-			    s->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT ||     \
-			    s->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_PROPERTIES_EXT) {   \
+			if (is_unknown_struct(s->sType)) {                                                             \
 				saved[ns] = s;                                                                         \
 				prevs[ns++] = prev;                                                                    \
 				prev->pNext = next;                                                                    \
@@ -803,6 +841,292 @@ static VKAPI_ATTR void VKAPI_CALL GetPhysicalDeviceExternalSemaphoreProperties(
 	in->GetPhysicalDeviceExternalSemaphoreProperties(pd, &plain, out);
 }
 
+// --- VK_EXT_debug_utils stubs (the extension is stripped at instance creation) ---------------------------
+
+static VKAPI_ATTR VkResult VKAPI_CALL CreateDebugUtilsMessenger(VkInstance instance,
+                                                                const VkDebugUtilsMessengerCreateInfoEXT *ci,
+                                                                const VkAllocationCallbacks *alloc,
+                                                                VkDebugUtilsMessengerEXT *out)
+{
+	*out = (VkDebugUtilsMessengerEXT)(uintptr_t)1;
+	return VK_SUCCESS;
+}
+
+// every other debug_utils command returns void or VkResult: VK_SUCCESS is 0
+static VKAPI_ATTR VkResult VKAPI_CALL debug_utils_noop(void) { return VK_SUCCESS; }
+
+static PFN_vkVoidFunction debug_utils_stub(const char *name)
+{
+	if (!strstr(name, "DebugUtils"))
+		return NULL;
+	if (strcmp(name, "vkCreateDebugUtilsMessengerEXT") == 0)
+		return (PFN_vkVoidFunction)CreateDebugUtilsMessenger;
+	return (PFN_vkVoidFunction)debug_utils_noop;
+}
+
+// --- simulated direct-mode display for vrcompositor ----------------------------------------------------
+
+#include "quest1_display.c"
+
+
+// --- fences ----------------------------------------------------------------------------------------------
+
+// Long timeouts (UINT64_MAX in particular) make the blob return VK_TIMEOUT at once: wait in steps.
+static VKAPI_ATTR VkResult VKAPI_CALL WaitForFences(VkDevice device, uint32_t n, const VkFence *fences, VkBool32 all,
+                                                    uint64_t timeout)
+{
+	struct device *d = device_of(device);
+	const uint64_t step = 100000000ull; // 100 ms
+	if (timeout <= step)
+		return d->WaitForFences(device, n, fences, all, timeout);
+	uint64_t deadline = timeout == UINT64_MAX ? UINT64_MAX : now_ns() + timeout;
+	for (;;) {
+		VkResult r = d->WaitForFences(device, n, fences, all, step);
+		if (r != VK_TIMEOUT || (deadline != UINT64_MAX && now_ns() >= deadline))
+			return r;
+	}
+}
+
+// --- shader modules -------------------------------------------------------------------------------------
+// QUEST1_COMPAT_SPIRV=1 logs the capabilities of every module (the Adreno compiler crashes on some),
+// =2 also writes them to /tmp/quest1-spirv/<n>.spv
+
+static atomic_uint counter;
+
+struct spv_entry
+{
+	VkShaderModule module;
+	unsigned index;
+};
+static struct spv_entry spv_modules[1024];
+static unsigned spv_count;
+
+// The Adreno compiler chokes on gl_Layer / gl_ViewportIndex outside geometry shaders: it crashes on
+// vertex shaders that write them (SPV_EXT_shader_viewport_index_layer, which this layer only
+// advertises) and fails fragment shaders that read gl_Layer. vrcompositor's distortion pass writes
+// gl_Layer from a uniform, always 0 for its single-layer swapchain, and its fragment shader reads it
+// back. So turn those built-ins into Private variables: written ones become no-ops, read ones read 0.
+// The capabilities they needed (ShaderViewportIndexLayerEXT, and Geometry when nothing else uses it)
+// are dropped. Returns a malloc'ed module (words in *out_words) or NULL when there is nothing to do.
+static uint32_t *rewrite_layer_builtins(const uint32_t *w, uint32_t words, uint32_t *out_words)
+{
+	enum { CAP = 17, EXT = 10, ENTRY = 15, DECORATE = 71, TYPE_POINTER = 32, VARIABLE = 59 };
+	enum { STORAGE_INPUT = 1, STORAGE_OUTPUT = 3, STORAGE_PRIVATE = 6 };
+	enum { BUILTIN = 11, BI_PRIMITIVE_ID = 7, BI_LAYER = 9, BI_VIEWPORT_INDEX = 10 };
+	enum { CAP_GEOMETRY = 2, CAP_VIEWPORT_INDEX_LAYER = 5254 };
+	struct { uint32_t id, ptr, storage; } vars[8];
+	struct { uint32_t ptr, storage, newptr, zero; } ptrs[8];
+	uint32_t nvars = 0, nptrs = 0, decorated[8], ndec = 0;
+	bool primitive_id = false;
+
+	// pass 1: the Layer/ViewportIndex built-ins declared as Input or Output variables
+	for (uint32_t i = 5; i < words;) {
+		uint32_t op = w[i] & 0xffff, wc = w[i] >> 16;
+		if (wc == 0 || i + wc > words)
+			return NULL;
+		if (op == DECORATE && wc >= 4 && w[i + 2] == BUILTIN) {
+			if ((w[i + 3] == BI_LAYER || w[i + 3] == BI_VIEWPORT_INDEX) && ndec < 8)
+				decorated[ndec++] = w[i + 1];
+			primitive_id |= w[i + 3] == BI_PRIMITIVE_ID;
+		}
+		if (op == VARIABLE && (w[i + 3] == STORAGE_INPUT || w[i + 3] == STORAGE_OUTPUT))
+			for (uint32_t k = 0; k < ndec; k++)
+				if (decorated[k] == w[i + 2] && nvars < 8) {
+					vars[nvars].id = w[i + 2];
+					vars[nvars].ptr = w[i + 1];
+					vars[nvars++].storage = w[i + 3];
+					bool known = false;
+					for (uint32_t p = 0; p < nptrs; p++)
+						known |= ptrs[p].ptr == w[i + 1];
+					if (!known && nptrs < 8) {
+						ptrs[nptrs].ptr = w[i + 1];
+						ptrs[nptrs++].storage = w[i + 3];
+					}
+				}
+		i += wc;
+	}
+	if (nvars == 0)
+		return NULL;
+
+	// per pointer type: a new pointer + a zero constant (8 words); per variable: an initialiser word
+	uint32_t *o = malloc((words + 8 * nptrs + nvars) * sizeof(uint32_t));
+	memcpy(o, w, 5 * sizeof(uint32_t));
+	uint32_t n = 5, bound = w[3];
+	for (uint32_t p = 0; p < nptrs; p++) {
+		ptrs[p].newptr = bound++;
+		ptrs[p].zero = ptrs[p].storage == STORAGE_INPUT ? bound++ : 0;
+	}
+	o[3] = bound;
+	bool keep_interface = w[1] >= 0x10400; // SPIR-V 1.4+ lists Private variables in the interface too
+	bool reads = false;
+	for (uint32_t v = 0; v < nvars; v++)
+		reads |= vars[v].storage == STORAGE_INPUT;
+	bool drop_geometry = reads && !primitive_id;
+
+	for (uint32_t i = 5; i < words;) {
+		uint32_t op = w[i] & 0xffff, wc = w[i] >> 16;
+		const uint32_t *ins = &w[i];
+		i += wc;
+		int var = -1;
+		for (uint32_t v = 0; v < nvars; v++)
+			if ((op == DECORATE && ins[1] == vars[v].id) || (op == VARIABLE && ins[2] == vars[v].id))
+				var = (int)v;
+
+		if (op == CAP && (ins[1] == CAP_VIEWPORT_INDEX_LAYER || (ins[1] == CAP_GEOMETRY && drop_geometry)))
+			continue;
+		if (op == EXT && strcmp((const char *)&ins[1], "SPV_EXT_shader_viewport_index_layer") == 0)
+			continue;
+		if (op == DECORATE && var >= 0)
+			continue;
+		if (op == ENTRY && !keep_interface) {
+			// [model, id, name (nul-terminated string words), interface ids...]
+			uint32_t s = 3;
+			while (s < wc && memchr(&ins[s], 0, 4) == NULL)
+				s++;
+			s++; // the word holding the terminator
+			uint32_t start = n;
+			memcpy(&o[n], ins, s * sizeof(uint32_t));
+			n += s;
+			for (uint32_t k = s; k < wc; k++) {
+				bool drop = false;
+				for (uint32_t v = 0; v < nvars; v++)
+					drop |= ins[k] == vars[v].id;
+				if (!drop)
+					o[n++] = ins[k];
+			}
+			o[start] = ((n - start) << 16) | ENTRY;
+			continue;
+		}
+		if (op == VARIABLE && var >= 0) {
+			for (uint32_t p = 0; p < nptrs; p++)
+				if (ptrs[p].ptr == ins[1]) {
+					o[n++] = ((ptrs[p].zero ? 5u : 4u) << 16) | VARIABLE;
+					o[n++] = ptrs[p].newptr;
+					o[n++] = ins[2];
+					o[n++] = STORAGE_PRIVATE;
+					if (ptrs[p].zero)
+						o[n++] = ptrs[p].zero; // initialiser: what reading gl_Layer gives
+				}
+			continue;
+		}
+		memcpy(&o[n], ins, wc * sizeof(uint32_t));
+		n += wc;
+		if (op == TYPE_POINTER)
+			for (uint32_t p = 0; p < nptrs; p++)
+				if (ptrs[p].ptr == ins[1]) {
+					o[n++] = (4u << 16) | TYPE_POINTER;
+					o[n++] = ptrs[p].newptr;
+					o[n++] = STORAGE_PRIVATE;
+					o[n++] = ins[3];
+					if (ptrs[p].zero) { // OpConstant <int type> <id> 0
+						o[n++] = (4u << 16) | 43;
+						o[n++] = ins[3];
+						o[n++] = ptrs[p].zero;
+						o[n++] = 0;
+					}
+				}
+	}
+	*out_words = n;
+	return o;
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL CreateShaderModule(VkDevice device, const VkShaderModuleCreateInfo *ci,
+                                                         const VkAllocationCallbacks *alloc, VkShaderModule *out)
+{
+	VkShaderModuleCreateInfo rewritten;
+	uint32_t *code = NULL, words = 0;
+	if (ci->codeSize >= 20 && ci->pCode[0] == 0x07230203 && !getenv("QUEST1_COMPAT_NO_SPIRV_REWRITE") &&
+	    (code = rewrite_layer_builtins(ci->pCode, ci->codeSize / 4, &words))) {
+		rewritten = *ci;
+		rewritten.pCode = code;
+		rewritten.codeSize = words * 4;
+		ci = &rewritten;
+		LOG("shader module: gl_Layer/gl_ViewportIndex turned into private variables\n");
+	}
+	const char *dbg = getenv("QUEST1_COMPAT_SPIRV");
+	if (dbg && ci->codeSize >= 20 && ci->pCode[0] == 0x07230203) {
+		unsigned n = atomic_fetch_add(&counter, 1);
+		char caps[512] = "";
+		size_t len = 0;
+		const uint32_t *w = ci->pCode, words = ci->codeSize / 4;
+		for (uint32_t i = 5; i < words;) {
+			uint32_t op = w[i] & 0xffff, wc = w[i] >> 16;
+			if (wc == 0)
+				break;
+			if (op == 17 && wc >= 2 && len < sizeof(caps) - 12) // OpCapability
+				len += snprintf(caps + len, sizeof(caps) - len, " %u", w[i + 1]);
+			if (op == 54) // OpFunction: the preamble is over
+				break;
+			i += wc;
+		}
+		LOG("shader module %u: %zu bytes, capabilities%s\n", n, ci->codeSize, caps);
+		if (atoi(dbg) >= 2) {
+			char path[64];
+			mkdir("/tmp/quest1-spirv", 0777);
+			snprintf(path, sizeof(path), "/tmp/quest1-spirv/%u.spv", n);
+			FILE *f = fopen(path, "wb");
+			if (f) {
+				fwrite(ci->pCode, 1, ci->codeSize, f);
+				fclose(f);
+			}
+		}
+	}
+	VkResult r = device_of(device)->CreateShaderModule(device, ci, alloc, out);
+	free(code);
+	if (dbg && r == VK_SUCCESS) {
+		pthread_mutex_lock(&g_lock);
+		spv_modules[spv_count++ % 1024] = (struct spv_entry){*out, atomic_load(&counter) - 1};
+		pthread_mutex_unlock(&g_lock);
+	}
+	return r;
+}
+
+static int spv_index(VkShaderModule m)
+{
+	int r = -1;
+	pthread_mutex_lock(&g_lock);
+	for (unsigned i = 0; i < 1024; i++)
+		if (spv_modules[i].module == m)
+			r = (int)spv_modules[i].index;
+	pthread_mutex_unlock(&g_lock);
+	return r;
+}
+
+static void log_stages(const char *what, const VkPipelineShaderStageCreateInfo *st, uint32_t n)
+{
+	char buf[256] = "";
+	size_t len = 0;
+	for (uint32_t i = 0; i < n && len < sizeof(buf) - 32; i++)
+		len += snprintf(buf + len, sizeof(buf) - len, " stage 0x%x=module %d", st[i].stage, spv_index(st[i].module));
+	LOG("%s:%s\n", what, buf);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL CreateGraphicsPipelines(VkDevice device, VkPipelineCache cache, uint32_t n,
+                                                              const VkGraphicsPipelineCreateInfo *ci,
+                                                              const VkAllocationCallbacks *alloc, VkPipeline *out)
+{
+	if (getenv("QUEST1_COMPAT_SPIRV"))
+		for (uint32_t i = 0; i < n; i++)
+			log_stages("graphics pipeline", ci[i].pStages, ci[i].stageCount);
+	VkResult r = device_of(device)->CreateGraphicsPipelines(device, cache, n, ci, alloc, out);
+	if (getenv("QUEST1_COMPAT_SPIRV"))
+		LOG("  -> %d\n", r);
+	return r;
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL CreateComputePipelines(VkDevice device, VkPipelineCache cache, uint32_t n,
+                                                             const VkComputePipelineCreateInfo *ci,
+                                                             const VkAllocationCallbacks *alloc, VkPipeline *out)
+{
+	if (getenv("QUEST1_COMPAT_SPIRV"))
+		for (uint32_t i = 0; i < n; i++)
+			log_stages("compute pipeline", &ci[i].stage, 1);
+	VkResult r = device_of(device)->CreateComputePipelines(device, cache, n, ci, alloc, out);
+	if (getenv("QUEST1_COMPAT_SPIRV"))
+		LOG("  -> %d\n", r);
+	return r;
+}
+
 // --- device creation -----------------------------------------------------------------------------------
 
 static VKAPI_ATTR void VKAPI_CALL noop_cmd(void) {}
@@ -835,6 +1159,28 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice pd, const Vk
 	VkDeviceCreateInfo copy = *ci;
 	copy.enabledExtensionCount = ne;
 	copy.ppEnabledExtensionNames = exts;
+
+	// vrcompositor asks for a HIGH/REALTIME global-priority queue, which the blob refuses to non-root
+	// processes (VK_ERROR_NOT_PERMITTED): drop the priority request, keep default priority queues
+	VkDeviceQueueCreateInfo queues[8];
+	if (!getenv("QUEST1_COMPAT_KEEP_PRIORITY") && ci->queueCreateInfoCount <= 8) {
+		for (uint32_t i = 0; i < ci->queueCreateInfoCount; i++) {
+			queues[i] = ci->pQueueCreateInfos[i];
+			const VkBaseInStructure **link = (const VkBaseInStructure **)&queues[i].pNext;
+			while (*link) {
+				if ((*link)->sType == VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_KHR) {
+					LOG("dropping the global priority of queue family %u\n", queues[i].queueFamilyIndex);
+					// unlinked from our copy when first in the chain; deeper, this edits the
+					// caller's chain (vrcompositor passes the priority struct alone)
+					*link = (*link)->pNext;
+					break;
+				}
+				link = (const VkBaseInStructure **)&(*link)->pNext;
+			}
+		}
+		copy.pQueueCreateInfos = queues;
+	}
+
 	VkResult r;
 	WITH_UNLINKED(&copy, r = next_create(pd, &copy, alloc, out));
 	free(exts);
@@ -851,6 +1197,9 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice pd, const Vk
 	GET(DestroySemaphore);
 	GET(QueueSubmit);
 	GET(QueueWaitIdle);
+	GET(CreateShaderModule);
+	GET(CreateGraphicsPipelines);
+	GET(CreateComputePipelines);
 	GET(DeviceWaitIdle);
 	GET(CreateFence);
 	GET(DestroyFence);
@@ -900,6 +1249,10 @@ static VKAPI_ATTR void VKAPI_CALL DestroyDevice(VkDevice device, const VkAllocat
 static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL GetDeviceProcAddr(VkDevice device, const char *name)
 {
 	PFN_vkVoidFunction f = device_intercept(name);
+	if (!f)
+		f = debug_utils_stub(name);
+	if (!f)
+		f = qd_proc(name);
 	if (f)
 		return f;
 	struct device *d = device_of(device);
@@ -930,6 +1283,10 @@ static PFN_vkVoidFunction device_intercept(const char *name)
 	I("vkImportSemaphoreFdKHR", ImportSemaphoreFdKHR)
 	I("vkQueueSubmit", QueueSubmit)
 	I("vkQueueWaitIdle", QueueWaitIdle)
+	I("vkCreateShaderModule", CreateShaderModule)
+	I("vkWaitForFences", WaitForFences)
+	I("vkCreateGraphicsPipelines", CreateGraphicsPipelines)
+	I("vkCreateComputePipelines", CreateComputePipelines)
 	I("vkDeviceWaitIdle", DeviceWaitIdle)
 #undef I
 	return NULL;
@@ -951,10 +1308,24 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateInstance(const VkInstanceCreateInfo 
 	PFN_vkGetInstanceProcAddr gipa = chain->u.pLayerInfo->pfnNextGetInstanceProcAddr;
 	chain->u.pLayerInfo = chain->u.pLayerInfo->pNext;
 	PFN_vkCreateInstance next_create = (PFN_vkCreateInstance)gipa(VK_NULL_HANDLE, "vkCreateInstance");
+
+	// The Android loader lists VK_EXT_debug_utils but fails vkCreateInstance with it
+	// (VK_ERROR_EXTENSION_NOT_PRESENT): drop it, its entry points become no-ops (debug_utils_stub)
+	const char **exts = calloc(ci->enabledExtensionCount + 1, sizeof(char *));
+	uint32_t ne = 0;
+	for (uint32_t i = 0; i < ci->enabledExtensionCount; i++)
+		if (strcmp(ci->ppEnabledExtensionNames[i], VK_EXT_DEBUG_UTILS_EXTENSION_NAME) != 0)
+			exts[ne++] = ci->ppEnabledExtensionNames[i];
+	VkInstanceCreateInfo copy = *ci;
+	copy.enabledExtensionCount = ne;
+	copy.ppEnabledExtensionNames = exts;
 	VkResult r;
-	WITH_UNLINKED(ci, r = next_create(ci, alloc, out));
-	if (r != VK_SUCCESS)
+	WITH_UNLINKED(&copy, r = next_create(&copy, alloc, out));
+	free(exts);
+	if (r != VK_SUCCESS) {
+		LOG("vkCreateInstance failed: %d\n", r);
 		return r;
+	}
 
 	struct instance *in = calloc(1, sizeof(*in));
 	in->key = key_of(*out);
@@ -1008,6 +1379,10 @@ static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL GetInstanceProcAddr(VkInstance i
 	if (f)
 		return f;
 	f = device_intercept(name);
+	if (!f)
+		f = debug_utils_stub(name);
+	if (!f)
+		f = qd_proc(name);
 	if (f)
 		return f;
 	struct instance *in = instance ? instance_of(instance) : NULL;

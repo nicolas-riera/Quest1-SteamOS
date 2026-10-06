@@ -12,6 +12,9 @@ install -m755 $B/src/xrt/targets/openxr/libopenxr_monado.so $P/lib/libopenxr_mon
 mkdir -p /etc/xdg/openxr/1
 ln -sf $P/share/openxr/1/openxr_monado.json /etc/xdg/openxr/1/active_runtime.json
 
+# binder nodes 0666 as on Android: non-root Vulkan/gralloc clients (SteamVR as steamos) need them
+echo 'KERNEL=="binder|hwbinder|vndbinder", MODE="0666"' > /etc/udev/rules.d/60-quest1-binder.rules
+
 cat > /etc/systemd/system/monado.service <<'EOF'
 [Unit]
 Description=Monado OpenXR runtime (Quest 1 native: SyncBoss IMU, MDP panels)
@@ -19,6 +22,8 @@ Requires=android-gralloc.service android-configstore.service
 After=android-gralloc.service android-configstore.service
 
 [Service]
+# the IPC socket must be connectable by steamos (SteamVR's driver_quest1 is an OpenXR client)
+UMask=0000
 # libhybris needs bionic's TLS layout; the IPC socket goes to $XDG_RUNTIME_DIR
 Environment=LD_PRELOAD=/opt/hybris/lib/libbionictls.so
 Environment=XDG_RUNTIME_DIR=/run/monado HOME=/root
