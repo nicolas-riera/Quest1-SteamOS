@@ -30,6 +30,10 @@ quest1_detect(void);
 struct xrt_device *
 quest1_hmd_create(void);
 
+//! The Touch controllers the HMD created (QUEST1_CONTROLLERS=0 disables them); false if none.
+bool
+quest1_hmd_get_controllers(struct xrt_device *hmd, struct xrt_device **out_left, struct xrt_device **out_right);
+
 
 /*
  *

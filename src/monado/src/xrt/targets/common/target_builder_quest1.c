@@ -48,8 +48,18 @@ quest1_open_system_impl(struct xrt_builder *xb,
 	if (head == NULL) {
 		return XRT_ERROR_DEVICE_CREATION_FAILED;
 	}
+	// The HMD first: it owns the SyncBoss thread that feeds the controllers, and the system
+	// destroys static devices in order.
 	xsysd->static_xdevs[xsysd->static_xdev_count++] = head;
 	tbo->head = head;
+
+	struct xrt_device *left = NULL, *right = NULL;
+	if (quest1_hmd_get_controllers(head, &left, &right)) {
+		xsysd->static_xdevs[xsysd->static_xdev_count++] = left;
+		xsysd->static_xdevs[xsysd->static_xdev_count++] = right;
+		tbo->left = left;
+		tbo->right = right;
+	}
 	return XRT_SUCCESS;
 }
 

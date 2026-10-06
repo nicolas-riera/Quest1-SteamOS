@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 6556fa7..78f6aea 100644
+index 6556fa7f3..78f6aea94 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -388,6 +388,8 @@ option_with_deps(XRT_BUILD_DRIVER_XREAL_AIR "Enable Xreal Air HMD driver" DEPEND
@@ -35,7 +35,7 @@ index 6556fa7..78f6aea 100644
  
  # Default to PIC code
 diff --git a/src/xrt/auxiliary/util/CMakeLists.txt b/src/xrt/auxiliary/util/CMakeLists.txt
-index d42a418..e0e5a70 100644
+index d42a41807..e0e5a707b 100644
 --- a/src/xrt/auxiliary/util/CMakeLists.txt
 +++ b/src/xrt/auxiliary/util/CMakeLists.txt
 @@ -276,3 +276,8 @@ if(XRT_HAVE_OPENCV)
@@ -49,7 +49,7 @@ index d42a418..e0e5a70 100644
 +endif()
 diff --git a/src/xrt/auxiliary/util/u_hybris_ahb.c b/src/xrt/auxiliary/util/u_hybris_ahb.c
 new file mode 100644
-index 0000000..3515915
+index 000000000..351591564
 --- /dev/null
 +++ b/src/xrt/auxiliary/util/u_hybris_ahb.c
 @@ -0,0 +1,86 @@
@@ -140,7 +140,7 @@ index 0000000..3515915
 +	return nw.recv(fd, out);
 +}
 diff --git a/src/xrt/compositor/main/CMakeLists.txt b/src/xrt/compositor/main/CMakeLists.txt
-index cc7d3b5..5ba2840 100644
+index cc7d3b52b..5ba284045 100644
 --- a/src/xrt/compositor/main/CMakeLists.txt
 +++ b/src/xrt/compositor/main/CMakeLists.txt
 @@ -21,6 +21,8 @@ add_library(
@@ -162,7 +162,7 @@ index cc7d3b5..5ba2840 100644
 +	target_link_libraries(comp_main PRIVATE drv_qbridge)
 +endif()
 diff --git a/src/xrt/compositor/main/comp_compositor.c b/src/xrt/compositor/main/comp_compositor.c
-index a8fbd01..ca0e07c 100644
+index a8fbd01d8..ca0e07c65 100644
 --- a/src/xrt/compositor/main/comp_compositor.c
 +++ b/src/xrt/compositor/main/comp_compositor.c
 @@ -838,6 +838,8 @@ const struct comp_target_factory *ctfs[] = {
@@ -175,7 +175,7 @@ index a8fbd01..ca0e07c 100644
  };
  
 diff --git a/src/xrt/compositor/main/comp_window.h b/src/xrt/compositor/main/comp_window.h
-index eb41c3c..5214613 100644
+index eb41c3c36..5214613da 100644
 --- a/src/xrt/compositor/main/comp_window.h
 +++ b/src/xrt/compositor/main/comp_window.h
 @@ -33,6 +33,8 @@ extern "C" {
@@ -189,10 +189,10 @@ index eb41c3c..5214613 100644
  
 diff --git a/src/xrt/compositor/main/comp_window_mdp.c b/src/xrt/compositor/main/comp_window_mdp.c
 new file mode 100644
-index 0000000..7655bd4
+index 000000000..91c523987
 --- /dev/null
 +++ b/src/xrt/compositor/main/comp_window_mdp.c
-@@ -0,0 +1,688 @@
+@@ -0,0 +1,765 @@
 +// Copyright 2026, Quest1-SteamOS contributors
 +// SPDX-License-Identifier: BSL-1.0
 +/*!
@@ -207,6 +207,10 @@ index 0000000..7655bd4
 + * Frame pacing follows the vsync events of the video mode panels; commit
 + * fences only signal one commit later, so they are kept as release fences for
 + * reusing images.
++ *
++ * The proximity sensor (SyncBoss powerstate events) switches the panels off
++ * while the headset is not worn; apps are then paced at a low rate.
++ * QUEST1_IGNORE_PROX=1 shows frames regardless (development without wearing it).
 + *
 + * @ingroup comp_main
 + */
@@ -225,6 +229,7 @@ index 0000000..7655bd4
 +#include <fcntl.h>
 +#include <poll.h>
 +#include <stdio.h>
++#include <stdlib.h>
 +#include <string.h>
 +#include <sys/ioctl.h>
 +#include <unistd.h>
@@ -252,6 +257,21 @@ index 0000000..7655bd4
 +//! Time the compositor gets between waking up and the vsync that shows its frame.
 +#define MDP_RENDER_BUDGET_NS (15 * U_TIME_1MS_IN_NS)
 +#define PRIV_FLAGS_UBWC_ALIGNED 0x08000000
++//! Frame period while the headset is not worn: apps keep running, slowly.
++#define MDP_IDLE_PERIOD_NS (MDP_PERIOD_NS * 8)
++
++// SyncBoss powerstate messages (drivers/staging/oculus uapi syncboss.h)
++#define SYNCBOSS_DRIVER_MESSAGE_POWERSTATE_MSG 2
++#define SYNCBOSS_PROX_EVENT_PROX_ON 2
++#define SYNCBOSS_PROX_EVENT_PROX_OFF 3
++struct syncboss_driver_message
++{
++	uint8_t header_version;
++	uint8_t header_length;
++	uint8_t from_driver;
++	uint32_t type;
++	uint32_t data;
++} __attribute__((packed));
 +
 +typedef struct
 +{
@@ -265,6 +285,7 @@ index 0000000..7655bd4
 +
 +	int fb_fd;
 +	int vsync_fd;
++	int prox_fd; //!< /dev/syncboss_powerstate0, -1 when proximity is ignored.
 +	struct os_thread_helper vsync_thread;
 +	int64_t last_vsync_ns;   //!< Protected by vsync_thread's mutex.
 +	int64_t last_present_ns; //!< Protected by vsync_thread's mutex.
@@ -293,6 +314,7 @@ index 0000000..7655bd4
 +	} stats;
 +	bool has_init_vulkan;
 +	bool unblanked; //!< Protected by vsync_thread's mutex.
++	bool worn;      //!< Proximity sensor covered. Protected by vsync_thread's mutex.
 +};
 +
 +static inline struct mdp_target *
@@ -349,6 +371,36 @@ index 0000000..7655bd4
 +	U_LOG_I("mdp: panels %s", on ? "on" : "off");
 +}
 +
++/*!
++ * Read the pending powerstate messages and track whether the headset is worn.
++ * Call with vsync_thread's mutex held.
++ */
++static void
++read_prox_locked(struct mdp_target *t)
++{
++	uint8_t buf[256];
++	ssize_t n;
++	while ((n = read(t->prox_fd, buf, sizeof(buf))) > 0) {
++		for (ssize_t off = 0; off + (ssize_t)sizeof(struct syncboss_driver_message) <= n;) {
++			struct syncboss_driver_message m;
++			memcpy(&m, buf + off, sizeof(m));
++			off += m.header_length ? m.header_length : sizeof(m);
++			if (m.type != SYNCBOSS_DRIVER_MESSAGE_POWERSTATE_MSG ||
++			    (m.data != SYNCBOSS_PROX_EVENT_PROX_ON && m.data != SYNCBOSS_PROX_EVENT_PROX_OFF)) {
++				continue;
++			}
++			bool worn = m.data == SYNCBOSS_PROX_EVENT_PROX_ON;
++			if (worn != t->worn) {
++				U_LOG_I("mdp: headset %s", worn ? "worn" : "removed");
++			}
++			t->worn = worn;
++			if (!worn) {
++				set_panels_locked(t, false);
++			}
++		}
++	}
++}
++
 +static void *
 +vsync_thread_func(void *ptr)
 +{
@@ -360,9 +412,9 @@ index 0000000..7655bd4
 +	while (os_thread_helper_is_running_locked(&t->vsync_thread)) {
 +		os_thread_helper_unlock(&t->vsync_thread);
 +
-+		struct pollfd p = {t->vsync_fd, POLLPRI | POLLERR, 0};
++		struct pollfd p[2] = {{t->vsync_fd, POLLPRI | POLLERR, 0}, {t->prox_fd, POLLIN, 0}};
 +		int64_t ts = 0;
-+		if (poll(&p, 1, 100) > 0) {
++		if (poll(p, t->prox_fd >= 0 ? 2 : 1, 100) > 0 && p[0].revents != 0) {
 +			lseek(t->vsync_fd, 0, SEEK_SET);
 +			ssize_t n = read(t->vsync_fd, buf, sizeof(buf) - 1);
 +			buf[n > 0 ? n : 0] = '\0';
@@ -376,6 +428,9 @@ index 0000000..7655bd4
 +		if (ts > 0) {
 +			t->last_vsync_ns = ts;
 +		}
++		if (t->prox_fd >= 0 && (p[1].revents & POLLIN)) {
++			read_prox_locked(t);
++		}
 +		if (t->unblanked && os_monotonic_get_ns() - t->last_present_ns > U_TIME_1S_IN_NS) {
 +			set_panels_locked(t, false);
 +		}
@@ -385,10 +440,11 @@ index 0000000..7655bd4
 +}
 +
 +static int64_t
-+get_last_vsync(struct mdp_target *t)
++get_last_vsync(struct mdp_target *t, bool *out_worn)
 +{
 +	os_thread_helper_lock(&t->vsync_thread);
 +	int64_t v = t->last_vsync_ns;
++	*out_worn = t->worn;
 +	os_thread_helper_unlock(&t->vsync_thread);
 +	return v;
 +}
@@ -659,9 +715,15 @@ index 0000000..7655bd4
 +	}
 +
 +	os_thread_helper_lock(&t->vsync_thread);
-+	t->last_present_ns = t1;
-+	set_panels_locked(t, true);
++	bool worn = t->worn;
++	if (worn) {
++		t->last_present_ns = t1;
++		set_panels_locked(t, true);
++	}
 +	os_thread_helper_unlock(&t->vsync_thread);
++	if (!worn) {
++		return VK_SUCCESS; // panels off: nothing to scan out
++	}
 +
 +	// One DMA pipe per panel; each pipe fetches its half of the buffer.
 +	struct mdp_input_layer layers[2];
@@ -721,16 +783,19 @@ index 0000000..7655bd4
 +{
 +	struct mdp_target *t = mdpt(ct);
 +	int64_t now = os_monotonic_get_ns();
-+	int64_t vsync = get_last_vsync(t);
++	bool worn;
++	int64_t vsync = get_last_vsync(t, &worn);
 +	if (vsync <= 0) {
 +		vsync = now;
 +	}
++	// The panels stop sending vsyncs once off: the last one is extrapolated.
++	int64_t period = worn ? MDP_PERIOD_NS : MDP_IDLE_PERIOD_NS;
 +
 +	// First vsync that leaves the compositor its render budget, and never the
 +	// same one twice.
 +	int64_t target = vsync + MDP_PERIOD_NS;
 +	while (target < now + MDP_RENDER_BUDGET_NS || target <= t->last_display_ns) {
-+		target += MDP_PERIOD_NS;
++		target += period;
 +	}
 +	t->last_display_ns = target;
 +
@@ -787,6 +852,7 @@ index 0000000..7655bd4
 +		t->unblanked = true; // force: also blank what an earlier process left on
 +		set_panels_locked(t, false);
 +	}
++	close_fd(&t->prox_fd);
 +	close_fd(&t->vsync_fd);
 +	close_fd(&t->fb_fd);
 +	free(t);
@@ -830,6 +896,17 @@ index 0000000..7655bd4
 +		return false;
 +	}
 +	*(void **)&t->get_native_handle = get_handle;
++
++	// Shown until the sensor says otherwise: its first state comes right after opening.
++	t->worn = true;
++	t->prox_fd = -1;
++	const char *ignore = getenv("QUEST1_IGNORE_PROX");
++	if (ignore == NULL || strcmp(ignore, "1") != 0) {
++		t->prox_fd = open("/dev/syncboss_powerstate0", O_RDONLY | O_CLOEXEC | O_NONBLOCK);
++		if (t->prox_fd < 0) {
++			COMP_WARN(c, "mdp: no proximity sensor (%s), panels always on", strerror(errno));
++		}
++	}
 +
 +	unsigned int on = 1;
 +	if (ioctl(t->fb_fd, MSMFB_OVERLAY_VSYNC_CTRL, &on) < 0) {
@@ -883,7 +960,7 @@ index 0000000..7655bd4
 +};
 diff --git a/src/xrt/compositor/main/comp_window_qbridge.c b/src/xrt/compositor/main/comp_window_qbridge.c
 new file mode 100644
-index 0000000..d4f38bc
+index 000000000..d4f38bc58
 --- /dev/null
 +++ b/src/xrt/compositor/main/comp_window_qbridge.c
 @@ -0,0 +1,410 @@
@@ -1299,7 +1376,7 @@ index 0000000..d4f38bc
 +};
 diff --git a/src/xrt/compositor/main/msm/linux/msm_mdp.h b/src/xrt/compositor/main/msm/linux/msm_mdp.h
 new file mode 100644
-index 0000000..481814c
+index 000000000..481814cb8
 --- /dev/null
 +++ b/src/xrt/compositor/main/msm/linux/msm_mdp.h
 @@ -0,0 +1,1474 @@
@@ -2779,7 +2856,7 @@ index 0000000..481814c
 +#endif /*_UAPI_MSM_MDP_H_*/
 diff --git a/src/xrt/compositor/main/msm/linux/msm_mdp_ext.h b/src/xrt/compositor/main/msm/linux/msm_mdp_ext.h
 new file mode 100644
-index 0000000..f5a1ec7
+index 000000000..f5a1ec72f
 --- /dev/null
 +++ b/src/xrt/compositor/main/msm/linux/msm_mdp_ext.h
 @@ -0,0 +1,860 @@
@@ -3644,7 +3721,7 @@ index 0000000..f5a1ec7
 +
 +#endif
 diff --git a/src/xrt/drivers/CMakeLists.txt b/src/xrt/drivers/CMakeLists.txt
-index 5ec9910..ba8e20e 100644
+index 5ec99108b..514459a7b 100644
 --- a/src/xrt/drivers/CMakeLists.txt
 +++ b/src/xrt/drivers/CMakeLists.txt
 @@ -698,3 +698,19 @@ if(ENABLED_HEADSET_DRIVERS)
@@ -3653,7 +3730,7 @@ index 5ec9910..ba8e20e 100644
  endif()
 +
 +if(XRT_BUILD_DRIVER_QUEST1)
-+	add_library(drv_quest1 STATIC quest1/quest1_hmd.c quest1/quest1_interface.h)
++	add_library(drv_quest1 STATIC quest1/quest1_hmd.c quest1/quest1_controller.c quest1/quest1_interface.h)
 +	target_include_directories(drv_quest1 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 +	target_link_libraries(drv_quest1 PRIVATE xrt-interfaces aux_util aux_math aux_os)
 +	target_link_libraries(drv_quest1 PUBLIC -L/opt/hybris/lib -lhybris-common)
@@ -3669,7 +3746,7 @@ index 5ec9910..ba8e20e 100644
 +endif()
 diff --git a/src/xrt/drivers/qbridge/qb_link.c b/src/xrt/drivers/qbridge/qb_link.c
 new file mode 100644
-index 0000000..1fba55d
+index 000000000..1fba55db6
 --- /dev/null
 +++ b/src/xrt/drivers/qbridge/qb_link.c
 @@ -0,0 +1,202 @@
@@ -3877,7 +3954,7 @@ index 0000000..1fba55d
 +}
 diff --git a/src/xrt/drivers/qbridge/qb_link.h b/src/xrt/drivers/qbridge/qb_link.h
 new file mode 100644
-index 0000000..2a5f7d4
+index 000000000..2a5f7d4f7
 --- /dev/null
 +++ b/src/xrt/drivers/qbridge/qb_link.h
 @@ -0,0 +1,62 @@
@@ -3945,7 +4022,7 @@ index 0000000..2a5f7d4
 +#endif
 diff --git a/src/xrt/drivers/qbridge/qbridge_device.c b/src/xrt/drivers/qbridge/qbridge_device.c
 new file mode 100644
-index 0000000..a5ba991
+index 000000000..a5ba991a0
 --- /dev/null
 +++ b/src/xrt/drivers/qbridge/qbridge_device.c
 @@ -0,0 +1,459 @@
@@ -4410,7 +4487,7 @@ index 0000000..a5ba991
 +}
 diff --git a/src/xrt/drivers/qbridge/qbridge_interface.h b/src/xrt/drivers/qbridge/qbridge_interface.h
 new file mode 100644
-index 0000000..12acfc5
+index 000000000..12acfc561
 --- /dev/null
 +++ b/src/xrt/drivers/qbridge/qbridge_interface.h
 @@ -0,0 +1,56 @@
@@ -4472,7 +4549,7 @@ index 0000000..12acfc5
 +#endif
 diff --git a/src/xrt/drivers/qbridge/qbridge_proto.h b/src/xrt/drivers/qbridge/qbridge_proto.h
 new file mode 100644
-index 0000000..9836345
+index 000000000..983634529
 --- /dev/null
 +++ b/src/xrt/drivers/qbridge/qbridge_proto.h
 @@ -0,0 +1,132 @@
@@ -4608,12 +4685,447 @@ index 0000000..9836345
 +};
 +
 +#endif
+diff --git a/src/xrt/drivers/quest1/quest1_controller.c b/src/xrt/drivers/quest1/quest1_controller.c
+new file mode 100755
+index 000000000..0023e5680
+--- /dev/null
++++ b/src/xrt/drivers/quest1/quest1_controller.c
+@@ -0,0 +1,429 @@
++// Copyright 2026, Quest1-SteamOS contributors
++// SPDX-License-Identifier: BSL-1.0
++/*!
++ * @file
++ * @brief  Quest 1 Touch controllers: 3DoF orientation from their IMU, arm model, buttons.
++ *
++ * The SyncBoss stream (read by the HMD driver's thread) carries the controllers' IMU and
++ * button records; the HMD driver decodes them and pushes them here. Without camera tracking
++ * the hand position comes from a simple arm model hung off the head pose. Each controller's
++ * yaw is aligned with the head's on the first sample and whenever the Oculus/menu button is
++ * held for a second (as on the Quest).
++ *
++ * @ingroup drv_quest1
++ */
++
++#include "math/m_api.h"
++#include "math/m_imu_3dof.h"
++#include "math/m_mathinclude.h"
++#include "math/m_space.h"
++#include "os/os_threading.h"
++#include "os/os_time.h"
++#include "util/u_debug.h"
++#include "util/u_device.h"
++#include "util/u_logging.h"
++#include "util/u_misc.h"
++#include "util/u_time.h"
++#include "util/u_var.h"
++
++#include "quest1_interface.h"
++
++#include <stdio.h>
++#include <string.h>
++
++DEBUG_GET_ONCE_OPTION(quest1_ctrl_axes, "QUEST1_CTRL_AXES", "x,y,z")
++
++//! Held this long, the Oculus (right) or menu (left) button recenters the controller's yaw.
++#define RECENTER_HOLD_NS (1 * U_TIME_1S_IN_NS)
++
++static struct xrt_binding_input_pair simple_inputs[4] = {
++    {XRT_INPUT_SIMPLE_SELECT_CLICK, XRT_INPUT_TOUCH_TRIGGER_VALUE},
++    {XRT_INPUT_SIMPLE_MENU_CLICK, XRT_INPUT_TOUCH_MENU_CLICK},
++    {XRT_INPUT_SIMPLE_GRIP_POSE, XRT_INPUT_TOUCH_GRIP_POSE},
++    {XRT_INPUT_SIMPLE_AIM_POSE, XRT_INPUT_TOUCH_AIM_POSE},
++};
++
++static struct xrt_binding_output_pair simple_outputs[1] = {
++    {XRT_OUTPUT_NAME_SIMPLE_VIBRATION, XRT_OUTPUT_NAME_TOUCH_HAPTIC},
++};
++
++static struct xrt_binding_profile binding_profiles[1] = {
++    {
++        .name = XRT_DEVICE_SIMPLE_CONTROLLER,
++        .inputs = simple_inputs,
++        .input_count = ARRAY_SIZE(simple_inputs),
++        .outputs = simple_outputs,
++        .output_count = ARRAY_SIZE(simple_outputs),
++    },
++};
++
++enum touch_input_index
++{
++	// left: X, Y, menu / right: A, B, Oculus (system)
++	IN_AX_CLICK = 0,
++	IN_AX_TOUCH,
++	IN_BY_CLICK,
++	IN_BY_TOUCH,
++	IN_MENU_CLICK,
++
++	IN_SQUEEZE_VALUE,
++	IN_TRIGGER_TOUCH,
++	IN_TRIGGER_VALUE,
++	IN_THUMBSTICK_CLICK,
++	IN_THUMBSTICK_TOUCH,
++	IN_THUMBSTICK,
++	IN_THUMBREST_TOUCH,
++	IN_GRIP_POSE,
++	IN_AIM_POSE,
++
++	IN_COUNT
++};
++
++struct quest1_controller
++{
++	struct xrt_device base;
++	struct xrt_device *hmd;
++	bool left;
++
++	struct os_mutex mutex;
++
++	//! Controller IMU axis remap: ctrl[i] = axis_sign[i] * imu[axis_index[i]].
++	int axis_index[3];
++	float axis_sign[3];
++
++	struct m_imu_3dof fusion;
++	struct xrt_quat yaw_offset; //!< Applied before the fusion orientation to align with the head.
++	bool aligned;
++	int64_t last_imu_ns;
++
++	struct quest1_controller_state state;
++	int64_t state_ns;
++	int64_t menu_down_since_ns;
++	bool connected;
++
++	quest1_haptic_fn haptic_fn;
++	void *haptic_data;
++
++	enum u_logging_level log_level;
++};
++
++static inline struct quest1_controller *
++qc(struct xrt_device *xdev)
++{
++	return (struct quest1_controller *)xdev;
++}
++
++static void
++parse_axes(struct quest1_controller *c, const char *spec)
++{
++	const char *p = spec;
++	for (int i = 0; i < 3; i++) {
++		float sign = 1.0f;
++		if (*p == '-' || *p == '+') {
++			sign = *p == '-' ? -1.0f : 1.0f;
++			p++;
++		}
++		if (*p < 'x' || *p > 'z') {
++			goto fail;
++		}
++		c->axis_index[i] = *p - 'x';
++		c->axis_sign[i] = sign;
++		p++;
++		if (i < 2 && *p++ != ',') {
++			goto fail;
++		}
++	}
++	return;
++fail:
++	U_LOG_W("quest1: bad QUEST1_CTRL_AXES '%s', using x,y,z", spec);
++	for (int i = 0; i < 3; i++) {
++		c->axis_index[i] = i;
++		c->axis_sign[i] = 1.0f;
++	}
++}
++
++static struct xrt_vec3
++remap(const struct quest1_controller *c, const struct xrt_vec3 *v)
++{
++	const float in[3] = {v->x, v->y, v->z};
++	return (struct xrt_vec3){
++	    c->axis_sign[0] * in[c->axis_index[0]],
++	    c->axis_sign[1] * in[c->axis_index[1]],
++	    c->axis_sign[2] * in[c->axis_index[2]],
++	};
++}
++
++//! Rotation about the vertical axis only (heading) of q.
++static struct xrt_quat
++yaw_of(const struct xrt_quat *q)
++{
++	// forward = q * (0,0,-1), flattened
++	float fx = -2.0f * (q->x * q->z + q->w * q->y);
++	float fz = -(1.0f - 2.0f * (q->x * q->x + q->y * q->y));
++	float yaw = atan2f(-fx, -fz);
++	return (struct xrt_quat){0, sinf(yaw / 2), 0, cosf(yaw / 2)};
++}
++
++static bool
++head_pose(struct quest1_controller *c, int64_t at_ns, struct xrt_pose *out)
++{
++	struct xrt_space_relation rel = XRT_SPACE_RELATION_ZERO;
++	if (xrt_device_get_tracked_pose(c->hmd, XRT_INPUT_GENERIC_HEAD_POSE, at_ns, &rel) != XRT_SUCCESS ||
++	    !(rel.relation_flags & XRT_SPACE_RELATION_ORIENTATION_VALID_BIT)) {
++		return false;
++	}
++	*out = rel.pose;
++	return true;
++}
++
++//! Make the controller point where the head looks. Call with the mutex held.
++static void
++align_yaw_locked(struct quest1_controller *c, int64_t at_ns)
++{
++	struct xrt_pose head;
++	if (!head_pose(c, at_ns, &head)) {
++		return;
++	}
++	struct xrt_quat head_yaw = yaw_of(&head.orientation);
++	struct xrt_quat ctrl_yaw = yaw_of(&c->fusion.rot);
++	struct xrt_quat inv;
++	math_quat_invert(&ctrl_yaw, &inv);
++	math_quat_rotate(&head_yaw, &inv, &c->yaw_offset);
++	c->aligned = true;
++	U_LOG_I("quest1: %s controller recentered", c->left ? "left" : "right");
++}
++
++
++/*
++ *
++ * Feeding from the HMD driver's SyncBoss thread.
++ *
++ */
++
++void
++quest1_controller_push_imu(struct quest1_controller *c,
++                           int64_t when_ns,
++                           const struct xrt_vec3 *accel,
++                           const struct xrt_vec3 *gyro)
++{
++	struct xrt_vec3 a = remap(c, accel), g = remap(c, gyro);
++	os_mutex_lock(&c->mutex);
++	m_imu_3dof_update(&c->fusion, when_ns, &a, &g);
++	c->last_imu_ns = when_ns;
++	c->connected = true;
++	// once gravity has settled pitch and roll
++	if (!c->aligned && c->fusion.state == M_IMU_3DOF_STATE_RUNNING) {
++		align_yaw_locked(c, when_ns);
++	}
++	os_mutex_unlock(&c->mutex);
++}
++
++void
++quest1_controller_push_state(struct quest1_controller *c, int64_t when_ns, const struct quest1_controller_state *s)
++{
++	os_mutex_lock(&c->mutex);
++	c->state = *s;
++	c->state_ns = when_ns;
++	c->connected = true;
++	bool menu = (s->buttons & QUEST1_BUTTON_MENU) != 0;
++	if (!menu) {
++		c->menu_down_since_ns = 0;
++	} else if (c->menu_down_since_ns == 0) {
++		c->menu_down_since_ns = when_ns;
++	} else if (c->menu_down_since_ns > 0 && when_ns - c->menu_down_since_ns > RECENTER_HOLD_NS) {
++		align_yaw_locked(c, when_ns);
++		c->menu_down_since_ns = -1; // once per hold
++	}
++	os_mutex_unlock(&c->mutex);
++}
++
++void
++quest1_controller_set_disconnected(struct quest1_controller *c)
++{
++	os_mutex_lock(&c->mutex);
++	c->connected = false;
++	c->state = (struct quest1_controller_state){0};
++	os_mutex_unlock(&c->mutex);
++}
++
++void
++quest1_controller_set_haptic_fn(struct quest1_controller *c, quest1_haptic_fn fn, void *data)
++{
++	c->haptic_fn = fn;
++	c->haptic_data = data;
++}
++
++
++/*
++ *
++ * xrt_device.
++ *
++ */
++
++static void
++set_bool(struct quest1_controller *c, int i, int64_t ns, bool v)
++{
++	c->base.inputs[i].timestamp = ns;
++	c->base.inputs[i].value.boolean = v;
++}
++
++static void
++set_f32(struct quest1_controller *c, int i, int64_t ns, float v)
++{
++	c->base.inputs[i].timestamp = ns;
++	c->base.inputs[i].value.vec1.x = v;
++}
++
++static xrt_result_t
++controller_update_inputs(struct xrt_device *xdev)
++{
++	struct quest1_controller *c = qc(xdev);
++	os_mutex_lock(&c->mutex);
++	const struct quest1_controller_state *s = &c->state;
++	int64_t ns = c->state_ns;
++	set_bool(c, IN_AX_CLICK, ns, s->buttons & QUEST1_BUTTON_AX);
++	set_bool(c, IN_AX_TOUCH, ns, s->touches & QUEST1_TOUCH_AX);
++	set_bool(c, IN_BY_CLICK, ns, s->buttons & QUEST1_BUTTON_BY);
++	set_bool(c, IN_BY_TOUCH, ns, s->touches & QUEST1_TOUCH_BY);
++	set_bool(c, IN_MENU_CLICK, ns, s->buttons & QUEST1_BUTTON_MENU);
++	set_f32(c, IN_SQUEEZE_VALUE, ns, s->grip);
++	set_bool(c, IN_TRIGGER_TOUCH, ns, s->touches & QUEST1_TOUCH_TRIGGER);
++	set_f32(c, IN_TRIGGER_VALUE, ns, s->trigger);
++	set_bool(c, IN_THUMBSTICK_CLICK, ns, s->buttons & QUEST1_BUTTON_STICK);
++	set_bool(c, IN_THUMBSTICK_TOUCH, ns, s->touches & QUEST1_TOUCH_STICK);
++	c->base.inputs[IN_THUMBSTICK].timestamp = ns;
++	c->base.inputs[IN_THUMBSTICK].value.vec2.x = s->stick_x;
++	c->base.inputs[IN_THUMBSTICK].value.vec2.y = s->stick_y;
++	set_bool(c, IN_THUMBREST_TOUCH, ns, s->touches & QUEST1_TOUCH_THUMBREST);
++	os_mutex_unlock(&c->mutex);
++	return XRT_SUCCESS;
++}
++
++/*!
++ * Arm model: the elbow hangs at a fixed offset below and in front of the head, turned with the
++ * head's heading; the forearm points along the controller's orientation.
++ */
++static xrt_result_t
++controller_get_tracked_pose(struct xrt_device *xdev,
++                            enum xrt_input_name name,
++                            int64_t at_ns,
++                            struct xrt_space_relation *out)
++{
++	struct quest1_controller *c = qc(xdev);
++	if (name != XRT_INPUT_TOUCH_AIM_POSE && name != XRT_INPUT_TOUCH_GRIP_POSE) {
++		U_LOG_XDEV_UNSUPPORTED_INPUT(&c->base, c->log_level, name);
++		return XRT_ERROR_INPUT_UNSUPPORTED;
++	}
++
++	os_mutex_lock(&c->mutex);
++	bool ok = c->connected && c->fusion.state == M_IMU_3DOF_STATE_RUNNING;
++	struct xrt_quat rot;
++	math_quat_rotate(&c->yaw_offset, &c->fusion.rot, &rot);
++	struct xrt_vec3 gyro = c->fusion.last.gyro;
++	os_mutex_unlock(&c->mutex);
++
++	*out = (struct xrt_space_relation)XRT_SPACE_RELATION_ZERO;
++	if (!ok) {
++		return XRT_SUCCESS; // no flags: not tracked
++	}
++
++	struct xrt_pose head = {XRT_QUAT_IDENTITY, {0, 0, 0}};
++	head_pose(c, at_ns, &head);
++	struct xrt_quat head_yaw = yaw_of(&head.orientation);
++
++	float side = c->left ? -1.0f : 1.0f;
++	struct xrt_vec3 elbow_local = {side * 0.17f, -0.45f, -0.05f}, elbow, forearm;
++	struct xrt_vec3 forearm_local = {0.0f, 0.0f, -0.30f};
++	math_quat_rotate_vec3(&head_yaw, &elbow_local, &elbow);
++	math_quat_rotate_vec3(&rot, &forearm_local, &forearm);
++
++	out->pose.orientation = rot;
++	out->pose.position = (struct xrt_vec3){
++	    head.position.x + elbow.x + forearm.x,
++	    head.position.y + elbow.y + forearm.y,
++	    head.position.z + elbow.z + forearm.z,
++	};
++	math_quat_rotate_derivative(&rot, &gyro, &out->angular_velocity);
++	out->relation_flags = XRT_SPACE_RELATION_ORIENTATION_VALID_BIT | XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT |
++	                      XRT_SPACE_RELATION_POSITION_VALID_BIT | XRT_SPACE_RELATION_ANGULAR_VELOCITY_VALID_BIT;
++	return XRT_SUCCESS;
++}
++
++static xrt_result_t
++controller_set_output(struct xrt_device *xdev, enum xrt_output_name name, const struct xrt_output_value *value)
++{
++	struct quest1_controller *c = qc(xdev);
++	if (name != XRT_OUTPUT_NAME_TOUCH_HAPTIC || c->haptic_fn == NULL) {
++		return XRT_SUCCESS;
++	}
++	c->haptic_fn(c->haptic_data, c->left, value->vibration.amplitude, value->vibration.duration_ns);
++	return XRT_SUCCESS;
++}
++
++static void
++controller_destroy(struct xrt_device *xdev)
++{
++	struct quest1_controller *c = qc(xdev);
++	u_var_remove_root(c);
++	m_imu_3dof_close(&c->fusion);
++	os_mutex_destroy(&c->mutex);
++	u_device_free(&c->base);
++}
++
++struct quest1_controller *
++quest1_controller_create(struct xrt_device *hmd, bool left)
++{
++	struct quest1_controller *c =
++	    U_DEVICE_ALLOCATE(struct quest1_controller, U_DEVICE_ALLOC_TRACKING_NONE, IN_COUNT, 1);
++	if (c == NULL) {
++		return NULL;
++	}
++	os_mutex_init(&c->mutex);
++	c->hmd = hmd;
++	c->left = left;
++	c->log_level = U_LOGGING_INFO;
++	c->yaw_offset = (struct xrt_quat)XRT_QUAT_IDENTITY;
++	parse_axes(c, debug_get_option_quest1_ctrl_axes());
++	m_imu_3dof_init(&c->fusion, M_IMU_3DOF_USE_GRAVITY_DUR_20MS);
++
++	u_device_populate_function_pointers(&c->base, controller_get_tracked_pose, controller_destroy);
++	c->base.update_inputs = controller_update_inputs;
++	c->base.set_output = controller_set_output;
++	c->base.name = XRT_DEVICE_TOUCH_CONTROLLER;
++	c->base.device_type = left ? XRT_DEVICE_TYPE_LEFT_HAND_CONTROLLER : XRT_DEVICE_TYPE_RIGHT_HAND_CONTROLLER;
++	c->base.supported.orientation_tracking = true;
++	c->base.supported.position_tracking = false; // arm model only
++
++	snprintf(c->base.str, XRT_DEVICE_NAME_LEN, "Oculus Quest %s Touch Controller", left ? "Left" : "Right");
++	snprintf(c->base.serial, XRT_DEVICE_NAME_LEN, "Quest1 %s Controller", left ? "Left" : "Right");
++
++	struct xrt_input *in = c->base.inputs;
++	in[IN_AX_CLICK].name = left ? XRT_INPUT_TOUCH_X_CLICK : XRT_INPUT_TOUCH_A_CLICK;
++	in[IN_AX_TOUCH].name = left ? XRT_INPUT_TOUCH_X_TOUCH : XRT_INPUT_TOUCH_A_TOUCH;
++	in[IN_BY_CLICK].name = left ? XRT_INPUT_TOUCH_Y_CLICK : XRT_INPUT_TOUCH_B_CLICK;
++	in[IN_BY_TOUCH].name = left ? XRT_INPUT_TOUCH_Y_TOUCH : XRT_INPUT_TOUCH_B_TOUCH;
++	in[IN_MENU_CLICK].name = left ? XRT_INPUT_TOUCH_MENU_CLICK : XRT_INPUT_TOUCH_SYSTEM_CLICK;
++	in[IN_SQUEEZE_VALUE].name = XRT_INPUT_TOUCH_SQUEEZE_VALUE;
++	in[IN_TRIGGER_TOUCH].name = XRT_INPUT_TOUCH_TRIGGER_TOUCH;
++	in[IN_TRIGGER_VALUE].name = XRT_INPUT_TOUCH_TRIGGER_VALUE;
++	in[IN_THUMBSTICK_CLICK].name = XRT_INPUT_TOUCH_THUMBSTICK_CLICK;
++	in[IN_THUMBSTICK_TOUCH].name = XRT_INPUT_TOUCH_THUMBSTICK_TOUCH;
++	in[IN_THUMBSTICK].name = XRT_INPUT_TOUCH_THUMBSTICK;
++	in[IN_THUMBREST_TOUCH].name = XRT_INPUT_TOUCH_THUMBREST_TOUCH;
++	in[IN_GRIP_POSE].name = XRT_INPUT_TOUCH_GRIP_POSE;
++	in[IN_AIM_POSE].name = XRT_INPUT_TOUCH_AIM_POSE;
++	c->base.outputs[0].name = XRT_OUTPUT_NAME_TOUCH_HAPTIC;
++
++	c->base.binding_profiles = binding_profiles;
++	c->base.binding_profile_count = ARRAY_SIZE(binding_profiles);
++
++	u_var_add_root(c, c->base.str, true);
++	m_imu_3dof_add_vars(&c->fusion, c, "");
++	return c;
++}
++
++struct xrt_device *
++quest1_controller_xdev(struct quest1_controller *c)
++{
++	return &c->base;
++}
 diff --git a/src/xrt/drivers/quest1/quest1_hmd.c b/src/xrt/drivers/quest1/quest1_hmd.c
 new file mode 100644
-index 0000000..2f20f24
+index 000000000..d8f518965
 --- /dev/null
 +++ b/src/xrt/drivers/quest1/quest1_hmd.c
-@@ -0,0 +1,499 @@
+@@ -0,0 +1,763 @@
 +// Copyright 2026, Quest1-SteamOS contributors
 +// SPDX-License-Identifier: BSL-1.0
 +/*!
@@ -4658,6 +5170,7 @@ index 0000000..2f20f24
 +// Head axis i = sign * IMU axis, e.g. "-y,x,z". Head frame: +X right, +Y up, +Z back.
 +// Calibrated on the device 2026-10-05: up = -x, look-down = +y, turn-left = -x, tilt-left = -z (IMU frame).
 +DEBUG_GET_ONCE_OPTION(quest1_imu_axes, "QUEST1_IMU_AXES", "-y,-x,-z")
++DEBUG_GET_ONCE_BOOL_OPTION(quest1_controllers, "QUEST1_CONTROLLERS", true)
 +
 +#define Q1_TRACE(h, ...) U_LOG_XDEV_IFL_T(&h->base, h->log_level, __VA_ARGS__)
 +#define Q1_DEBUG(h, ...) U_LOG_XDEV_IFL_D(&h->base, h->log_level, __VA_ARGS__)
@@ -4693,6 +5206,55 @@ index 0000000..2f20f24
 +	uint32_t pad;
 +};
 +
++//! Record type 3: controller IMU, the headset IMU layout with the controller id first.
++struct sb_ctrl_imu
++{
++	uint64_t id;
++	uint64_t timestamp_us; // MCU clock, shared with the headset IMU
++	uint32_t aux;
++	float accel[3]; // m/s²
++	float gyro[3];  // rad/s
++	uint32_t pad;
++};
++
++//! Record type 8: controller input state (docs/controllers-native.md).
++struct sb_ctrl_input
++{
++	uint64_t id;
++	uint64_t timestamp_us;
++	uint8_t btn_ax, btn_by, btn_sys, btn_stick;
++	uint8_t touch_ax, touch_by, touch_trigger, touch_stick, touch_thumbrest;
++	uint8_t prox_ax, prox_by, prox_trigger, prox_stick, prox_thumbrest;
++	int16_t cap[5];
++	float stick_x, stick_y; // -1..1
++	float grip_raw;         // 1.0 = released
++	float trigger_raw;      // 1.0 = released
++	uint8_t battery_percent;
++	uint8_t pad[7];
++};
++
++#define SB_RECORD_HEADSET_IMU 0
++#define SB_RECORD_CONTROLLER_IMU 3
++#define SB_RECORD_CONTROLLER_INPUT 8
++
++//! syncboss_input_device_info_t, 0x148 bytes.
++struct sb_input_device_info
++{
++	uint64_t id;
++	uint8_t connected, asleep, fw_up_to_date, pad;
++	uint32_t type;
++	uint32_t subtype; // 1 left, 2 right
++	char desc[64];
++	char serial[16];
++	char pcb_serial[16];
++	char fw_version[64];
++	char fw_expected[64];
++	char imu_info[64];
++	float accel_scale, gyro_scale;
++	uint32_t gyro_range;
++	double battery_percent;
++};
++
 +struct sb_api
 +{
 +	int (*init)(void **handle, const void *opts);
@@ -4700,6 +5262,17 @@ index 0000000..2f20f24
 +	int (*imu_enable)(void *handle);
 +	int (*imu_disable)(void *handle);
 +	int (*wait)(void *handle, uint32_t timeout_ms, struct sb_record *out);
++
++	// controllers (optional)
++	int (*input_start)(void *handle);
++	int (*input_stop)(void *handle);
++	int (*wait_device_change)(void *handle,
++	                          uint32_t *generation,
++	                          uint32_t timeout_ms,
++	                          struct sb_input_device_info *out,
++	                          int *inout_count);
++	int (*cancel_device_wait)(void *handle);
++	int (*set_haptic)(void *handle, uint64_t id, uint8_t amplitude);
 +};
 +
 +static bool
@@ -4714,6 +5287,11 @@ index 0000000..2f20f24
 +	api->imu_enable = android_dlsym(lib, "syncboss_imu_enable");
 +	api->imu_disable = android_dlsym(lib, "syncboss_imu_disable");
 +	api->wait = android_dlsym(lib, "syncboss_wait_on_stream_data_exclusive");
++	api->input_start = android_dlsym(lib, "syncboss_input_start");
++	api->input_stop = android_dlsym(lib, "syncboss_input_stop");
++	api->wait_device_change = android_dlsym(lib, "syncboss_input_wait_for_device_change_and_enumerate");
++	api->cancel_device_wait = android_dlsym(lib, "syncboss_input_cancel_device_wait");
++	api->set_haptic = android_dlsym(lib, "syncboss_input_set_haptic");
 +	return api->init != NULL && api->imu_enable != NULL && api->wait != NULL;
 +}
 +
@@ -4750,6 +5328,17 @@ index 0000000..2f20f24
 +
 +	struct m_relation_history *history;
 +	enum u_logging_level log_level;
++
++	//! Touch controllers: [0] left, [1] right. NULL when disabled.
++	struct quest1_controller *ctrl[2];
++	struct os_thread_helper input_thread;
++	struct os_mutex ctrl_mutex;
++	uint64_t ctrl_id[2]; //!< Connected controller ids, 0 = none. Protected by ctrl_mutex.
++	struct
++	{
++		uint8_t amplitude;
++		int64_t until_ns, last_sent_ns;
++	} haptic[2]; //!< Protected by ctrl_mutex.
 +};
 +
 +static inline struct quest1_hmd *
@@ -4856,6 +5445,136 @@ index 0000000..2f20f24
 +	}
 +}
 +
++static int
++controller_index(struct quest1_hmd *h, uint64_t id)
++{
++	os_mutex_lock(&h->ctrl_mutex);
++	int i = id == 0 ? -1 : id == h->ctrl_id[0] ? 0 : id == h->ctrl_id[1] ? 1 : -1;
++	os_mutex_unlock(&h->ctrl_mutex);
++	return i;
++}
++
++static void
++handle_controller_imu(struct quest1_hmd *h, const struct sb_ctrl_imu *e)
++{
++	int i = controller_index(h, e->id);
++	if (i < 0 || !h->imu.have_offset) {
++		return;
++	}
++	int64_t when = (int64_t)(e->timestamp_us * U_TIME_1US_IN_NS) + h->imu.clock_offset_ns;
++	struct xrt_vec3 accel = {e->accel[0], e->accel[1], e->accel[2]};
++	struct xrt_vec3 gyro = {e->gyro[0], e->gyro[1], e->gyro[2]};
++	quest1_controller_push_imu(h->ctrl[i], when, &accel, &gyro);
++}
++
++static void
++handle_controller_input(struct quest1_hmd *h, const struct sb_ctrl_input *e)
++{
++	int i = controller_index(h, e->id);
++	if (i < 0) {
++		return;
++	}
++	struct quest1_controller_state s = {0};
++	s.buttons = (e->btn_ax ? QUEST1_BUTTON_AX : 0) | (e->btn_by ? QUEST1_BUTTON_BY : 0) |
++	            (e->btn_sys ? QUEST1_BUTTON_MENU : 0) | (e->btn_stick ? QUEST1_BUTTON_STICK : 0);
++	s.touches = (e->touch_ax ? QUEST1_TOUCH_AX : 0) | (e->touch_by ? QUEST1_TOUCH_BY : 0) |
++	            (e->touch_stick ? QUEST1_TOUCH_STICK : 0) | (e->touch_trigger ? QUEST1_TOUCH_TRIGGER : 0) |
++	            (e->touch_thumbrest ? QUEST1_TOUCH_THUMBREST : 0);
++	// the analog values read 1.0 when released; Meta's sensors HAL inverts them too
++	s.trigger = CLAMP(1.0f - e->trigger_raw, 0.0f, 1.0f);
++	s.grip = CLAMP(1.0f - e->grip_raw, 0.0f, 1.0f);
++	s.stick_x = e->stick_x;
++	s.stick_y = e->stick_y;
++	quest1_controller_push_state(h->ctrl[i], os_monotonic_get_ns(), &s);
++}
++
++//! Keep haptic pulses alive: the controller expects the amplitude re-sent every <= 50 ms.
++static void
++refresh_haptics(struct quest1_hmd *h)
++{
++	int64_t now = os_monotonic_get_ns();
++	os_mutex_lock(&h->ctrl_mutex);
++	for (int i = 0; i < 2; i++) {
++		if (h->ctrl_id[i] == 0 || h->haptic[i].last_sent_ns == 0) {
++			continue;
++		}
++		bool on = h->haptic[i].amplitude > 0 && now < h->haptic[i].until_ns;
++		if (!on) {
++			h->sb.set_haptic(h->sb_handle, h->ctrl_id[i], 0);
++			h->haptic[i].last_sent_ns = 0;
++		} else if (now - h->haptic[i].last_sent_ns > 40 * U_TIME_1MS_IN_NS) {
++			h->sb.set_haptic(h->sb_handle, h->ctrl_id[i], h->haptic[i].amplitude);
++			h->haptic[i].last_sent_ns = now;
++		}
++	}
++	os_mutex_unlock(&h->ctrl_mutex);
++}
++
++static void
++controller_haptic(void *data, bool left, float amplitude, int64_t duration_ns)
++{
++	struct quest1_hmd *h = data;
++	int i = left ? 0 : 1;
++	int64_t now = os_monotonic_get_ns();
++	os_mutex_lock(&h->ctrl_mutex);
++	h->haptic[i].amplitude = (uint8_t)(CLAMP(amplitude, 0.0f, 1.0f) * 255.0f);
++	// XR_MIN_HAPTIC_DURATION (-1 / 0) means "shortest pulse"
++	h->haptic[i].until_ns = now + (duration_ns > 0 ? duration_ns : 20 * U_TIME_1MS_IN_NS);
++	if (h->ctrl_id[i] != 0) {
++		h->sb.set_haptic(h->sb_handle, h->ctrl_id[i], h->haptic[i].amplitude);
++		h->haptic[i].last_sent_ns = now;
++	}
++	os_mutex_unlock(&h->ctrl_mutex);
++}
++
++/*!
++ * Follows controller connections. Already paired controllers connect when a button wakes them;
++ * libsyncboss decodes the radio events inside the stream pump of the IMU thread.
++ */
++static void *
++input_thread(void *ptr)
++{
++	struct quest1_hmd *h = ptr;
++	os_thread_helper_name(&h->input_thread, "Quest1 input");
++	uint32_t generation = 0;
++
++	os_thread_helper_lock(&h->input_thread);
++	while (os_thread_helper_is_running_locked(&h->input_thread)) {
++		os_thread_helper_unlock(&h->input_thread);
++
++		struct sb_input_device_info info[6];
++		int count = 6;
++		int r = h->sb.wait_device_change(h->sb_handle, &generation, 1000, info, &count);
++		if (r == 0) {
++			uint64_t ids[2] = {0, 0};
++			for (int i = 0; i < count; i++) {
++				if (info[i].connected && (info[i].subtype == 1 || info[i].subtype == 2)) {
++					ids[info[i].subtype - 1] = info[i].id;
++					Q1_INFO(h, "%s controller connected: fw %s (expects %s), battery %.0f%%",
++					        info[i].subtype == 1 ? "left" : "right", info[i].fw_version,
++					        info[i].fw_expected, info[i].battery_percent);
++				}
++			}
++			os_mutex_lock(&h->ctrl_mutex);
++			for (int i = 0; i < 2; i++) {
++				if (h->ctrl_id[i] != 0 && ids[i] == 0) {
++					quest1_controller_set_disconnected(h->ctrl[i]);
++					Q1_INFO(h, "%s controller disconnected", i == 0 ? "left" : "right");
++				}
++				h->ctrl_id[i] = ids[i];
++			}
++			os_mutex_unlock(&h->ctrl_mutex);
++		} else if (r != -110 && r != -125) { // timeout, cancelled
++			Q1_ERROR(h, "syncboss_input_wait_for_device_change_and_enumerate: %d", r);
++			os_nanosleep(U_TIME_1S_IN_NS);
++		}
++
++		os_thread_helper_lock(&h->input_thread);
++	}
++	os_thread_helper_unlock(&h->input_thread);
++	return NULL;
++}
++
 +static void *
 +imu_thread(void *ptr)
 +{
@@ -4868,13 +5587,24 @@ index 0000000..2f20f24
 +
 +		struct sb_record rec;
 +		int r = h->sb.wait(h->sb_handle, 100, &rec);
-+		if (r == 0 && rec.type == 0) {
++		if (r == 0 && rec.type == SB_RECORD_HEADSET_IMU) {
 +			struct sb_imu_event e;
 +			memcpy(&e, rec.data, sizeof(e));
 +			handle_imu(h, &e);
++		} else if (r == 0 && rec.type == SB_RECORD_CONTROLLER_IMU && h->ctrl[0] != NULL) {
++			struct sb_ctrl_imu e;
++			memcpy(&e, rec.data, sizeof(e));
++			handle_controller_imu(h, &e);
++		} else if (r == 0 && rec.type == SB_RECORD_CONTROLLER_INPUT && h->ctrl[0] != NULL) {
++			struct sb_ctrl_input e;
++			memcpy(&e, rec.data, sizeof(e));
++			handle_controller_input(h, &e);
 +		} else if (r != 0 && r != -11) {
 +			Q1_ERROR(h, "syncboss_wait_on_stream_data_exclusive: %d", r);
 +			os_nanosleep(100 * U_TIME_1MS_IN_NS);
++		}
++		if (h->ctrl[0] != NULL) {
++			refresh_haptics(h);
 +		}
 +
 +		os_thread_helper_lock(&h->oth);
@@ -4908,6 +5638,22 @@ index 0000000..2f20f24
 +hmd_destroy(struct xrt_device *xdev)
 +{
 +	struct quest1_hmd *h = q1(xdev);
++	if (h->ctrl[0] != NULL && h->sb_handle != NULL) {
++		os_thread_helper_signal_stop(&h->input_thread);
++		if (h->sb.cancel_device_wait != NULL) {
++			h->sb.cancel_device_wait(h->sb_handle);
++		}
++		os_thread_helper_destroy(&h->input_thread);
++		os_mutex_lock(&h->ctrl_mutex);
++		for (int i = 0; i < 2; i++) {
++			if (h->ctrl_id[i] != 0) {
++				h->sb.set_haptic(h->sb_handle, h->ctrl_id[i], 0);
++			}
++		}
++		os_mutex_unlock(&h->ctrl_mutex);
++		h->sb.input_stop(h->sb_handle);
++		os_nanosleep(300 * U_TIME_1MS_IN_NS); // the stop goes out while the IMU thread still pumps
++	}
 +	os_thread_helper_destroy(&h->oth);
 +	if (h->sb_handle != NULL) {
 +		if (h->sb.imu_disable != NULL) {
@@ -4920,6 +5666,8 @@ index 0000000..2f20f24
 +	u_var_remove_root(h);
 +	m_imu_3dof_close(&h->imu.fusion);
 +	m_relation_history_destroy(&h->history);
++	os_mutex_destroy(&h->ctrl_mutex);
++	// The controller devices are destroyed by the system after the HMD (static_xdevs order).
 +	u_device_free(&h->base);
 +}
 +
@@ -5070,6 +5818,8 @@ index 0000000..2f20f24
 +	m_imu_3dof_init(&h->imu.fusion, M_IMU_3DOF_USE_GRAVITY_DUR_20MS);
 +	m_relation_history_create(&h->history);
 +	os_thread_helper_init(&h->oth);
++	os_thread_helper_init(&h->input_thread);
++	os_mutex_init(&h->ctrl_mutex);
 +	setup_display(h);
 +
 +	const char *axes = debug_get_option_quest1_imu_axes();
@@ -5101,6 +5851,20 @@ index 0000000..2f20f24
 +		goto err;
 +	}
 +
++	bool have_input = h->sb.input_start && h->sb.input_stop && h->sb.wait_device_change && h->sb.set_haptic;
++	if (debug_get_bool_option_quest1_controllers() && have_input) {
++		for (int i = 0; i < 2; i++) {
++			h->ctrl[i] = quest1_controller_create(&h->base, i == 0);
++			quest1_controller_set_haptic_fn(h->ctrl[i], controller_haptic, h);
++		}
++		r = h->sb.input_start(h->sb_handle);
++		if (r != 0 || os_thread_helper_start(&h->input_thread, input_thread, h) != 0) {
++			Q1_ERROR(h, "syncboss_input_start: %d, no controllers", r);
++		} else {
++			Q1_INFO(h, "controller radio started: press a button to wake the controllers");
++		}
++	}
++
 +	u_var_add_root(h, "Quest 1 HMD", true);
 +	u_var_add_log_level(h, &h->log_level, "log_level");
 +	u_var_add_ro_vec3_f32(h, &h->imu.gyro_bias, "gyro_bias");
@@ -5113,12 +5877,24 @@ index 0000000..2f20f24
 +	hmd_destroy(&h->base);
 +	return NULL;
 +}
++
++bool
++quest1_hmd_get_controllers(struct xrt_device *hmd, struct xrt_device **out_left, struct xrt_device **out_right)
++{
++	struct quest1_hmd *h = q1(hmd);
++	if (h->ctrl[0] == NULL) {
++		return false;
++	}
++	*out_left = quest1_controller_xdev(h->ctrl[0]);
++	*out_right = quest1_controller_xdev(h->ctrl[1]);
++	return true;
++}
 diff --git a/src/xrt/drivers/quest1/quest1_interface.h b/src/xrt/drivers/quest1/quest1_interface.h
 new file mode 100644
-index 0000000..c6237e2
+index 000000000..28ebd6b8d
 --- /dev/null
 +++ b/src/xrt/drivers/quest1/quest1_interface.h
-@@ -0,0 +1,35 @@
+@@ -0,0 +1,98 @@
 +// Copyright 2026, Quest1-SteamOS contributors
 +// SPDX-License-Identifier: BSL-1.0
 +/*!
@@ -5151,11 +5927,74 @@ index 0000000..c6237e2
 +struct xrt_device *
 +quest1_hmd_create(void);
 +
++//! The Touch controllers the HMD created (QUEST1_CONTROLLERS=0 disables them); false if none.
++bool
++quest1_hmd_get_controllers(struct xrt_device *hmd, struct xrt_device **out_left, struct xrt_device **out_right);
++
++
++/*
++ *
++ * Touch controllers (quest1_controller.c), fed by the HMD driver's SyncBoss thread.
++ *
++ */
++
++enum quest1_controller_buttons
++{
++	QUEST1_BUTTON_AX = 1 << 0,
++	QUEST1_BUTTON_BY = 1 << 1,
++	QUEST1_BUTTON_MENU = 1 << 2, //!< Menu (left) or Oculus (right).
++	QUEST1_BUTTON_STICK = 1 << 3,
++};
++
++enum quest1_controller_touches
++{
++	QUEST1_TOUCH_AX = 1 << 0,
++	QUEST1_TOUCH_BY = 1 << 1,
++	QUEST1_TOUCH_STICK = 1 << 2,
++	QUEST1_TOUCH_TRIGGER = 1 << 3,
++	QUEST1_TOUCH_THUMBREST = 1 << 4,
++};
++
++struct quest1_controller_state
++{
++	uint32_t buttons; //!< quest1_controller_buttons
++	uint32_t touches; //!< quest1_controller_touches
++	float trigger, grip;     //!< 0..1
++	float stick_x, stick_y;  //!< -1..1, +y up
++};
++
++struct quest1_controller;
++
++//! Amplitude 0..1; duration_ns 0 = minimal pulse (OpenXR XR_MIN_HAPTIC_DURATION).
++typedef void (*quest1_haptic_fn)(void *data, bool left, float amplitude, int64_t duration_ns);
++
++struct quest1_controller *
++quest1_controller_create(struct xrt_device *hmd, bool left);
++
++struct xrt_device *
++quest1_controller_xdev(struct quest1_controller *c);
++
++//! IMU sample in m/sÂ² and rad/s, raw controller axes, monotonic time.
++void
++quest1_controller_push_imu(struct quest1_controller *c,
++                           int64_t when_ns,
++                           const struct xrt_vec3 *accel,
++                           const struct xrt_vec3 *gyro);
++
++void
++quest1_controller_push_state(struct quest1_controller *c, int64_t when_ns, const struct quest1_controller_state *s);
++
++void
++quest1_controller_set_disconnected(struct quest1_controller *c);
++
++void
++quest1_controller_set_haptic_fn(struct quest1_controller *c, quest1_haptic_fn fn, void *data);
++
 +#ifdef __cplusplus
 +}
 +#endif
 diff --git a/src/xrt/include/xrt/xrt_handles.h b/src/xrt/include/xrt/xrt_handles.h
-index 3657498..341bcb3 100644
+index 3657498cd..341bcb314 100644
 --- a/src/xrt/include/xrt/xrt_handles.h
 +++ b/src/xrt/include/xrt/xrt_handles.h
 @@ -188,7 +188,10 @@ xrt_shmem_is_valid(xrt_shmem_handle_t handle)
@@ -5180,7 +6019,7 @@ index 3657498..341bcb3 100644
  /*!
   * The type underlying buffers shared between compositor clients and the main
 diff --git a/src/xrt/state_trackers/oxr/oxr_vulkan.c b/src/xrt/state_trackers/oxr/oxr_vulkan.c
-index efcbf2d..b443f93 100644
+index efcbf2d04..b443f93c0 100644
 --- a/src/xrt/state_trackers/oxr/oxr_vulkan.c
 +++ b/src/xrt/state_trackers/oxr/oxr_vulkan.c
 @@ -112,9 +112,10 @@ static const char *required_vk_instance_extensions[] = {
@@ -5196,7 +6035,7 @@ index efcbf2d..b443f93 100644
  
  // The device extensions do vary by platform, but in a very regular way.
 diff --git a/src/xrt/targets/common/CMakeLists.txt b/src/xrt/targets/common/CMakeLists.txt
-index f3f46c9..dbbad67 100644
+index f3f46c911..dbbad67eb 100644
 --- a/src/xrt/targets/common/CMakeLists.txt
 +++ b/src/xrt/targets/common/CMakeLists.txt
 @@ -297,3 +297,13 @@ if(ANDROID)
@@ -5214,7 +6053,7 @@ index f3f46c9..dbbad67 100644
 +	target_link_libraries(target_lists PRIVATE drv_qbridge)
 +endif()
 diff --git a/src/xrt/targets/common/target_builder_interface.h b/src/xrt/targets/common/target_builder_interface.h
-index e36c1dd..5d1529d 100644
+index e36c1dd01..5d1529d3e 100644
 --- a/src/xrt/targets/common/target_builder_interface.h
 +++ b/src/xrt/targets/common/target_builder_interface.h
 @@ -158,6 +158,16 @@ struct xrt_builder *
@@ -5236,7 +6075,7 @@ index e36c1dd..5d1529d 100644
   * Builder for @ref drv_simulated devices.
 diff --git a/src/xrt/targets/common/target_builder_qbridge.c b/src/xrt/targets/common/target_builder_qbridge.c
 new file mode 100644
-index 0000000..31b9f04
+index 000000000..31b9f04e9
 --- /dev/null
 +++ b/src/xrt/targets/common/target_builder_qbridge.c
 @@ -0,0 +1,94 @@
@@ -5336,10 +6175,10 @@ index 0000000..31b9f04
 +}
 diff --git a/src/xrt/targets/common/target_builder_quest1.c b/src/xrt/targets/common/target_builder_quest1.c
 new file mode 100644
-index 0000000..472cba6
+index 000000000..03d6f7ce8
 --- /dev/null
 +++ b/src/xrt/targets/common/target_builder_quest1.c
-@@ -0,0 +1,76 @@
+@@ -0,0 +1,86 @@
 +// Copyright 2026, Quest1-SteamOS contributors
 +// SPDX-License-Identifier: BSL-1.0
 +/*!
@@ -5390,8 +6229,18 @@ index 0000000..472cba6
 +	if (head == NULL) {
 +		return XRT_ERROR_DEVICE_CREATION_FAILED;
 +	}
++	// The HMD first: it owns the SyncBoss thread that feeds the controllers, and the system
++	// destroys static devices in order.
 +	xsysd->static_xdevs[xsysd->static_xdev_count++] = head;
 +	tbo->head = head;
++
++	struct xrt_device *left = NULL, *right = NULL;
++	if (quest1_hmd_get_controllers(head, &left, &right)) {
++		xsysd->static_xdevs[xsysd->static_xdev_count++] = left;
++		xsysd->static_xdevs[xsysd->static_xdev_count++] = right;
++		tbo->left = left;
++		tbo->right = right;
++	}
 +	return XRT_SUCCESS;
 +}
 +
@@ -5417,7 +6266,7 @@ index 0000000..472cba6
 +	return &ub->base;
 +}
 diff --git a/src/xrt/targets/common/target_lists.c b/src/xrt/targets/common/target_lists.c
-index 78efb9b..74bf1f2 100644
+index 78efb9b3b..74bf1f2e6 100644
 --- a/src/xrt/targets/common/target_lists.c
 +++ b/src/xrt/targets/common/target_lists.c
 @@ -112,6 +112,12 @@

@@ -42,6 +42,7 @@ DEBUG_GET_ONCE_LOG_OPTION(quest1_log, "QUEST1_LOG", U_LOGGING_INFO)
 // Head axis i = sign * IMU axis, e.g. "-y,x,z". Head frame: +X right, +Y up, +Z back.
 // Calibrated on the device 2026-10-05: up = -x, look-down = +y, turn-left = -x, tilt-left = -z (IMU frame).
 DEBUG_GET_ONCE_OPTION(quest1_imu_axes, "QUEST1_IMU_AXES", "-y,-x,-z")
+DEBUG_GET_ONCE_BOOL_OPTION(quest1_controllers, "QUEST1_CONTROLLERS", true)
 
 #define Q1_TRACE(h, ...) U_LOG_XDEV_IFL_T(&h->base, h->log_level, __VA_ARGS__)
 #define Q1_DEBUG(h, ...) U_LOG_XDEV_IFL_D(&h->base, h->log_level, __VA_ARGS__)
@@ -77,6 +78,55 @@ struct sb_imu_event
 	uint32_t pad;
 };
 
+//! Record type 3: controller IMU, the headset IMU layout with the controller id first.
+struct sb_ctrl_imu
+{
+	uint64_t id;
+	uint64_t timestamp_us; // MCU clock, shared with the headset IMU
+	uint32_t aux;
+	float accel[3]; // m/s²
+	float gyro[3];  // rad/s
+	uint32_t pad;
+};
+
+//! Record type 8: controller input state (docs/controllers-native.md).
+struct sb_ctrl_input
+{
+	uint64_t id;
+	uint64_t timestamp_us;
+	uint8_t btn_ax, btn_by, btn_sys, btn_stick;
+	uint8_t touch_ax, touch_by, touch_trigger, touch_stick, touch_thumbrest;
+	uint8_t prox_ax, prox_by, prox_trigger, prox_stick, prox_thumbrest;
+	int16_t cap[5];
+	float stick_x, stick_y; // -1..1
+	float grip_raw;         // 1.0 = released
+	float trigger_raw;      // 1.0 = released
+	uint8_t battery_percent;
+	uint8_t pad[7];
+};
+
+#define SB_RECORD_HEADSET_IMU 0
+#define SB_RECORD_CONTROLLER_IMU 3
+#define SB_RECORD_CONTROLLER_INPUT 8
+
+//! syncboss_input_device_info_t, 0x148 bytes.
+struct sb_input_device_info
+{
+	uint64_t id;
+	uint8_t connected, asleep, fw_up_to_date, pad;
+	uint32_t type;
+	uint32_t subtype; // 1 left, 2 right
+	char desc[64];
+	char serial[16];
+	char pcb_serial[16];
+	char fw_version[64];
+	char fw_expected[64];
+	char imu_info[64];
+	float accel_scale, gyro_scale;
+	uint32_t gyro_range;
+	double battery_percent;
+};
+
 struct sb_api
 {
 	int (*init)(void **handle, const void *opts);
@@ -84,6 +134,17 @@ struct sb_api
 	int (*imu_enable)(void *handle);
 	int (*imu_disable)(void *handle);
 	int (*wait)(void *handle, uint32_t timeout_ms, struct sb_record *out);
+
+	// controllers (optional)
+	int (*input_start)(void *handle);
+	int (*input_stop)(void *handle);
+	int (*wait_device_change)(void *handle,
+	                          uint32_t *generation,
+	                          uint32_t timeout_ms,
+	                          struct sb_input_device_info *out,
+	                          int *inout_count);
+	int (*cancel_device_wait)(void *handle);
+	int (*set_haptic)(void *handle, uint64_t id, uint8_t amplitude);
 };
 
 static bool
@@ -98,6 +159,11 @@ sb_load(struct sb_api *api)
 	api->imu_enable = android_dlsym(lib, "syncboss_imu_enable");
 	api->imu_disable = android_dlsym(lib, "syncboss_imu_disable");
 	api->wait = android_dlsym(lib, "syncboss_wait_on_stream_data_exclusive");
+	api->input_start = android_dlsym(lib, "syncboss_input_start");
+	api->input_stop = android_dlsym(lib, "syncboss_input_stop");
+	api->wait_device_change = android_dlsym(lib, "syncboss_input_wait_for_device_change_and_enumerate");
+	api->cancel_device_wait = android_dlsym(lib, "syncboss_input_cancel_device_wait");
+	api->set_haptic = android_dlsym(lib, "syncboss_input_set_haptic");
 	return api->init != NULL && api->imu_enable != NULL && api->wait != NULL;
 }
 
@@ -134,6 +200,17 @@ struct quest1_hmd
 
 	struct m_relation_history *history;
 	enum u_logging_level log_level;
+
+	//! Touch controllers: [0] left, [1] right. NULL when disabled.
+	struct quest1_controller *ctrl[2];
+	struct os_thread_helper input_thread;
+	struct os_mutex ctrl_mutex;
+	uint64_t ctrl_id[2]; //!< Connected controller ids, 0 = none. Protected by ctrl_mutex.
+	struct
+	{
+		uint8_t amplitude;
+		int64_t until_ns, last_sent_ns;
+	} haptic[2]; //!< Protected by ctrl_mutex.
 };
 
 static inline struct quest1_hmd *
@@ -240,6 +317,136 @@ handle_imu(struct quest1_hmd *h, const struct sb_imu_event *e)
 	}
 }
 
+static int
+controller_index(struct quest1_hmd *h, uint64_t id)
+{
+	os_mutex_lock(&h->ctrl_mutex);
+	int i = id == 0 ? -1 : id == h->ctrl_id[0] ? 0 : id == h->ctrl_id[1] ? 1 : -1;
+	os_mutex_unlock(&h->ctrl_mutex);
+	return i;
+}
+
+static void
+handle_controller_imu(struct quest1_hmd *h, const struct sb_ctrl_imu *e)
+{
+	int i = controller_index(h, e->id);
+	if (i < 0 || !h->imu.have_offset) {
+		return;
+	}
+	int64_t when = (int64_t)(e->timestamp_us * U_TIME_1US_IN_NS) + h->imu.clock_offset_ns;
+	struct xrt_vec3 accel = {e->accel[0], e->accel[1], e->accel[2]};
+	struct xrt_vec3 gyro = {e->gyro[0], e->gyro[1], e->gyro[2]};
+	quest1_controller_push_imu(h->ctrl[i], when, &accel, &gyro);
+}
+
+static void
+handle_controller_input(struct quest1_hmd *h, const struct sb_ctrl_input *e)
+{
+	int i = controller_index(h, e->id);
+	if (i < 0) {
+		return;
+	}
+	struct quest1_controller_state s = {0};
+	s.buttons = (e->btn_ax ? QUEST1_BUTTON_AX : 0) | (e->btn_by ? QUEST1_BUTTON_BY : 0) |
+	            (e->btn_sys ? QUEST1_BUTTON_MENU : 0) | (e->btn_stick ? QUEST1_BUTTON_STICK : 0);
+	s.touches = (e->touch_ax ? QUEST1_TOUCH_AX : 0) | (e->touch_by ? QUEST1_TOUCH_BY : 0) |
+	            (e->touch_stick ? QUEST1_TOUCH_STICK : 0) | (e->touch_trigger ? QUEST1_TOUCH_TRIGGER : 0) |
+	            (e->touch_thumbrest ? QUEST1_TOUCH_THUMBREST : 0);
+	// the analog values read 1.0 when released; Meta's sensors HAL inverts them too
+	s.trigger = CLAMP(1.0f - e->trigger_raw, 0.0f, 1.0f);
+	s.grip = CLAMP(1.0f - e->grip_raw, 0.0f, 1.0f);
+	s.stick_x = e->stick_x;
+	s.stick_y = e->stick_y;
+	quest1_controller_push_state(h->ctrl[i], os_monotonic_get_ns(), &s);
+}
+
+//! Keep haptic pulses alive: the controller expects the amplitude re-sent every <= 50 ms.
+static void
+refresh_haptics(struct quest1_hmd *h)
+{
+	int64_t now = os_monotonic_get_ns();
+	os_mutex_lock(&h->ctrl_mutex);
+	for (int i = 0; i < 2; i++) {
+		if (h->ctrl_id[i] == 0 || h->haptic[i].last_sent_ns == 0) {
+			continue;
+		}
+		bool on = h->haptic[i].amplitude > 0 && now < h->haptic[i].until_ns;
+		if (!on) {
+			h->sb.set_haptic(h->sb_handle, h->ctrl_id[i], 0);
+			h->haptic[i].last_sent_ns = 0;
+		} else if (now - h->haptic[i].last_sent_ns > 40 * U_TIME_1MS_IN_NS) {
+			h->sb.set_haptic(h->sb_handle, h->ctrl_id[i], h->haptic[i].amplitude);
+			h->haptic[i].last_sent_ns = now;
+		}
+	}
+	os_mutex_unlock(&h->ctrl_mutex);
+}
+
+static void
+controller_haptic(void *data, bool left, float amplitude, int64_t duration_ns)
+{
+	struct quest1_hmd *h = data;
+	int i = left ? 0 : 1;
+	int64_t now = os_monotonic_get_ns();
+	os_mutex_lock(&h->ctrl_mutex);
+	h->haptic[i].amplitude = (uint8_t)(CLAMP(amplitude, 0.0f, 1.0f) * 255.0f);
+	// XR_MIN_HAPTIC_DURATION (-1 / 0) means "shortest pulse"
+	h->haptic[i].until_ns = now + (duration_ns > 0 ? duration_ns : 20 * U_TIME_1MS_IN_NS);
+	if (h->ctrl_id[i] != 0) {
+		h->sb.set_haptic(h->sb_handle, h->ctrl_id[i], h->haptic[i].amplitude);
+		h->haptic[i].last_sent_ns = now;
+	}
+	os_mutex_unlock(&h->ctrl_mutex);
+}
+
+/*!
+ * Follows controller connections. Already paired controllers connect when a button wakes them;
+ * libsyncboss decodes the radio events inside the stream pump of the IMU thread.
+ */
+static void *
+input_thread(void *ptr)
+{
+	struct quest1_hmd *h = ptr;
+	os_thread_helper_name(&h->input_thread, "Quest1 input");
+	uint32_t generation = 0;
+
+	os_thread_helper_lock(&h->input_thread);
+	while (os_thread_helper_is_running_locked(&h->input_thread)) {
+		os_thread_helper_unlock(&h->input_thread);
+
+		struct sb_input_device_info info[6];
+		int count = 6;
+		int r = h->sb.wait_device_change(h->sb_handle, &generation, 1000, info, &count);
+		if (r == 0) {
+			uint64_t ids[2] = {0, 0};
+			for (int i = 0; i < count; i++) {
+				if (info[i].connected && (info[i].subtype == 1 || info[i].subtype == 2)) {
+					ids[info[i].subtype - 1] = info[i].id;
+					Q1_INFO(h, "%s controller connected: fw %s (expects %s), battery %.0f%%",
+					        info[i].subtype == 1 ? "left" : "right", info[i].fw_version,
+					        info[i].fw_expected, info[i].battery_percent);
+				}
+			}
+			os_mutex_lock(&h->ctrl_mutex);
+			for (int i = 0; i < 2; i++) {
+				if (h->ctrl_id[i] != 0 && ids[i] == 0) {
+					quest1_controller_set_disconnected(h->ctrl[i]);
+					Q1_INFO(h, "%s controller disconnected", i == 0 ? "left" : "right");
+				}
+				h->ctrl_id[i] = ids[i];
+			}
+			os_mutex_unlock(&h->ctrl_mutex);
+		} else if (r != -110 && r != -125) { // timeout, cancelled
+			Q1_ERROR(h, "syncboss_input_wait_for_device_change_and_enumerate: %d", r);
+			os_nanosleep(U_TIME_1S_IN_NS);
+		}
+
+		os_thread_helper_lock(&h->input_thread);
+	}
+	os_thread_helper_unlock(&h->input_thread);
+	return NULL;
+}
+
 static void *
 imu_thread(void *ptr)
 {
@@ -252,13 +459,24 @@ imu_thread(void *ptr)
 
 		struct sb_record rec;
 		int r = h->sb.wait(h->sb_handle, 100, &rec);
-		if (r == 0 && rec.type == 0) {
+		if (r == 0 && rec.type == SB_RECORD_HEADSET_IMU) {
 			struct sb_imu_event e;
 			memcpy(&e, rec.data, sizeof(e));
 			handle_imu(h, &e);
+		} else if (r == 0 && rec.type == SB_RECORD_CONTROLLER_IMU && h->ctrl[0] != NULL) {
+			struct sb_ctrl_imu e;
+			memcpy(&e, rec.data, sizeof(e));
+			handle_controller_imu(h, &e);
+		} else if (r == 0 && rec.type == SB_RECORD_CONTROLLER_INPUT && h->ctrl[0] != NULL) {
+			struct sb_ctrl_input e;
+			memcpy(&e, rec.data, sizeof(e));
+			handle_controller_input(h, &e);
 		} else if (r != 0 && r != -11) {
 			Q1_ERROR(h, "syncboss_wait_on_stream_data_exclusive: %d", r);
 			os_nanosleep(100 * U_TIME_1MS_IN_NS);
+		}
+		if (h->ctrl[0] != NULL) {
+			refresh_haptics(h);
 		}
 
 		os_thread_helper_lock(&h->oth);
@@ -292,6 +510,22 @@ static void
 hmd_destroy(struct xrt_device *xdev)
 {
 	struct quest1_hmd *h = q1(xdev);
+	if (h->ctrl[0] != NULL && h->sb_handle != NULL) {
+		os_thread_helper_signal_stop(&h->input_thread);
+		if (h->sb.cancel_device_wait != NULL) {
+			h->sb.cancel_device_wait(h->sb_handle);
+		}
+		os_thread_helper_destroy(&h->input_thread);
+		os_mutex_lock(&h->ctrl_mutex);
+		for (int i = 0; i < 2; i++) {
+			if (h->ctrl_id[i] != 0) {
+				h->sb.set_haptic(h->sb_handle, h->ctrl_id[i], 0);
+			}
+		}
+		os_mutex_unlock(&h->ctrl_mutex);
+		h->sb.input_stop(h->sb_handle);
+		os_nanosleep(300 * U_TIME_1MS_IN_NS); // the stop goes out while the IMU thread still pumps
+	}
 	os_thread_helper_destroy(&h->oth);
 	if (h->sb_handle != NULL) {
 		if (h->sb.imu_disable != NULL) {
@@ -304,6 +538,8 @@ hmd_destroy(struct xrt_device *xdev)
 	u_var_remove_root(h);
 	m_imu_3dof_close(&h->imu.fusion);
 	m_relation_history_destroy(&h->history);
+	os_mutex_destroy(&h->ctrl_mutex);
+	// The controller devices are destroyed by the system after the HMD (static_xdevs order).
 	u_device_free(&h->base);
 }
 
@@ -454,6 +690,8 @@ quest1_hmd_create(void)
 	m_imu_3dof_init(&h->imu.fusion, M_IMU_3DOF_USE_GRAVITY_DUR_20MS);
 	m_relation_history_create(&h->history);
 	os_thread_helper_init(&h->oth);
+	os_thread_helper_init(&h->input_thread);
+	os_mutex_init(&h->ctrl_mutex);
 	setup_display(h);
 
 	const char *axes = debug_get_option_quest1_imu_axes();
@@ -485,6 +723,20 @@ quest1_hmd_create(void)
 		goto err;
 	}
 
+	bool have_input = h->sb.input_start && h->sb.input_stop && h->sb.wait_device_change && h->sb.set_haptic;
+	if (debug_get_bool_option_quest1_controllers() && have_input) {
+		for (int i = 0; i < 2; i++) {
+			h->ctrl[i] = quest1_controller_create(&h->base, i == 0);
+			quest1_controller_set_haptic_fn(h->ctrl[i], controller_haptic, h);
+		}
+		r = h->sb.input_start(h->sb_handle);
+		if (r != 0 || os_thread_helper_start(&h->input_thread, input_thread, h) != 0) {
+			Q1_ERROR(h, "syncboss_input_start: %d, no controllers", r);
+		} else {
+			Q1_INFO(h, "controller radio started: press a button to wake the controllers");
+		}
+	}
+
 	u_var_add_root(h, "Quest 1 HMD", true);
 	u_var_add_log_level(h, &h->log_level, "log_level");
 	u_var_add_ro_vec3_f32(h, &h->imu.gyro_bias, "gyro_bias");
@@ -496,4 +748,16 @@ quest1_hmd_create(void)
 err:
 	hmd_destroy(&h->base);
 	return NULL;
+}
+
+bool
+quest1_hmd_get_controllers(struct xrt_device *hmd, struct xrt_device **out_left, struct xrt_device **out_right)
+{
+	struct quest1_hmd *h = q1(hmd);
+	if (h->ctrl[0] == NULL) {
+		return false;
+	}
+	*out_left = quest1_controller_xdev(h->ctrl[0]);
+	*out_right = quest1_controller_xdev(h->ctrl[1]);
+	return true;
 }

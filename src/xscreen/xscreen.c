@@ -8,7 +8,8 @@
 //   defaults: /run/xvfb/Xvfb_screen0 1.6 1.4 0 (0 = no timeout)
 //   SIGUSR1 recenters the screen in front of the current gaze; SIGINT/SIGTERM quit.
 //   Putting the headset on (proximity sensor) also recenters it.
-// Build: gcc -O2 -o xscreen xscreen.c -I/usr/include -L<loader dir> -lopenxr_loader -lvulkan -lm
+//   The Touch controllers also drive a virtual Xbox 360 pad for the Steam client (gamepad.c).
+// Build: gcc -O2 -o xscreen xscreen.c gamepad.c -L<loader dir> -lopenxr_loader -lvulkan -lm
 #include <errno.h>
 #include <fcntl.h>
 #include <math.h>
@@ -26,6 +27,8 @@
 #define XR_USE_GRAPHICS_API_VULKAN
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
+
+#include "gamepad.h"
 
 #define MAX_IMAGES 8
 
@@ -371,6 +374,8 @@ int main(int argc, char **argv)
 	sci.systemId = sys;
 	XrSession session;
 	XR(xrCreateSession(xi, &sci, &session));
+	if (!gamepad_init(xi, session))
+		fprintf(stderr, "xscreen: no controller gamepad\n");
 
 	XrReferenceSpaceCreateInfo rsci = {XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
 	rsci.poseInReferenceSpace.orientation.w = 1;
@@ -420,7 +425,7 @@ int main(int argc, char **argv)
 	quad.subImage.imageRect.extent = (XrExtent2Di){(int32_t)x.width, (int32_t)x.height};
 	quad.size = (XrExtent2Df){width_m, width_m * x.height / x.width};
 
-	int running = 0, have_image = 0, exit_requested = 0;
+	int running = 0, have_image = 0, exit_requested = 0, focused = 0;
 	uint64_t frame = 0;
 	double start = now_s();
 	for (;;) {
@@ -436,6 +441,7 @@ int main(int argc, char **argv)
 		while (xrPollEvent(xi, &ev) == XR_SUCCESS) {
 			if (ev.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED) {
 				XrSessionState s = ((XrEventDataSessionStateChanged *)&ev)->state;
+				focused = s == XR_SESSION_STATE_FOCUSED;
 				if (s == XR_SESSION_STATE_READY) {
 					XrSessionBeginInfo sbi = {XR_TYPE_SESSION_BEGIN_INFO};
 					sbi.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
@@ -461,6 +467,7 @@ int main(int argc, char **argv)
 		poll_prox(prox_fd);
 		XrFrameState fs = {XR_TYPE_FRAME_STATE};
 		XR(xrWaitFrame(session, NULL, &fs));
+		gamepad_update(session, focused);
 		XR(xrBeginFrame(session, NULL));
 
 		if (recenter_requested) {
@@ -490,6 +497,7 @@ int main(int argc, char **argv)
 		XR(xrEndFrame(session, &fei));
 	}
 done:
+	gamepad_close();
 	printf("xscreen: exiting after %lu frames\n", (unsigned long)frame);
 	xrDestroySwapchain(swapchain);
 	xrDestroySession(session);
