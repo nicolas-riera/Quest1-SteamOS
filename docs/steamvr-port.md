@@ -251,3 +251,106 @@ The 16-byte `{name, found}` entries are filtered with `strcmp` against the avail
   The HMD driver shrinks to tracking + `IVRDisplayComponent` (the display is matched by name/EDID). It costs more layer surface area than B. Do it after B works, or directly if the on-device test in §5 shows the no-WSI path breaking later in vrcompositor.
 
 **Cheapest first experiment:** on the Quest, run vrserver + vrcompositor with a stub virtual-display driver, under a pass-through layer that only lies about extension names (timeline etc.). Read `vrcompositor.txt` for how far initialisation gets: device creation, then `Headset display is virtual`, then the first `DoVirtualDisplayPresent`.
+
+---
+
+## 8. Sizing the compatibility Vulkan layer: what the default path actually uses
+
+**Method (offline):**
+- Map every volk loader store (`vkGetDeviceProcAddr(dev,"vkX")` → global) to its GOT slot, then count code loads of each slot and attribute each to the nearest `/data/src/...` assert-path string.
+- Scan the code for `mov/movk` pairs that build 32-bit Vulkan `sType` and `VkDynamicState` constants (hits inside OpenXR enum-to-string tables were discarded as false positives).
+- Disassemble all 299 shipped SPIR-V modules (`resources/shaders/vulkan/*.spv`) with `spirv-dis`. vrcompositor contains no embedded SPIR-V; the single magic-number hit is a constant. Shaders are loaded by path (`shaders/vulkan/*.spv`).
+
+**"Default path"** means `useFacetRenderer=false` (→ `Using Vulkan Renderer`, `vrcommon/vrrenderer/vulkanrenderer.cpp`), `motionSmoothing=false`, no tessellation or wireframe debug, and Prism disabled.
+
+### 8.1 Timeline semaphores: USED on the default path [H]
+| Where | What |
+|---|---|
+| `vulkanrenderer.cpp` (legacy renderer, 0x2b46bc) | Creates semaphores with `VkExportSemaphoreCreateInfo` + `VkSemaphoreTypeCreateInfo{TIMELINE}` (`CreateGPUSemaphore`) |
+| `sharedresource_linux.cpp` (`CSharedSemaphoreLinux`, `CSharedResourceBaseLinux`) | `vkGetSemaphoreFdKHR(OPAQUE_FD)` to export. `vkImportSemaphoreFdKHR` + a `SEMAPHORE_TYPE_CREATE_INFO` timeline to import. Host-side `vkWaitSemaphoresKHR` / `vkSignalSemaphoreKHR` / `vkGetSemaphoreCounterValueKHR` (`... failed with result %d Value: %lx`). `vkQueueSubmit` with `VkTimelineSemaphoreSubmitInfo` (`vkQueueSubmit to wait on/signal semaphores ...`). Each semaphore also has an IPC shared-memory block (`ImportVulkanSemaphore - failed to get shared memory for handle`). |
+| facet (`vksync.cpp` Import/ExportTimeline, `vkcommand.cpp`, `vkresourcepool.h`) | Core `vkWaitSemaphores`/`vkSignalSemaphore`. Only used when facet is enabled. |
+
+- **Every shared resource pre-allocates an associated timeline semaphore** (`CSharedResourceBaseLinux::CreateAssociatedResources failed to pre-allocate semaphore`).
+- **Cross-process peers:** processes that contain the Linux shared-resource code: **vrclient.so** (every OpenVR/OpenXR app, overlays, the dashboard/vrwebhelper via libopenvr_api) and **systemlayer**.
+  vrserver only forwards handles and fds (`IVRIPCResourceManagerClient`, no `CSharedResourceBaseLinux`, no Vulkan sync code). driver_cv contains no external-memory or semaphore `sType` constants at all.
+- **Conclusion [M]:** timeline sharing is between **apps (vrclient) / systemlayer and vrcompositor**. A virtual-display driver gets no semaphore through the public interfaces (§8.5).
+- **Layer work:** implement `VK_KHR_timeline_semaphore` over binary semaphores, fences and a shared counter. That covers create (incl. export flags), `vkGetSemaphoreFdKHR`/`vkImportSemaphoreFdKHR` (the exported "OPAQUE_FD" can be a memfd holding the counter plus a futex), host wait/signal/query, and submit-time wait/signal values. Waits must be resolved on the CPU before the submit, because the blob cannot wait for a value on the GPU.
+  **Size: LARGE** (the only large item).
+
+### 8.2 Extended dynamic state 1/3: NOT used on the default path [M]
+- vrcompositor resolves all `vkCmdSet*EXT` names (volk loads the full list), but code references the pointers only in:
+  - facet `vkcommand.cpp` (`vkCmdSetStencilOpEXT`, `vkCmdSetStencilTestEnableEXT`);
+  - `vrmotionvectors.cpp` (`vkCmdSetStencilTestEnableEXT`, motion smoothing);
+  - `facetrenderer.cpp` and facet (`vkCmdSetSampleLocationsEnableEXT`, EDS3).
+- Dynamic-state enum constants in pipeline creation appear only in facet `vkshaderpipeline.cpp`: `STENCIL_TEST_ENABLE`, `STENCIL_OP`, `SAMPLE_LOCATIONS_EXT`, EDS3 `SAMPLE_LOCATIONS_ENABLE`.
+- `vulkanrenderer.cpp` / `scenegraphrenderer.cpp` pipelines use no EDS states (no constants found near their `vkCreateGraphicsPipelines` sites).
+- **The extension is still enabled at device creation:** the WSI `CreateVulkanDevice` chains `PhysicalDevice{ExtendedDynamicState,ExtendedDynamicState3,CustomBorderColor,HostQueryReset,TimelineSemaphore}Features` (0xb4f88–0xb5018).
+- **Layer work:** advertise the names, strip those feature structs (or force the bits to false) before calling the blob, and give `vkCmdSet*EXT` stubs that log. **Size: SMALL** with `useFacetRenderer=false` and `motionSmoothing=false`. If facet or motion smoothing is ever needed, this becomes **LARGE** (pipeline variants keyed on stencil state).
+
+### 8.3 Layer/ViewportIndex and other SPIR-V capabilities [H]
+| Capability | Modules | Notes |
+|---|---|---|
+| ShaderViewportIndexLayerEXT (+ `SPV_EXT_shader_viewport_index_layer`) | 18 VS: `distort_vs`, `distort_vs_nd`, `distort_vs_latest_nd`, `distort_vs_layered(_nd)`, `distort_vs_reproject_{layered,layered_nd,mv,nd}`, `unlit_vs`, `frame_hallucination_*_vs` (6), `motion_filter_vs`, `motion_filter_early_out_vs` | `gl_Layer` is written from a **uniform/push-constant member** (eye index). None of them uses InstanceIndex: one draw per eye, no instanced layering. |
+| Geometry (only to *declare* `BuiltIn Layer` as an FS input) | 54 FS (`distort_ps*`, `unlit_*_ps`, `motion_*`, `frame_hallucination_*_ps`) | **No FS ever loads it**: it is only in the interface. The blob has `geometryShader=false`. |
+| Geometry (real GS entry points) | 12 debug GS: `distort_{line,point,tri}_*_gs`, `portal_stencil_gs` | Wireframe/debug/portal only |
+| Tessellation | 6: `distort_{,grid_,ptnorm_}hs/ds` | Tessellated distortion. The blob has `tessellationShader=false`. Keep it off: the Frame's `tesselationDebug` setting suggests it is a debug path [L]. |
+| StorageImageExtendedFormats | `mv_static_reject_cs` (Rg32i storage image) | Motion vectors only. The blob has `shaderStorageImageExtendedFormats=false`. |
+| ImageQuery (67), DerivativeControl (4) | many | Vulkan 1.0 core, fine |
+| Int16/Float16/subgroup/StorageImageWriteWithoutFormat/MultiView | none | none |
+
+- **Layer work:** rewrite SPIR-V at `vkCreateShaderModule`:
+  - VS: drop `OpStore` to the Layer variable, its decoration, interface entry and capability/extension.
+  - FS: drop the unused Layer input and the `Geometry` capability.
+- **Size: SMALL–MEDIUM** (a SPIR-V pass with spirv-tools-style editing). This holds only while render targets are single-layer: the virtual-display backbuffer is a 2D image (§8.5).
+  If vrcompositor ever renders into array targets with these shaders (the `_layered` variants for array-texture apps), every draw would have to be redirected to a per-layer framebuffer, and this becomes **LARGE** [L].
+
+### 8.4 The small four
+| Item | Use on the default path | Layer work / size |
+|---|---|---|
+| VK_EXT_custom_border_color | `SAMPLER_CUSTOM_BORDER_COLOR_CREATE_INFO` is built in exactly one place: `CFacetVRRenderer::CreateSampler` (0x294ea4). The feature struct is requested at device creation. **Unused by default [H].** | Strip the feature struct and the sampler pNext (map to the nearest standard border). **SMALL** |
+| VK_EXT_sample_locations | `vkCmdSetSampleLocationsEXT` and `SAMPLE_LOCATIONS_INFO` only in `facetrenderer.cpp` (0x2a19ec/0x2a1a6c) and facet pipelines. **Unused by default [H].** | Name only, plus no-op stubs. **SMALL** |
+| VK_EXT_host_query_reset | `vkResetQueryPool` (host) is called from `gputiming_vulkan.cpp` (GPU timing, default path) and heavily from facet. **Used [M].** | Implement `vkResetQueryPool` as a tiny submit of `vkCmdResetQueryPool` + fence wait, or record the reset into the next command buffer. Strip the feature struct. **SMALL** |
+| VK_KHR_image_format_list | `VkImageFormatListCreateInfo` chained in `sharedresource_linux.cpp` image create/import (`CSharedImageLinux::ImportVulkanImage`, 0x2afad0/0x2afec0). **Used [H]**, but it is only a hint. | Strip from pNext. Mutable-format views work in Vulkan 1.0 via `MUTABLE_FORMAT_BIT`. Note: the exporter and the importer must strip it the same way, so that memory requirements still match across processes. **SMALL** |
+
+- **Not needed on the default path:** `dynamic_rendering`. `vkCmdBeginRenderingKHR` is referenced once, in `graphicsdevice.cpp` (0x86c7c); it looks like a capability check, not a call [L]. `queue_submit2` has no users found.
+
+### 8.5 IVRVirtualDisplay on Linux: what the driver receives
+- **Backbuffers:** vrcompositor creates **three** backbuffers `TextureVirtualDisplay` (loop at 0x7fca8: render-target desc `{fmt-enum 3, mips 1, array 1, samples 1, flags 0x102}`, width/height = the display size).
+  It stores the **shared handle** of each (virtual getter at vtbl+320). This is the `SharedTextureHandle_t` that vrserver's `CVirtualDisplayServerThread` passes as `PresentInfo_t.backbufferTextureHandle` [M].
+- **Resolving the handle [M, from §3.4 + SDK]:** `IVRIPCResourceManagerClient::RefResource(handle, &ipcHandle)` then `ReceiveSharedFd(ipcHandle, &fd)` gives an **OPAQUE_FD of the VkDeviceMemory**.
+  - The API returns **no size, format or semaphore**. The driver must recreate a matching `VkImage` (display width/height, very likely `R8G8B8A8_UNORM`/`_SRGB`, optimal tiling, the same usage, dedicated allocation) and import with `allocationSize` from its own memory requirements.
+  - Cache the import per handle: there are 3 handles, so import once each and `UnrefResource` on shutdown.
+- **Sync:** the resource's associated timeline semaphore is not exposed to drivers. The driver must assume that rendering is complete when `Present` is called, or wait conservatively. `NewSharedVulkanSemaphore` exists for driver-created sync but is not wired into `PresentInfo_t` [L]. Verify on the device; the safe fallback is a short GPU-idle wait in the driver before the blit.
+- **`IVRIPCResourceManagerClient_004` [M]:**
+  - vrserver's `CVRIPCResourceManager(Base)` vtable has 11 slots: 9 methods + 2 destructor slots, the same as `_003`.
+  - The `_003` adapter forwards 8 methods unchanged (pure `br` thunks at vtbl+8…+64). Only `NewSharedVulkanImage` is adapted: it **inserts two new `bool` arguments, passed as `false`**. The recovered `_004` order:
+
+```cpp
+// slot 0
+virtual bool NewSharedVulkanImage( uint32_t nImageFormat, uint32_t nWidth, uint32_t nHeight,
+        bool bRenderable, bool bMappable, bool bNew_A /*003 passes false*/, bool bComputeAccess,
+        bool bNew_B /*003 passes false*/, uint32_t unMipLevels, uint32_t unArrayLayerCount,
+        uint32_t unAdditionalVkCreateFlags, uint32_t unAdditionalVkUsageFlags,
+        vr::SharedTextureHandle_t *pSharedHandle ) = 0;
+virtual bool NewSharedVulkanBuffer( uint32_t nSize, uint32_t nUsageFlags, vr::SharedTextureHandle_t *pSharedHandle ) = 0; // slot 1
+virtual bool NewSharedVulkanSemaphore( bool bCounting, vr::SharedTextureHandle_t *pSharedHandle ) = 0;                     // slot 2
+virtual bool RefResource( vr::SharedTextureHandle_t hSharedHandle, uint64_t *pNewIpcHandle ) = 0;                          // slot 3
+virtual bool UnrefResource( vr::SharedTextureHandle_t hSharedHandle ) = 0;                                                 // slot 4
+virtual bool GetDmabufFormats( uint32_t *pOutFormatCount, uint32_t *pOutFormats ) = 0;                                     // slot 5
+virtual bool GetDmabufModifiers( vr::EVRApplicationType, uint32_t unDRMFormat, uint32_t *pOutModifierCount, uint64_t *pOutModifiers ) = 0; // slot 6
+virtual bool ImportDmabuf( vr::EVRApplicationType, vr::DmabufAttributes_t *, vr::SharedTextureHandle_t *pSharedHandle ) = 0; // slot 7
+virtual bool ReceiveSharedFd( uint64_t ulIpcHandle, int *pOutFd ) = 0;                                                    // slot 8
+```
+  The meaning of `bNew_A`/`bNew_B` is unknown. **Request `_003` from our driver** (vrserver still serves it) and avoid guessing.
+
+### 8.6 Layer size summary (default path: legacy renderer, no motion smoothing, no facet)
+| Item | Used? | Size |
+|---|---|---|
+| Timeline semaphores incl. OPAQUE_FD export/import across processes | yes | **Large** |
+| EXT_extended_dynamic_state / _state3 | name + feature struct only | Small (Large if facet or motion smoothing are needed) |
+| EXT_shader_viewport_index_layer (+ FS `Geometry` declaration) | yes, Layer written from a uniform | Small–Medium (SPIR-V strip; Large if layered targets are used) |
+| EXT_custom_border_color | facet only | Small |
+| EXT_sample_locations | facet only | Small |
+| EXT_host_query_reset | yes (`gputiming_vulkan.cpp`) | Small |
+| KHR_image_format_list | yes (hint in shared images) | Small |
+| Tessellation / GS / StorageImageExtendedFormats shaders | debug / motion smoothing only | none if those stay off |
