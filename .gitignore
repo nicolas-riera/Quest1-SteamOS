@@ -14,6 +14,7 @@ src/qbridge/third_party/
 *.img
 *.ko
 src/steamvr-quest1/quest1/bin/
+src/qcam/qcam
 
 # Editor / tool state
 .vscode/
