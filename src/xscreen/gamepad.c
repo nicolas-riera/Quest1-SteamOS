@@ -99,18 +99,23 @@ static int uinput_create(void)
 	    {ABS_Z, {0, 0, 255, 0, 0, 0}},            {ABS_RZ, {0, 0, 255, 0, 0, 0}},
 	    {ABS_HAT0X, {0, -1, 1, 0, 0, 0}},         {ABS_HAT0Y, {0, -1, 1, 0, 0, 0}},
 	};
+	// the Quest kernel is 4.4: no UI_DEV_SETUP / UI_ABS_SETUP (4.5+), so describe the device with
+	// the legacy uinput_user_dev write
+	struct uinput_user_dev dev = {0};
 	for (unsigned i = 0; i < sizeof(abs) / sizeof(abs[0]); i++) {
 		ioctl(fd, UI_SET_ABSBIT, abs[i].code);
-		ioctl(fd, UI_ABS_SETUP, &abs[i]);
+		dev.absmin[abs[i].code] = abs[i].absinfo.minimum;
+		dev.absmax[abs[i].code] = abs[i].absinfo.maximum;
+		dev.absfuzz[abs[i].code] = abs[i].absinfo.fuzz;
+		dev.absflat[abs[i].code] = abs[i].absinfo.flat;
 	}
 
-	struct uinput_setup setup = {0};
-	setup.id.bustype = BUS_USB;
-	setup.id.vendor = 0x045e; // Microsoft
-	setup.id.product = 0x028e; // Xbox 360 controller
-	setup.id.version = 0x0110;
-	snprintf(setup.name, sizeof(setup.name), "Microsoft X-Box 360 pad");
-	if (ioctl(fd, UI_DEV_SETUP, &setup) < 0 || ioctl(fd, UI_DEV_CREATE) < 0) {
+	dev.id.bustype = BUS_USB;
+	dev.id.vendor = 0x045e; // Microsoft
+	dev.id.product = 0x028e; // Xbox 360 controller
+	dev.id.version = 0x0110;
+	snprintf(dev.name, sizeof(dev.name), "Microsoft X-Box 360 pad");
+	if (write(fd, &dev, sizeof(dev)) != sizeof(dev) || ioctl(fd, UI_DEV_CREATE) < 0) {
 		perror("xscreen: uinput device");
 		close(fd);
 		return -1;

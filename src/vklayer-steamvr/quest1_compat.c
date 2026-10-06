@@ -747,7 +747,7 @@ static void fill_fake_features(VkPhysicalDeviceFeatures2 *f)
 		VkBaseOutStructure *prev = (VkBaseOutStructure *)(head_ptr);                                           \
 		for (VkBaseOutStructure *s = prev->pNext; s && ns < 16;) {                                             \
 			VkBaseOutStructure *next = s->pNext;                                                           \
-			if (s->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES ||               \
+			if (s->sType == VK_STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO ||                               			    s->sType == VK_STRUCTURE_TYPE_LOADER_DEVICE_CREATE_INFO ||                                 			    s->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES ||               \
 			    s->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_PROPERTIES ||             \
 			    s->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT ||     \
 			    s->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_PROPERTIES_EXT) {   \
@@ -951,7 +951,8 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateInstance(const VkInstanceCreateInfo 
 	PFN_vkGetInstanceProcAddr gipa = chain->u.pLayerInfo->pfnNextGetInstanceProcAddr;
 	chain->u.pLayerInfo = chain->u.pLayerInfo->pNext;
 	PFN_vkCreateInstance next_create = (PFN_vkCreateInstance)gipa(VK_NULL_HANDLE, "vkCreateInstance");
-	VkResult r = next_create(ci, alloc, out);
+	VkResult r;
+	WITH_UNLINKED(ci, r = next_create(ci, alloc, out));
 	if (r != VK_SUCCESS)
 		return r;
 

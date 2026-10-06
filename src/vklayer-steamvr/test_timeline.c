@@ -2,9 +2,13 @@
 // Parent exports a timeline semaphore (OPAQUE_FD), a forked child imports it, CPU-waits for 5,
 // then submits GPU work that waits on 5 and signals 10; the parent signals 5 from a GPU submit
 // and waits for 10. Run with QUEST1_STEAMVR_COMPAT=1 and the layer manifest on VK_LAYER_PATH /
-// VK_ADD_IMPLICIT_LAYER_PATH (works on any Vulkan driver, e.g. lavapipe in WSL).
+// VK_ADD_IMPLICIT_LAYER_PATH (works on any Vulkan driver, e.g. lavapipe in WSL), or on the headset
+// through quest1_vkshim (its directory first on LD_LIBRARY_PATH). Like SteamVR, it dlopens
+// libvulkan.so.1 and resolves everything through vkGetInstanceProcAddr.
+#define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
 
+#include <dlfcn.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,6 +25,22 @@
 		}                                                                                                      \
 	} while (0)
 
+static PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr;
+#define FN(n) static PFN_##n n;
+FN(vkCreateInstance)
+FN(vkDestroyInstance)
+FN(vkEnumeratePhysicalDevices)
+FN(vkGetPhysicalDeviceFeatures2)
+FN(vkCreateDevice)
+FN(vkDestroyDevice)
+FN(vkGetDeviceQueue)
+FN(vkGetDeviceProcAddr)
+FN(vkCreateSemaphore)
+FN(vkDestroySemaphore)
+FN(vkQueueSubmit)
+FN(vkQueueWaitIdle)
+#undef FN
+
 struct ctx
 {
 	VkInstance inst;
@@ -34,11 +54,31 @@ struct ctx
 
 static void init(struct ctx *c)
 {
+	void *lib = dlopen("libvulkan.so.1", RTLD_NOW);
+	if (!lib) {
+		fprintf(stderr, "%s\n", dlerror());
+		exit(1);
+	}
+	vkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)dlsym(lib, "vkGetInstanceProcAddr");
+	vkCreateInstance = (PFN_vkCreateInstance)vkGetInstanceProcAddr(VK_NULL_HANDLE, "vkCreateInstance");
 	VkApplicationInfo app = {VK_STRUCTURE_TYPE_APPLICATION_INFO};
 	app.apiVersion = VK_API_VERSION_1_1;
 	VkInstanceCreateInfo ici = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
 	ici.pApplicationInfo = &app;
 	CHECK(vkCreateInstance(&ici, NULL, &c->inst));
+#define FN(n) n = (PFN_##n)vkGetInstanceProcAddr(c->inst, #n);
+	FN(vkDestroyInstance)
+	FN(vkEnumeratePhysicalDevices)
+	FN(vkGetPhysicalDeviceFeatures2)
+	FN(vkCreateDevice)
+	FN(vkDestroyDevice)
+	FN(vkGetDeviceQueue)
+	FN(vkGetDeviceProcAddr)
+	FN(vkCreateSemaphore)
+	FN(vkDestroySemaphore)
+	FN(vkQueueSubmit)
+	FN(vkQueueWaitIdle)
+#undef FN
 	uint32_t n = 1;
 	VkPhysicalDevice pd;
 	vkEnumeratePhysicalDevices(c->inst, &n, &pd);
