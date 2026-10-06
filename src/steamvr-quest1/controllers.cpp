@@ -228,8 +228,11 @@ public:
 		p->SetStringProperty(container, Prop_SerialNumber_String, Serial());
 		p->SetStringProperty(container, Prop_ManufacturerName_String, "Oculus");
 		p->SetStringProperty(container, Prop_TrackingSystemName_String, "quest1");
+		// QUEST1_CTRL_MODEL=none: no render model (performance tests); otherwise Oculus' own
+		const char *model = getenv("QUEST1_CTRL_MODEL");
+		bool noModel = model && strcmp(model, "none") == 0;
 		p->SetStringProperty(container, Prop_RenderModelName_String,
-		                     left ? "oculus_quest_controller_left" : "oculus_quest_controller_right");
+		                     noModel ? "" : left ? "oculus_quest_controller_left" : "oculus_quest_controller_right");
 		p->SetStringProperty(container, Prop_RegisteredDeviceType_String,
 		                     left ? "quest1/QUEST1-Touch-Left" : "quest1/QUEST1-Touch-Right");
 		p->SetStringProperty(container, Prop_InputProfilePath_String, "{quest1}/input/quest1_touch_profile.json");
@@ -749,14 +752,21 @@ void State::Loop()
 	pthread_setname_np(pthread_self(), "quest1 ctrl");
 	bool wasFocused = true;
 	XrPath profile[2] = {XR_NULL_PATH, XR_NULL_PATH};
+	// Every tick is ~5 Monado IPC calls on the connection the frame thread also uses: at 250 Hz
+	// they starved it (SteamVR 40 -> 13 fps). SteamVR extrapolates poses with the velocities.
+	int hz = 90;
+	if (const char *e = getenv("QUEST1_CTRL_HZ"))
+		hz = atoi(e) > 0 ? atoi(e) : hz;
+	const auto period = std::chrono::microseconds(1000000 / hz);
+	const unsigned perSec = (unsigned)hz;
 	for (unsigned tick = 0; running; tick++) {
-		std::this_thread::sleep_for(std::chrono::milliseconds(4));
+		std::this_thread::sleep_for(period);
 		double now = MonoSeconds();
-		if (tick % 128 == 0)
+		if (tick % perSec == 0) // ~1 s
 			ReadKnobs();
-		if (tick % 64 == 0)
+		if (tick % (perSec / 4 + 1) == 0)
 			PollCalibration();
-		if (tick % 16 == 0)
+		if (tick % (perSec / 16 + 1) == 0)
 			PollPress();
 
 		XrActiveActionSet active{set, XR_NULL_PATH};
