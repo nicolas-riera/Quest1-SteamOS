@@ -11,7 +11,14 @@ enum qd_msg_type
 	QD_PRESENT = 2,   //!< layer -> driver: image `index` is finished, in TRANSFER_SRC_OPTIMAL
 	QD_RELEASE = 3,   //!< driver -> layer: done reading image `index`
 	QD_POSED = 4,     //!< driver -> layer: the pose of the frame after `frame` is published
+	//! layer -> driver: frame `frame` is submitted (GPU still rendering): publish the pose of the
+	//! next frame now, answered by QD_POSED. Its QD_PRESENT follows once rendered, with
+	//! QD_PRESENT_POSED in flags. Lets vrcompositor work on the next frame while the GPU renders.
+	QD_POSE = 5,
 };
+
+//! QD_PRESENT flags: the pose was already handled by a QD_POSE for this frame
+#define QD_PRESENT_POSED 1u
 
 struct qd_msg
 {

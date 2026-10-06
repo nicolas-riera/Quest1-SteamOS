@@ -212,6 +212,13 @@ public:
 	XrFovf fov[2] = {};
 	float ipd = 0.063f;
 	uint32_t eyeWidth = 0, eyeHeight = 0;
+	//! vrcompositor's output (the simulated display), both eyes side by side. Its distortion pass
+	//! fills it every frame, so a smaller one costs much less GPU (2448x1360 -> 1224x680: 40 ->
+	//! 60 fps); the blit to Monado's swapchains scales it back. QUEST1_DISPLAY_SIZE=WxH, also read
+	//! by the simulated display in the compat layer: both must agree.
+	uint32_t OutputWidth() const { return outputWidth ? outputWidth : eyeWidth * 2; }
+	uint32_t OutputHeight() const { return outputHeight ? outputHeight : eyeHeight; }
+	uint32_t outputWidth = 0, outputHeight = 0;
 	float displayHz = 72.0f;
 	// debug (QUEST1_POSE_TAG=1): frames are posed alternately straight ahead / looking down, and
 	// three rows of each displayed frame are read back, to see which pose a frame was rendered with
@@ -326,6 +333,9 @@ bool XrBackend::Init()
 		backbufferFormat = (VkFormat)atoi(f);
 	if (const char *w = getenv("QUEST1_VD_WAITIDLE"))
 		waitIdle = atoi(w) != 0;
+	if (const char *s = getenv("QUEST1_DISPLAY_SIZE"))
+		if (sscanf(s, "%ux%u", &outputWidth, &outputHeight) != 2)
+			outputWidth = outputHeight = 0;
 	if (const char *v = getenv("QUEST1_VIRTUAL_DISPLAY"))
 		useVirtualDisplay = atoi(v) != 0;
 	if (const char *h = getenv("QUEST1_EYE_HEIGHT"))
@@ -943,7 +953,19 @@ void XrBackend::DisplayThread()
 				presentCount++;
 				frameCond.notify_all();
 				lock.unlock();
+				if (m.flags & QD_PRESENT_POSED)
+					continue; // the pose was published at its QD_POSE
 				// the pose of the next frame, published before vrcompositor resumes (it waits for this)
+				lastPresent = MonotonicSeconds();
+				if (onPresent)
+					onPresent(m.frame);
+				qd_msg ack{};
+				ack.type = QD_POSED;
+				ack.frame = m.frame;
+				send(fd, &ack, sizeof(ack), MSG_NOSIGNAL);
+			} else if (m.type == QD_POSE) {
+				// frame m.frame is submitted (still rendering): publish the next frame's pose now
+				lock.unlock();
 				lastPresent = MonotonicSeconds();
 				if (onPresent)
 					onPresent(m.frame);
@@ -1395,8 +1417,8 @@ public:
 	void GetWindowBounds(int32_t *x, int32_t *y, uint32_t *w, uint32_t *h) override
 	{
 		*x = *y = 0;
-		*w = xr.eyeWidth * 2;
-		*h = xr.eyeHeight;
+		*w = xr.OutputWidth();
+		*h = xr.OutputHeight();
 	}
 	bool IsDisplayOnDesktop() override { return false; }
 	bool IsDisplayRealDisplay() override { return !xr.useVirtualDisplay; }
@@ -1407,10 +1429,10 @@ public:
 	}
 	void GetEyeOutputViewport(EVREye eye, uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h) override
 	{
-		*x = eye == Eye_Left ? 0 : xr.eyeWidth;
+		*x = eye == Eye_Left ? 0 : xr.OutputWidth() / 2;
 		*y = 0;
-		*w = xr.eyeWidth;
-		*h = xr.eyeHeight;
+		*w = xr.OutputWidth() / 2;
+		*h = xr.OutputHeight();
 	}
 	void GetProjectionRaw(EVREye eye, float *left, float *right, float *top, float *bottom) override
 	{
