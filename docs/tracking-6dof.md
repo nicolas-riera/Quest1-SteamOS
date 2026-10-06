@@ -14,7 +14,55 @@ Scratch scripts are in `%TEMP%\claude\...\scratchpad\t6\`; symbol dumps are in `
 
 ---
 
-## 0. Recommendation
+## Update 2026-10-06 evening: Path O step 1 works on the device
+
+`src/qcam/qcam.c` grabs frames from **all four tracking cameras natively** (Holo, no Android, no
+daemon), through libsyncboss + libqcameraoculushal loaded with libhybris. Verified live, with
+`monado.service` stopped for ~20 s (qcam pumps the SyncBoss stream itself, so it must be the only
+libsyncboss user), then Monado and SteamVR restarted:
+
+* `syncboss_camera_probe` → mask 0x0f; `qcamera_open(0)` (8 bpp) → 4 sensors; each sensor
+  640×480 `fmt 0x70` (Y8), buffers 640×**481** (line 0 = metadata line), stride 640, ION buffers
+  allocated by the library itself (`qcamera_start_sensor(..., nbufs 4, NULL fds, 1)`).
+* Sequence (as the sensors HAL's `MontereyCameraProvider`): probe → set_bpp(8) → init(4) →
+  get_sensor/query_sensor_info ×4 → set_frame_rate(33333 µs) → params → start_sensor ×4 →
+  set_frame_tag_mode(1) → start_streaming(4) → set_exposure_gain_tag → dequeue/enqueue loop;
+  then stop_streaming → stop_sensor ×4 → close → deinit(4) → release → syncboss_deinit. The kernel
+  logs "Turning off cameras" at release. 0 dequeue timeouts.
+* Frames alternate **HEADSET** (metadata tag 1, the requested 4 ms exposure, gain 2) and
+  **CONTROLLER** (tag 0, ~38 µs exposure, gain 4) at 2 × 30 Hz, all four cameras in the same
+  sequence number. ISP timestamps are CLOCK_MONOTONIC (`ts`, µs resolution, the 4 cameras within
+  17 µs). SyncBoss shutter records (stream type 14, µs SyncBoss time + 4-bit sync id) are matched
+  to the metadata sync id.
+* Images look right (fisheye, mono, rotated 90° as the calibration predicts). With qcam index =
+  calibration `Id`: Id 0/2 = bottom left/right cameras looking down-forward, Id 1/3 = top
+  left/right looking sideways-up (from `DeviceFromCamera` in `/persist/calibration/
+  camera_calibration_v2.json`, read only). The bottom pair saw the desk the headset was lying on,
+  the top pair the room, consistent with that mapping [I: confirm with a stereo check].
+* Indoor light needs more exposure than 4 ms ×2 (mean level ~10/255): use `--exp 10000 --gain 4`.
+* Controller frames showed no LEDs: Monado was stopped, so controller input/LED sync was off [I].
+* API corrections to §2.2 (from the RE, all [V] by disassembly): `qcamera_query_buffer_dimensions`
+  takes the bit depth (8/10), not a pixel format; `qcamera_start_sensor(s, dims, fmt28, nbufs,
+  fds_or_NULL, add_meta_line)`; `qcamera_dequeue` returns a frame with `tv_sec/tv_nsec` at +0/+8,
+  sequence at +24, pixels at +48. The libqcamerahal function starts are `Initialize` 0x5d68,
+  `EnableCamera` 0x6208, `StartCamera` 0x6488, `StreamingThread` 0x68f0 (§5 lists call sites).
+  The full notes are in the header of `src/qcam/qcam.c`.
+
+Consequences for the plan:
+1. Path O's capture is solved; it took an afternoon, not days. Its remaining work is integration:
+   **the capture has to live inside Monado's quest1 driver**, which already owns the libsyncboss
+   handle and pumps the stream (two stream pumps cannot coexist). Next step: a `QUEST1_CAMERAS=1`
+   option in `quest1_hmd.c` that runs the qcam sequence on Monado's handle and pushes HEADSET
+   frames (Id 0..3, one timestamp per frameset) to an `xrt_frame_sink`, with the camera
+   calibration loaded from `/persist` (rift_s parser, Fisheye62 → KB4).
+2. Then SLAM: build Basalt for aarch64 (cross-build in WSL against the Holo image, or on the
+   headset with SteamVR stopped, `-j1`, plus swap), rebuild Monado with `XRT_FEATURE_SLAM`, feed
+   `t_slam` (2 bottom + 2 top cameras, 1 kHz IMU) as `rift_s_tracker.c` does.
+3. Path M stays possible but also needs Monado to give up libsyncboss while Meta's sensors HAL
+   runs, so both paths converge on "one owner of SyncBoss". Path O now has the shorter road to a
+   first open 6DoF head pose; Path M remains the only road to Meta-quality controller tracking.
+
+## 0. Recommendation (original study)
 
 | | Path M: Meta stack, native processes plus binder stubs | Path O: open source, Monado SLAM and constellation |
 |---|---|---|
