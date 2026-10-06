@@ -354,3 +354,21 @@ virtual bool ReceiveSharedFd( uint64_t ulIpcHandle, int *pOutFd ) = 0;          
 | EXT_host_query_reset | yes (`gputiming_vulkan.cpp`) | Small |
 | KHR_image_format_list | yes (hint in shared images) | Small |
 | Tessellation / GS / StorageImageExtendedFormats shaders | debug / motion smoothing only | none if those stay off |
+
+## 9. Implementation status (2026-10-06, offline)
+
+| Piece | Where | State |
+|---|---|---|
+| HMD driver (IVRVirtualDisplay → OpenXR → Monado) | `src/steamvr-quest1` | builds (aarch64), untested |
+| Compatibility layer `VK_LAYER_QUEST1_steamvr_compat` | `src/vklayer-steamvr` | builds (aarch64); timeline emulation **passes a cross-process test on lavapipe** (`test_timeline.c`: OPAQUE_FD export/import, CPU waits, GPU submit waits/signals) |
+| Blob-hidden extensions (image_format_list, host_query_reset, custom_border_color, extended_dynamic_state, sample_locations) | `device/qgl_config.txt` → `/data/vendor/gpu/qgl_config.txt` | prepared, not installed |
+| `Layer` built-in in shaders (shader_viewport_index_layer) | layer, `vkCreateShaderModule` rewrite | not started: check on the device whether vrcompositor really renders into layered targets |
+
+Layer notes:
+- Implicit layer, active only with `QUEST1_STEAMVR_COMPAT=1`. Its manifest must list the emulated extensions in
+  `device_extensions`, or the Khronos loader rejects them at `vkCreateDevice` (`VK_ERROR_EXTENSION_NOT_PRESENT`).
+- All submissions of a device go through one worker thread (call order kept, so binary semaphore signal-before-wait
+  holds across queues); timeline waits block that worker on the CPU. An app that waits on a timeline value signalled
+  by a *later* submission of the same process would deadlock; SteamVR's waits are on other processes' signals.
+- Requires that `/opt/hybris/lib/libvulkan.so.1` is a Khronos loader (its 1.2.183 version suggests so): to confirm on
+  the device, otherwise the layer has to be preloaded differently.
