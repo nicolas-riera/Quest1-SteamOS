@@ -48,6 +48,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <thread>
@@ -193,8 +194,17 @@ public:
 	bool Init();
 	void Shutdown();
 
-	// tracking
-	bool Locate(DriverPose_t &pose);
+	// tracking: the pose only changes when vrcompositor presents a frame. At each present of
+	// frame k, the display socket thread calls onPresent, which publishes a new pose (predicted, no
+	// velocity, so SteamVR renders with exactly that pose) before vrcompositor resumes; frame k+1 is
+	// therefore rendered with it, and the frame thread submits frame k+1 to Monado with that same
+	// pose. Monado's reprojection then only corrects the latency, not a render/submit mismatch.
+	bool LocateAhead(DriverPose_t &pose, XrPosef *xrPose);
+	void RecordFramePose(uint64_t frame, const XrPosef &pose);
+	std::function<void(uint64_t presentedFrame)> onPresent;
+	std::atomic<double> lastPresent{0}; //!< MonotonicSeconds of the last display present
+	float headHeight = 1.65f;    //!< a 3DoF head sits at this height above SteamVR's floor
+	uint64_t predictNs = 30000000; //!< pose publication -> photons through vrcompositor, the driver, Monado
 	XrFovf fov[2] = {};
 	float ipd = 0.063f;
 	uint32_t eyeWidth = 0, eyeHeight = 0;
@@ -259,6 +269,17 @@ private:
 	int displayFds[QD_MAX_IMAGES] = {-1, -1, -1, -1};
 	bool displayChanged = false;
 	int presentedIndex = -1;
+	uint64_t presentedFrame = 0;
+
+	// the pose each display frame was rendered with (RecordFramePose), looked up by the frame thread
+	struct PoseSample
+	{
+		uint64_t frame = 0;
+		XrPosef pose{};
+	};
+	std::mutex poseRingMutex;
+	PoseSample poseRing[64];
+	bool PoseForFrame(uint64_t frame, XrPosef *pose);
 	// frame thread only
 	Backbuffer displayImages[QD_MAX_IMAGES];
 	uint32_t displayCount = 0, displayWidth = 0, displayHeight = 0;
@@ -281,6 +302,10 @@ bool XrBackend::Init()
 		waitIdle = atoi(w) != 0;
 	if (const char *v = getenv("QUEST1_VIRTUAL_DISPLAY"))
 		useVirtualDisplay = atoi(v) != 0;
+	if (const char *h = getenv("QUEST1_EYE_HEIGHT"))
+		headHeight = (float)atof(h);
+	if (const char *ms = getenv("QUEST1_POSE_PREDICT_MS"))
+		predictNs = (uint64_t)(atof(ms) * 1e6);
 	if (!LoadLibraries())
 		return false;
 
@@ -483,33 +508,29 @@ bool XrBackend::CreateSwapchains()
 	return true;
 }
 
-bool XrBackend::Locate(DriverPose_t &pose)
+bool XrBackend::LocateAhead(DriverPose_t &pose, XrPosef *xrPose)
 {
 	pose = {};
 	pose.qWorldFromDriverRotation.w = pose.qDriverFromHeadRotation.w = 1;
+	pose.vecWorldFromDriverTranslation[1] = headHeight;
 	pose.qRotation.w = 1;
 	pose.deviceIsConnected = true;
 	pose.result = TrackingResult_Running_OK;
 
-	XrSpaceVelocity vel{XR_TYPE_SPACE_VELOCITY};
+	XrTime when = Now() + (XrTime)predictNs;
 	XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
-	loc.next = &vel;
-	if (XR_FAILED(pxrLocateSpace(view, local, Now(), &loc)) ||
+	if (XR_FAILED(pxrLocateSpace(view, local, when, &loc)) ||
 	    !(loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) {
 		pose.result = TrackingResult_Running_OutOfRange;
 		return false;
 	}
+	*xrPose = loc.pose;
 	pose.qRotation = {loc.pose.orientation.w, loc.pose.orientation.x, loc.pose.orientation.y,
 	                  loc.pose.orientation.z};
 	pose.vecPosition[0] = loc.pose.position.x;
 	pose.vecPosition[1] = loc.pose.position.y;
 	pose.vecPosition[2] = loc.pose.position.z;
-	if (vel.velocityFlags & XR_SPACE_VELOCITY_ANGULAR_VALID_BIT) {
-		// OpenXR gives the angular velocity in the base space (LOCAL), as OpenVR expects
-		pose.vecAngularVelocity[0] = vel.angularVelocity.x;
-		pose.vecAngularVelocity[1] = vel.angularVelocity.y;
-		pose.vecAngularVelocity[2] = vel.angularVelocity.z;
-	}
+	// no velocities: SteamVR must not extrapolate, the pose is already predicted
 	pose.poseIsValid = true;
 	pose.willDriftInYaw = true; // 3DoF IMU, no magnetometer
 	return true;
@@ -662,6 +683,22 @@ void XrBackend::Present(SharedTextureHandle_t backbuffer)
 	frameCond.notify_all();
 }
 
+void XrBackend::RecordFramePose(uint64_t frame, const XrPosef &pose)
+{
+	std::lock_guard<std::mutex> lock(poseRingMutex);
+	poseRing[frame % 64] = {frame, pose};
+}
+
+bool XrBackend::PoseForFrame(uint64_t frame, XrPosef *pose)
+{
+	std::lock_guard<std::mutex> lock(poseRingMutex);
+	const PoseSample &slot = poseRing[frame % 64];
+	if (frame == 0 || slot.frame != frame)
+		return false;
+	*pose = slot.pose;
+	return true;
+}
+
 // --- simulated display receiver ---------------------------------------------------------------------------
 
 void XrBackend::DisplayThread()
@@ -705,7 +742,7 @@ void XrBackend::DisplayThread()
 			ssize_t n = recvmsg(fd, &h, MSG_CMSG_CLOEXEC);
 			if (n != (ssize_t)sizeof(m))
 				break;
-			std::lock_guard<std::mutex> lock(frameMutex);
+			std::unique_lock<std::mutex> lock(frameMutex);
 			if (m.type == QD_SWAPCHAIN) {
 				cmsghdr *c = CMSG_FIRSTHDR(&h);
 				int nfd = c && c->cmsg_type == SCM_RIGHTS ? (int)((c->cmsg_len - CMSG_LEN(0)) / sizeof(int)) : 0;
@@ -731,8 +768,18 @@ void XrBackend::DisplayThread()
 					send(fd, &r, sizeof(r), MSG_NOSIGNAL);
 				}
 				presentedIndex = (int)m.index;
+				presentedFrame = m.frame;
 				presentCount++;
 				frameCond.notify_all();
+				lock.unlock();
+				// the pose of the next frame, published before vrcompositor resumes (it waits for this)
+				lastPresent = MonotonicSeconds();
+				if (onPresent)
+					onPresent(m.frame);
+				qd_msg ack{};
+				ack.type = QD_POSED;
+				ack.frame = m.frame;
+				send(fd, &ack, sizeof(ack), MSG_NOSIGNAL);
 			}
 		}
 		std::lock_guard<std::mutex> lock(frameMutex);
@@ -873,7 +920,7 @@ void XrBackend::FrameThread()
 	proj.viewCount = 2;
 	proj.views = pv;
 	bool haveLayer = false;
-	uint64_t shown = 0;
+	uint64_t shown = 0, poseMisses = 0, totalMissLogs = 0;
 	double statsSince = MonotonicSeconds();
 
 	while (running) {
@@ -910,6 +957,7 @@ void XrBackend::FrameThread()
 		// SteamVR paces itself on our "vsyncs"; give its frame most of the period to arrive.
 		SharedTextureHandle_t handle = 0;
 		int displayIndex = -1;
+		uint64_t displayFrame = 0;
 		bool importDisplay = false;
 		{
 			std::unique_lock<std::mutex> lock(frameMutex);
@@ -919,6 +967,7 @@ void XrBackend::FrameThread()
 			handle = pending;
 			pending = 0;
 			displayIndex = presentedIndex;
+			displayFrame = presentedFrame;
 			presentedIndex = -1;
 			importDisplay = displayChanged;
 		}
@@ -948,10 +997,14 @@ void XrBackend::FrameThread()
 			for (int eye = 0; eye < 2; eye++)
 				pxrReleaseSwapchainImage(swapchain[eye], nullptr);
 
-			// SteamVR rendered for about this frame's display time: show it with that pose so
-			// Monado's reprojection is (nearly) identity.
+			// the pose SteamVR rendered this frame with (published when the previous one was
+			// presented); otherwise (virtual display, first frame) this frame's own
 			XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
-			pxrLocateSpace(view, local, fs.predictedDisplayTime, &head);
+			if (displayIndex < 0 || !PoseForFrame(displayFrame, &head.pose)) {
+				pxrLocateSpace(view, local, fs.predictedDisplayTime, &head);
+				if (displayIndex >= 0 && poseMisses++ < 3 && totalMissLogs++ < 6)
+					Log("quest1: no recorded pose for display frame %llu\n", (unsigned long long)displayFrame);
+			}
 			for (int eye = 0; eye < 2; eye++) {
 				pv[eye].pose = EyeFromHead(head.pose, eye == 0 ? -ipd / 2 : ipd / 2);
 				pv[eye].fov = fov[eye];
@@ -979,8 +1032,9 @@ void XrBackend::FrameThread()
 
 		double now = MonotonicSeconds();
 		if (now - statsSince > 5.0) {
-			Log("quest1: %.1f SteamVR frames/s shown\n", shown / (now - statsSince));
-			shown = 0;
+			Log("quest1: %.1f SteamVR frames/s shown, %llu without their render pose\n", shown / (now - statsSince),
+			    (unsigned long long)poseMisses);
+			shown = poseMisses = 0;
 			statsSince = now;
 		}
 	}
@@ -1056,22 +1110,42 @@ public:
 		poseThreadRunning = true;
 		poseThread = std::thread([this] {
 			pthread_setname_np(pthread_self(), "quest1 poses");
+			// while vrcompositor presents, poses are published by PublishFramePose only; before
+			// that (start-up, virtual display) at 250 Hz
 			while (poseThreadRunning) {
+				std::this_thread::sleep_for(std::chrono::milliseconds(4));
+				if (MonotonicSeconds() - xr.lastPresent < 0.2)
+					continue;
+				XrPosef unused;
 				DriverPose_t p;
-				xr.Locate(p);
-				{
-					std::lock_guard<std::mutex> lock(poseMutex);
-					lastPose = p;
-				}
-				VRServerDriverHost()->TrackedDevicePoseUpdated(id, p, sizeof(p));
-				std::this_thread::sleep_for(std::chrono::milliseconds(4)); // 250 Hz
+				xr.LocateAhead(p, &unused);
+				Publish(p);
 			}
 		});
+		xr.onPresent = [this](uint64_t presentedFrame) { PublishFramePose(presentedFrame + 1); };
 		return VRInitError_None;
+	}
+
+	void Publish(const DriverPose_t &p)
+	{
+		std::lock_guard<std::mutex> lock(poseMutex);
+		lastPose = p;
+		VRServerDriverHost()->TrackedDevicePoseUpdated(id, p, sizeof(p));
+	}
+
+	//! The pose display frame `frame` will be rendered with.
+	void PublishFramePose(uint64_t frame)
+	{
+		XrPosef xrPose;
+		DriverPose_t p;
+		if (xr.LocateAhead(p, &xrPose))
+			xr.RecordFramePose(frame, xrPose);
+		Publish(p);
 	}
 
 	void Deactivate() override
 	{
+		xr.onPresent = nullptr;
 		poseThreadRunning = false;
 		if (poseThread.joinable())
 			poseThread.join();

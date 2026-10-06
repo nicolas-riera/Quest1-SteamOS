@@ -25,6 +25,19 @@
 #define QD_NAME "Valve Corporation Quest1 (virtual)"
 
 static uint32_t qd_width = 2448, qd_height = 1360, qd_mhz = 72000;
+//! the vblank whose display-event fences were signaled last: vrcompositor starts a frame there
+static _Atomic uint64_t qd_frame_tick;
+
+// QUEST1_DISPLAY_TRACE=1: log the first display calls with their time (ms within the second)
+static void qd_trace(const char *what)
+{
+	static atomic_uint n;
+	if (!getenv("QUEST1_DISPLAY_TRACE") || atomic_fetch_add(&n, 1) >= 120)
+		return;
+	uint64_t t = now_ns();
+	LOG("trace %-12s %8.3f ms (vblank phase %6.3f ms)\n", what, (t % 1000000000ull) / 1e6,
+	    (t % (1000000000000ull / qd_mhz)) / 1e6);
+}
 static pthread_once_t qd_once = PTHREAD_ONCE_INIT;
 
 static void qd_init(void)
@@ -382,6 +395,8 @@ struct qd_swapchain
 	pthread_mutex_t mutex;
 	pthread_cond_t cond;
 	bool app_owned[QD_MAX_IMAGES], driver_owned[QD_MAX_IMAGES];
+	uint64_t frame_tick[QD_MAX_IMAGES]; //!< qd_frame_tick when the image was acquired
+	uint64_t posed_frame;               //!< last frame whose QD_POSED came back
 	uint32_t next;
 	uint64_t frame;
 	int sock;
@@ -435,6 +450,13 @@ static void *qd_reader(void *arg)
 	struct qd_swapchain *sc = arg;
 	struct qd_msg m;
 	while (recv(sc->sock, &m, sizeof(m), 0) == sizeof(m)) {
+		if (m.type == QD_POSED) {
+			pthread_mutex_lock(&sc->mutex);
+			sc->posed_frame = m.frame;
+			pthread_cond_broadcast(&sc->cond);
+			pthread_mutex_unlock(&sc->mutex);
+			continue;
+		}
 		if (m.type != QD_RELEASE || m.index >= sc->count)
 			continue;
 		pthread_mutex_lock(&sc->mutex);
@@ -729,6 +751,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL qd_GetSwapchainImagesKHR(VkDevice device, 
 static VkResult qd_acquire(struct qd_swapchain *sc, uint64_t timeout, VkSemaphore semaphore, VkFence fence,
                            uint32_t *index)
 {
+	qd_trace("acquire");
 	struct timespec deadline;
 	clock_gettime(CLOCK_REALTIME, &deadline);
 	if (timeout != UINT64_MAX) {
@@ -756,6 +779,7 @@ static VkResult qd_acquire(struct qd_swapchain *sc, uint64_t timeout, VkSemaphor
 		return timeout == 0 ? VK_NOT_READY : VK_TIMEOUT;
 	}
 	sc->app_owned[found] = true;
+	sc->frame_tick[found] = atomic_load(&qd_frame_tick);
 	sc->next = (found + 1) % sc->count;
 	pthread_mutex_unlock(&sc->mutex);
 
@@ -796,6 +820,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL qd_AcquireNextImage2KHR(VkDevice device, c
 
 static VKAPI_ATTR VkResult VKAPI_CALL qd_QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *pi)
 {
+	qd_trace("present");
 	VkResult result = VK_SUCCESS;
 	bool waited = false;
 	for (uint32_t s = 0; s < pi->swapchainCount; s++) {
@@ -834,8 +859,22 @@ static VKAPI_ATTR VkResult VKAPI_CALL qd_QueuePresentKHR(VkQueue queue, const Vk
 				struct qd_msg m = {QD_PRESENT};
 				m.index = idx;
 				m.frame = ++sc->frame;
-				if (send(sc->sock, &m, sizeof(m), MSG_NOSIGNAL) == sizeof(m))
+				m.vblank_ns = sc->frame_tick[idx];
+				if (send(sc->sock, &m, sizeof(m), MSG_NOSIGNAL) == sizeof(m)) {
 					sc->driver_owned[idx] = true;
+					// the driver publishes the pose of the next frame, which vrcompositor
+					// must only read once we return: wait for it (bounded)
+					struct timespec dl;
+					clock_gettime(CLOCK_REALTIME, &dl);
+					dl.tv_nsec += 4000000;
+					if (dl.tv_nsec >= 1000000000) {
+						dl.tv_sec++;
+						dl.tv_nsec -= 1000000000;
+					}
+					while (sc->posed_frame < m.frame && sc->sock >= 0 &&
+					       pthread_cond_timedwait(&sc->cond, &sc->mutex, &dl) != ETIMEDOUT)
+						;
+				}
 			}
 			pthread_cond_broadcast(&sc->cond);
 			pthread_mutex_unlock(&sc->mutex);
@@ -878,6 +917,8 @@ static void *qd_vblank_thread(void *arg)
 		while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL) == EINTR)
 			;
 		pthread_mutex_lock(&qd_event_mutex);
+		if (qd_event_count)
+			atomic_store(&qd_frame_tick, next);
 		for (uint32_t i = 0; i < qd_event_count; i++) {
 			struct qd_event *e = &qd_events[i];
 			pthread_mutex_lock(&e->d->queue_mutex);
@@ -893,7 +934,9 @@ static void *qd_vblank_thread(void *arg)
 static void qd_vblank_start(void)
 {
 	pthread_once(&qd_once, qd_init);
-	qd_epoch_ns = now_ns();
+	// ticks at multiples of the period since CLOCK_MONOTONIC's origin: driver_quest1 computes the
+	// same grid to publish one pose per vblank
+	qd_epoch_ns = 0;
 	pthread_t t;
 	pthread_create(&t, NULL, qd_vblank_thread, NULL);
 	pthread_detach(t);
@@ -903,6 +946,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL qd_RegisterDisplayEventEXT(VkDevice device
                                                                const VkDisplayEventInfoEXT *info,
                                                                const VkAllocationCallbacks *alloc, VkFence *fence)
 {
+	qd_trace("event");
 	pthread_once(&qd_vblank_once, qd_vblank_start);
 	struct device *d = device_of(device);
 	VkFenceCreateInfo fci = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
@@ -922,8 +966,16 @@ static VKAPI_ATTR VkResult VKAPI_CALL qd_RegisterDisplayEventEXT(VkDevice device
 static VKAPI_ATTR VkResult VKAPI_CALL qd_GetSwapchainCounterEXT(VkDevice device, VkSwapchainKHR swapchain,
                                                               VkSurfaceCounterFlagBitsEXT counter, uint64_t *value)
 {
+	qd_trace("counter");
 	pthread_once(&qd_vblank_once, qd_vblank_start);
 	*value = qd_vblank_count();
+	return VK_SUCCESS;
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL qd_WaitForPresentKHR(VkDevice device, VkSwapchainKHR swapchain, uint64_t id,
+                                                          uint64_t timeout)
+{
+	qd_trace("waitpresent");
 	return VK_SUCCESS;
 }
 
@@ -970,7 +1022,7 @@ static PFN_vkVoidFunction qd_proc(const char *name)
 	S("vkAcquireDrmDisplayEXT", qd_succeed)
 	S("vkReleaseDisplayEXT", qd_succeed)
 	S("vkDisplayPowerControlEXT", qd_succeed)
-	S("vkWaitForPresentKHR", qd_succeed)
+	S("vkWaitForPresentKHR", qd_WaitForPresentKHR)
 	S("vkGetDrmDisplayEXT", qd_unsupported)
 	S("vkRegisterDeviceEventEXT", qd_unsupported)
 #undef S
