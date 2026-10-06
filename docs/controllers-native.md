@@ -252,11 +252,16 @@ firmware path set, and the property area. No Android daemon is needed for this p
 the driver's own session (profile `/interaction_profiles/oculus/touch_controller`) and adds two
 SteamVR controllers:
 
-* `controller_type` **oculus_touch**, so the Touch bindings that games ship apply. Input profile
-  `{quest1}/input/quest1_touch_profile.json`, legacy bindings and dashboard
-  (`openvr.component.vrcompositor`) bindings next to it; render models
-  `oculus_quest_controller_{left,right}` from SteamVR's own resources.
-* Components: `/input/system/click` (left Menu, right Oculus button; both toggle the dashboard),
+* `controller_type` **oculus_touch**, so the Touch bindings that games ship apply. SteamVR
+  2.17 builds the `oculus_touch` type from its own `drivers/oculus/resources/input/touch_profile.json`
+  (the folder ships with the Frame image) and uses that profile's legacy and dashboard
+  (`vrcompositor_bindings_touch.json`) bindings, as seen in vrserver.txt. Our
+  `{quest1}/input/quest1_touch_profile.json` (+ bindings) is only a fallback for an install
+  without that folder. Render models `oculus_quest_controller_{left,right}` from SteamVR's own
+  resources.
+* Components: `/input/system/click` (left Menu, right Oculus button; the Oculus dashboard
+  bindings only bind the left one, so the right Oculus button is also reported as the left
+  system button),
   `a|x`, `b|y` click+touch, `trigger` value+touch, `grip` value (+touch = value > 0.05, the Touch
   grip has no capacitive sensor), `joystick` x/y/click/touch, `thumbrest/touch`, `/output/haptic`
   (`VREvent_Input_HapticVibration` → `xrApplyHapticFeedback`).
@@ -284,4 +289,5 @@ in the second, which fixes `imuToAim`. The result is logged (`calibrated: imu->a
 angle between the poses, 90° expected) and saved to `~steamos/.config/quest1-controllers.txt`
 (loaded at every start). `echo reset > /tmp/quest1-ctrl-cal` returns to the default. Knobs:
 `/tmp/quest1-ctrl` = `<default pitch deg> <velocities 0|1> <debug 0|1>` (debug logs the IMU up
-vector, aim heading/pitch and positions once a second).
+vector, aim heading/pitch and positions once a second). Debug: `echo "left system" >
+/tmp/quest1-ctrl-press` holds a component (`system`, `a`, `b`, `trigger`) for 150 ms.

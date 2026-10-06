@@ -304,6 +304,8 @@ public:
 	//! Update thread: a component value; only changes reach vrserver.
 	void Set(Comp c, float v)
 	{
+		if (c == forced)
+			v = 1;
 		if (!activated || last[c] == v)
 			return;
 		last[c] = v;
@@ -325,6 +327,7 @@ public:
 
 	const bool left;
 	std::atomic<bool> activated{false};
+	int forced = -1; //!< debug: a Comp held at 1 (simulated press), update thread only
 	uint32_t id = k_unTrackedDeviceIndexInvalid;
 	PropertyContainerHandle_t container = k_ulInvalidPropertyContainer;
 	VRInputComponentHandle_t haptic = k_ulInvalidInputComponentHandle;
@@ -375,6 +378,12 @@ struct State
 	std::atomic<bool> velocities{true};
 	std::atomic<bool> debug{false};
 	time_t calMtime = 0;
+	// debug: a simulated button press from /tmp/quest1-ctrl-press ("<left|right> <system|a|b|trigger>")
+	time_t pressMtime = 0;
+	int pressHand = -1;
+	Comp pressComp = C_SYSTEM_CLICK;
+	double pressUntil = 0;
+	void PollPress();
 
 	void Loop();
 	void UpdateHand(int h, double now, const XrPosef &head, bool headValid);
@@ -548,6 +557,32 @@ void State::PollCalibration()
 		SaveCalibration();
 }
 
+void State::PollPress()
+{
+	struct stat st;
+	if (stat("/tmp/quest1-ctrl-press", &st) != 0 || st.st_mtime == pressMtime)
+		return;
+	bool first = pressMtime == 0;
+	pressMtime = st.st_mtime;
+	if (first && time(nullptr) - st.st_mtime > 5)
+		return;
+	char side[16] = "", what[16] = "";
+	FILE *f = fopen("/tmp/quest1-ctrl-press", "r");
+	if (!f)
+		return;
+	int n = fscanf(f, "%15s %15s", side, what);
+	fclose(f);
+	if (n != 2)
+		return;
+	pressHand = !strcmp(side, "right") ? 1 : 0;
+	pressComp = !strcmp(what, "a")         ? C_PRIMARY_CLICK
+	            : !strcmp(what, "b")       ? C_SECONDARY_CLICK
+	            : !strcmp(what, "trigger") ? C_TRIGGER_VALUE
+	                                       : C_SYSTEM_CLICK;
+	pressUntil = MonoSeconds() + 0.15;
+	CLog("quest1: simulated press: %s %s\n", pressHand ? "right" : "left", what);
+}
+
 void State::ReadKnobs()
 {
 	FILE *f = fopen("/tmp/quest1-ctrl", "r");
@@ -586,8 +621,18 @@ void State::UpdateHand(int h, double now, const XrPosef &headPose, bool headVali
 		XrActionStateFloat s{XR_TYPE_ACTION_STATE_FLOAT};
 		return XR_SUCCEEDED(cxrGetActionStateFloat(xr.session, &gi, &s)) && s.isActive ? s.currentState : 0.f;
 	};
+	d->forced = pressHand == h && now < pressUntil ? (int)pressComp : -1;
 	float system = boolean(ACT_SYSTEM);
-	d->Set(C_SYSTEM_CLICK, system);
+	// SteamVR takes the oculus_touch controller type (and its dashboard bindings) from its own
+	// Oculus driver resources, where only the left system button toggles the dashboard: the right
+	// Oculus button is reported as the left system button too (it is unbound on the right).
+	float otherSystem = 0;
+	if (d->left) {
+		gi.subactionPath = hand[1];
+		otherSystem = boolean(ACT_SYSTEM);
+		gi.subactionPath = hand[h];
+	}
+	d->Set(C_SYSTEM_CLICK, system != 0 || otherSystem != 0 ? 1.f : 0.f);
 	d->Set(C_PRIMARY_CLICK, boolean(ACT_PRIMARY));
 	d->Set(C_PRIMARY_TOUCH, boolean(ACT_PRIMARY_TOUCH));
 	d->Set(C_SECONDARY_CLICK, boolean(ACT_SECONDARY));
@@ -711,6 +756,8 @@ void State::Loop()
 			ReadKnobs();
 		if (tick % 64 == 0)
 			PollCalibration();
+		if (tick % 16 == 0)
+			PollPress();
 
 		XrActiveActionSet active{set, XR_NULL_PATH};
 		XrActionsSyncInfo si{XR_TYPE_ACTIONS_SYNC_INFO};
