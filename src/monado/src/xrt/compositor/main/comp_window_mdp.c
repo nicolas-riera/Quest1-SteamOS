@@ -165,7 +165,10 @@ set_panels_locked(struct mdp_target *t, bool on)
 		}
 		close(gov);
 	}
-	if (ioctl(t->fb_fd, FBIOBLANK, on ? FB_BLANK_UNBLANK : FB_BLANK_POWERDOWN) < 0) {
+	// Off with HSYNC_SUSPEND: mdss powers the panels off as for POWERDOWN, but the fan driver
+	// (drivers/platform/oculus/vs1-board.c) only stops the fan on POWERDOWN or VSYNC_SUSPEND,
+	// so it keeps cooling the SoC, which may still be busy, while the headset is off the head.
+	if (ioctl(t->fb_fd, FBIOBLANK, on ? FB_BLANK_UNBLANK : FB_BLANK_HSYNC_SUSPEND) < 0) {
 		U_LOG_E("mdp: FBIOBLANK %s: %s", on ? "unblank" : "powerdown", strerror(errno));
 	}
 	if (on) {

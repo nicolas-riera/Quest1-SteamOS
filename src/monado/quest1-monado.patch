@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 6556fa7f3..78f6aea94 100644
+index 6556fa7..78f6aea 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -388,6 +388,8 @@ option_with_deps(XRT_BUILD_DRIVER_XREAL_AIR "Enable Xreal Air HMD driver" DEPEND
@@ -35,7 +35,7 @@ index 6556fa7f3..78f6aea94 100644
  
  # Default to PIC code
 diff --git a/src/xrt/auxiliary/util/CMakeLists.txt b/src/xrt/auxiliary/util/CMakeLists.txt
-index d42a41807..e0e5a707b 100644
+index d42a418..e0e5a70 100644
 --- a/src/xrt/auxiliary/util/CMakeLists.txt
 +++ b/src/xrt/auxiliary/util/CMakeLists.txt
 @@ -276,3 +276,8 @@ if(XRT_HAVE_OPENCV)
@@ -49,7 +49,7 @@ index d42a41807..e0e5a707b 100644
 +endif()
 diff --git a/src/xrt/auxiliary/util/u_hybris_ahb.c b/src/xrt/auxiliary/util/u_hybris_ahb.c
 new file mode 100644
-index 000000000..351591564
+index 0000000..3515915
 --- /dev/null
 +++ b/src/xrt/auxiliary/util/u_hybris_ahb.c
 @@ -0,0 +1,86 @@
@@ -139,8 +139,26 @@ index 000000000..351591564
 +	NW();
 +	return nw.recv(fd, out);
 +}
+diff --git a/src/xrt/compositor/client/comp_vk_client.c b/src/xrt/compositor/client/comp_vk_client.c
+index ad3c7a6..ce080fe 100644
+--- a/src/xrt/compositor/client/comp_vk_client.c
++++ b/src/xrt/compositor/client/comp_vk_client.c
+@@ -897,9 +897,12 @@ client_vk_compositor_create(struct xrt_compositor_native *xcn,
+ 
+ #ifdef VK_KHR_timeline_semaphore
+ 	if (vk_can_import_and_export_timeline_semaphore(&c->vk)) {
++		// The service may not be able to create one even when this device can import it (Quest 1:
++		// the clients timeline semaphores are emulated by a layer, the services driver has none).
++		// Fall back to fences then.
+ 		xret = setup_semaphore(c);
+ 		if (xret != XRT_SUCCESS) {
+-			goto err_pool;
++			U_LOG_W("No compositor semaphore, using fences instead");
+ 		}
+ 	}
+ #endif
 diff --git a/src/xrt/compositor/main/CMakeLists.txt b/src/xrt/compositor/main/CMakeLists.txt
-index cc7d3b52b..5ba284045 100644
+index cc7d3b5..5ba2840 100644
 --- a/src/xrt/compositor/main/CMakeLists.txt
 +++ b/src/xrt/compositor/main/CMakeLists.txt
 @@ -21,6 +21,8 @@ add_library(
@@ -162,7 +180,7 @@ index cc7d3b52b..5ba284045 100644
 +	target_link_libraries(comp_main PRIVATE drv_qbridge)
 +endif()
 diff --git a/src/xrt/compositor/main/comp_compositor.c b/src/xrt/compositor/main/comp_compositor.c
-index a8fbd01d8..ca0e07c65 100644
+index a8fbd01..ca0e07c 100644
 --- a/src/xrt/compositor/main/comp_compositor.c
 +++ b/src/xrt/compositor/main/comp_compositor.c
 @@ -838,6 +838,8 @@ const struct comp_target_factory *ctfs[] = {
@@ -175,7 +193,7 @@ index a8fbd01d8..ca0e07c65 100644
  };
  
 diff --git a/src/xrt/compositor/main/comp_window.h b/src/xrt/compositor/main/comp_window.h
-index eb41c3c36..5214613da 100644
+index eb41c3c..5214613 100644
 --- a/src/xrt/compositor/main/comp_window.h
 +++ b/src/xrt/compositor/main/comp_window.h
 @@ -33,6 +33,8 @@ extern "C" {
@@ -189,10 +207,10 @@ index eb41c3c36..5214613da 100644
  
 diff --git a/src/xrt/compositor/main/comp_window_mdp.c b/src/xrt/compositor/main/comp_window_mdp.c
 new file mode 100644
-index 000000000..91c523987
+index 0000000..236a665
 --- /dev/null
 +++ b/src/xrt/compositor/main/comp_window_mdp.c
-@@ -0,0 +1,765 @@
+@@ -0,0 +1,768 @@
 +// Copyright 2026, Quest1-SteamOS contributors
 +// SPDX-License-Identifier: BSL-1.0
 +/*!
@@ -360,7 +378,10 @@ index 000000000..91c523987
 +		}
 +		close(gov);
 +	}
-+	if (ioctl(t->fb_fd, FBIOBLANK, on ? FB_BLANK_UNBLANK : FB_BLANK_POWERDOWN) < 0) {
++	// Off with HSYNC_SUSPEND: mdss powers the panels off as for POWERDOWN, but the fan driver
++	// (drivers/platform/oculus/vs1-board.c) only stops the fan on POWERDOWN or VSYNC_SUSPEND,
++	// so it keeps cooling the SoC, which may still be busy, while the headset is off the head.
++	if (ioctl(t->fb_fd, FBIOBLANK, on ? FB_BLANK_UNBLANK : FB_BLANK_HSYNC_SUSPEND) < 0) {
 +		U_LOG_E("mdp: FBIOBLANK %s: %s", on ? "unblank" : "powerdown", strerror(errno));
 +	}
 +	if (on) {
@@ -960,7 +981,7 @@ index 000000000..91c523987
 +};
 diff --git a/src/xrt/compositor/main/comp_window_qbridge.c b/src/xrt/compositor/main/comp_window_qbridge.c
 new file mode 100644
-index 000000000..d4f38bc58
+index 0000000..d4f38bc
 --- /dev/null
 +++ b/src/xrt/compositor/main/comp_window_qbridge.c
 @@ -0,0 +1,410 @@
@@ -1376,7 +1397,7 @@ index 000000000..d4f38bc58
 +};
 diff --git a/src/xrt/compositor/main/msm/linux/msm_mdp.h b/src/xrt/compositor/main/msm/linux/msm_mdp.h
 new file mode 100644
-index 000000000..481814cb8
+index 0000000..481814c
 --- /dev/null
 +++ b/src/xrt/compositor/main/msm/linux/msm_mdp.h
 @@ -0,0 +1,1474 @@
@@ -2856,7 +2877,7 @@ index 000000000..481814cb8
 +#endif /*_UAPI_MSM_MDP_H_*/
 diff --git a/src/xrt/compositor/main/msm/linux/msm_mdp_ext.h b/src/xrt/compositor/main/msm/linux/msm_mdp_ext.h
 new file mode 100644
-index 000000000..f5a1ec72f
+index 0000000..f5a1ec7
 --- /dev/null
 +++ b/src/xrt/compositor/main/msm/linux/msm_mdp_ext.h
 @@ -0,0 +1,860 @@
@@ -3721,7 +3742,7 @@ index 000000000..f5a1ec72f
 +
 +#endif
 diff --git a/src/xrt/drivers/CMakeLists.txt b/src/xrt/drivers/CMakeLists.txt
-index 5ec99108b..514459a7b 100644
+index 5ec9910..514459a 100644
 --- a/src/xrt/drivers/CMakeLists.txt
 +++ b/src/xrt/drivers/CMakeLists.txt
 @@ -698,3 +698,19 @@ if(ENABLED_HEADSET_DRIVERS)
@@ -3746,7 +3767,7 @@ index 5ec99108b..514459a7b 100644
 +endif()
 diff --git a/src/xrt/drivers/qbridge/qb_link.c b/src/xrt/drivers/qbridge/qb_link.c
 new file mode 100644
-index 000000000..1fba55db6
+index 0000000..1fba55d
 --- /dev/null
 +++ b/src/xrt/drivers/qbridge/qb_link.c
 @@ -0,0 +1,202 @@
@@ -3954,7 +3975,7 @@ index 000000000..1fba55db6
 +}
 diff --git a/src/xrt/drivers/qbridge/qb_link.h b/src/xrt/drivers/qbridge/qb_link.h
 new file mode 100644
-index 000000000..2a5f7d4f7
+index 0000000..2a5f7d4
 --- /dev/null
 +++ b/src/xrt/drivers/qbridge/qb_link.h
 @@ -0,0 +1,62 @@
@@ -4022,7 +4043,7 @@ index 000000000..2a5f7d4f7
 +#endif
 diff --git a/src/xrt/drivers/qbridge/qbridge_device.c b/src/xrt/drivers/qbridge/qbridge_device.c
 new file mode 100644
-index 000000000..a5ba991a0
+index 0000000..a5ba991
 --- /dev/null
 +++ b/src/xrt/drivers/qbridge/qbridge_device.c
 @@ -0,0 +1,459 @@
@@ -4487,7 +4508,7 @@ index 000000000..a5ba991a0
 +}
 diff --git a/src/xrt/drivers/qbridge/qbridge_interface.h b/src/xrt/drivers/qbridge/qbridge_interface.h
 new file mode 100644
-index 000000000..12acfc561
+index 0000000..12acfc5
 --- /dev/null
 +++ b/src/xrt/drivers/qbridge/qbridge_interface.h
 @@ -0,0 +1,56 @@
@@ -4549,7 +4570,7 @@ index 000000000..12acfc561
 +#endif
 diff --git a/src/xrt/drivers/qbridge/qbridge_proto.h b/src/xrt/drivers/qbridge/qbridge_proto.h
 new file mode 100644
-index 000000000..983634529
+index 0000000..9836345
 --- /dev/null
 +++ b/src/xrt/drivers/qbridge/qbridge_proto.h
 @@ -0,0 +1,132 @@
@@ -4686,8 +4707,8 @@ index 000000000..983634529
 +
 +#endif
 diff --git a/src/xrt/drivers/quest1/quest1_controller.c b/src/xrt/drivers/quest1/quest1_controller.c
-new file mode 100755
-index 000000000..0023e5680
+new file mode 100644
+index 0000000..0023e56
 --- /dev/null
 +++ b/src/xrt/drivers/quest1/quest1_controller.c
 @@ -0,0 +1,429 @@
@@ -5122,7 +5143,7 @@ index 000000000..0023e5680
 +}
 diff --git a/src/xrt/drivers/quest1/quest1_hmd.c b/src/xrt/drivers/quest1/quest1_hmd.c
 new file mode 100644
-index 000000000..d8f518965
+index 0000000..d8f5189
 --- /dev/null
 +++ b/src/xrt/drivers/quest1/quest1_hmd.c
 @@ -0,0 +1,763 @@
@@ -5891,7 +5912,7 @@ index 000000000..d8f518965
 +}
 diff --git a/src/xrt/drivers/quest1/quest1_interface.h b/src/xrt/drivers/quest1/quest1_interface.h
 new file mode 100644
-index 000000000..28ebd6b8d
+index 0000000..28ebd6b
 --- /dev/null
 +++ b/src/xrt/drivers/quest1/quest1_interface.h
 @@ -0,0 +1,98 @@
@@ -5994,7 +6015,7 @@ index 000000000..28ebd6b8d
 +}
 +#endif
 diff --git a/src/xrt/include/xrt/xrt_handles.h b/src/xrt/include/xrt/xrt_handles.h
-index 3657498cd..341bcb314 100644
+index 3657498..341bcb3 100644
 --- a/src/xrt/include/xrt/xrt_handles.h
 +++ b/src/xrt/include/xrt/xrt_handles.h
 @@ -188,7 +188,10 @@ xrt_shmem_is_valid(xrt_shmem_handle_t handle)
@@ -6019,7 +6040,7 @@ index 3657498cd..341bcb314 100644
  /*!
   * The type underlying buffers shared between compositor clients and the main
 diff --git a/src/xrt/state_trackers/oxr/oxr_vulkan.c b/src/xrt/state_trackers/oxr/oxr_vulkan.c
-index efcbf2d04..b443f93c0 100644
+index efcbf2d..b443f93 100644
 --- a/src/xrt/state_trackers/oxr/oxr_vulkan.c
 +++ b/src/xrt/state_trackers/oxr/oxr_vulkan.c
 @@ -112,9 +112,10 @@ static const char *required_vk_instance_extensions[] = {
@@ -6035,7 +6056,7 @@ index efcbf2d04..b443f93c0 100644
  
  // The device extensions do vary by platform, but in a very regular way.
 diff --git a/src/xrt/targets/common/CMakeLists.txt b/src/xrt/targets/common/CMakeLists.txt
-index f3f46c911..dbbad67eb 100644
+index f3f46c9..dbbad67 100644
 --- a/src/xrt/targets/common/CMakeLists.txt
 +++ b/src/xrt/targets/common/CMakeLists.txt
 @@ -297,3 +297,13 @@ if(ANDROID)
@@ -6053,7 +6074,7 @@ index f3f46c911..dbbad67eb 100644
 +	target_link_libraries(target_lists PRIVATE drv_qbridge)
 +endif()
 diff --git a/src/xrt/targets/common/target_builder_interface.h b/src/xrt/targets/common/target_builder_interface.h
-index e36c1dd01..5d1529d3e 100644
+index e36c1dd..5d1529d 100644
 --- a/src/xrt/targets/common/target_builder_interface.h
 +++ b/src/xrt/targets/common/target_builder_interface.h
 @@ -158,6 +158,16 @@ struct xrt_builder *
@@ -6075,7 +6096,7 @@ index e36c1dd01..5d1529d3e 100644
   * Builder for @ref drv_simulated devices.
 diff --git a/src/xrt/targets/common/target_builder_qbridge.c b/src/xrt/targets/common/target_builder_qbridge.c
 new file mode 100644
-index 000000000..31b9f04e9
+index 0000000..31b9f04
 --- /dev/null
 +++ b/src/xrt/targets/common/target_builder_qbridge.c
 @@ -0,0 +1,94 @@
@@ -6175,7 +6196,7 @@ index 000000000..31b9f04e9
 +}
 diff --git a/src/xrt/targets/common/target_builder_quest1.c b/src/xrt/targets/common/target_builder_quest1.c
 new file mode 100644
-index 000000000..03d6f7ce8
+index 0000000..03d6f7c
 --- /dev/null
 +++ b/src/xrt/targets/common/target_builder_quest1.c
 @@ -0,0 +1,86 @@
@@ -6266,7 +6287,7 @@ index 000000000..03d6f7ce8
 +	return &ub->base;
 +}
 diff --git a/src/xrt/targets/common/target_lists.c b/src/xrt/targets/common/target_lists.c
-index 78efb9b3b..74bf1f2e6 100644
+index 78efb9b..74bf1f2 100644
 --- a/src/xrt/targets/common/target_lists.c
 +++ b/src/xrt/targets/common/target_lists.c
 @@ -112,6 +112,12 @@
