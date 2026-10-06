@@ -30,6 +30,65 @@ quest1_detect(void);
 struct xrt_device *
 quest1_hmd_create(void);
 
+
+/*
+ *
+ * Touch controllers (quest1_controller.c), fed by the HMD driver's SyncBoss thread.
+ *
+ */
+
+enum quest1_controller_buttons
+{
+	QUEST1_BUTTON_AX = 1 << 0,
+	QUEST1_BUTTON_BY = 1 << 1,
+	QUEST1_BUTTON_MENU = 1 << 2, //!< Menu (left) or Oculus (right).
+	QUEST1_BUTTON_STICK = 1 << 3,
+};
+
+enum quest1_controller_touches
+{
+	QUEST1_TOUCH_AX = 1 << 0,
+	QUEST1_TOUCH_BY = 1 << 1,
+	QUEST1_TOUCH_STICK = 1 << 2,
+	QUEST1_TOUCH_TRIGGER = 1 << 3,
+	QUEST1_TOUCH_THUMBREST = 1 << 4,
+};
+
+struct quest1_controller_state
+{
+	uint32_t buttons; //!< quest1_controller_buttons
+	uint32_t touches; //!< quest1_controller_touches
+	float trigger, grip;     //!< 0..1
+	float stick_x, stick_y;  //!< -1..1, +y up
+};
+
+struct quest1_controller;
+
+//! Amplitude 0..1; duration_ns 0 = minimal pulse (OpenXR XR_MIN_HAPTIC_DURATION).
+typedef void (*quest1_haptic_fn)(void *data, bool left, float amplitude, int64_t duration_ns);
+
+struct quest1_controller *
+quest1_controller_create(struct xrt_device *hmd, bool left);
+
+struct xrt_device *
+quest1_controller_xdev(struct quest1_controller *c);
+
+//! IMU sample in m/s² and rad/s, raw controller axes, monotonic time.
+void
+quest1_controller_push_imu(struct quest1_controller *c,
+                           int64_t when_ns,
+                           const struct xrt_vec3 *accel,
+                           const struct xrt_vec3 *gyro);
+
+void
+quest1_controller_push_state(struct quest1_controller *c, int64_t when_ns, const struct quest1_controller_state *s);
+
+void
+quest1_controller_set_disconnected(struct quest1_controller *c);
+
+void
+quest1_controller_set_haptic_fn(struct quest1_controller *c, quest1_haptic_fn fn, void *data);
+
 #ifdef __cplusplus
 }
 #endif
