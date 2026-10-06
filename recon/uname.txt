@@ -1,0 +1,1 @@
+Linux localhost 4.4.205-perf+ #1 SMP PREEMPT Wed Jul 31 02:31:55 PDT 2024 aarch64

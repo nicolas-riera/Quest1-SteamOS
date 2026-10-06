@@ -1,0 +1,2116 @@
+ls: /firmware: No such file or directory
+ls: /dsp: No such file or directory
+ls: /persist: Permission denied
+ls: /system/bin/adbd: Permission denied
+ls: /system/bin/apexd: Permission denied
+ls: /system/bin/art_apex_boot_integrity: Permission denied
+ls: /system/bin/ashmemd: Permission denied
+ls: /system/bin/audioserver: Permission denied
+ls: /system/bin/auditctl: Permission denied
+ls: /system/bin/blank_screen: Permission denied
+ls: /system/bin/blkid: Permission denied
+ls: /system/bin/bootstat: Permission denied
+ls: /system/bin/bpfloader: Permission denied
+ls: /system/bin/calibrationserver: Permission denied
+ls: /system/bin/cameramuxmodeservice: Permission denied
+ls: /system/bin/cdxserver: Permission denied
+ls: /system/bin/charger: Permission denied
+ls: /system/bin/clatd: Permission denied
+ls: /system/bin/dex2oat: Permission denied
+ls: /system/bin/dexoptanalyzer: Permission denied
+ls: /system/bin/dnsmasq: Permission denied
+ls: /system/bin/drmserver: Permission denied
+ls: /system/bin/dumpstate: Permission denied
+ls: /system/bin/e2fsck: Permission denied
+ls: /system/bin/e2fsdroid: Permission denied
+ls: /system/bin/flags_health_check: Permission denied
+ls: /system/bin/fsck.f2fs: Permission denied
+ls: /system/bin/fsck_msdos: Permission denied
+ls: /system/bin/fsverity_init: Permission denied
+ls: /system/bin/gatekeeperd: Permission denied
+ls: /system/bin/gatekeeperserver: Permission denied
+ls: /system/bin/gpuprofserver: Permission denied
+ls: /system/bin/gpuservice: Permission denied
+ls: /system/bin/gsid: Permission denied
+ls: /system/bin/heapprofd: Permission denied
+ls: /system/bin/hwservicemanager: Permission denied
+ls: /system/bin/idmap: Permission denied
+ls: /system/bin/idmap2: Permission denied
+ls: /system/bin/idmap2d: Permission denied
+ls: /system/bin/incident_helper: Permission denied
+ls: /system/bin/incidentd: Permission denied
+ls: /system/bin/init: Permission denied
+ls: /system/bin/installd: Permission denied
+ls: /system/bin/iorapd: Permission denied
+ls: /system/bin/keystore: Permission denied
+ls: /system/bin/lmkd: Permission denied
+ls: /system/bin/logd: Permission denied
+ls: /system/bin/lpdumpd: Permission denied
+ls: /system/bin/make_f2fs: Permission denied
+ls: /system/bin/mdnsd: Permission denied
+ls: /system/bin/mediadrmserver: Permission denied
+ls: /system/bin/mediaextractor: Permission denied
+ls: /system/bin/mediaserver: Permission denied
+ls: /system/bin/migrate_legacy_obb_data.sh: Permission denied
+ls: /system/bin/mke2fs: Permission denied
+ls: /system/bin/mrsystemservice: Permission denied
+ls: /system/bin/mtpd: Permission denied
+ls: /system/bin/netd: Permission denied
+ls: /system/bin/netutils-wrapper-1.0: Permission denied
+ls: /system/bin/ovr_crashuploader: Permission denied
+ls: /system/bin/ovr_crashuploader64: Permission denied
+ls: /system/bin/perfstream: Permission denied
+ls: /system/bin/pppd: Permission denied
+ls: /system/bin/profman: Permission denied
+ls: /system/bin/racoon: Permission denied
+ls: /system/bin/recovery-persist: Permission denied
+ls: /system/bin/recovery-refresh: Permission denied
+ls: /system/bin/rss_hwm_reset: Permission denied
+ls: /system/bin/runtimeipcbroker: Permission denied
+ls: /system/bin/sdcard: Permission denied
+ls: /system/bin/servicemanager: Permission denied
+ls: /system/bin/settingsserver: Permission denied
+ls: /system/bin/sgdisk: Permission denied
+ls: /system/bin/sload_f2fs: Permission denied
+ls: /system/bin/statsd: Permission denied
+ls: /system/bin/storaged: Permission denied
+ls: /system/bin/surfaceflinger: Permission denied
+ls: /system/bin/tcpdump: Permission denied
+ls: /system/bin/telemetry: Permission denied
+ls: /system/bin/tombstoned: Permission denied
+ls: /system/bin/traced: Permission denied
+ls: /system/bin/traced_probes: Permission denied
+ls: /system/bin/trackingservice: Permission denied
+ls: /system/bin/tune2fs: Permission denied
+ls: /system/bin/uncrypt: Permission denied
+ls: /system/bin/update_engine: Permission denied
+ls: /system/bin/update_verifier: Permission denied
+ls: /system/bin/usbd: Permission denied
+ls: /system/bin/vdc: Permission denied
+ls: /system/bin/viewcompiler: Permission denied
+ls: /system/bin/voiceassistantserver: Permission denied
+ls: /system/bin/vold: Permission denied
+ls: /system/bin/vold_prepare_subdirs: Permission denied
+ls: /system/bin/vr_bootanimation: Permission denied
+ls: /system/bin/vrapiserver: Permission denied
+ls: /system/bin/vrfocusserver: Permission denied
+ls: /system/bin/wait_for_keymaster: Permission denied
+ls: /system/bin/watchdogd: Permission denied
+ls: /system/bin/wificond: Permission denied
+ls: /system/bin/wifitelemetry: Permission denied
+ls: /system/bin/xrspd: Permission denied
+/system/bin:
+total 11796
+drwxr-x--x  4 root shell    8192 2009-01-01 01:00 .
+drwxr-xr-x 14 root root     4096 2009-01-01 01:00 ..
+-rwxr-xr-x  1 root shell  153576 2009-01-01 01:00 abb
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 acpi -> toybox
+-rwxr-xr-x  1 root shell     207 2009-01-01 01:00 am
+lrwxr-xr-x  1 root shell      13 2009-01-01 01:00 app_process -> app_process64
+-rwxr-xr-x  1 root shell   34924 2009-01-01 01:00 app_process32
+-rwxr-xr-x  1 root shell   44464 2009-01-01 01:00 app_process64
+-rwxr-xr-x  1 root shell   87568 2009-01-01 01:00 applypatch
+-rwxr-xr-x  1 root shell      33 2009-01-01 01:00 appops
+-rwxr-xr-x  1 root shell     232 2009-01-01 01:00 appwidget
+-rwxr-xr-x  1 root shell   70304 2009-01-01 01:00 atrace
+-rwxr-xr-x  1 root shell  107936 2009-01-01 01:00 awk
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 base64 -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 basename -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 bc -> toybox
+-rwxr-xr-x  1 root shell   40968 2009-01-01 01:00 bcc
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 blockdev -> toybox
+-rwxr-xr-x  1 root shell     216 2009-01-01 01:00 bmgr
+drwxr-x--x  2 root shell    4096 2009-01-01 01:00 bootstrap
+-rwxr-xr-x  1 root shell     173 2009-01-01 01:00 bu
+-rwxr-xr-x  1 root shell    6848 2009-01-01 01:00 bugreport
+-rwxr-xr-x  1 root shell    8184 2009-01-01 01:00 bugreportz
+lrwxr-xr-x  1 root shell       5 2009-01-01 01:00 bunzip2 -> bzip2
+lrwxr-xr-x  1 root shell       5 2009-01-01 01:00 bzcat -> bzip2
+-rwxr-xr-x  1 root shell   29328 2009-01-01 01:00 bzip2
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 cal -> toybox
+-rwxr-xr-x  1 root shell    9520 2009-01-01 01:00 calibration_manager_ctl
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 cat -> toybox
+-rwxr-xr-x  1 root shell   13240 2009-01-01 01:00 catcal
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 chcon -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 chgrp -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 chmod -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 chown -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 chroot -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 chrt -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 cksum -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 clear -> toybox
+-rwxr-xr-x  1 root shell   43616 2009-01-01 01:00 cmd
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 cmp -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 comm -> toybox
+-rwxr-xr-x  1 root shell     224 2009-01-01 01:00 content
+-rwxr-xr-x  1 root shell  168352 2009-01-01 01:00 controller_input_settings
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 cp -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 cpio -> toybox
+-rwxr-xr-x  1 root shell   98636 2009-01-01 01:00 crash_dump32
+-rwxr-xr-x  1 root shell  128944 2009-01-01 01:00 crash_dump64
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 cut -> toybox
+lrwxr-xr-x  1 root shell      38 2009-01-01 01:00 dalvikvm -> /apex/com.android.runtime/bin/dalvikvm
+lrwxr-xr-x  1 root shell      40 2009-01-01 01:00 dalvikvm32 -> /apex/com.android.runtime/bin/dalvikvm32
+lrwxr-xr-x  1 root shell      40 2009-01-01 01:00 dalvikvm64 -> /apex/com.android.runtime/bin/dalvikvm64
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 date -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 dd -> toybox
+-rwxr-xr-x  1 root shell   11160 2009-01-01 01:00 debuggerd
+lrwxr-xr-x  1 root shell       9 2009-01-01 01:00 defrag.f2fs -> fsck.f2fs
+-rwxr-xr-x  1 root shell      40 2009-01-01 01:00 device_config
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 devmem -> toybox
+lrwxr-xr-x  1 root shell      37 2009-01-01 01:00 dexdiag -> /apex/com.android.runtime/bin/dexdiag
+lrwxr-xr-x  1 root shell      37 2009-01-01 01:00 dexdump -> /apex/com.android.runtime/bin/dexdump
+lrwxr-xr-x  1 root shell      37 2009-01-01 01:00 dexlist -> /apex/com.android.runtime/bin/dexlist
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 df -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 diff -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 dirname -> toybox
+-rwxr-xr-x  1 root shell   63896 2009-01-01 01:00 dmctl
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 dmesg -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 dos2unix -> toybox
+-rwxr-xr-x  1 root shell     173 2009-01-01 01:00 dpm
+-rwxr-xr-x  1 root shell 3689136 2009-01-01 01:00 draw_frame
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 du -> toybox
+-rwxr-xr-x  1 root shell   37440 2009-01-01 01:00 dumpsys
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 echo -> toybox
+lrwxr-xr-x  1 root shell       4 2009-01-01 01:00 egrep -> grep
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 env -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 expand -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 expr -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 fallocate -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 false -> toybox
+lrwxr-xr-x  1 root shell       4 2009-01-01 01:00 fgrep -> grep
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 file -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 find -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 flock -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 fmt -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 free -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 fsync -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 getconf -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 getenforce -> toybox
+lrwxr-xr-x  1 root shell       7 2009-01-01 01:00 getevent -> toolbox
+lrwxr-xr-x  1 root shell       7 2009-01-01 01:00 getprop -> toolbox
+-rwxr-xr-x  1 root shell   38568 2009-01-01 01:00 gpumeminfo
+-rwxr-xr-x  1 root shell   76376 2009-01-01 01:00 gpustats
+-rwxr-xr-x  1 root shell   24512 2009-01-01 01:00 grep
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 groups -> toybox
+-rwxr-xr-x  1 root shell   37400 2009-01-01 01:00 gsi_tool
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 gunzip -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 gzip -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 head -> toybox
+-rwxr-xr-x  1 root shell     469 2009-01-01 01:00 hid
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 hostname -> toybox
+drwxr-x--x  2 root shell    4096 2009-01-01 01:00 hw
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 hwclock -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 i2cdetect -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 i2cdump -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 i2cget -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 i2cset -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 iconv -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 id -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 ifconfig -> toybox
+-rwxr-xr-x  1 root shell      48 2009-01-01 01:00 ime
+-rwxr-xr-x  1 root shell   37048 2009-01-01 01:00 incident
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 inotifyd -> toybox
+-rwxr-xr-x  1 root shell     220 2009-01-01 01:00 input
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 insmod -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 install -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 ionice -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 iorenice -> toybox
+-rwxr-xr-x  1 root shell  390640 2009-01-01 01:00 ip
+lrwxr-xr-x  1 root shell      20 2009-01-01 01:00 ip-wrapper-1.0 -> netutils-wrapper-1.0
+-rwxr-xr-x  1 root shell  362408 2009-01-01 01:00 ip6tables
+lrwxr-xr-x  1 root shell       9 2009-01-01 01:00 ip6tables-restore -> ip6tables
+lrwxr-xr-x  1 root shell       9 2009-01-01 01:00 ip6tables-save -> ip6tables
+lrwxr-xr-x  1 root shell      20 2009-01-01 01:00 ip6tables-wrapper-1.0 -> netutils-wrapper-1.0
+-rwxr-xr-x  1 root shell  351992 2009-01-01 01:00 iptables
+lrwxr-xr-x  1 root shell       8 2009-01-01 01:00 iptables-restore -> iptables
+lrwxr-xr-x  1 root shell       8 2009-01-01 01:00 iptables-save -> iptables
+lrwxr-xr-x  1 root shell      20 2009-01-01 01:00 iptables-wrapper-1.0 -> netutils-wrapper-1.0
+-rwxr-xr-x  1 root shell   65424 2009-01-01 01:00 keystore_cli_v2
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 kill -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 killall -> toybox
+-rwxr-xr-x  1 root shell     119 2009-01-01 01:00 killtop.sh
+-rwxr-xr-x  1 root shell  609360 2009-01-01 01:00 ld.mc
+-rwxr-xr-x  1 root shell   38176 2009-01-01 01:00 librank
+lrwxr-xr-x  1 root shell      36 2009-01-01 01:00 linker -> /apex/com.android.runtime/bin/linker
+lrwxr-xr-x  1 root shell      38 2009-01-01 01:00 linker64 -> /apex/com.android.runtime/bin/linker64
+lrwxr-xr-x  1 root shell      36 2009-01-01 01:00 linker_asan -> /apex/com.android.runtime/bin/linker
+lrwxr-xr-x  1 root shell      38 2009-01-01 01:00 linker_asan64 -> /apex/com.android.runtime/bin/linker64
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 ln -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 load_policy -> toybox
+-rwxr-xr-x  1 root shell     211 2009-01-01 01:00 locksettings
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 log -> toybox
+-rwxr-xr-x  1 root shell   94712 2009-01-01 01:00 logcat
+-rwxr-xr-x  1 root shell   97328 2009-01-01 01:00 logcatd
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 logname -> toybox
+lrwxr-xr-x  1 root shell      16 2009-01-01 01:00 logpersist.cat -> logpersist.start
+-rwxr-xr-x  1 root shell    5564 2009-01-01 01:00 logpersist.start
+lrwxr-xr-x  1 root shell      16 2009-01-01 01:00 logpersist.stop -> logpersist.start
+-rwxr-xr-x  1 root shell   13400 2009-01-01 01:00 logwrapper
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 losetup -> toybox
+-rwxr-xr-x  1 root shell   14152 2009-01-01 01:00 lpdump
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 ls -> toybox
+-rwxr-xr-x  1 root shell    5960 2009-01-01 01:00 lshal
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 lsmod -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 lsof -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 lspci -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 lsusb -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 md5sum -> toybox
+-rwxr-xr-x  1 root shell     223 2009-01-01 01:00 media
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 microcom -> toybox
+-rwxr-xr-x  1 root shell   57920 2009-01-01 01:00 mini-keyctl
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 mkdir -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 mkfifo -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 mkfs.ext2 -> mke2fs
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 mkfs.ext3 -> mke2fs
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 mkfs.ext4 -> mke2fs
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 mknod -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 mkswap -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 mktemp -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 modinfo -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 modprobe -> toybox
+-rwxr-xr-x  1 root shell     268 2009-01-01 01:00 monkey
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 more -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 mount -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 mountpoint -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 mv -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 nc -> toybox
+-rwxr-xr-x  1 root shell   51824 2009-01-01 01:00 ndc
+lrwxr-xr-x  1 root shell      20 2009-01-01 01:00 ndc-wrapper-1.0 -> netutils-wrapper-1.0
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 netcat -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 netstat -> toybox
+-rwxr-xr-x  1 root shell   21048 2009-01-01 01:00 newfs_msdos
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 nice -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 nl -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 nohup -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 nproc -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 nsenter -> toybox
+lrwxr-xr-x  1 root shell      37 2009-01-01 01:00 oatdump -> /apex/com.android.runtime/bin/oatdump
+-rwxr-xr-x  1 root shell   29064 2009-01-01 01:00 oculuspreferences
+-rwxr-xr-x  1 root shell   28968 2009-01-01 01:00 oculussetting
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 od -> toybox
+-rwxr-xr-x  1 root shell    7036 2009-01-01 01:00 ovr_crashreporter
+-rwxr-xr-x  1 root shell    8800 2009-01-01 01:00 ovr_crashreporter64
+-rwxr-xr-x  1 root shell   32768 2009-01-01 01:00 ovrgpuprofiler
+-rwxr-xr-x  1 root shell      43 2009-01-01 01:00 package_settings
+-rwxr-xr-x  1 root shell  197624 2009-01-01 01:00 pairing_ctl
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 paste -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 patch -> toybox
+-rwxr-xr-x  1 root shell  615656 2009-01-01 01:00 perfetto
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 pgrep -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 pidof -> toybox
+-rwxr-xr-x  1 root shell   35312 2009-01-01 01:00 ping
+-rwxr-xr-x  1 root shell   37904 2009-01-01 01:00 ping6
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 pkill -> toybox
+-rwxr-xr-x  1 root shell      34 2009-01-01 01:00 pm
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 pmap -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 printenv -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 printf -> toybox
+-rwxr-xr-x  1 root shell   48024 2009-01-01 01:00 procrank
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 ps -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 pwd -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 readlink -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 realpath -> toybox
+-rwxr-xr-x  1 root shell    6464 2009-01-01 01:00 reboot
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 renice -> toybox
+-rwxr-xr-x  1 root shell     205 2009-01-01 01:00 requestsync
+lrwxr-xr-x  1 root shell       9 2009-01-01 01:00 resize.f2fs -> fsck.f2fs
+-rwxr-xr-x  1 root shell   50688 2009-01-01 01:00 resize2fs
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 restorecon -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 rm -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 rmdir -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 rmmod -> toybox
+-rwxr-xr-x  1 root shell  203912 2009-01-01 01:00 rstest
+-rwxr-x---  1 root shell   12576 2009-01-01 01:00 run-as
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 runcon -> toybox
+-rwxr-xr-x  1 root shell    5032 2009-01-01 01:00 schedtest
+-rwxr-xr-x  1 root shell   11784 2009-01-01 01:00 screencap
+-rwxr-xr-x  1 root shell  119712 2009-01-01 01:00 screenrecord
+-rwxr-xr-x  1 root shell   20072 2009-01-01 01:00 secdiscard
+-rwx------  1 root root   286656 2009-01-01 01:00 secilc
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 sed -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 sendevent -> toybox
+-rwxr-xr-x  1 root shell    6752 2009-01-01 01:00 sensorservice
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 seq -> toybox
+-rwxr-xr-x  1 root shell   29400 2009-01-01 01:00 service
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 setenforce -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 setprop -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 setsid -> toybox
+-rwxr-xr-x  1 root shell      35 2009-01-01 01:00 settings
+-rwxr-xr-x  1 root shell  256776 2009-01-01 01:00 sh
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 sha1sum -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 sha224sum -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 sha256sum -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 sha384sum -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 sha512sum -> toybox
+-rwxr-xr-x  1 root shell   15672 2009-01-01 01:00 showmap
+-rwxr-xr-x  1 root shell  710712 2009-01-01 01:00 simpleperf
+-rwxr-x---  1 root shell   16328 2009-01-01 01:00 simpleperf_app_runner
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 sleep -> toybox
+-rwxr-xr-x  1 root shell     207 2009-01-01 01:00 sm
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 sort -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 split -> toybox
+-rwxr-xr-x  1 root shell   65152 2009-01-01 01:00 ss
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 start -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 stat -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 stop -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 strings -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 stty -> toybox
+-rwxr-xr-x  1 root shell   93544 2009-01-01 01:00 stub_zygote
+-rwxr-xr-x  1 root shell     209 2009-01-01 01:00 svc
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 swapoff -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 swapon -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 sync -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 sysctl -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 tac -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 tail -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 tar -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 taskset -> toybox
+-rwxr-xr-x  1 root shell  265352 2009-01-01 01:00 tc
+lrwxr-xr-x  1 root shell      20 2009-01-01 01:00 tc-wrapper-1.0 -> netutils-wrapper-1.0
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 tee -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 time -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 timeout -> toybox
+-rwxr-xr-x  1 root shell   12104 2009-01-01 01:00 tinymix
+-rwxr-xr-x  1 root shell   53256 2009-01-01 01:00 toolbox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 top -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 touch -> toybox
+-rwxr-xr-x  1 root shell  489056 2009-01-01 01:00 toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 tr -> toybox
+-rwxr-xr-x  1 root shell   20584 2009-01-01 01:00 tracked_object_ctl
+-rwxr-xr-x  1 root shell  194272 2009-01-01 01:00 trackinginterface_cli
+-rwxr-xr-x  1 root shell     474 2009-01-01 01:00 trackingservice_ctl
+-rwxr-xr-x  1 root shell  313928 2009-01-01 01:00 trigger_perfetto
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 true -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 truncate -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 tty -> toybox
+-rwxr-xr-x  1 root shell   21944 2009-01-01 01:00 tzdatacheck
+lrwxr-xr-x  1 root shell       4 2009-01-01 01:00 ueventd -> init
+-rwxr-xr-x  1 root shell    4173 2009-01-01 01:00 uiautomator
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 ulimit -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 umount -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 uname -> toybox
+-rwxr-xr-x  1 root shell   59048 2009-01-01 01:00 unifiedtelemetry_cli
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 uniq -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 unix2dos -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 unlink -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 unshare -> toybox
+-rwxr-xr-x  1 root shell    9808 2009-01-01 01:00 unwind
+-rwxr-xr-x  1 root shell   21872 2009-01-01 01:00 unzip
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 uptime -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 usleep -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 uudecode -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 uuencode -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 uuidgen -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 vmstat -> toybox
+-rwxr-xr-x  1 root shell  131568 2009-01-01 01:00 vraccountmanager_cli
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 watch -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 wc -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 which -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 whoami -> toybox
+-rwxr-xr-x  1 root shell      33 2009-01-01 01:00 wm
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 xargs -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 xxd -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 xzcat -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 yes -> toybox
+lrwxr-xr-x  1 root shell       6 2009-01-01 01:00 zcat -> toybox
+
+/system/etc/init:
+total 328
+drwxr-xr-x  2 root root  4096 2009-01-01 01:00 .
+drwxr-xr-x 22 root root  4096 2009-01-01 01:00 ..
+-rw-r--r--  1 root root   117 2009-01-01 01:00 android.hidl.allocator@1.0-service.rc
+-rw-r--r--  1 root root   160 2009-01-01 01:00 android.system.suspend@1.0-service.rc
+-rw-r--r--  1 root root   237 2009-01-01 01:00 apexd.rc
+-rw-r--r--  1 root root   813 2009-01-01 01:00 art_apex_boot_integrity.rc
+-rw-r--r--  1 root root    84 2009-01-01 01:00 ashmemd.rc
+-rw-r--r--  1 root root 13310 2009-01-01 01:00 atrace.rc
+-rw-r--r--  1 root root   794 2009-01-01 01:00 audioserver.rc
+-rw-r--r--  1 root root   113 2009-01-01 01:00 blank_screen.rc
+-rw-r--r--  1 root root  4386 2009-01-01 01:00 bootstat.rc
+-rw-r--r--  1 root root   406 2009-01-01 01:00 bpfloader.rc
+-rw-r--r--  1 root root   102 2009-01-01 01:00 bug_report_service.rc
+-rw-r--r--  1 root root   420 2009-01-01 01:00 calibrationserver.rc
+-rw-r--r--  1 root root   149 2009-01-01 01:00 cameramuxmodeservice.rc
+-rw-r--r--  1 root root   193 2009-01-01 01:00 cdxserver.rc
+-rw-r--r--  1 root root   146 2009-01-01 01:00 drmserver.rc
+-rw-r--r--  1 root root   799 2009-01-01 01:00 dumpstate.rc
+-rw-r--r--  1 root root   484 2009-01-01 01:00 flags_health_check.rc
+-rw-r--r--  1 root root   152 2009-01-01 01:00 gatekeeperd.rc
+-rw-r--r--  1 root root   215 2009-01-01 01:00 gatekeeperservice.rc
+-rw-r--r--  1 root root   399 2009-01-01 01:00 gpuprofilingservice.rc
+-rw-r--r--  1 root root    90 2009-01-01 01:00 gpuservice.rc
+-rw-r--r--  1 root root   356 2009-01-01 01:00 gsid.rc
+-rw-r--r--  1 root root  1490 2009-01-01 01:00 heapprofd.rc
+-rw-r--r--  1 root root   367 2009-01-01 01:00 hwservicemanager.rc
+-rw-r--r--  1 root root    84 2009-01-01 01:00 idmap2d.rc
+-rw-r--r--  1 root root   851 2009-01-01 01:00 incidentd.rc
+-rw-r--r--  1 root root  4674 2009-01-01 01:00 installd.rc
+-rw-r--r--  1 root root  1104 2009-01-01 01:00 iorapd.rc
+-rw-r--r--  1 root root   172 2009-01-01 01:00 keystore.rc
+-rw-r--r--  1 root root   274 2009-01-01 01:00 lmkd.rc
+-rw-r--r--  1 root root  2521 2009-01-01 01:00 logcatd.rc
+-rw-r--r--  1 root root   879 2009-01-01 01:00 logd.rc
+-rw-r--r--  1 root root  1346 2009-01-01 01:00 lpdumpd.rc
+-rw-r--r--  1 root root   142 2009-01-01 01:00 mdnsd.rc
+-rw-r--r--  1 root root   158 2009-01-01 01:00 mediadrmserver.rc
+-rw-r--r--  1 root root   166 2009-01-01 01:00 mediaextractor.rc
+-rw-r--r--  1 root root   230 2009-01-01 01:00 mediaserver.rc
+-rw-r--r--  1 root root   618 2009-01-01 01:00 mrsystemservice.rc
+-rw-r--r--  1 root root   178 2009-01-01 01:00 mtpd.rc
+-rw-r--r--  1 root root   468 2009-01-01 01:00 netd.rc
+-rw-r--r--  1 root root   207 2009-01-01 01:00 oculus.perfetto.rc
+-rw-r--r--  1 root root    44 2009-01-01 01:00 oculus_shutdown_stats.rc
+-rw-r--r--  1 root root  1356 2009-01-01 01:00 ovr_crashreporter.rc
+-rw-r--r--  1 root root   180 2009-01-01 01:00 ovr_crashuploader.rc
+-rw-r--r--  1 root root  2436 2009-01-01 01:00 perfetto.rc
+-rw-r--r--  1 root root   260 2009-01-01 01:00 perfstream.rc
+-rw-r--r--  1 root root   301 2009-01-01 01:00 preferencesserver.rc
+-rw-r--r--  1 root root   230 2009-01-01 01:00 racoon.rc
+-rw-r--r--  1 root root   127 2009-01-01 01:00 recovery-persist.rc
+-rw-r--r--  1 root root    76 2009-01-01 01:00 recovery-refresh.rc
+-rw-r--r--  1 root root   912 2009-01-01 01:00 rss_hwm_reset.rc
+-rw-r--r--  1 root root   108 2009-01-01 01:00 runtimeipcbroker.rc
+-rw-r--r--  1 root root   557 2009-01-01 01:00 servicemanager.rc
+-rw-r--r--  1 root root  1112 2009-01-01 01:00 statsd.rc
+-rw-r--r--  1 root root   225 2009-01-01 01:00 storaged.rc
+-rw-r--r--  1 root root   559 2009-01-01 01:00 surfaceflinger.rc
+-rw-r--r--  1 root root   462 2009-01-01 01:00 telemetry.rc
+-rw-r--r--  1 root root   399 2009-01-01 01:00 tombstoned.rc
+-rw-r--r--  1 root root   857 2009-01-01 01:00 trackingservice.rc
+-rw-r--r--  1 root root   390 2009-01-01 01:00 uncrypt.rc
+-rw-r--r--  1 root root   295 2009-01-01 01:00 update_engine.rc
+-rw-r--r--  1 root root   287 2009-01-01 01:00 update_verifier.rc
+-rw-r--r--  1 root root   190 2009-01-01 01:00 usbd.rc
+-rw-r--r--  1 root root   525 2009-01-01 01:00 vdc.rc
+-rw-r--r--  1 root root   222 2009-01-01 01:00 vendor.oculus.hardware.telemetry@1.0-service.rc
+-rw-r--r--  1 root root   292 2009-01-01 01:00 voiceassistantserver.rc
+-rw-r--r--  1 root root   326 2009-01-01 01:00 vold.rc
+-rw-r--r--  1 root root   164 2009-01-01 01:00 vr_bootanim.rc
+-rw-r--r--  1 root root   173 2009-01-01 01:00 vrapiserver.rc
+-rw-r--r--  1 root root   109 2009-01-01 01:00 vrfocusserver.rc
+-rw-r--r--  1 root root   127 2009-01-01 01:00 wait_for_keymaster.rc
+-rw-r--r--  1 root root    90 2009-01-01 01:00 watchdogd.rc
+-rw-r--r--  1 root root   135 2009-01-01 01:00 wificond.rc
+-rw-r--r--  1 root root   146 2009-01-01 01:00 wifitelemetry.rc
+-rw-r--r--  1 root root   641 2009-01-01 01:00 xrspd.pie.rc
+ls: /system/lib/bootstrap: Permission denied
+
+/system/lib:
+total 75696
+drwxr-xr-x 10 root root   16384 2009-01-01 01:00 .
+drwxr-xr-x 14 root root    4096 2009-01-01 01:00 ..
+-rw-r--r--  1 root root   92864 2009-01-01 01:00 android.frameworks.bufferhub@1.0.so
+-rw-r--r--  1 root root   59812 2009-01-01 01:00 android.frameworks.schedulerservice@1.0.so
+-rw-r--r--  1 root root  159252 2009-01-01 01:00 android.frameworks.sensorservice@1.0.so
+-rw-r--r--  1 root root   89432 2009-01-01 01:00 android.frameworks.vr.composer@1.0.so
+-rw-r--r--  1 root root    4288 2009-01-01 01:00 android.hardware.audio.common@2.0.so
+-rw-r--r--  1 root root   12860 2009-01-01 01:00 android.hardware.audio.common@5.0.so
+-rw-r--r--  1 root root   95372 2009-01-01 01:00 android.hardware.bluetooth.a2dp@1.0.so
+-rw-r--r--  1 root root  157420 2009-01-01 01:00 android.hardware.bluetooth.audio@2.0.so
+-rw-r--r--  1 root root   95516 2009-01-01 01:00 android.hardware.bluetooth@1.0.so
+-rw-r--r--  1 root root  177520 2009-01-01 01:00 android.hardware.broadcastradio@1.0.so
+-rw-r--r--  1 root root  205188 2009-01-01 01:00 android.hardware.broadcastradio@1.1.so
+-rw-r--r--  1 root root   65916 2009-01-01 01:00 android.hardware.cas.native@1.0.so
+-rw-r--r--  1 root root  165832 2009-01-01 01:00 android.hardware.cas@1.0.so
+-rw-r--r--  1 root root    6228 2009-01-01 01:00 android.hardware.configstore-utils.so
+-rw-r--r--  1 root root   87868 2009-01-01 01:00 android.hardware.configstore@1.0.so
+-rw-r--r--  1 root root   75480 2009-01-01 01:00 android.hardware.configstore@1.1.so
+-rw-r--r--  1 root root  108544 2009-01-01 01:00 android.hardware.contexthub@1.0.so
+-rw-r--r--  1 root root  257712 2009-01-01 01:00 android.hardware.drm@1.0.so
+-rw-r--r--  1 root root  179776 2009-01-01 01:00 android.hardware.drm@1.1.so
+-rw-r--r--  1 root root  270780 2009-01-01 01:00 android.hardware.drm@1.2.so
+-rw-r--r--  1 root root   91140 2009-01-01 01:00 android.hardware.gnss.measurement_corrections@1.0.so
+-rw-r--r--  1 root root   92672 2009-01-01 01:00 android.hardware.gnss.visibility_control@1.0.so
+-rw-r--r--  1 root root  660328 2009-01-01 01:00 android.hardware.gnss@1.0.so
+-rw-r--r--  1 root root  231212 2009-01-01 01:00 android.hardware.gnss@1.1.so
+-rw-r--r--  1 root root  461512 2009-01-01 01:00 android.hardware.gnss@2.0.so
+-rw-r--r--  1 root root   61796 2009-01-01 01:00 android.hardware.graphics.allocator@2.0.so
+-rw-r--r--  1 root root   61896 2009-01-01 01:00 android.hardware.graphics.allocator@3.0.so
+-rw-r--r--  1 root root  149236 2009-01-01 01:00 android.hardware.graphics.bufferqueue@1.0.so
+-rw-r--r--  1 root root  133504 2009-01-01 01:00 android.hardware.graphics.bufferqueue@2.0.so
+-rw-r--r--  1 root root    2928 2009-01-01 01:00 android.hardware.graphics.common@1.0.so
+-rw-r--r--  1 root root    2984 2009-01-01 01:00 android.hardware.graphics.common@1.1.so
+-rw-r--r--  1 root root    3680 2009-01-01 01:00 android.hardware.graphics.common@1.2.so
+-rw-r--r--  1 root root  183320 2009-01-01 01:00 android.hardware.graphics.composer@2.1.so
+-rw-r--r--  1 root root  156600 2009-01-01 01:00 android.hardware.graphics.composer@2.2.so
+-rw-r--r--  1 root root  195092 2009-01-01 01:00 android.hardware.graphics.composer@2.3.so
+-rw-r--r--  1 root root   67928 2009-01-01 01:00 android.hardware.graphics.mapper@2.0.so
+-rw-r--r--  1 root root   71592 2009-01-01 01:00 android.hardware.graphics.mapper@2.1.so
+-rw-r--r--  1 root root   75404 2009-01-01 01:00 android.hardware.graphics.mapper@3.0.so
+-rw-r--r--  1 root root   63720 2009-01-01 01:00 android.hardware.health@1.0.so
+-rw-r--r--  1 root root  116528 2009-01-01 01:00 android.hardware.health@2.0.so
+-rw-r--r--  1 root root   60440 2009-01-01 01:00 android.hardware.input.classifier@1.0.so
+-rw-r--r--  1 root root    5004 2009-01-01 01:00 android.hardware.input.common@1.0.so
+-rw-r--r--  1 root root   58772 2009-01-01 01:00 android.hardware.ir@1.0.so
+-rw-r--r--  1 root root  100856 2009-01-01 01:00 android.hardware.keymaster@3.0.so
+-rw-r--r--  1 root root  115496 2009-01-01 01:00 android.hardware.keymaster@4.0.so
+-rw-r--r--  1 root root   57872 2009-01-01 01:00 android.hardware.light@2.0.so
+-rw-r--r--  1 root root  144676 2009-01-01 01:00 android.hardware.media.bufferpool@2.0.so
+-rw-r--r--  1 root root  366652 2009-01-01 01:00 android.hardware.media.c2@1.0.so
+-rw-r--r--  1 root root  282492 2009-01-01 01:00 android.hardware.media.omx@1.0.so
+-rw-r--r--  1 root root    3568 2009-01-01 01:00 android.hardware.media@1.0.so
+-rw-r--r--  1 root root   57200 2009-01-01 01:00 android.hardware.memtrack@1.0.so
+-rw-r--r--  1 root root  150340 2009-01-01 01:00 android.hardware.neuralnetworks@1.0.so
+-rw-r--r--  1 root root   74080 2009-01-01 01:00 android.hardware.neuralnetworks@1.1.so
+-rw-r--r--  1 root root  281612 2009-01-01 01:00 android.hardware.neuralnetworks@1.2.so
+-rw-r--r--  1 root root   76456 2009-01-01 01:00 android.hardware.power.stats@1.0.so
+-rw-r--r--  1 root root   62972 2009-01-01 01:00 android.hardware.power@1.0.so
+-rw-r--r--  1 root root   66552 2009-01-01 01:00 android.hardware.power@1.1.so
+-rw-r--r--  1 root root   66968 2009-01-01 01:00 android.hardware.power@1.2.so
+-rw-r--r--  1 root root   70956 2009-01-01 01:00 android.hardware.power@1.3.so
+-rw-r--r--  1 root root  232124 2009-01-01 01:00 android.hardware.renderscript@1.0.so
+-rw-r--r--  1 root root   78768 2009-01-01 01:00 android.hardware.sensors@1.0.so
+-rw-r--r--  1 root root  109624 2009-01-01 01:00 android.hardware.sensors@2.0.so
+-rw-r--r--  1 root root   59040 2009-01-01 01:00 android.hardware.tetheroffload.config@1.0.so
+-rw-r--r--  1 root root   63988 2009-01-01 01:00 android.hardware.thermal@1.0.so
+-rw-r--r--  1 root root  106620 2009-01-01 01:00 android.hardware.thermal@2.0.so
+-rw-r--r--  1 root root  108124 2009-01-01 01:00 android.hardware.tv.cec@1.0.so
+-rw-r--r--  1 root root   90992 2009-01-01 01:00 android.hardware.tv.input@1.0.so
+-rw-r--r--  1 root root   64076 2009-01-01 01:00 android.hardware.vibrator@1.0.so
+-rw-r--r--  1 root root   64352 2009-01-01 01:00 android.hardware.vibrator@1.1.so
+-rw-r--r--  1 root root   68376 2009-01-01 01:00 android.hardware.vibrator@1.2.so
+-rw-r--r--  1 root root   76276 2009-01-01 01:00 android.hardware.vibrator@1.3.so
+-rw-r--r--  1 root root   55240 2009-01-01 01:00 android.hardware.vr@1.0.so
+-rw-r--r--  1 root root  726324 2009-01-01 01:00 android.hardware.wifi@1.0.so
+-rw-r--r--  1 root root  141568 2009-01-01 01:00 android.hardware.wifi@1.1.so
+-rw-r--r--  1 root root  392560 2009-01-01 01:00 android.hardware.wifi@1.2.so
+-rw-r--r--  1 root root  234584 2009-01-01 01:00 android.hardware.wifi@1.3.so
+-rw-r--r--  1 root root   60396 2009-01-01 01:00 android.hidl.allocator@1.0.so
+-rw-r--r--  1 root root   56756 2009-01-01 01:00 android.hidl.memory.token@1.0.so
+-rw-r--r--  1 root root   91456 2009-01-01 01:00 android.hidl.memory@1.0.so
+-rw-r--r--  1 root root    2928 2009-01-01 01:00 android.hidl.safe_union@1.0.so
+-rw-r--r--  1 root root    9452 2009-01-01 01:00 android.hidl.token@1.0-utils.so
+-rw-r--r--  1 root root   63084 2009-01-01 01:00 android.hidl.token@1.0.so
+-rw-r--r--  1 root root   82832 2009-01-01 01:00 android.system.suspend@1.0.so
+-rw-r--r--  1 root root   17472 2009-01-01 01:00 ashmemd_aidl_interface-cpp.so
+drwxr-xr-x  2 root root    4096 2009-01-01 01:00 drm
+drwxr-xr-x  2 root root    4096 2009-01-01 01:00 gllayer
+-rw-r--r--  1 root root   40972 2009-01-01 01:00 heapprofd_client.so
+drwxr-xr-x  2 root root    4096 2009-01-01 01:00 hw
+-rw-r--r--  1 root root    2996 2009-01-01 01:00 ld-android.so
+-rw-r--r--  1 root root  148360 2009-01-01 01:00 libEGL.so
+-rw-r--r--  1 root root    7372 2009-01-01 01:00 libETC1.so
+-rw-r--r--  1 root root  216108 2009-01-01 01:00 libFFTEm.so
+-rw-r--r--  1 root root   23132 2009-01-01 01:00 libGLESv1_CM.so
+-rw-r--r--  1 root root   67848 2009-01-01 01:00 libGLESv2.so
+-rw-r--r--  1 root root   67856 2009-01-01 01:00 libGLESv3.so
+-rw-r--r--  1 root root 1366596 2009-01-01 01:00 libOVRMrcLib.oculus.so
+-rw-r--r--  1 root root    6156 2009-01-01 01:00 libOpenMAXAL.so
+-rw-r--r--  1 root root    6736 2009-01-01 01:00 libOpenSLES.so
+-rw-r--r--  1 root root   46448 2009-01-01 01:00 libRS.so
+-rw-r--r--  1 root root    5300 2009-01-01 01:00 libRSCacheDir.so
+-rw-r--r--  1 root root  379992 2009-01-01 01:00 libRSCpuRef.so
+-rw-r--r--  1 root root  148140 2009-01-01 01:00 libRSDriver.so
+-rw-r--r--  1 root root  224140 2009-01-01 01:00 libRS_internal.so
+-rw-r--r--  1 root root  180708 2009-01-01 01:00 libRScpp.so
+-rw-r--r--  1 root root   82876 2009-01-01 01:00 libSurfaceFlingerProp.so
+-rw-r--r--  1 root root  145364 2009-01-01 01:00 libaaudio.so
+-rw-r--r--  1 root root  179252 2009-01-01 01:00 libadb_pairing_auth.so
+-rw-r--r--  1 root root  329948 2009-01-01 01:00 libadb_pairing_connection.so
+-rw-r--r--  1 root root  191204 2009-01-01 01:00 libadb_pairing_server.so
+-rw-r--r--  1 root root  131256 2009-01-01 01:00 libadsprpc_system.so
+-rw-r--r--  1 root root   19044 2009-01-01 01:00 libamidi.so
+-rw-r--r--  1 root root  101972 2009-01-01 01:00 libandroid.so
+-rw-r--r--  1 root root    4128 2009-01-01 01:00 libandroid_net.so
+-rw-r--r--  1 root root 1441388 2009-01-01 01:00 libandroid_runtime.so
+-rw-r--r--  1 root root    4744 2009-01-01 01:00 libandroid_runtime_lazy.so
+-rw-r--r--  1 root root  472792 2009-01-01 01:00 libandroid_servers.so
+-rw-r--r--  1 root root  318988 2009-01-01 01:00 libandroidfw.so
+-rw-r--r--  1 root root   37704 2009-01-01 01:00 libappfuse.so
+-rw-r--r--  1 root root    8452 2009-01-01 01:00 libartpalette-system.so
+-rw-r--r--  1 root root    7336 2009-01-01 01:00 libashmemd_client.so
+-rw-r--r--  1 root root    3524 2009-01-01 01:00 libasyncio.so
+-rw-r--r--  1 root root   19640 2009-01-01 01:00 libaudio-resampler.so
+-rw-r--r--  1 root root  404572 2009-01-01 01:00 libaudioclient.so
+-rw-r--r--  1 root root   23312 2009-01-01 01:00 libaudioeffect_jni.so
+-rw-r--r--  1 root root   12252 2009-01-01 01:00 libaudiomanager.so
+-rw-r--r--  1 root root   13892 2009-01-01 01:00 libaudiopolicy.so
+-rw-r--r--  1 root root   59608 2009-01-01 01:00 libaudioutils.so
+-rw-r--r--  1 root root   76228 2009-01-01 01:00 libbacktrace.so
+-rw-r--r--  1 root root   61660 2009-01-01 01:00 libbase.so
+-rw-r--r--  1 root root  760492 2009-01-01 01:00 libbcinfo.so
+-rw-r--r--  1 root root  453552 2009-01-01 01:00 libbinder.so
+-rw-r--r--  1 root root   44000 2009-01-01 01:00 libbinder_ndk.so
+-rw-r--r--  1 root root   10380 2009-01-01 01:00 libbinderthreadstate.so
+-rw-r--r--  1 root root  790876 2009-01-01 01:00 libblas.so
+-rw-r--r--  1 root root 2958468 2009-01-01 01:00 libbluetooth.so
+-rw-r--r--  1 root root   49772 2009-01-01 01:00 libbpf_android.so
+-rw-r--r--  1 root root   27604 2009-01-01 01:00 libbpf_bcc.so
+-rw-r--r--  1 root root   45564 2009-01-01 01:00 libbufferhub.so
+-rw-r--r--  1 root root   85460 2009-01-01 01:00 libbufferhubqueue.so
+-rw-r--r--  1 root root  496264 2009-01-01 01:00 libc++.so
+lrw-r--r--  1 root root      44 2009-01-01 01:00 libc.so -> /apex/com.android.runtime/lib/bionic/libc.so
+-rw-r--r--  1 root root  233956 2009-01-01 01:00 libc_malloc_debug.so
+-rw-r--r--  1 root root    5880 2009-01-01 01:00 libc_malloc_hooks.so
+-rw-r--r--  1 root root    9016 2009-01-01 01:00 libcalibrationstore.so
+-rw-r--r--  1 root root  114648 2009-01-01 01:00 libcamera2ndk.so
+-rw-r--r--  1 root root  274428 2009-01-01 01:00 libcamera_client.so
+-rw-r--r--  1 root root   26916 2009-01-01 01:00 libcamera_metadata.so
+-rw-r--r--  1 root root  154912 2009-01-01 01:00 libcdxservice.so
+-rw-r--r--  1 root root    8588 2009-01-01 01:00 libcgrouprc.so
+-rw-r--r--  1 root root  917380 2009-01-01 01:00 libchrome.so
+-rw-r--r--  1 root root 1771396 2009-01-01 01:00 libclang_rt.asan-arm-android.so
+-rw-r--r--  1 root root  297820 2009-01-01 01:00 libclcore.bc
+-rw-r--r--  1 root root  323452 2009-01-01 01:00 libclcore_debug.bc
+-rw-r--r--  1 root root  941408 2009-01-01 01:00 libclcore_debug_g.bc
+-rw-r--r--  1 root root 1067372 2009-01-01 01:00 libclcore_g.bc
+-rw-r--r--  1 root root  301196 2009-01-01 01:00 libclcore_neon.bc
+-rw-r--r--  1 root root    2768 2009-01-01 01:00 libcodec2.so
+-rw-r--r--  1 root root  103672 2009-01-01 01:00 libcodec2_client.so
+-rw-r--r--  1 root root   88688 2009-01-01 01:00 libcodec2_hidl_client@1.0.so
+-rw-r--r--  1 root root  431672 2009-01-01 01:00 libcodec2_vndk.so
+-rw-r--r--  1 root root   32872 2009-01-01 01:00 libcompiler_rt.so
+-rw-r--r--  1 root root    9004 2009-01-01 01:00 libcontrollers_jni.so
+-rw-r--r--  1 root root  773908 2009-01-01 01:00 libcrypto.so
+-rw-r--r--  1 root root    4852 2009-01-01 01:00 libcrypto_utils.so
+-rw-r--r--  1 root root  243604 2009-01-01 01:00 libctrlbugreportsyncutils.so
+-rw-r--r--  1 root root  245432 2009-01-01 01:00 libcurl.so
+-rw-r--r--  1 root root   49192 2009-01-01 01:00 libcutils.so
+-rw-r--r--  1 root root   17888 2009-01-01 01:00 libdebuggerd_client.so
+-rw-r--r--  1 root root   14816 2009-01-01 01:00 libdeviceid.so
+-rw-r--r--  1 root root    8192 2009-01-01 01:00 libdexfile_support.so
+lrw-r--r--  1 root root      45 2009-01-01 01:00 libdl.so -> /apex/com.android.runtime/lib/bionic/libdl.so
+-rw-r--r--  1 root root    3412 2009-01-01 01:00 libdl_android.so
+-rw-r--r--  1 root root  503644 2009-01-01 01:00 libdng_sdk.so
+-rw-r--r--  1 root root   92692 2009-01-01 01:00 libdrmframework.so
+-rw-r--r--  1 root root   24632 2009-01-01 01:00 libdrmframework_jni.so
+-rw-r--r--  1 root root    5136 2009-01-01 01:00 libelfutils.so
+-rw-r--r--  1 root root  277172 2009-01-01 01:00 libevent.so
+-rw-r--r--  1 root root    6680 2009-01-01 01:00 libeventflaghelper.so
+-rw-r--r--  1 root root  156804 2009-01-01 01:00 libexif.so
+-rw-r--r--  1 root root   86376 2009-01-01 01:00 libexpat.so
+-rw-r--r--  1 root root   11636 2009-01-01 01:00 libext2_uuid.so
+-rw-r--r--  1 root root   63228 2009-01-01 01:00 libexternalbattery.so
+-rw-r--r--  1 root root   13012 2009-01-01 01:00 libfbutils.so
+-rw-r--r--  1 root root 4428772 2009-01-01 01:00 libffloggerwrapper.so
+-rw-r--r--  1 root root  136592 2009-01-01 01:00 libfilterfw.so
+-rw-r--r--  1 root root    5592 2009-01-01 01:00 libfilterpack_imageproc.so
+-rw-r--r--  1 root root   11480 2009-01-01 01:00 libfmq.so
+-rw-r--r--  1 root root  585096 2009-01-01 01:00 libft2.so
+-rw-r--r--  1 root root    8092 2009-01-01 01:00 libgammacorrection.so
+-rw-r--r--  1 root root   13532 2009-01-01 01:00 libgatekeeper.so
+-rw-r--r--  1 root root   94164 2009-01-01 01:00 libgatekeeperclient.so
+-rw-r--r--  1 root root  134288 2009-01-01 01:00 libgatekeepernativeservice.so
+-rw-r--r--  1 root root   43560 2009-01-01 01:00 libgraphicsenv.so
+-rw-r--r--  1 root root  679000 2009-01-01 01:00 libgui.so
+-rw-r--r--  1 root root    6180 2009-01-01 01:00 libhardware.so
+-rw-r--r--  1 root root   13960 2009-01-01 01:00 libhardware_legacy.so
+-rw-r--r--  1 root root  527928 2009-01-01 01:00 libharfbuzz_ng.so
+-rw-r--r--  1 root root   20816 2009-01-01 01:00 libheif.so
+-rw-r--r--  1 root root   53036 2009-01-01 01:00 libhexagon.so
+-rw-r--r--  1 root root   94256 2009-01-01 01:00 libhidl-gen-utils.so
+-rw-r--r--  1 root root    4172 2009-01-01 01:00 libhidlallocatorutils.so
+-rw-r--r--  1 root root  480732 2009-01-01 01:00 libhidlbase.so
+-rw-r--r--  1 root root   16940 2009-01-01 01:00 libhidlmemory.so
+-rw-r--r--  1 root root    2784 2009-01-01 01:00 libhidltransport.so
+-rw-r--r--  1 root root    2768 2009-01-01 01:00 libhwbinder.so
+-rw-r--r--  1 root root 4102820 2009-01-01 01:00 libhwui.so
+-rw-r--r--  1 root root   13472 2009-01-01 01:00 libimagebuffer.so
+-rw-r--r--  1 root root   52380 2009-01-01 01:00 libimg_utils.so
+-rw-r--r--  1 root root  143040 2009-01-01 01:00 libinput.so
+-rw-r--r--  1 root root  202164 2009-01-01 01:00 libinputflinger.so
+-rw-r--r--  1 root root   21120 2009-01-01 01:00 libinputflinger_base.so
+-rw-r--r--  1 root root  199440 2009-01-01 01:00 libinputreader.so
+-rw-r--r--  1 root root    4608 2009-01-01 01:00 libinputreporter.so
+-rw-r--r--  1 root root   59300 2009-01-01 01:00 libinputservice.so
+-rw-r--r--  1 root root    5836 2009-01-01 01:00 libion.so
+-rw-r--r--  1 root root   74300 2009-01-01 01:00 libiprouteutil.so
+-rw-r--r--  1 root root    3760 2009-01-01 01:00 libjnigraphics.so
+-rw-r--r--  1 root root  288304 2009-01-01 01:00 libjpeg.so
+-rw-r--r--  1 root root   87904 2009-01-01 01:00 libjsoncpp.so
+-rw-r--r--  1 root root  120656 2009-01-01 01:00 libkeymaster4support.so
+-rw-r--r--  1 root root  110688 2009-01-01 01:00 libkeystore_aidl.so
+-rw-r--r--  1 root root   76360 2009-01-01 01:00 libkeystore_binder.so
+-rw-r--r--  1 root root   33112 2009-01-01 01:00 libkeystore_parcelables.so
+-rw-r--r--  1 root root   12268 2009-01-01 01:00 libkvstore.so
+-rw-r--r--  1 root root  153848 2009-01-01 01:00 liblayers_proto.so
+-rw-r--r--  1 root root    4756 2009-01-01 01:00 libldacBT_abr.so
+-rw-r--r--  1 root root   42848 2009-01-01 01:00 libldacBT_enc.so
+-rw-r--r--  1 root root   17812 2009-01-01 01:00 liblocalpubsub.so
+-rw-r--r--  1 root root   62492 2009-01-01 01:00 liblog.so
+-rw-r--r--  1 root root   95700 2009-01-01 01:00 liblzma.so
+lrw-r--r--  1 root root      44 2009-01-01 01:00 libm.so -> /apex/com.android.runtime/lib/bionic/libm.so
+-rw-r--r--  1 root root   24100 2009-01-01 01:00 libmdnssd.so
+-rw-r--r--  1 root root  367224 2009-01-01 01:00 libmedia.so
+-rw-r--r--  1 root root   33868 2009-01-01 01:00 libmedia2_jni_core.so
+-rw-r--r--  1 root root   63496 2009-01-01 01:00 libmedia_helper.so
+-rw-r--r--  1 root root  336376 2009-01-01 01:00 libmedia_jni.so
+-rw-r--r--  1 root root    8008 2009-01-01 01:00 libmedia_jni_utils.so
+-rw-r--r--  1 root root  153724 2009-01-01 01:00 libmedia_omx.so
+-rw-r--r--  1 root root   11088 2009-01-01 01:00 libmedia_omx_client.so
+-rw-r--r--  1 root root  158472 2009-01-01 01:00 libmediadrm.so
+-rw-r--r--  1 root root  104588 2009-01-01 01:00 libmediadrmmetrics_lite.so
+-rw-r--r--  1 root root   38144 2009-01-01 01:00 libmediametrics.so
+-rw-r--r--  1 root root  105964 2009-01-01 01:00 libmediandk.so
+-rw-r--r--  1 root root    3484 2009-01-01 01:00 libmediandk_utils.so
+-rw-r--r--  1 root root  606972 2009-01-01 01:00 libmediaplayerservice.so
+-rw-r--r--  1 root root   63736 2009-01-01 01:00 libmediautils.so
+-rw-r--r--  1 root root   40460 2009-01-01 01:00 libmeminfo.so
+-rw-r--r--  1 root root    9340 2009-01-01 01:00 libmemtrack.so
+-rw-r--r--  1 root root  129208 2009-01-01 01:00 libmemunreachable.so
+-rw-r--r--  1 root root  140108 2009-01-01 01:00 libminikin.so
+-rw-r--r--  1 root root  133644 2009-01-01 01:00 libmtp.so
+-rw-r--r--  1 root root    7308 2009-01-01 01:00 libnativebridge_lazy.so
+-rw-r--r--  1 root root    5068 2009-01-01 01:00 libnativeloader_lazy.so
+-rw-r--r--  1 root root   16508 2009-01-01 01:00 libnativewindow.so
+-rw-r--r--  1 root root  144200 2009-01-01 01:00 libnblog.so
+-rw-r--r--  1 root root   13660 2009-01-01 01:00 libnetd_client.so
+-rw-r--r--  1 root root   24552 2009-01-01 01:00 libnetdbpf.so
+-rw-r--r--  1 root root   56308 2009-01-01 01:00 libnetdutils.so
+-rw-r--r--  1 root root   16908 2009-01-01 01:00 libnetlink.so
+-rw-r--r--  1 root root   21552 2009-01-01 01:00 libnetutils.so
+-rw-r--r--  1 root root 1281392 2009-01-01 01:00 libneuralnetworks.so
+-rw-r--r--  1 root root   86520 2009-01-01 01:00 libnotificationproxyclient.so
+-rw-r--r--  1 root root  170616 2009-01-01 01:00 libopenxr_forwardloader.oculus.so
+-rw-r--r--  1 root root 1010464 2009-01-01 01:00 libossdk.oculus.so
+-rw-r--r--  1 root root    3332 2009-01-01 01:00 libosutils-testhelpers.so
+-rw-r--r--  1 root root  231196 2009-01-01 01:00 libosutils.so
+-rw-r--r--  1 root root  631116 2009-01-01 01:00 libovr_crashreporter.so
+-rw-r--r--  1 root root  430168 2009-01-01 01:00 libovr_crashuploader.so
+-rw-r--r--  1 root root    6372 2009-01-01 01:00 libpackagelistparser.so
+-rw-r--r--  1 root root  243856 2009-01-01 01:00 libpcre2.so
+-rw-r--r--  1 root root 4687988 2009-01-01 01:00 libpdfium.so
+-rw-r--r--  1 root root  119496 2009-01-01 01:00 libpdx_default_transport.so
+-rw-r--r--  1 root root   33248 2009-01-01 01:00 libperfstream-aidl-cpp.so
+-rw-r--r--  1 root root  199520 2009-01-01 01:00 libperfstreamcore.so
+-rw-r--r--  1 root root   98932 2009-01-01 01:00 libperfstreamprovider.so
+-rw-r--r--  1 root root   60156 2009-01-01 01:00 libpiex.so
+-rw-r--r--  1 root root  128808 2009-01-01 01:00 libpixelflinger.so
+-rw-r--r--  1 root root  136376 2009-01-01 01:00 libpng.so
+-rw-r--r--  1 root root  311736 2009-01-01 01:00 libposeprediction.so
+-rw-r--r--  1 root root   12464 2009-01-01 01:00 libpower.so
+-rw-r--r--  1 root root   12760 2009-01-01 01:00 libpowermanager.so
+-rw-r--r--  1 root root  513252 2009-01-01 01:00 libpreferencesservice.so
+-rw-r--r--  1 root root  181544 2009-01-01 01:00 libprocessgroup.so
+-rw-r--r--  1 root root    9596 2009-01-01 01:00 libprocinfo.so
+-rw-r--r--  1 root root 1333940 2009-01-01 01:00 libprotobuf-cpp-full.so
+-rw-r--r--  1 root root  196400 2009-01-01 01:00 libprotobuf-cpp-lite.so
+-rw-r--r--  1 root root    4776 2009-01-01 01:00 libpsi.so
+-rw-r--r--  1 root root    7676 2009-01-01 01:00 libradio_metadata.so
+-rw-r--r--  1 root root   42240 2009-01-01 01:00 libresourcemanagerservice.so
+-rw-r--r--  1 root root 1104232 2009-01-01 01:00 libripcclient.oculus.so
+-rw-r--r--  1 root root   49152 2009-01-01 01:00 librs_jni.so
+-rw-r--r--  1 root root  121496 2009-01-01 01:00 librtp_jni.so
+-rw-r--r--  1 root root   23520 2009-01-01 01:00 libruntimeipcbroker_interface-cpp.so
+-rw-r--r--  1 root root   21392 2009-01-01 01:00 libruntimeipcbroker_interface-ndk_platform.so
+-rw-r--r--  1 root root   18404 2009-01-01 01:00 libruntimeipchelper_interface-cpp.so
+-rw-r--r--  1 root root    8436 2009-01-01 01:00 libschedulerservicehidl.so
+-rw-r--r--  1 root root   30324 2009-01-01 01:00 libsdm-disp-apis.so
+-rw-r--r--  1 root root   65776 2009-01-01 01:00 libselinux.so
+-rw-r--r--  1 root root   66168 2009-01-01 01:00 libsensor.so
+-rw-r--r--  1 root root  140904 2009-01-01 01:00 libsensorclientutils.so
+-rw-r--r--  1 root root   32288 2009-01-01 01:00 libsensorprivacy.so
+-rw-r--r--  1 root root  148888 2009-01-01 01:00 libsensorservice.so
+-rw-r--r--  1 root root   38336 2009-01-01 01:00 libsensorservicehidl.so
+-rw-r--r--  1 root root   47556 2009-01-01 01:00 libsensorstream.so
+-rw-r--r--  1 root root  388444 2009-01-01 01:00 libsfplugin_ccodec.so
+-rw-r--r--  1 root root  154516 2009-01-01 01:00 libsfplugin_ccodec_utils.so
+-rw-r--r--  1 root root    9984 2009-01-01 01:00 libsonic.so
+-rw-r--r--  1 root root  553028 2009-01-01 01:00 libsonivox.so
+-rw-r--r--  1 root root   33344 2009-01-01 01:00 libsoundpool.so
+-rw-r--r--  1 root root   43380 2009-01-01 01:00 libsoundtrigger.so
+-rw-r--r--  1 root root   14328 2009-01-01 01:00 libspeexresampler.so
+-rw-r--r--  1 root root  497196 2009-01-01 01:00 libsqlite.so
+-rw-r--r--  1 root root  219828 2009-01-01 01:00 libssl.so
+-rw-r--r--  1 root root  945640 2009-01-01 01:00 libstagefright.so
+-rw-r--r--  1 root root   51844 2009-01-01 01:00 libstagefright_amrnb_common.so
+-rw-r--r--  1 root root  156968 2009-01-01 01:00 libstagefright_bufferpool@2.0.1.so
+-rw-r--r--  1 root root  375632 2009-01-01 01:00 libstagefright_bufferqueue_helper.so
+-rw-r--r--  1 root root   15632 2009-01-01 01:00 libstagefright_codecbase.so
+-rw-r--r--  1 root root    4232 2009-01-01 01:00 libstagefright_enc_common.so
+-rw-r--r--  1 root root  124980 2009-01-01 01:00 libstagefright_foundation.so
+-rw-r--r--  1 root root    5672 2009-01-01 01:00 libstagefright_http_support.so
+-rw-r--r--  1 root root  275744 2009-01-01 01:00 libstagefright_httplive.so
+-rw-r--r--  1 root root  188076 2009-01-01 01:00 libstagefright_omx.so
+-rw-r--r--  1 root root   11684 2009-01-01 01:00 libstagefright_omx_utils.so
+-rw-r--r--  1 root root   79104 2009-01-01 01:00 libstagefright_xmlparser.so
+-rw-r--r--  1 root root  118732 2009-01-01 01:00 libstatslog.so
+-rw-r--r--  1 root root   10196 2009-01-01 01:00 libstdc++.so
+-rw-r--r--  1 root root 1090932 2009-01-01 01:00 libsurfaceflinger.so
+-rw-r--r--  1 root root    5676 2009-01-01 01:00 libsync.so
+-rw-r--r--  1 root root   33464 2009-01-01 01:00 libsysutils.so
+-rw-r--r--  1 root root   79424 2009-01-01 01:00 libtelemetry.so
+-rw-r--r--  1 root root    4500 2009-01-01 01:00 libtelemetry_accountcheckpoint.so
+-rw-r--r--  1 root root  121832 2009-01-01 01:00 libtelemetry_dynamictelemetry.so
+-rw-r--r--  1 root root  143752 2009-01-01 01:00 libtelemetry_eventfiltering.so
+-rw-r--r--  1 root root   19252 2009-01-01 01:00 libtelemetry_eventfiltering_performance.so
+-rw-r--r--  1 root root    3736 2009-01-01 01:00 libtelemetry_gatekeeperwrapper.so
+-rw-r--r--  1 root root   75020 2009-01-01 01:00 libtelemetry_identitymanager.so
+-rw-r--r--  1 root root   21172 2009-01-01 01:00 libtelemetry_packageinfomanager.so
+-rw-r--r--  1 root root    6252 2009-01-01 01:00 libtelemetry_schemafetcher.so
+-rw-r--r--  1 root root    9336 2009-01-01 01:00 libtelemetry_sequencenumbermanager.so
+-rw-r--r--  1 root root  188092 2009-01-01 01:00 libtelemetry_sessionmanager.so
+-rw-r--r--  1 root root   21660 2009-01-01 01:00 libtelemetry_settingsmanager.so
+-rw-r--r--  1 root root   18056 2009-01-01 01:00 libtelemetrykvstore.so
+-rw-r--r--  1 root root  302888 2009-01-01 01:00 libtelemetryprocessor.so
+-rw-r--r--  1 root root  567484 2009-01-01 01:00 libtextclassifier.so
+-rw-r--r--  1 root root   15408 2009-01-01 01:00 libtextclassifier_hash.so
+-rw-r--r--  1 root root 1266912 2009-01-01 01:00 libtflite.so
+-rw-r--r--  1 root root   68036 2009-01-01 01:00 libtimestats_proto.so
+-rw-r--r--  1 root root   19136 2009-01-01 01:00 libtinyalsa.so
+-rw-r--r--  1 root root   42436 2009-01-01 01:00 libtinyxml2.so
+-rw-r--r--  1 root root   15780 2009-01-01 01:00 libtombstoned_client.so
+-rw-r--r--  1 root root  136092 2009-01-01 01:00 libtrackingutils.so
+-rw-r--r--  1 root root  135556 2009-01-01 01:00 libui.so
+-rw-r--r--  1 root root  284860 2009-01-01 01:00 libunwindstack.so
+-rw-r--r--  1 root root   11376 2009-01-01 01:00 libusbhost.so
+-rw-r--r--  1 root root   20932 2009-01-01 01:00 libuserutil.so
+-rw-r--r--  1 root root   73796 2009-01-01 01:00 libusl-oculus_time_spent_event.so
+-rw-r--r--  1 root root   74748 2009-01-01 01:00 libusl-session_transition.so
+-rw-r--r--  1 root root   83292 2009-01-01 01:00 libutils.so
+-rw-r--r--  1 root root   15460 2009-01-01 01:00 libutilscallstack.so
+-rw-r--r--  1 root root   31600 2009-01-01 01:00 libvibrator.so
+-rw-r--r--  1 root root  400660 2009-01-01 01:00 libvintf.so
+-rw-r--r--  1 root root    4812 2009-01-01 01:00 libvndksupport.so
+-rw-r--r--  1 root root  128464 2009-01-01 01:00 libvorbisidec.so
+-rw-r--r--  1 root root  117964 2009-01-01 01:00 libvrapi.so
+-rw-r--r--  1 root root   46204 2009-01-01 01:00 libvrfocus_interface-cpp.so
+-rw-r--r--  1 root root  377212 2009-01-01 01:00 libvrsensors-hidlwrapper.so
+-rw-r--r--  1 root root    6736 2009-01-01 01:00 libvrsensors-utils.so
+-rw-r--r--  1 root root  428432 2009-01-01 01:00 libvrui_jni.so
+-rw-r--r--  1 root root  123680 2009-01-01 01:00 libvulkan.so
+-rw-r--r--  1 root root   15940 2009-01-01 01:00 libwakelock.so
+-rw-r--r--  1 root root    7192 2009-01-01 01:00 libwebviewchromium_loader.so
+-rw-r--r--  1 root root   11412 2009-01-01 01:00 libwebviewchromium_plat_support.so
+-rw-r--r--  1 root root    5684 2009-01-01 01:00 libwifi-service.so
+-rw-r--r--  1 root root  163136 2009-01-01 01:00 libwifitelemetry.so
+-rw-r--r--  1 root root  179888 2009-01-01 01:00 libwilhelm.so
+-rw-r--r--  1 root root  746692 2009-01-01 01:00 libxml2.so
+-rw-r--r--  1 root root   92536 2009-01-01 01:00 libz.so
+-rw-r--r--  1 root root   39984 2009-01-01 01:00 libziparchive.so
+drwxr-xr-x  3 root root    4096 2009-01-01 01:00 rfsa
+-rw-r--r--  1 root root   64240 2009-01-01 01:00 server_configurable_flags.so
+-rw-r--r--  1 root root   28516 2009-01-01 01:00 suspend_control_aidl_interface-cpp.so
+-rw-r--r--  1 root root   59688 2009-01-01 01:00 vendor.oculus.hardware.clocks@1.0.so
+-rw-r--r--  1 root root   60652 2009-01-01 01:00 vendor.oculus.hardware.graphics.composer@1.0.so
+-rw-r--r--  1 root root   85164 2009-01-01 01:00 vendor.oculus.hardware.graphics.composer@1.1.so
+-rw-r--r--  1 root root  856584 2009-01-01 01:00 vendor.oculus.hardware.sensors@1.0.so
+-rw-r--r--  1 root root   93188 2009-01-01 01:00 vendor.oculus.hardware.sensors_java@1.0.so
+-rw-r--r--  1 root root   68368 2009-01-01 01:00 vendor.oculus.hardware.telemetry@1.0.so
+drwxr-xr-x  2 root root    4096 2009-01-01 01:00 vklayer
+drwxr-xr-x  2 root root   12288 2009-01-01 01:00 vndk-29
+drwxr-xr-x  3 root root    4096 2009-01-01 01:00 vndk-sp-29
+ls: /system/lib64/bootstrap: Permission denied
+
+/system/lib64:
+total 199336
+drwxr-xr-x  9 root root    20480 2009-01-01 01:00 .
+drwxr-xr-x 14 root root     4096 2009-01-01 01:00 ..
+-rw-r--r--  1 root root   125504 2009-01-01 01:00 android.frameworks.bufferhub@1.0.so
+-rw-r--r--  1 root root   164424 2009-01-01 01:00 android.frameworks.displayservice@1.0.so
+-rw-r--r--  1 root root    79136 2009-01-01 01:00 android.frameworks.schedulerservice@1.0.so
+-rw-r--r--  1 root root   217456 2009-01-01 01:00 android.frameworks.sensorservice@1.0.so
+-rw-r--r--  1 root root   114520 2009-01-01 01:00 android.frameworks.stats@1.0.so
+-rw-r--r--  1 root root   118320 2009-01-01 01:00 android.frameworks.vr.composer@1.0.so
+-rw-r--r--  1 root root    82256 2009-01-01 01:00 android.hardware.atrace@1.0.so
+-rw-r--r--  1 root root    10312 2009-01-01 01:00 android.hardware.audio.common-util.so
+-rw-r--r--  1 root root    12128 2009-01-01 01:00 android.hardware.audio.common@2.0-util.so
+-rw-r--r--  1 root root     5464 2009-01-01 01:00 android.hardware.audio.common@2.0.so
+-rw-r--r--  1 root root    12120 2009-01-01 01:00 android.hardware.audio.common@4.0-util.so
+-rw-r--r--  1 root root     5464 2009-01-01 01:00 android.hardware.audio.common@4.0.so
+-rw-r--r--  1 root root    12120 2009-01-01 01:00 android.hardware.audio.common@5.0-util.so
+-rw-r--r--  1 root root    16376 2009-01-01 01:00 android.hardware.audio.common@5.0.so
+-rw-r--r--  1 root root  1202696 2009-01-01 01:00 android.hardware.audio.effect@2.0.so
+-rw-r--r--  1 root root  1198768 2009-01-01 01:00 android.hardware.audio.effect@4.0.so
+-rw-r--r--  1 root root  1198832 2009-01-01 01:00 android.hardware.audio.effect@5.0.so
+-rw-r--r--  1 root root   602432 2009-01-01 01:00 android.hardware.audio@2.0.so
+-rw-r--r--  1 root root   640704 2009-01-01 01:00 android.hardware.audio@4.0.so
+-rw-r--r--  1 root root   645152 2009-01-01 01:00 android.hardware.audio@5.0.so
+-rw-r--r--  1 root root   129504 2009-01-01 01:00 android.hardware.bluetooth.a2dp@1.0.so
+-rw-r--r--  1 root root   212376 2009-01-01 01:00 android.hardware.bluetooth.audio@2.0.so
+-rw-r--r--  1 root root   129224 2009-01-01 01:00 android.hardware.bluetooth@1.0.so
+-rw-r--r--  1 root root    97088 2009-01-01 01:00 android.hardware.boot@1.0.so
+-rw-r--r--  1 root root   244496 2009-01-01 01:00 android.hardware.broadcastradio@1.0.so
+-rw-r--r--  1 root root   280408 2009-01-01 01:00 android.hardware.broadcastradio@1.1.so
+-rw-r--r--  1 root root    87640 2009-01-01 01:00 android.hardware.cas.native@1.0.so
+-rw-r--r--  1 root root   227672 2009-01-01 01:00 android.hardware.cas@1.0.so
+-rw-r--r--  1 root root     7952 2009-01-01 01:00 android.hardware.configstore-utils.so
+-rw-r--r--  1 root root   117456 2009-01-01 01:00 android.hardware.configstore@1.0.so
+-rw-r--r--  1 root root    99792 2009-01-01 01:00 android.hardware.configstore@1.1.so
+-rw-r--r--  1 root root   121120 2009-01-01 01:00 android.hardware.confirmationui@1.0.so
+-rw-r--r--  1 root root   146784 2009-01-01 01:00 android.hardware.contexthub@1.0.so
+-rw-r--r--  1 root root   356048 2009-01-01 01:00 android.hardware.drm@1.0.so
+-rw-r--r--  1 root root   244944 2009-01-01 01:00 android.hardware.drm@1.1.so
+-rw-r--r--  1 root root   369456 2009-01-01 01:00 android.hardware.drm@1.2.so
+-rw-r--r--  1 root root    74816 2009-01-01 01:00 android.hardware.dumpstate@1.0.so
+-rw-r--r--  1 root root    89016 2009-01-01 01:00 android.hardware.gatekeeper@1.0.so
+-rw-r--r--  1 root root   121184 2009-01-01 01:00 android.hardware.gnss.measurement_corrections@1.0.so
+-rw-r--r--  1 root root   123344 2009-01-01 01:00 android.hardware.gnss.visibility_control@1.0.so
+-rw-r--r--  1 root root   921816 2009-01-01 01:00 android.hardware.gnss@1.0.so
+-rw-r--r--  1 root root   316144 2009-01-01 01:00 android.hardware.gnss@1.1.so
+-rw-r--r--  1 root root   635736 2009-01-01 01:00 android.hardware.gnss@2.0.so
+-rw-r--r--  1 root root    82552 2009-01-01 01:00 android.hardware.graphics.allocator@2.0.so
+-rw-r--r--  1 root root    82664 2009-01-01 01:00 android.hardware.graphics.allocator@3.0.so
+-rw-r--r--  1 root root   200752 2009-01-01 01:00 android.hardware.graphics.bufferqueue@1.0.so
+-rw-r--r--  1 root root   179624 2009-01-01 01:00 android.hardware.graphics.bufferqueue@2.0.so
+-rw-r--r--  1 root root     3904 2009-01-01 01:00 android.hardware.graphics.common@1.0.so
+-rw-r--r--  1 root root     3952 2009-01-01 01:00 android.hardware.graphics.common@1.1.so
+-rw-r--r--  1 root root     4712 2009-01-01 01:00 android.hardware.graphics.common@1.2.so
+-rw-r--r--  1 root root   249496 2009-01-01 01:00 android.hardware.graphics.composer@2.1.so
+-rw-r--r--  1 root root   210152 2009-01-01 01:00 android.hardware.graphics.composer@2.2.so
+-rw-r--r--  1 root root   261096 2009-01-01 01:00 android.hardware.graphics.composer@2.3.so
+-rw-r--r--  1 root root    90816 2009-01-01 01:00 android.hardware.graphics.mapper@2.0.so
+-rw-r--r--  1 root root    95528 2009-01-01 01:00 android.hardware.graphics.mapper@2.1.so
+-rw-r--r--  1 root root   101152 2009-01-01 01:00 android.hardware.graphics.mapper@3.0.so
+-rw-r--r--  1 root root   114632 2009-01-01 01:00 android.hardware.health.storage@1.0.so
+-rw-r--r--  1 root root    85904 2009-01-01 01:00 android.hardware.health@1.0.so
+-rw-r--r--  1 root root   159184 2009-01-01 01:00 android.hardware.health@2.0.so
+-rw-r--r--  1 root root    80368 2009-01-01 01:00 android.hardware.input.classifier@1.0.so
+-rw-r--r--  1 root root     6512 2009-01-01 01:00 android.hardware.input.common@1.0.so
+-rw-r--r--  1 root root    78840 2009-01-01 01:00 android.hardware.ir@1.0.so
+-rw-r--r--  1 root root   136688 2009-01-01 01:00 android.hardware.keymaster@3.0.so
+-rw-r--r--  1 root root   156688 2009-01-01 01:00 android.hardware.keymaster@4.0.so
+-rw-r--r--  1 root root    77648 2009-01-01 01:00 android.hardware.light@2.0.so
+-rw-r--r--  1 root root   198792 2009-01-01 01:00 android.hardware.media.bufferpool@2.0.so
+-rw-r--r--  1 root root   508480 2009-01-01 01:00 android.hardware.media.c2@1.0.so
+-rw-r--r--  1 root root   390232 2009-01-01 01:00 android.hardware.media.omx@1.0.so
+-rw-r--r--  1 root root     4600 2009-01-01 01:00 android.hardware.media@1.0.so
+-rw-r--r--  1 root root    76704 2009-01-01 01:00 android.hardware.memtrack@1.0.so
+-rw-r--r--  1 root root   206496 2009-01-01 01:00 android.hardware.neuralnetworks@1.0.so
+-rw-r--r--  1 root root    98944 2009-01-01 01:00 android.hardware.neuralnetworks@1.1.so
+-rw-r--r--  1 root root   385848 2009-01-01 01:00 android.hardware.neuralnetworks@1.2.so
+-rw-r--r--  1 root root   102952 2009-01-01 01:00 android.hardware.power.stats@1.0.so
+-rw-r--r--  1 root root    84664 2009-01-01 01:00 android.hardware.power@1.0.so
+-rw-r--r--  1 root root    89256 2009-01-01 01:00 android.hardware.power@1.1.so
+-rw-r--r--  1 root root    89872 2009-01-01 01:00 android.hardware.power@1.2.so
+-rw-r--r--  1 root root    95328 2009-01-01 01:00 android.hardware.power@1.3.so
+-rw-r--r--  1 root root   312080 2009-01-01 01:00 android.hardware.renderscript@1.0.so
+-rw-r--r--  1 root root   105888 2009-01-01 01:00 android.hardware.sensors@1.0.so
+-rw-r--r--  1 root root   149168 2009-01-01 01:00 android.hardware.sensors@2.0.so
+-rw-r--r--  1 root root   148920 2009-01-01 01:00 android.hardware.soundtrigger@2.0.so
+-rw-r--r--  1 root root   161576 2009-01-01 01:00 android.hardware.soundtrigger@2.1.so
+-rw-r--r--  1 root root   102624 2009-01-01 01:00 android.hardware.soundtrigger@2.2.so
+-rw-r--r--  1 root root    78672 2009-01-01 01:00 android.hardware.tetheroffload.config@1.0.so
+-rw-r--r--  1 root root    86072 2009-01-01 01:00 android.hardware.thermal@1.0.so
+-rw-r--r--  1 root root   144248 2009-01-01 01:00 android.hardware.thermal@2.0.so
+-rw-r--r--  1 root root   146896 2009-01-01 01:00 android.hardware.tv.cec@1.0.so
+-rw-r--r--  1 root root   123200 2009-01-01 01:00 android.hardware.tv.input@1.0.so
+-rw-r--r--  1 root root   121344 2009-01-01 01:00 android.hardware.usb.gadget@1.0.so
+-rw-r--r--  1 root root    85944 2009-01-01 01:00 android.hardware.vibrator@1.0.so
+-rw-r--r--  1 root root    85968 2009-01-01 01:00 android.hardware.vibrator@1.1.so
+-rw-r--r--  1 root root    91176 2009-01-01 01:00 android.hardware.vibrator@1.2.so
+-rw-r--r--  1 root root   101480 2009-01-01 01:00 android.hardware.vibrator@1.3.so
+-rw-r--r--  1 root root    74384 2009-01-01 01:00 android.hardware.vr@1.0.so
+-rw-r--r--  1 root root   137312 2009-01-01 01:00 android.hardware.wifi.offload@1.0.so
+-rw-r--r--  1 root root  1015056 2009-01-01 01:00 android.hardware.wifi@1.0.so
+-rw-r--r--  1 root root   192976 2009-01-01 01:00 android.hardware.wifi@1.1.so
+-rw-r--r--  1 root root   539080 2009-01-01 01:00 android.hardware.wifi@1.2.so
+-rw-r--r--  1 root root   317760 2009-01-01 01:00 android.hardware.wifi@1.3.so
+-rw-r--r--  1 root root    80952 2009-01-01 01:00 android.hidl.allocator@1.0.so
+-rw-r--r--  1 root root    75808 2009-01-01 01:00 android.hidl.memory.token@1.0.so
+-rw-r--r--  1 root root   124424 2009-01-01 01:00 android.hidl.memory@1.0.so
+-rw-r--r--  1 root root     3888 2009-01-01 01:00 android.hidl.safe_union@1.0.so
+-rw-r--r--  1 root root    12672 2009-01-01 01:00 android.hidl.token@1.0-utils.so
+-rw-r--r--  1 root root    84592 2009-01-01 01:00 android.hidl.token@1.0.so
+-rw-r--r--  1 root root    78536 2009-01-01 01:00 android.system.net.netd@1.0.so
+-rw-r--r--  1 root root    95560 2009-01-01 01:00 android.system.net.netd@1.1.so
+-rw-r--r--  1 root root   112680 2009-01-01 01:00 android.system.suspend@1.0.so
+-rw-r--r--  1 root root    85280 2009-01-01 01:00 android.system.wifi.keystore@1.0.so
+-rw-r--r--  1 root root    51744 2009-01-01 01:00 apex_aidl_interface-cpp.so
+-rw-r--r--  1 root root    24288 2009-01-01 01:00 ashmemd_aidl_interface-cpp.so
+-rw-r--r--  1 root root    42448 2009-01-01 01:00 dnsresolver_aidl_interface-V2-cpp.so
+drwxr-xr-x  2 root root     4096 2009-01-01 01:00 drm
+drwxr-xr-x  2 root root     4096 2009-01-01 01:00 gllayer
+-rw-r--r--  1 root root    41056 2009-01-01 01:00 gsi_aidl_interface-cpp.so
+-rw-r--r--  1 root root    54984 2009-01-01 01:00 heapprofd_client.so
+drwxr-xr-x  2 root root     4096 2009-01-01 01:00 hw
+-rw-r--r--  1 root root     3576 2009-01-01 01:00 ld-android.so
+-rw-r--r--  1 root root   214904 2009-01-01 01:00 libEGL.so
+-rw-r--r--  1 root root     9416 2009-01-01 01:00 libETC1.so
+-rw-r--r--  1 root root   298240 2009-01-01 01:00 libFFTEm.so
+-rw-r--r--  1 root root    33768 2009-01-01 01:00 libGLESv1_CM.so
+-rw-r--r--  1 root root    98152 2009-01-01 01:00 libGLESv2.so
+-rw-r--r--  1 root root    98152 2009-01-01 01:00 libGLESv3.so
+-rw-r--r--  1 root root 16786272 2009-01-01 01:00 libLLVM_android.so
+-rw-r--r--  1 root root  2002056 2009-01-01 01:00 libOVRMrcLib.oculus.so
+-rw-r--r--  1 root root     8176 2009-01-01 01:00 libOpenMAXAL.so
+-rw-r--r--  1 root root     8976 2009-01-01 01:00 libOpenSLES.so
+-rw-r--r--  1 root root  2247824 2009-01-01 01:00 libQProfilerInterface.so
+-rw-r--r--  1 root root    64056 2009-01-01 01:00 libRS.so
+-rw-r--r--  1 root root     6792 2009-01-01 01:00 libRSCacheDir.so
+-rw-r--r--  1 root root   480880 2009-01-01 01:00 libRSCpuRef.so
+-rw-r--r--  1 root root   194744 2009-01-01 01:00 libRSDriver.so
+-rw-r--r--  1 root root   303968 2009-01-01 01:00 libRS_internal.so
+-rw-r--r--  1 root root   256232 2009-01-01 01:00 libRScpp.so
+-rw-r--r--  1 root root   103536 2009-01-01 01:00 libSurfaceFlingerProp.so
+-rw-r--r--  1 root root   279912 2009-01-01 01:00 libaaudio.so
+-rw-r--r--  1 root root   203176 2009-01-01 01:00 libaaudioservice.so
+-rw-r--r--  1 root root   633920 2009-01-01 01:00 libadb_crypto.so
+-rw-r--r--  1 root root   284440 2009-01-01 01:00 libadb_pairing_auth.so
+-rw-r--r--  1 root root   503328 2009-01-01 01:00 libadb_pairing_connection.so
+-rw-r--r--  1 root root   302568 2009-01-01 01:00 libadb_pairing_server.so
+-rw-r--r--  1 root root   230776 2009-01-01 01:00 libadb_protos.so
+-rw-r--r--  1 root root   673768 2009-01-01 01:00 libadb_tls_connection.so
+-rw-r--r--  1 root root   355896 2009-01-01 01:00 libadbd.so
+-rw-r--r--  1 root root   352168 2009-01-01 01:00 libadbd_auth.so
+-rw-r--r--  1 root root   456672 2009-01-01 01:00 libadbd_services.so
+-rw-r--r--  1 root root   170544 2009-01-01 01:00 libadsprpc_system.so
+-rw-r--r--  1 root root    26600 2009-01-01 01:00 libamidi.so
+-rw-r--r--  1 root root   141616 2009-01-01 01:00 libandroid.so
+-rw-r--r--  1 root root     5488 2009-01-01 01:00 libandroid_net.so
+-rw-r--r--  1 root root  2066264 2009-01-01 01:00 libandroid_runtime.so
+-rw-r--r--  1 root root     6008 2009-01-01 01:00 libandroid_runtime_lazy.so
+-rw-r--r--  1 root root   634296 2009-01-01 01:00 libandroid_servers.so
+-rw-r--r--  1 root root   427568 2009-01-01 01:00 libandroidfw.so
+-rw-r--r--  1 root root    50008 2009-01-01 01:00 libappfuse.so
+-rw-r--r--  1 root root    11584 2009-01-01 01:00 libartpalette-system.so
+-rw-r--r--  1 root root     9528 2009-01-01 01:00 libashmemd_client.so
+-rw-r--r--  1 root root     4736 2009-01-01 01:00 libasyncio.so
+-rw-r--r--  1 root root    27600 2009-01-01 01:00 libaudio-resampler.so
+-rw-r--r--  1 root root   568072 2009-01-01 01:00 libaudioclient.so
+-rw-r--r--  1 root root    31760 2009-01-01 01:00 libaudioeffect_jni.so
+-rw-r--r--  1 root root   812024 2009-01-01 01:00 libaudioflinger.so
+-rw-r--r--  1 root root    12248 2009-01-01 01:00 libaudiohal.so
+-rw-r--r--  1 root root   199480 2009-01-01 01:00 libaudiohal@2.0.so
+-rw-r--r--  1 root root   225648 2009-01-01 01:00 libaudiohal@4.0.so
+-rw-r--r--  1 root root   231072 2009-01-01 01:00 libaudiohal@5.0.so
+-rw-r--r--  1 root root    17552 2009-01-01 01:00 libaudiohal_deathhandler.so
+-rw-r--r--  1 root root    17240 2009-01-01 01:00 libaudiomanager.so
+-rw-r--r--  1 root root    18928 2009-01-01 01:00 libaudiopolicy.so
+-rw-r--r--  1 root root   498456 2009-01-01 01:00 libaudiopolicyenginedefault.so
+-rw-r--r--  1 root root   183704 2009-01-01 01:00 libaudiopolicymanager.so
+-rw-r--r--  1 root root   798840 2009-01-01 01:00 libaudiopolicymanagerdefault.so
+-rw-r--r--  1 root root   224648 2009-01-01 01:00 libaudiopolicyservice.so
+-rw-r--r--  1 root root   240096 2009-01-01 01:00 libaudioprocessing.so
+-rw-r--r--  1 root root    15488 2009-01-01 01:00 libaudioroute.so
+-rw-r--r--  1 root root    17928 2009-01-01 01:00 libaudiospdif.so
+-rw-r--r--  1 root root    75752 2009-01-01 01:00 libaudioutils.so
+-rw-r--r--  1 root root   130736 2009-01-01 01:00 libauthenticate.so
+-rw-r--r--  1 root root    16712 2009-01-01 01:00 libavservices_minijail.so
+-rw-r--r--  1 root root   100152 2009-01-01 01:00 libbacktrace.so
+-rw-r--r--  1 root root    78584 2009-01-01 01:00 libbase.so
+-rw-r--r--  1 root root   274560 2009-01-01 01:00 libbcc.so
+-rw-r--r--  1 root root  1030536 2009-01-01 01:00 libbcinfo.so
+-rw-r--r--  1 root root   653784 2009-01-01 01:00 libbinder.so
+-rw-r--r--  1 root root    64560 2009-01-01 01:00 libbinder_ndk.so
+-rw-r--r--  1 root root    14064 2009-01-01 01:00 libbinderthreadstate.so
+-rw-r--r--  1 root root    20600 2009-01-01 01:00 libbinderwrapper.so
+-rw-r--r--  1 root root  1036360 2009-01-01 01:00 libblas.so
+-rw-r--r--  1 root root    51056 2009-01-01 01:00 libbluetooth-binder.so
+-rw-r--r--  1 root root  4533120 2009-01-01 01:00 libbluetooth.so
+-rw-r--r--  1 root root   280776 2009-01-01 01:00 libbluetooth_jni.so
+-rw-r--r--  1 root root    85880 2009-01-01 01:00 libbootloader_message.so
+-rw-r--r--  1 root root    62632 2009-01-01 01:00 libbpf_android.so
+-rw-r--r--  1 root root    33120 2009-01-01 01:00 libbpf_bcc.so
+-rw-r--r--  1 root root    10656 2009-01-01 01:00 libbrillo-binder.so
+-rw-r--r--  1 root root   102288 2009-01-01 01:00 libbrillo-stream.so
+-rw-r--r--  1 root root   185472 2009-01-01 01:00 libbrillo.so
+-rw-r--r--  1 root root   685152 2009-01-01 01:00 libbrotli.so
+-rw-r--r--  1 root root    62424 2009-01-01 01:00 libbufferhub.so
+-rw-r--r--  1 root root   117816 2009-01-01 01:00 libbufferhubqueue.so
+-rw-r--r--  1 root root    73104 2009-01-01 01:00 libbz.so
+-rw-r--r--  1 root root   727472 2009-01-01 01:00 libc++.so
+lrw-r--r--  1 root root       46 2009-01-01 01:00 libc.so -> /apex/com.android.runtime/lib64/bionic/libc.so
+-rw-r--r--  1 root root   362376 2009-01-01 01:00 libc_malloc_debug.so
+-rw-r--r--  1 root root     7712 2009-01-01 01:00 libc_malloc_hooks.so
+-rw-r--r--  1 root root    35888 2009-01-01 01:00 libc_scudo.so
+-rw-r--r--  1 root root    12960 2009-01-01 01:00 libcalibrationstore.so
+-rw-r--r--  1 root root   219824 2009-01-01 01:00 libcamera2ndk.so
+-rw-r--r--  1 root root   390248 2009-01-01 01:00 libcamera_client.so
+-rw-r--r--  1 root root    35248 2009-01-01 01:00 libcamera_metadata.so
+-rw-r--r--  1 root root   101296 2009-01-01 01:00 libcameramuxmodemonitor.so
+-rw-r--r--  1 root root    16496 2009-01-01 01:00 libcap.so
+-rw-r--r--  1 root root   213304 2009-01-01 01:00 libcdxservice.so
+-rw-r--r--  1 root root    11616 2009-01-01 01:00 libcgrouprc.so
+-rw-r--r--  1 root root  1264816 2009-01-01 01:00 libchrome.so
+-rw-r--r--  1 root root  1898712 2009-01-01 01:00 libclang_rt.asan-aarch64-android.so
+-rw-r--r--  1 root root   330432 2009-01-01 01:00 libclcore.bc
+-rw-r--r--  1 root root   353076 2009-01-01 01:00 libclcore_debug.bc
+-rw-r--r--  1 root root  1077160 2009-01-01 01:00 libclcore_debug_g.bc
+-rw-r--r--  1 root root  1124700 2009-01-01 01:00 libclcore_g.bc
+-rw-r--r--  1 root root     3704 2009-01-01 01:00 libcodec2.so
+-rw-r--r--  1 root root   128776 2009-01-01 01:00 libcodec2_client.so
+-rw-r--r--  1 root root   111952 2009-01-01 01:00 libcodec2_hidl_client@1.0.so
+-rw-r--r--  1 root root   571696 2009-01-01 01:00 libcodec2_vndk.so
+-rw-r--r--  1 root root   101936 2009-01-01 01:00 libcompiler_rt.so
+-rw-r--r--  1 root root    12464 2009-01-01 01:00 libcontrollers_jni.so
+-rw-r--r--  1 root root  1109280 2009-01-01 01:00 libcrypto.so
+-rw-r--r--  1 root root     6280 2009-01-01 01:00 libcrypto_utils.so
+-rw-r--r--  1 root root   342968 2009-01-01 01:00 libctrlbugreportsyncutils.so
+-rw-r--r--  1 root root   353168 2009-01-01 01:00 libcurl.so
+-rw-r--r--  1 root root    67816 2009-01-01 01:00 libcutils.so
+-rw-r--r--  1 root root    19520 2009-01-01 01:00 libdebuggerd_client.so
+-rw-r--r--  1 root root    19800 2009-01-01 01:00 libdeviceid.so
+-rw-r--r--  1 root root    10360 2009-01-01 01:00 libdexfile_support.so
+-rw-r--r--  1 root root    17544 2009-01-01 01:00 libdiskconfig.so
+-rw-r--r--  1 root root    29568 2009-01-01 01:00 libdisplayservicehidl.so
+lrw-r--r--  1 root root       47 2009-01-01 01:00 libdl.so -> /apex/com.android.runtime/lib64/bionic/libdl.so
+-rw-r--r--  1 root root     4672 2009-01-01 01:00 libdl_android.so
+-rw-r--r--  1 root root   690000 2009-01-01 01:00 libdng_sdk.so
+-rw-r--r--  1 root root   134656 2009-01-01 01:00 libdrmframework.so
+-rw-r--r--  1 root root    35304 2009-01-01 01:00 libdrmframework_jni.so
+-rw-r--r--  1 root root    64296 2009-01-01 01:00 libdumpstateaidl.so
+-rw-r--r--  1 root root    27992 2009-01-01 01:00 libdumpstateutil.so
+-rw-r--r--  1 root root    16192 2009-01-01 01:00 libdumputils.so
+-rw-r--r--  1 root root    25584 2009-01-01 01:00 libeffectsconfig.so
+-rw-r--r--  1 root root     6600 2009-01-01 01:00 libelfutils.so
+-rw-r--r--  1 root root   300376 2009-01-01 01:00 libevent.so
+-rw-r--r--  1 root root     8632 2009-01-01 01:00 libeventflaghelper.so
+-rw-r--r--  1 root root   215072 2009-01-01 01:00 libexif.so
+-rw-r--r--  1 root root   135024 2009-01-01 01:00 libexpat.so
+-rw-r--r--  1 root root    42312 2009-01-01 01:00 libext2_blkid.so
+-rw-r--r--  1 root root    10904 2009-01-01 01:00 libext2_com_err.so
+-rw-r--r--  1 root root    28512 2009-01-01 01:00 libext2_e2p.so
+-rw-r--r--  1 root root    15728 2009-01-01 01:00 libext2_misc.so
+-rw-r--r--  1 root root    51744 2009-01-01 01:00 libext2_quota.so
+-rw-r--r--  1 root root    12416 2009-01-01 01:00 libext2_uuid.so
+-rw-r--r--  1 root root   264856 2009-01-01 01:00 libext2fs.so
+-rw-r--r--  1 root root    12040 2009-01-01 01:00 libext4_utils.so
+-rw-r--r--  1 root root    84648 2009-01-01 01:00 libexternalbattery.so
+-rw-r--r--  1 root root    15288 2009-01-01 01:00 libf2fs_sparseblock.so
+-rw-r--r--  1 root root    17016 2009-01-01 01:00 libfbutils.so
+-rw-r--r--  1 root root    44072 2009-01-01 01:00 libfec.so
+-rw-r--r--  1 root root  4152608 2009-01-01 01:00 libfetchstats.so
+-rw-r--r--  1 root root  6558064 2009-01-01 01:00 libffloggerwrapper.so
+-rw-r--r--  1 root root   188096 2009-01-01 01:00 libfilterfw.so
+-rw-r--r--  1 root root     7488 2009-01-01 01:00 libfilterpack_imageproc.so
+-rw-r--r--  1 root root    11728 2009-01-01 01:00 libfmq.so
+-rw-r--r--  1 root root   140416 2009-01-01 01:00 libfruit.so
+-rw-r--r--  1 root root   314704 2009-01-01 01:00 libfs_mgr.so
+-rw-r--r--  1 root root    27136 2009-01-01 01:00 libfscrypt.so
+-rw-r--r--  1 root root   613064 2009-01-01 01:00 libft2.so
+-rw-r--r--  1 root root    11224 2009-01-01 01:00 libgammacorrection.so
+-rw-r--r--  1 root root    28800 2009-01-01 01:00 libgatekeeper.so
+-rw-r--r--  1 root root   126528 2009-01-01 01:00 libgatekeeperclient.so
+-rw-r--r--  1 root root   180568 2009-01-01 01:00 libgatekeepernativeservice.so
+-rw-r--r--  1 root root    85904 2009-01-01 01:00 libgflags.so
+-rw-r--r--  1 root root  2506240 2009-01-01 01:00 libgpuprofilingservice.so
+-rw-r--r--  1 root root    58936 2009-01-01 01:00 libgraphicsenv.so
+-rw-r--r--  1 root root    11224 2009-01-01 01:00 libgsi.so
+-rw-r--r--  1 root root     3704 2009-01-01 01:00 libgtest_prod.so
+-rw-r--r--  1 root root   967008 2009-01-01 01:00 libgui.so
+-rw-r--r--  1 root root     7504 2009-01-01 01:00 libhardware.so
+-rw-r--r--  1 root root    19088 2009-01-01 01:00 libhardware_legacy.so
+-rw-r--r--  1 root root   583896 2009-01-01 01:00 libharfbuzz_ng.so
+-rw-r--r--  1 root root    28840 2009-01-01 01:00 libheif.so
+-rw-r--r--  1 root root    77960 2009-01-01 01:00 libhexagon.so
+-rw-r--r--  1 root root    17168 2009-01-01 01:00 libhidcommand_jni.so
+-rw-r--r--  1 root root   122784 2009-01-01 01:00 libhidl-gen-hash.so
+-rw-r--r--  1 root root   132072 2009-01-01 01:00 libhidl-gen-utils.so
+-rw-r--r--  1 root root     5304 2009-01-01 01:00 libhidlallocatorutils.so
+-rw-r--r--  1 root root   672168 2009-01-01 01:00 libhidlbase.so
+-rw-r--r--  1 root root    21424 2009-01-01 01:00 libhidlmemory.so
+-rw-r--r--  1 root root     3704 2009-01-01 01:00 libhidltransport.so
+-rw-r--r--  1 root root     3704 2009-01-01 01:00 libhwbinder.so
+-rw-r--r--  1 root root  5566256 2009-01-01 01:00 libhwui.so
+-rw-r--r--  1 root root    28824 2009-01-01 01:00 libiad-utils.so
+-rw-r--r--  1 root root   121912 2009-01-01 01:00 libidmap2.so
+-rw-r--r--  1 root root    17640 2009-01-01 01:00 libimagebuffer.so
+-rw-r--r--  1 root root    72744 2009-01-01 01:00 libimg_utils.so
+-rw-r--r--  1 root root   101664 2009-01-01 01:00 libincident.so
+-rw-r--r--  1 root root   193056 2009-01-01 01:00 libinput.so
+-rw-r--r--  1 root root   267904 2009-01-01 01:00 libinputflinger.so
+-rw-r--r--  1 root root    28552 2009-01-01 01:00 libinputflinger_base.so
+-rw-r--r--  1 root root   262208 2009-01-01 01:00 libinputreader.so
+-rw-r--r--  1 root root     6352 2009-01-01 01:00 libinputreporter.so
+-rw-r--r--  1 root root    76936 2009-01-01 01:00 libinputservice.so
+-rw-r--r--  1 root root   139376 2009-01-01 01:00 libinputsettingsservice.so
+-rw-r--r--  1 root root     7944 2009-01-01 01:00 libion.so
+-rw-r--r--  1 root root   106848 2009-01-01 01:00 libiprouteutil.so
+-rw-r--r--  1 root root    19488 2009-01-01 01:00 libjdns_sd.so
+-rw-r--r--  1 root root     9128 2009-01-01 01:00 libjni_pacprocessor.so
+-rw-r--r--  1 root root     4832 2009-01-01 01:00 libjnigraphics.so
+-rw-r--r--  1 root root   317848 2009-01-01 01:00 libjpeg.so
+-rw-r--r--  1 root root   116568 2009-01-01 01:00 libjsoncpp.so
+-rw-r--r--  1 root root   167744 2009-01-01 01:00 libkeymaster4support.so
+-rw-r--r--  1 root root    86416 2009-01-01 01:00 libkeymaster_messages.so
+-rw-r--r--  1 root root   311440 2009-01-01 01:00 libkeymaster_portable.so
+-rw-r--r--  1 root root    67544 2009-01-01 01:00 libkeystore-engine.so
+-rw-r--r--  1 root root   195376 2009-01-01 01:00 libkeystore_aidl.so
+-rw-r--r--  1 root root   106376 2009-01-01 01:00 libkeystore_binder.so
+-rw-r--r--  1 root root    41792 2009-01-01 01:00 libkeystore_parcelables.so
+-rw-r--r--  1 root root     5120 2009-01-01 01:00 libkeyutils.so
+-rw-r--r--  1 root root    16784 2009-01-01 01:00 libkvstore.so
+-rw-r--r--  1 root root 10065560 2009-01-01 01:00 libkwsengine.so
+-rw-r--r--  1 root root   204568 2009-01-01 01:00 liblayers_proto.so
+-rw-r--r--  1 root root     5680 2009-01-01 01:00 libldacBT_abr.so
+-rw-r--r--  1 root root    44912 2009-01-01 01:00 libldacBT_enc.so
+-rw-r--r--  1 root root    22920 2009-01-01 01:00 liblocalpubsub.so
+-rw-r--r--  1 root root    83672 2009-01-01 01:00 liblog.so
+-rw-r--r--  1 root root    11464 2009-01-01 01:00 liblogwrap.so
+-rw-r--r--  1 root root   158072 2009-01-01 01:00 liblp.so
+-rw-r--r--  1 root root   166808 2009-01-01 01:00 liblpdump.so
+-rw-r--r--  1 root root    35184 2009-01-01 01:00 liblpdump_interface-cpp.so
+-rw-r--r--  1 root root   305992 2009-01-01 01:00 liblshal.so
+-rw-r--r--  1 root root   131120 2009-01-01 01:00 liblzma.so
+lrw-r--r--  1 root root       46 2009-01-01 01:00 libm.so -> /apex/com.android.runtime/lib64/bionic/libm.so
+-rw-r--r--  1 root root    32184 2009-01-01 01:00 libmdnssd.so
+-rw-r--r--  1 root root   537832 2009-01-01 01:00 libmedia.so
+-rw-r--r--  1 root root    59456 2009-01-01 01:00 libmedia2_jni_core.so
+-rw-r--r--  1 root root    85808 2009-01-01 01:00 libmedia_helper.so
+-rw-r--r--  1 root root   461472 2009-01-01 01:00 libmedia_jni.so
+-rw-r--r--  1 root root    10096 2009-01-01 01:00 libmedia_jni_utils.so
+-rw-r--r--  1 root root   225736 2009-01-01 01:00 libmedia_omx.so
+-rw-r--r--  1 root root    21888 2009-01-01 01:00 libmedia_omx_client.so
+-rw-r--r--  1 root root   225096 2009-01-01 01:00 libmediadrm.so
+-rw-r--r--  1 root root   140296 2009-01-01 01:00 libmediadrmmetrics_lite.so
+-rw-r--r--  1 root root    23400 2009-01-01 01:00 libmediaextractorservice.so
+-rw-r--r--  1 root root    54568 2009-01-01 01:00 libmedialogservice.so
+-rw-r--r--  1 root root    52120 2009-01-01 01:00 libmediametrics.so
+-rw-r--r--  1 root root   194624 2009-01-01 01:00 libmediandk.so
+-rw-r--r--  1 root root    11288 2009-01-01 01:00 libmediandk_utils.so
+-rw-r--r--  1 root root    84320 2009-01-01 01:00 libmediautils.so
+-rw-r--r--  1 root root    50688 2009-01-01 01:00 libmeminfo.so
+-rw-r--r--  1 root root    12312 2009-01-01 01:00 libmemtrack.so
+-rw-r--r--  1 root root   190536 2009-01-01 01:00 libmemunreachable.so
+-rw-r--r--  1 root root    10208 2009-01-01 01:00 libmetricslogger.so
+-rw-r--r--  1 root root   122864 2009-01-01 01:00 libminijail.so
+-rw-r--r--  1 root root   192248 2009-01-01 01:00 libminikin.so
+-rw-r--r--  1 root root  3205944 2009-01-01 01:00 libmrengine.so
+-rw-r--r--  1 root root   223672 2009-01-01 01:00 libmtp.so
+-rw-r--r--  1 root root    10112 2009-01-01 01:00 libnativebridge_lazy.so
+-rw-r--r--  1 root root   283328 2009-01-01 01:00 libnativehelper_compat_libc++.so
+-rw-r--r--  1 root root     6952 2009-01-01 01:00 libnativeloader_lazy.so
+-rw-r--r--  1 root root    21912 2009-01-01 01:00 libnativewindow.so
+-rw-r--r--  1 root root    37520 2009-01-01 01:00 libnbaio.so
+-rw-r--r--  1 root root   192496 2009-01-01 01:00 libnblog.so
+-rw-r--r--  1 root root    18360 2009-01-01 01:00 libnetd_client.so
+-rw-r--r--  1 root root    33568 2009-01-01 01:00 libnetdbpf.so
+-rw-r--r--  1 root root    73120 2009-01-01 01:00 libnetdutils.so
+-rw-r--r--  1 root root    23408 2009-01-01 01:00 libnetlink.so
+-rw-r--r--  1 root root    26584 2009-01-01 01:00 libnetutils.so
+-rw-r--r--  1 root root     8176 2009-01-01 01:00 libnetworkstackutilsjni.so
+-rw-r--r--  1 root root  1737432 2009-01-01 01:00 libneuralnetworks.so
+-rw-r--r--  1 root root   115104 2009-01-01 01:00 libnotificationproxyclient.so
+-rw-r--r--  1 root root   273608 2009-01-01 01:00 libopenxr_forwardloader.oculus.so
+-rw-r--r--  1 root root  1491568 2009-01-01 01:00 libossdk.oculus.so
+-rw-r--r--  1 root root     4472 2009-01-01 01:00 libosutils-testhelpers.so
+-rw-r--r--  1 root root   338312 2009-01-01 01:00 libosutils.so
+-rw-r--r--  1 root root   850944 2009-01-01 01:00 libovr_crashreporter.so
+-rw-r--r--  1 root root   564400 2009-01-01 01:00 libovr_crashuploader.so
+-rw-r--r--  1 root root     8392 2009-01-01 01:00 libpackagelistparser.so
+-rw-r--r--  1 root root   246760 2009-01-01 01:00 libpcap.so
+-rw-r--r--  1 root root   290016 2009-01-01 01:00 libpcre2.so
+-rw-r--r--  1 root root    31744 2009-01-01 01:00 libpcrecpp.so
+-rw-r--r--  1 root root  4977160 2009-01-01 01:00 libpdfium.so
+-rw-r--r--  1 root root   161776 2009-01-01 01:00 libpdx_default_transport.so
+-rw-r--r--  1 root root  1006520 2009-01-01 01:00 libperfetto.so
+-rw-r--r--  1 root root    21536 2009-01-01 01:00 libperfetto_android_internal.so
+-rw-r--r--  1 root root    47792 2009-01-01 01:00 libperfstream-aidl-cpp.so
+-rw-r--r--  1 root root   277504 2009-01-01 01:00 libperfstreamcore.so
+-rw-r--r--  1 root root   129376 2009-01-01 01:00 libperfstreamprovider.so
+-rw-r--r--  1 root root     3736 2009-01-01 01:00 libpermission.so
+-rw-r--r--  1 root root    85912 2009-01-01 01:00 libpiex.so
+-rw-r--r--  1 root root   177144 2009-01-01 01:00 libpixelflinger.so
+-rw-r--r--  1 root root   188976 2009-01-01 01:00 libpng.so
+-rw-r--r--  1 root root   496032 2009-01-01 01:00 libposeprediction.so
+-rw-r--r--  1 root root    16904 2009-01-01 01:00 libpower.so
+-rw-r--r--  1 root root    18336 2009-01-01 01:00 libpowermanager.so
+-rw-r--r--  1 root root    17792 2009-01-01 01:00 libpowerstatscollector.so
+-rw-r--r--  1 root root   695656 2009-01-01 01:00 libpreferencesservice.so
+-rw-r--r--  1 root root     9344 2009-01-01 01:00 libpreloader.so
+-rw-r--r--  1 root root   248552 2009-01-01 01:00 libprocessgroup.so
+-rw-r--r--  1 root root    28344 2009-01-01 01:00 libprocessgroup_setup.so
+-rw-r--r--  1 root root    12200 2009-01-01 01:00 libprocinfo.so
+-rw-r--r--  1 root root  1840232 2009-01-01 01:00 libprotobuf-cpp-full.so
+-rw-r--r--  1 root root   262168 2009-01-01 01:00 libprotobuf-cpp-lite.so
+-rw-r--r--  1 root root    39000 2009-01-01 01:00 libprotoutil.so
+-rw-r--r--  1 root root     6152 2009-01-01 01:00 libpsi.so
+-rw-r--r--  1 root root     7728 2009-01-01 01:00 libqtaguid.so
+-rw-r--r--  1 root root    10216 2009-01-01 01:00 libradio_metadata.so
+-rw-r--r--  1 root root   314168 2009-01-01 01:00 libremoteservice.so
+-rw-r--r--  1 root root  1565344 2009-01-01 01:00 libripcclient.oculus.so
+-rw-r--r--  1 root root    74920 2009-01-01 01:00 librs_jni.so
+-rw-r--r--  1 root root   167368 2009-01-01 01:00 librtp_jni.so
+-rw-r--r--  1 root root    32920 2009-01-01 01:00 libruntimeipcbroker_interface-cpp.so
+-rw-r--r--  1 root root    29824 2009-01-01 01:00 libruntimeipcbroker_interface-ndk_platform.so
+-rw-r--r--  1 root root    25672 2009-01-01 01:00 libruntimeipchelper_interface-cpp.so
+-rw-r--r--  1 root root  1088096 2009-01-01 01:00 libruntimeipcservice.so
+-rw-r--r--  1 root root    10736 2009-01-01 01:00 libschedulerservicehidl.so
+-rw-r--r--  1 root root    83248 2009-01-01 01:00 libscudo_wrapper.so
+-rw-r--r--  1 root root    42536 2009-01-01 01:00 libsdm-disp-apis.so
+-rw-r--r--  1 root root    93168 2009-01-01 01:00 libselinux.so
+-rw-r--r--  1 root root    93048 2009-01-01 01:00 libsensor.so
+-rw-r--r--  1 root root   185168 2009-01-01 01:00 libsensorclientutils.so
+-rw-r--r--  1 root root    22024 2009-01-01 01:00 libsensorcontrol.so
+-rw-r--r--  1 root root    46168 2009-01-01 01:00 libsensorprivacy.so
+-rw-r--r--  1 root root   213952 2009-01-01 01:00 libsensorservice.so
+-rw-r--r--  1 root root    50336 2009-01-01 01:00 libsensorservicehidl.so
+-rw-r--r--  1 root root    61560 2009-01-01 01:00 libsensorstream.so
+-rw-r--r--  1 root root    58672 2009-01-01 01:00 libservices.so
+-rw-r--r--  1 root root   539296 2009-01-01 01:00 libsfplugin_ccodec.so
+-rw-r--r--  1 root root   248544 2009-01-01 01:00 libsfplugin_ccodec_utils.so
+-rw-r--r--  1 root root   196200 2009-01-01 01:00 libsoftkeymasterdevice.so
+-rw-r--r--  1 root root    13768 2009-01-01 01:00 libsonic.so
+-rw-r--r--  1 root root   574192 2009-01-01 01:00 libsonivox.so
+-rw-r--r--  1 root root    47696 2009-01-01 01:00 libsoundpool.so
+-rw-r--r--  1 root root    64304 2009-01-01 01:00 libsoundtrigger.so
+-rw-r--r--  1 root root   136800 2009-01-01 01:00 libsoundtriggerservice.so
+-rw-r--r--  1 root root    30512 2009-01-01 01:00 libsparse.so
+-rw-r--r--  1 root root    16680 2009-01-01 01:00 libspeexresampler.so
+-rw-r--r--  1 root root   728752 2009-01-01 01:00 libsqlite.so
+-rw-r--r--  1 root root     5264 2009-01-01 01:00 libsquashfs_utils.so
+-rw-r--r--  1 root root   326488 2009-01-01 01:00 libssl.so
+-rw-r--r--  1 root root  1554000 2009-01-01 01:00 libstagefright.so
+-rw-r--r--  1 root root    70368 2009-01-01 01:00 libstagefright_amrnb_common.so
+-rw-r--r--  1 root root   163064 2009-01-01 01:00 libstagefright_bufferpool@2.0.1.so
+-rw-r--r--  1 root root   648152 2009-01-01 01:00 libstagefright_bufferqueue_helper.so
+-rw-r--r--  1 root root    27072 2009-01-01 01:00 libstagefright_codecbase.so
+-rw-r--r--  1 root root    11456 2009-01-01 01:00 libstagefright_enc_common.so
+-rw-r--r--  1 root root   177312 2009-01-01 01:00 libstagefright_foundation.so
+-rw-r--r--  1 root root    11840 2009-01-01 01:00 libstagefright_http_support.so
+-rw-r--r--  1 root root   285224 2009-01-01 01:00 libstagefright_omx.so
+-rw-r--r--  1 root root    16536 2009-01-01 01:00 libstagefright_omx_utils.so
+-rw-r--r--  1 root root    86976 2009-01-01 01:00 libstagefright_xmlparser.so
+-rw-r--r--  1 root root   170448 2009-01-01 01:00 libstatslog.so
+-rw-r--r--  1 root root     9584 2009-01-01 01:00 libstatssocket.so
+-rw-r--r--  1 root root    10768 2009-01-01 01:00 libstdc++.so
+-rw-r--r--  1 root root  1566520 2009-01-01 01:00 libsurfaceflinger.so
+-rw-r--r--  1 root root    15096 2009-01-01 01:00 libsuspend.so
+-rw-r--r--  1 root root     7664 2009-01-01 01:00 libsync.so
+-rw-r--r--  1 root root    45152 2009-01-01 01:00 libsysutils.so
+-rw-r--r--  1 root root   105352 2009-01-01 01:00 libtelemetry.so
+-rw-r--r--  1 root root     6088 2009-01-01 01:00 libtelemetry_accountcheckpoint.so
+-rw-r--r--  1 root root   123776 2009-01-01 01:00 libtelemetry_activesession.so
+-rw-r--r--  1 root root   162480 2009-01-01 01:00 libtelemetry_dynamictelemetry.so
+-rw-r--r--  1 root root   191216 2009-01-01 01:00 libtelemetry_eventfiltering.so
+-rw-r--r--  1 root root    21928 2009-01-01 01:00 libtelemetry_eventfiltering_performance.so
+-rw-r--r--  1 root root     4984 2009-01-01 01:00 libtelemetry_gatekeeperwrapper.so
+-rw-r--r--  1 root root    97984 2009-01-01 01:00 libtelemetry_identitymanager.so
+-rw-r--r--  1 root root    28712 2009-01-01 01:00 libtelemetry_packageinfomanager.so
+-rw-r--r--  1 root root    15608 2009-01-01 01:00 libtelemetry_performance.so
+-rw-r--r--  1 root root     7928 2009-01-01 01:00 libtelemetry_schemafetcher.so
+-rw-r--r--  1 root root    12848 2009-01-01 01:00 libtelemetry_sequencenumbermanager.so
+-rw-r--r--  1 root root   250512 2009-01-01 01:00 libtelemetry_sessionmanager.so
+-rw-r--r--  1 root root    29016 2009-01-01 01:00 libtelemetry_settingsmanager.so
+-rw-r--r--  1 root root    16824 2009-01-01 01:00 libtelemetry_useragentbuilder.so
+-rw-r--r--  1 root root   101800 2009-01-01 01:00 libtelemetryconfig.so
+-rw-r--r--  1 root root   317128 2009-01-01 01:00 libtelemetrydebug.so
+-rw-r--r--  1 root root   221232 2009-01-01 01:00 libtelemetryintake.so
+-rw-r--r--  1 root root    22408 2009-01-01 01:00 libtelemetrykvstore.so
+-rw-r--r--  1 root root   409304 2009-01-01 01:00 libtelemetryprocessor.so
+-rw-r--r--  1 root root   822736 2009-01-01 01:00 libtextclassifier.so
+-rw-r--r--  1 root root    14400 2009-01-01 01:00 libtextclassifier_hash.so
+-rw-r--r--  1 root root  1726872 2009-01-01 01:00 libtflite.so
+-rw-r--r--  1 root root    87600 2009-01-01 01:00 libtimestats_proto.so
+-rw-r--r--  1 root root    27064 2009-01-01 01:00 libtinyalsa.so
+-rw-r--r--  1 root root    63608 2009-01-01 01:00 libtinyxml2.so
+-rw-r--r--  1 root root    18776 2009-01-01 01:00 libtombstoned_client.so
+-rw-r--r--  1 root root   123800 2009-01-01 01:00 libtourguideapi.so
+-rw-r--r--  1 root root 25887872 2009-01-01 01:00 libtrackingengines.so
+-rw-r--r--  1 root root   161360 2009-01-01 01:00 libtrackinginjection-service.so
+-rw-r--r--  1 root root   191600 2009-01-01 01:00 libtrackingutils.so
+-rw-r--r--  1 root root   182168 2009-01-01 01:00 libui.so
+-rw-r--r--  1 root root   378352 2009-01-01 01:00 libunwindstack.so
+-rw-r--r--  1 root root    15992 2009-01-01 01:00 libusbhost.so
+-rw-r--r--  1 root root    27040 2009-01-01 01:00 libuserutil.so
+-rw-r--r--  1 root root    95904 2009-01-01 01:00 libusl-oculus_time_spent_event.so
+-rw-r--r--  1 root root    97176 2009-01-01 01:00 libusl-session_transition.so
+-rw-r--r--  1 root root   114640 2009-01-01 01:00 libutils.so
+-rw-r--r--  1 root root    21136 2009-01-01 01:00 libutilscallstack.so
+-rw-r--r--  1 root root    45088 2009-01-01 01:00 libvibrator.so
+-rw-r--r--  1 root root   551680 2009-01-01 01:00 libvintf.so
+-rw-r--r--  1 root root     6296 2009-01-01 01:00 libvndksupport.so
+-rw-r--r--  1 root root   209936 2009-01-01 01:00 libvoiceassistantnativeservice.so
+-rw-r--r--  1 root root   127456 2009-01-01 01:00 libvorbisidec.so
+-rw-r--r--  1 root root   274304 2009-01-01 01:00 libvrapi.so
+-rw-r--r--  1 root root    66528 2009-01-01 01:00 libvrfocus_interface-cpp.so
+-rw-r--r--  1 root root   487832 2009-01-01 01:00 libvrsensors-hidlwrapper.so
+-rw-r--r--  1 root root     8680 2009-01-01 01:00 libvrsensors-utils.so
+-rw-r--r--  1 root root   581256 2009-01-01 01:00 libvrui_jni.so
+-rw-r--r--  1 root root   171520 2009-01-01 01:00 libvulkan.so
+-rw-r--r--  1 root root    22040 2009-01-01 01:00 libwakelock.so
+-rw-r--r--  1 root root    32280 2009-01-01 01:00 libwakeword.so
+-rw-r--r--  1 root root     9424 2009-01-01 01:00 libwebviewchromium_loader.so
+-rw-r--r--  1 root root    15184 2009-01-01 01:00 libwebviewchromium_plat_support.so
+-rw-r--r--  1 root root     7680 2009-01-01 01:00 libwifi-service.so
+-rw-r--r--  1 root root    12760 2009-01-01 01:00 libwifi-system-iface.so
+-rw-r--r--  1 root root    70280 2009-01-01 01:00 libwifikeystorehal.so
+-rw-r--r--  1 root root   231336 2009-01-01 01:00 libwifitelemetry.so
+-rw-r--r--  1 root root   251664 2009-01-01 01:00 libwilhelm.so
+-rw-r--r--  1 root root  1085736 2009-01-01 01:00 libxml2.so
+-rw-r--r--  1 root root  3603448 2009-01-01 01:00 libxrspdhelper.so
+-rw-r--r--  1 root root  7520640 2009-01-01 01:00 libxrstreaminghost.oculus.so
+-rw-r--r--  1 root root     5384 2009-01-01 01:00 libyadi.so
+-rw-r--r--  1 root root    92520 2009-01-01 01:00 libz.so
+-rw-r--r--  1 root root    50400 2009-01-01 01:00 libziparchive.so
+-rw-r--r--  1 root root   459152 2009-01-01 01:00 netd_aidl_interface-V2-cpp.so
+-rw-r--r--  1 root root    34584 2009-01-01 01:00 netd_event_listener_interface-V1-cpp.so
+-rw-r--r--  1 root root    34584 2009-01-01 01:00 netd_event_listener_interface-cpp.so
+-rw-r--r--  1 root root    40168 2009-01-01 01:00 oemnetd_aidl_interface-cpp.so
+-rw-r--r--  1 root root     6744 2009-01-01 01:00 pppol2tp-android.so
+-rw-r--r--  1 root root     5328 2009-01-01 01:00 pppopptp-android.so
+-rw-r--r--  1 root root    90512 2009-01-01 01:00 server_configurable_flags.so
+-rw-r--r--  1 root root   300776 2009-01-01 01:00 slicer.so
+-rw-r--r--  1 root root    40648 2009-01-01 01:00 suspend_control_aidl_interface-cpp.so
+-rw-r--r--  1 root root    79744 2009-01-01 01:00 vendor.oculus.hardware.clocks@1.0.so
+-rw-r--r--  1 root root    80576 2009-01-01 01:00 vendor.oculus.hardware.graphics.composer@1.0.so
+-rw-r--r--  1 root root   112488 2009-01-01 01:00 vendor.oculus.hardware.graphics.composer@1.1.so
+-rw-r--r--  1 root root  1174528 2009-01-01 01:00 vendor.oculus.hardware.sensors@1.0.so
+-rw-r--r--  1 root root   125344 2009-01-01 01:00 vendor.oculus.hardware.sensors_java@1.0.so
+-rw-r--r--  1 root root    91704 2009-01-01 01:00 vendor.oculus.hardware.telemetry@1.0.so
+drwxr-xr-x  2 root root     4096 2009-01-01 01:00 vklayer
+drwxr-xr-x  2 root root    12288 2009-01-01 01:00 vndk-29
+drwxr-xr-x  3 root root     4096 2009-01-01 01:00 vndk-sp-29
+ls: /vendor/bin/msm_irqbalance: Permission denied
+ls: /vendor/bin/wpa_cli: Permission denied
+ls: /vendor/bin/pd-mapper: Permission denied
+ls: /vendor/bin/rmt_storage: Permission denied
+ls: /vendor/bin/irsc_util: Permission denied
+ls: /vendor/bin/cnss_diag: Permission denied
+ls: /vendor/bin/wifisighelper: Permission denied
+ls: /vendor/bin/qseecomd: Permission denied
+ls: /vendor/bin/tftp_server: Permission denied
+ls: /vendor/bin/grep: Permission denied
+ls: /vendor/bin/energy-awareness: Permission denied
+ls: /vendor/bin/logwrapper: Permission denied
+ls: /vendor/bin/awk: Permission denied
+ls: /vendor/bin/ssr_setup: Permission denied
+ls: /vendor/bin/board_init: Permission denied
+ls: /vendor/bin/catty: Permission denied
+ls: /vendor/bin/time_daemon: Permission denied
+ls: /vendor/bin/dumpsys: Permission denied
+ls: /vendor/bin/vndservicemanager: Permission denied
+ls: /vendor/bin/adsprpcd: Permission denied
+ls: /vendor/bin/vndservice: Permission denied
+ls: /vendor/bin/syncboss_consumers_ctl: Permission denied
+ls: /vendor/bin/fw_init: Permission denied
+ls: /vendor/bin/wattsup: Permission denied
+ls: /vendor/bin/toolbox: Permission denied
+ls: /vendor/bin/cnss-daemon: Permission denied
+ls: /vendor/bin/pm-proxy: Permission denied
+ls: /vendor/bin/pm-service: Permission denied
+ls: /vendor/bin/toybox_vendor: Permission denied
+ls: /vendor/bin/syncboss_input_tool: Permission denied
+ls: /vendor/bin/qrtr-ns: Permission denied
+
+/vendor/bin:
+total 264
+drwxr-xr-x  3 root shell   4096 2009-01-01 01:00 .
+drwxr-xr-x 11 root shell   4096 2009-01-01 01:00 ..
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 acpi -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 base64 -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 basename -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 bc -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 blockdev -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 cal -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 cat -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 chcon -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 chgrp -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 chmod -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 chown -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 chroot -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 chrt -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 cksum -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 clear -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 cmp -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 comm -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 cp -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 cpio -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 cut -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 date -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 dd -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 devmem -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 df -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 diff -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 dirname -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 dmesg -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 dos2unix -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 du -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 echo -> toybox_vendor
+lrwxr-xr-x  1 root shell      4 2009-01-01 01:00 egrep -> grep
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 env -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 expand -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 expr -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 fallocate -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 false -> toybox_vendor
+lrwxr-xr-x  1 root shell      4 2009-01-01 01:00 fgrep -> grep
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 file -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 find -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 flock -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 fmt -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 free -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 fsync -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 getconf -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 getenforce -> toybox_vendor
+lrwxr-xr-x  1 root shell      7 2009-01-01 01:00 getevent -> toolbox
+lrwxr-xr-x  1 root shell      7 2009-01-01 01:00 getprop -> toolbox
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 groups -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 gunzip -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 gzip -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 head -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 hostname -> toybox_vendor
+drwxr-xr-x  2 root shell   4096 2009-01-01 01:00 hw
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 hwclock -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 i2cdetect -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 i2cdump -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 i2cget -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 i2cset -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 iconv -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 id -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 ifconfig -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 inotifyd -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 insmod -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 install -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 ionice -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 iorenice -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 kill -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 killall -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 ln -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 load_policy -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 log -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 logname -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 losetup -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 ls -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 lsmod -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 lsof -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 lspci -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 lsusb -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 md5sum -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 microcom -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 mkdir -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 mkfifo -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 mknod -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 mkswap -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 mktemp -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 modinfo -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 modprobe -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 more -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 mount -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 mountpoint -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 mv -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 nc -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 netcat -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 netstat -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 nice -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 nl -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 nohup -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 nproc -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 nsenter -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 od -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 paste -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 patch -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 pgrep -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 pidof -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 pkill -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 pmap -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 printenv -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 printf -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 ps -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 pwd -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 readlink -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 realpath -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 renice -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 restorecon -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 rm -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 rmdir -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 rmmod -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 runcon -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 sed -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 sendevent -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 seq -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 setenforce -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 setprop -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 setsid -> toybox_vendor
+-rwxr-xr-x  1 root shell 256864 2009-01-01 01:00 sh
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 sha1sum -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 sha224sum -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 sha256sum -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 sha384sum -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 sha512sum -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 sleep -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 sort -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 split -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 start -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 stat -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 stop -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 strings -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 stty -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 swapoff -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 swapon -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 sync -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 sysctl -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 tac -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 tail -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 tar -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 taskset -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 tee -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 time -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 timeout -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 top -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 touch -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 tr -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 true -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 truncate -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 tty -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 ulimit -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 umount -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 uname -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 uniq -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 unix2dos -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 unlink -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 unshare -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 uptime -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 usleep -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 uudecode -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 uuencode -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 uuidgen -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 vmstat -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 watch -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 wc -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 which -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 whoami -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 xargs -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 xxd -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 xzcat -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 yes -> toybox_vendor
+lrwxr-xr-x  1 root shell     13 2009-01-01 01:00 zcat -> toybox_vendor
+
+/vendor/dsp:
+total 9920
+drwxr-xr-x  2 root shell    4096 2009-01-01 01:00 .
+drwxr-xr-x 11 root shell    4096 2009-01-01 01:00 ..
+-rw-r--r--  1 root root    25704 2009-01-01 01:00 AlacDecoderModule.so.1
+-rw-r--r--  1 root root    42096 2009-01-01 01:00 ApeDecoderModule.so.1
+-rw-r--r--  1 root root    75568 2009-01-01 01:00 AudioSphereModule.so.1
+-rw-r--r--  1 root root    25768 2009-01-01 01:00 CFCMModule.so.1
+-rw-r--r--  1 root root   573656 2009-01-01 01:00 DTS_HPX_MODULE.so.1
+-rw-r--r--  1 root root   252792 2009-01-01 01:00 DolbyMobileModule.so.1
+-rw-r--r--  1 root root   412784 2009-01-01 01:00 DolbySurroundModule.so.1
+-rw-r--r--  1 root root   197008 2009-01-01 01:00 EtsiEaacPlusEncAndCmnModule.so.1
+-rw-r--r--  1 root root    36176 2009-01-01 01:00 FlacDecoderModule.so.1
+-rw-r--r--  1 root root   295280 2009-01-01 01:00 HeaacDecoderModule.so.1
+-rw-r--r--  1 root root   117904 2009-01-01 01:00 SAPlusCmnModule.so.1
+-rw-r--r--  1 root root    83608 2009-01-01 01:00 VorbisDecoderModule.so.1
+-rw-r--r--  1 root root   377944 2009-01-01 01:00 WmaProDecoderModule.so.1
+-rw-r--r--  1 root root   128792 2009-01-01 01:00 WmaStdDecoderModule.so.1
+-rw-r--r--  1 root root   756812 2009-01-01 01:00 fastrpc_shell_0
+-rw-r--r--  1 root root   153296 2009-01-01 01:00 fluence_voiceplus_module.so.1
+-rw-r--r--  1 root root  4460472 2009-01-01 01:00 libc++.so.1
+-rw-r--r--  1 root root  1410520 2009-01-01 01:00 libc++abi.so.1
+-rw-r--r--  1 root root    54526 2009-01-01 01:00 libsysmon_skel.so
+-rw-r--r--  1 root root    63630 2009-01-01 01:00 libsysmondomain_skel.so
+-rw-r--r--  1 root root   559768 2009-01-01 01:00 mmecns_module.so.1
+
+/vendor/etc/init:
+total 152
+drwxr-xr-x  2 root shell 4096 2009-01-01 01:00 .
+drwxr-xr-x 11 root shell 4096 2009-01-01 01:00 ..
+-rw-r--r--  1 root root   552 2009-01-01 01:00 android.hardware.atrace@1.0-service.rc
+-rw-r--r--  1 root root   753 2009-01-01 01:00 android.hardware.audio@2.0-service.rc
+-rw-r--r--  1 root root   232 2009-01-01 01:00 android.hardware.bluetooth@1.0-service-qti.rc
+-rw-r--r--  1 root root   126 2009-01-01 01:00 android.hardware.boot@1.0-service.rc
+-rw-r--r--  1 root root   188 2009-01-01 01:00 android.hardware.cas@1.1-service.rc
+-rw-r--r--  1 root root   144 2009-01-01 01:00 android.hardware.configstore@1.1-service.rc
+-rw-r--r--  1 root root   311 2009-01-01 01:00 android.hardware.drm@1.0-service.rc
+-rw-r--r--  1 root root   580 2009-01-01 01:00 android.hardware.drm@1.2-service.clearkey.rc
+-rw-r--r--  1 root root   949 2009-01-01 01:00 android.hardware.drm@1.2-service.widevine.rc
+-rw-r--r--  1 root root   230 2009-01-01 01:00 android.hardware.dumpstate@1.0-service.ovr.rc
+-rw-r--r--  1 root root   132 2009-01-01 01:00 android.hardware.gatekeeper@1.0-service.rc
+-rw-r--r--  1 root root   293 2009-01-01 01:00 android.hardware.graphics.allocator@2.0-service.rc
+-rw-r--r--  1 root root   288 2009-01-01 01:00 android.hardware.graphics.composer@2.1-service.monterey.rc
+-rw-r--r--  1 root root  1149 2009-01-01 01:00 android.hardware.health@2.0-service.monterey.rc
+-rw-r--r--  1 root root   136 2009-01-01 01:00 android.hardware.keymaster@3.0-service.rc
+-rw-r--r--  1 root root   207 2009-01-01 01:00 android.hardware.light@2.0-service.monterey.rc
+-rw-r--r--  1 root root   205 2009-01-01 01:00 android.hardware.media.omx@1.0-service.rc
+-rw-r--r--  1 root root   132 2009-01-01 01:00 android.hardware.memtrack@1.0-service.rc
+-rw-r--r--  1 root root   215 2009-01-01 01:00 android.hardware.power.stats@1.0-service.monterey.rc
+-rw-r--r--  1 root root   246 2009-01-01 01:00 android.hardware.power@1.3-service-libperfmgr.rc
+-rw-r--r--  1 root root   200 2009-01-01 01:00 android.hardware.thermal@2.0-service.monterey.rc
+-rw-r--r--  1 root root   517 2009-01-01 01:00 android.hardware.usb@1.2-service.ovr.rc
+-rw-r--r--  1 root root   173 2009-01-01 01:00 android.hardware.wifi@1.0-service.rc
+-rw-r--r--  1 root root   103 2009-01-01 01:00 board_init.rc
+-rw-r--r--  1 root root   146 2009-01-01 01:00 fw_init.rc
+-rw-r--r--  1 root root   255 2009-01-01 01:00 fw_init_bootstat.rc
+-rw-r--r--  1 root root   665 2009-01-01 01:00 hostapd.android.rc
+-rw-r--r--  1 root root   365 2009-01-01 01:00 init.time_daemon.rc
+-rw-r--r--  1 root root   128 2009-01-01 01:00 vendor.oculus.hardware.catty@1.0-service.rc
+-rw-r--r--  1 root root   289 2009-01-01 01:00 vendor.oculus.hardware.devicecert@1.0-service.monterey.rc
+-rw-r--r--  1 root root   244 2009-01-01 01:00 vendor.oculus.hardware.sensors@1.0-iad.rc
+-rw-r--r--  1 root root   991 2009-01-01 01:00 vendor.oculus.hardware.sensors@1.0-service.rc
+-rw-r--r--  1 root root   255 2009-01-01 01:00 vendor.qti.rmt_storage.rc
+-rw-r--r--  1 root root   215 2009-01-01 01:00 vendor.qti.tftp.rc
+-rw-r--r--  1 root root   199 2009-01-01 01:00 vndservicemanager.rc
+-rw-r--r--  1 root root   156 2009-01-01 01:00 wifisighelper.rc
+ls: /vendor/firmware/adsp.b02: Permission denied
+ls: /vendor/firmware/apnv10.bin: Permission denied
+ls: /vendor/firmware/adsp.b04: Permission denied
+ls: /vendor/firmware/lcon-downgrade.bin: Permission denied
+ls: /vendor/firmware/adsp.b11: Permission denied
+ls: /vendor/firmware/crbtfw11.tlv: Permission denied
+ls: /vendor/firmware/crbtfw20.tlv: Permission denied
+ls: /vendor/firmware/crnv20.bin: Permission denied
+ls: /vendor/firmware/crnv11.bin: Permission denied
+ls: /vendor/firmware/adsp.b01: Permission denied
+ls: /vendor/firmware/a540_gpmu.fw2: Permission denied
+ls: /vendor/firmware/adsp.b00: Permission denied
+ls: /vendor/firmware/adsp.b03: Permission denied
+ls: /vendor/firmware/adsp.b08: Permission denied
+ls: /vendor/firmware/a530_pm4.fw: Permission denied
+ls: /vendor/firmware/crnv21.bin: Permission denied
+ls: /vendor/firmware/adsp.b05: Permission denied
+ls: /vendor/firmware/lcon_archive.bin: Permission denied
+ls: /vendor/firmware/apbtfw10.tlv: Permission denied
+ls: /vendor/firmware/syncboss.bin: Permission denied
+ls: /vendor/firmware/adsp.b09: Permission denied
+ls: /vendor/firmware/adsp.mdt: Permission denied
+ls: /vendor/firmware/adsp.b06: Permission denied
+ls: /vendor/firmware/crbtfw21.tlv: Permission denied
+ls: /vendor/firmware/CM710X.bin: Permission denied
+ls: /vendor/firmware/a530_pfp.fw: Permission denied
+
+/vendor/firmware:
+total 12
+drwxr-xr-x  3 root shell 4096 2009-01-01 01:00 .
+drwxr-xr-x 11 root shell 4096 2009-01-01 01:00 ..
+lrw-r--r--  1 root root    28 2009-01-01 01:00 PROX_PS_CAL_VERSION -> /persist/PROX_PS_CAL_VERSION
+lrw-r--r--  1 root root    21 2009-01-01 01:00 PROX_PS_CANC -> /persist/PROX_PS_CANC
+lrw-r--r--  1 root root    21 2009-01-01 01:00 PROX_PS_THDH -> /persist/PROX_PS_THDH
+lrw-r--r--  1 root root    21 2009-01-01 01:00 PROX_PS_THDL -> /persist/PROX_PS_THDL
+lrw-r--r--  1 root root    32 2009-01-01 01:00 cycle_stats.bin -> /persist/battery/cycle_stats.bin
+lrw-r--r--  1 root root    35 2009-01-01 01:00 msadp -> /dev/block/bootdevice/by-name/msadp
+drwxr-xr-x  3 root shell 4096 2009-01-01 01:00 wlan
+ls: /vendor/lib/android.hardware.audio.common-util.so: Permission denied
+ls: /vendor/lib/android.hardware.audio.common@5.0-util.so: Permission denied
+ls: /vendor/lib/libAlacSwDec.so: Permission denied
+ls: /vendor/lib/libApeSwDec.so: Permission denied
+ls: /vendor/lib/libFlacSwDec.so: Permission denied
+ls: /vendor/lib/libGPreqcancel.so: Permission denied
+ls: /vendor/lib/libGPreqcancel_svc.so: Permission denied
+ls: /vendor/lib/libI420colorconvert.so: Permission denied
+ls: /vendor/lib/libOmxAacDec.so: Permission denied
+ls: /vendor/lib/libOmxAacEnc.so: Permission denied
+ls: /vendor/lib/libOmxAlacDec.so: Permission denied
+ls: /vendor/lib/libOmxAlacDecSw.so: Permission denied
+ls: /vendor/lib/libOmxAmrDec.so: Permission denied
+ls: /vendor/lib/libOmxAmrEnc.so: Permission denied
+ls: /vendor/lib/libOmxAmrwbplusDec.so: Permission denied
+ls: /vendor/lib/libOmxApeDec.so: Permission denied
+ls: /vendor/lib/libOmxApeDecSw.so: Permission denied
+ls: /vendor/lib/libOmxDsdDec.so: Permission denied
+ls: /vendor/lib/libOmxEvrcDec.so: Permission denied
+ls: /vendor/lib/libOmxEvrcEnc.so: Permission denied
+ls: /vendor/lib/libOmxQcelp13Dec.so: Permission denied
+ls: /vendor/lib/libOmxQcelp13Enc.so: Permission denied
+ls: /vendor/lib/libOmxVpp.so: Permission denied
+ls: /vendor/lib/libOmxWmaDec.so: Permission denied
+ls: /vendor/lib/libQSEEComAPI.so: Permission denied
+ls: /vendor/lib/libStDrvInt.so: Permission denied
+ls: /vendor/lib/libacdb-fts.so: Permission denied
+ls: /vendor/lib/libacdbloader.so: Permission denied
+ls: /vendor/lib/libacdbrtac.so: Permission denied
+ls: /vendor/lib/libadiertac.so: Permission denied
+ls: /vendor/lib/libadm.so: Permission denied
+ls: /vendor/lib/libadsp_default_listener.so: Permission denied
+ls: /vendor/lib/libadsprpc.so: Permission denied
+ls: /vendor/lib/libalsautils.so: Permission denied
+ls: /vendor/lib/libaudcal.so: Permission denied
+ls: /vendor/lib/libaudio_log_utils.so: Permission denied
+ls: /vendor/lib/libavservices_minijail_vendor.so: Permission denied
+ls: /vendor/lib/libbthost_if.so: Permission denied
+ls: /vendor/lib/libbtnv.so: Permission denied
+ls: /vendor/lib/libc2d30_bltlib.so: Permission denied
+ls: /vendor/lib/libcdsprpc.so: Permission denied
+ls: /vendor/lib/libcld80211.so: Permission denied
+ls: /vendor/lib/libcpion.so: Permission denied
+ls: /vendor/lib/libcppf.so: Permission denied
+ls: /vendor/lib/libdiag.so: Permission denied
+ls: /vendor/lib/libdisp-aba.so: Permission denied
+ls: /vendor/lib/libdrmfs.so: Permission denied
+ls: /vendor/lib/libdrmtime.so: Permission denied
+ls: /vendor/lib/libdsutils.so: Permission denied
+ls: /vendor/lib/libeffects.so: Permission denied
+ls: /vendor/lib/libeffectsconfig.so: Permission denied
+ls: /vendor/lib/libgpu_tonemapper.so: Permission denied
+ls: /vendor/lib/libhdcpsrm.so: Permission denied
+ls: /vendor/lib/libhdr_tm.so: Permission denied
+ls: /vendor/lib/libidl.so: Permission denied
+ls: /vendor/lib/libkeymaster3device.so: Permission denied
+ls: /vendor/lib/libmdmdetect.so: Permission denied
+ls: /vendor/lib/libmdsprpc.so: Permission denied
+ls: /vendor/lib/libmm-color-convertor.so: Permission denied
+ls: /vendor/lib/libmm-omxcore.so: Permission denied
+ls: /vendor/lib/libnbaio_mono.so: Permission denied
+ls: /vendor/lib/liboemcrypto.so: Permission denied
+ls: /vendor/lib/libopus.so: Permission denied
+ls: /vendor/lib/libosutils.so: Permission denied
+ls: /vendor/lib/libovr_crashreporter_remote.so: Permission denied
+ls: /vendor/lib/libperipheral_client.so: Permission denied
+ls: /vendor/lib/libqcci_legacy.so: Permission denied
+ls: /vendor/lib/libqisl.so: Permission denied
+ls: /vendor/lib/libqmi.so: Permission denied
+ls: /vendor/lib/libqmi_cci.so: Permission denied
+ls: /vendor/lib/libqmi_client_helper.so: Permission denied
+ls: /vendor/lib/libqmi_client_qmux.so: Permission denied
+ls: /vendor/lib/libqmi_common_so.so: Permission denied
+ls: /vendor/lib/libqmi_csi.so: Permission denied
+ls: /vendor/lib/libqmi_encdec.so: Permission denied
+ls: /vendor/lib/libqmiservices.so: Permission denied
+ls: /vendor/lib/libqseed3.so: Permission denied
+ls: /vendor/lib/libqsocket.so: Permission denied
+ls: /vendor/lib/libqtigef.so: Permission denied
+ls: /vendor/lib/librpmb.so: Permission denied
+ls: /vendor/lib/libsdm-color.so: Permission denied
+ls: /vendor/lib/libsdm-diag.so: Permission denied
+ls: /vendor/lib/libsdmcore.so: Permission denied
+ls: /vendor/lib/libsdmextension.so: Permission denied
+ls: /vendor/lib/libsdmutils.so: Permission denied
+ls: /vendor/lib/libsdsprpc.so: Permission denied
+ls: /vendor/lib/libsecureui.so: Permission denied
+ls: /vendor/lib/libsecureui_svcsock.so: Permission denied
+ls: /vendor/lib/libspl.so: Permission denied
+ls: /vendor/lib/libssd.so: Permission denied
+ls: /vendor/lib/libstagefright_amrnb_common.so: Permission denied
+ls: /vendor/lib/libstagefright_enc_common.so: Permission denied
+ls: /vendor/lib/libstagefright_flacdec.so: Permission denied
+ls: /vendor/lib/libstagefright_soft_aacdec.so: Permission denied
+ls: /vendor/lib/libstagefright_soft_aacenc.so: Permission denied
+ls: /vendor/lib/libstagefright_soft_amrnbenc.so: Permission denied
+ls: /vendor/lib/libstagefright_soft_amrwbenc.so: Permission denied
+ls: /vendor/lib/libstagefright_soft_flacdec.so: Permission denied
+ls: /vendor/lib/libstagefright_soft_flacenc.so: Permission denied
+ls: /vendor/lib/libstagefright_soft_mp3dec.so: Permission denied
+ls: /vendor/lib/libstagefright_soft_opusdec.so: Permission denied
+ls: /vendor/lib/libstagefright_soft_rawdec.so: Permission denied
+ls: /vendor/lib/libstagefright_soft_vorbisdec.so: Permission denied
+ls: /vendor/lib/libstagefright_softomx.so: Permission denied
+ls: /vendor/lib/libstagefright_softomx_plugin.so: Permission denied
+ls: /vendor/lib/libstagefrighthw.so: Permission denied
+ls: /vendor/lib/libsystem_health_mon.so: Permission denied
+ls: /vendor/lib/libtime_genoff.so: Permission denied
+ls: /vendor/lib/libtinycompress.so: Permission denied
+ls: /vendor/lib/libtinyxml.so: Permission denied
+ls: /vendor/lib/libvorbisidec.so: Permission denied
+ls: /vendor/lib/libvpphvx.so: Permission denied
+ls: /vendor/lib/libvpplibrary.so: Permission denied
+ls: /vendor/lib/libwebrtc_audio_preprocessing.so: Permission denied
+ls: /vendor/lib/libwifi-hal-ctrl.so: Permission denied
+ls: /vendor/lib/libwifi-hal-qcom.so: Permission denied
+ls: /vendor/lib/libwpa_client.so: Permission denied
+ls: /vendor/lib/libxml.so: Permission denied
+ls: /vendor/lib/vendor.qti.hardware.tui_comm@1.0.so: Permission denied
+
+/vendor/lib:
+total 16800
+drwxr-xr-x  8 root shell     8192 2009-01-01 01:00 .
+drwxr-xr-x 11 root shell     4096 2009-01-01 01:00 ..
+drwxr-xr-x  2 root shell     4096 2009-01-01 01:00 egl
+drwxr-xr-x  2 root shell     4096 2009-01-01 01:00 hw
+-rw-r--r--  1 root root    161792 2009-01-01 01:00 libC2D2.so
+lrw-r--r--  1 root root        20 2009-01-01 01:00 libEGL_adreno.so -> egl/libEGL_adreno.so
+lrw-r--r--  1 root root        23 2009-01-01 01:00 libGLESv2_adreno.so -> egl/libGLESv2_adreno.so
+-rw-r--r--  1 root root     22436 2009-01-01 01:00 libOmxCore.so
+-rw-r--r--  1 root root    256632 2009-01-01 01:00 libOmxVdec.so
+-rw-r--r--  1 root root    255340 2009-01-01 01:00 libOmxVenc.so
+-rw-r--r--  1 root root    145552 2009-01-01 01:00 libRSDriver_adreno.so
+-rw-r--r--  1 root root     82612 2009-01-01 01:00 libadreno_utils.so
+-rw-r--r--  1 root root     20008 2009-01-01 01:00 libbccQTI.so
+-rw-r--r--  1 root root     12144 2009-01-01 01:00 libc2dcolorconvert.so
+-rw-r--r--  1 root root     45216 2009-01-01 01:00 libdrm.so
+-rw-r--r--  1 root root      9260 2009-01-01 01:00 libdrmutils.so
+-rw-r--r--  1 root root     15748 2009-01-01 01:00 libgrallocutils.so
+-rw-r--r--  1 root root   2139780 2009-01-01 01:00 libgsl.so
+-rw-r--r--  1 root root      5040 2009-01-01 01:00 libhypv_intercept.so
+-rw-r--r--  1 root root    958444 2009-01-01 01:00 libllvm-glnext.so
+-rw-r--r--  1 root root  11156480 2009-01-01 01:00 libllvm-qgl.so
+-rw-r--r--  1 root root     11352 2009-01-01 01:00 libqdMetaData.so
+-rw-r--r--  1 root root     24484 2009-01-01 01:00 libqdutils.so
+-rw-r--r--  1 root root     34940 2009-01-01 01:00 libqservice.so
+-rw-r--r--  1 root root    592532 2009-01-01 01:00 librs_adreno.so
+-rw-r--r--  1 root root     24116 2009-01-01 01:00 librs_adreno_sha1.so
+drwxr-xr-x  2 root shell     4096 2009-01-01 01:00 mediacas
+drwxr-xr-x  2 root shell     4096 2009-01-01 01:00 mediadrm
+drwxr-xr-x  3 root shell     4096 2009-01-01 01:00 rfsa
+drwxr-xr-x  2 root shell     4096 2009-01-01 01:00 soundfx
+-rw-r--r--  1 root root     95400 2009-01-01 01:00 vendor.display.config@1.0.so
+-rw-r--r--  1 root root     79180 2009-01-01 01:00 vendor.display.config@1.1.so
+-rw-r--r--  1 root root     83184 2009-01-01 01:00 vendor.display.config@1.2.so
+-rw-r--r--  1 root root     87272 2009-01-01 01:00 vendor.display.config@1.3.so
+-rw-r--r--  1 root root     92476 2009-01-01 01:00 vendor.display.config@1.4.so
+-rw-r--r--  1 root root     96000 2009-01-01 01:00 vendor.display.config@1.5.so
+-rw-r--r--  1 root root    101688 2009-01-01 01:00 vendor.display.config@1.6.so
+-rw-r--r--  1 root root    116820 2009-01-01 01:00 vendor.display.config@1.7.so
+-rw-r--r--  1 root root    115812 2009-01-01 01:00 vendor.display.config@1.8.so
+-rw-r--r--  1 root root    121816 2009-01-01 01:00 vendor.display.config@1.9.so
+-rw-r--r--  1 root root     60656 2009-01-01 01:00 vendor.oculus.hardware.graphics.composer@1.0.so
+-rw-r--r--  1 root root     85164 2009-01-01 01:00 vendor.oculus.hardware.graphics.composer@1.1.so
+ls: /vendor/lib64/android.hardware.audio.common-util.so: Permission denied
+ls: /vendor/lib64/android.hardware.audio.common@5.0-util.so: Permission denied
+ls: /vendor/lib64/libAlacSwDec.so: Permission denied
+ls: /vendor/lib64/libApeSwDec.so: Permission denied
+ls: /vendor/lib64/libFlacSwDec.so: Permission denied
+ls: /vendor/lib64/libGPreqcancel.so: Permission denied
+ls: /vendor/lib64/libGPreqcancel_svc.so: Permission denied
+ls: /vendor/lib64/libI420colorconvert.so: Permission denied
+ls: /vendor/lib64/libOmxAacDec.so: Permission denied
+ls: /vendor/lib64/libOmxAacEnc.so: Permission denied
+ls: /vendor/lib64/libOmxAlacDec.so: Permission denied
+ls: /vendor/lib64/libOmxAlacDecSw.so: Permission denied
+ls: /vendor/lib64/libOmxAmrDec.so: Permission denied
+ls: /vendor/lib64/libOmxAmrEnc.so: Permission denied
+ls: /vendor/lib64/libOmxAmrwbplusDec.so: Permission denied
+ls: /vendor/lib64/libOmxApeDec.so: Permission denied
+ls: /vendor/lib64/libOmxApeDecSw.so: Permission denied
+ls: /vendor/lib64/libOmxEvrcDec.so: Permission denied
+ls: /vendor/lib64/libOmxEvrcEnc.so: Permission denied
+ls: /vendor/lib64/libOmxQcelp13Dec.so: Permission denied
+ls: /vendor/lib64/libOmxQcelp13Enc.so: Permission denied
+ls: /vendor/lib64/libOmxVpp.so: Permission denied
+ls: /vendor/lib64/libOmxWmaDec.so: Permission denied
+ls: /vendor/lib64/libQSEEComAPI.so: Permission denied
+ls: /vendor/lib64/libStDrvInt.so: Permission denied
+ls: /vendor/lib64/libacdb-fts.so: Permission denied
+ls: /vendor/lib64/libacdbloader.so: Permission denied
+ls: /vendor/lib64/libacdbrtac.so: Permission denied
+ls: /vendor/lib64/libadiertac.so: Permission denied
+ls: /vendor/lib64/libadsp_default_listener.so: Permission denied
+ls: /vendor/lib64/libadsprpc.so: Permission denied
+ls: /vendor/lib64/libalsautils.so: Permission denied
+ls: /vendor/lib64/libaudcal.so: Permission denied
+ls: /vendor/lib64/libaudio_log_utils.so: Permission denied
+ls: /vendor/lib64/libbthost_if.so: Permission denied
+ls: /vendor/lib64/libbtnv.so: Permission denied
+ls: /vendor/lib64/libc2d30_bltlib.so: Permission denied
+ls: /vendor/lib64/libcalibrationstore.so: Permission denied
+ls: /vendor/lib64/libcamerahal.so: Permission denied
+ls: /vendor/lib64/libcdsprpc.so: Permission denied
+ls: /vendor/lib64/libcld80211.so: Permission denied
+ls: /vendor/lib64/libcpion.so: Permission denied
+ls: /vendor/lib64/libdevicecertservice.so: Permission denied
+ls: /vendor/lib64/libdevicecertserviceimpl.so: Permission denied
+ls: /vendor/lib64/libdeviceid.so: Permission denied
+ls: /vendor/lib64/libdiag.so: Permission denied
+ls: /vendor/lib64/libdisp-aba.so: Permission denied
+ls: /vendor/lib64/libdrm.so: Permission denied
+ls: /vendor/lib64/libdrmfs.so: Permission denied
+ls: /vendor/lib64/libdrmtime.so: Permission denied
+ls: /vendor/lib64/libdsutils.so: Permission denied
+ls: /vendor/lib64/libeffects.so: Permission denied
+ls: /vendor/lib64/libeffectsconfig.so: Permission denied
+ls: /vendor/lib64/libeventflaghelper.so: Permission denied
+ls: /vendor/lib64/libgammacompression.so: Permission denied
+ls: /vendor/lib64/libgammacorrection.so: Permission denied
+ls: /vendor/lib64/libgflags.so: Permission denied
+ls: /vendor/lib64/libgpu_tonemapper.so: Permission denied
+ls: /vendor/lib64/libhdcpsrm.so: Permission denied
+ls: /vendor/lib64/libhdr_tm.so: Permission denied
+ls: /vendor/lib64/libhealthbattery.so: Permission denied
+ls: /vendor/lib64/libhealthstorage.so: Permission denied
+ls: /vendor/lib64/libhwc2on1adapter.so: Permission denied
+ls: /vendor/lib64/libhwc2onfbadapter.so: Permission denied
+ls: /vendor/lib64/libhwminijail.so: Permission denied
+ls: /vendor/lib64/libiad-utils.so: Permission denied
+ls: /vendor/lib64/libiad.so: Permission denied
+ls: /vendor/lib64/libidl.so: Permission denied
+ls: /vendor/lib64/libimagebuffer.so: Permission denied
+ls: /vendor/lib64/libjson.so: Permission denied
+ls: /vendor/lib64/libkeymaster3device.so: Permission denied
+ls: /vendor/lib64/libkeymaster4support.so: Permission denied
+ls: /vendor/lib64/libkeystore-engine-wifi-hidl.so: Permission denied
+ls: /vendor/lib64/libkeystore-wifi-hidl.so: Permission denied
+ls: /vendor/lib64/liblight.so: Permission denied
+ls: /vendor/lib64/libmdmdetect.so: Permission denied
+ls: /vendor/lib64/libmdsprpc.so: Permission denied
+ls: /vendor/lib64/libmm-color-convertor.so: Permission denied
+ls: /vendor/lib64/libmm-omxcore.so: Permission denied
+ls: /vendor/lib64/libnbaio_mono.so: Permission denied
+ls: /vendor/lib64/liboemcrypto.so: Permission denied
+ls: /vendor/lib64/libosutils.so: Permission denied
+ls: /vendor/lib64/libovr_crashreporter_remote.so: Permission denied
+ls: /vendor/lib64/libovrperfmgr.so: Permission denied
+ls: /vendor/lib64/libperipheral_client.so: Permission denied
+ls: /vendor/lib64/libpowerstats.so: Permission denied
+ls: /vendor/lib64/libqcameradriver.so: Permission denied
+ls: /vendor/lib64/libqcamerahal.so: Permission denied
+ls: /vendor/lib64/libqcameraoculushal.so: Permission denied
+ls: /vendor/lib64/libqcci_legacy.so: Permission denied
+ls: /vendor/lib64/libqisl.so: Permission denied
+ls: /vendor/lib64/libqmi.so: Permission denied
+ls: /vendor/lib64/libqmi_cci.so: Permission denied
+ls: /vendor/lib64/libqmi_client_helper.so: Permission denied
+ls: /vendor/lib64/libqmi_client_qmux.so: Permission denied
+ls: /vendor/lib64/libqmi_common_so.so: Permission denied
+ls: /vendor/lib64/libqmi_csi.so: Permission denied
+ls: /vendor/lib64/libqmi_encdec.so: Permission denied
+ls: /vendor/lib64/libqmiservices.so: Permission denied
+ls: /vendor/lib64/libqrtr.so: Permission denied
+ls: /vendor/lib64/libqseed3.so: Permission denied
+ls: /vendor/lib64/libqsocket.so: Permission denied
+ls: /vendor/lib64/libqtigef.so: Permission denied
+ls: /vendor/lib64/librpmb.so: Permission denied
+ls: /vendor/lib64/libsdm-color.so: Permission denied
+ls: /vendor/lib64/libsdm-diag.so: Permission denied
+ls: /vendor/lib64/libsdmcore.so: Permission denied
+ls: /vendor/lib64/libsdmextension.so: Permission denied
+ls: /vendor/lib64/libsdmutils.so: Permission denied
+ls: /vendor/lib64/libsdsprpc.so: Permission denied
+ls: /vendor/lib64/libsecureui.so: Permission denied
+ls: /vendor/lib64/libsecureui_svcsock.so: Permission denied
+ls: /vendor/lib64/libsensortelemetry.so: Permission denied
+ls: /vendor/lib64/libspl.so: Permission denied
+ls: /vendor/lib64/libssd.so: Permission denied
+ls: /vendor/lib64/libstagefrighthw.so: Permission denied
+ls: /vendor/lib64/libsyncboss.so: Permission denied
+ls: /vendor/lib64/libsystem_health_mon.so: Permission denied
+ls: /vendor/lib64/libtelemetry.so: Permission denied
+ls: /vendor/lib64/libthermalutils.so: Permission denied
+ls: /vendor/lib64/libtime_genoff.so: Permission denied
+ls: /vendor/lib64/libtinycompress.so: Permission denied
+ls: /vendor/lib64/libtinyxml.so: Permission denied
+ls: /vendor/lib64/libuvcbase.so: Permission denied
+ls: /vendor/lib64/libuvcconfiguration.so: Permission denied
+ls: /vendor/lib64/libvpphvx.so: Permission denied
+ls: /vendor/lib64/libvpplibrary.so: Permission denied
+ls: /vendor/lib64/libvrsensors-hidlwrapper.so: Permission denied
+ls: /vendor/lib64/libvrsensors-utils.so: Permission denied
+ls: /vendor/lib64/libwavreader.so: Permission denied
+ls: /vendor/lib64/libwebrtc_audio_preprocessing.so: Permission denied
+ls: /vendor/lib64/libwifi-hal-ctrl.so: Permission denied
+ls: /vendor/lib64/libwifi-hal-qcom.so: Permission denied
+ls: /vendor/lib64/libwifi-hal.so: Permission denied
+ls: /vendor/lib64/libwpa_client.so: Permission denied
+ls: /vendor/lib64/libwvhidl.so: Permission denied
+ls: /vendor/lib64/libxml.so: Permission denied
+ls: /vendor/lib64/vendor.oculus.hardware.catty@1.0.so: Permission denied
+ls: /vendor/lib64/vendor.oculus.hardware.clocks@1.0.so: Permission denied
+ls: /vendor/lib64/vendor.oculus.hardware.devicecert@1.0.so: Permission denied
+ls: /vendor/lib64/vendor.oculus.hardware.light@2.0.so: Permission denied
+ls: /vendor/lib64/vendor.oculus.hardware.sensors@1.0.so: Permission denied
+ls: /vendor/lib64/vendor.oculus.hardware.sensors_java@1.0.so: Permission denied
+ls: /vendor/lib64/vendor.oculus.hardware.telemetry@1.0.so: Permission denied
+ls: /vendor/lib64/vendor.oculus.hardware.wifi.supplicant@1.0.so: Permission denied
+ls: /vendor/lib64/vendor.qti.hardware.tui_comm@1.0.so: Permission denied
+
+/vendor/lib64:
+total 21704
+drwxr-xr-x  7 root shell     8192 2009-01-01 01:00 .
+drwxr-xr-x 11 root shell     4096 2009-01-01 01:00 ..
+drwxr-xr-x  2 root shell     4096 2009-01-01 01:00 egl
+drwxr-xr-x  2 root shell     4096 2009-01-01 01:00 hw
+-rw-r--r--  1 root root    188408 2009-01-01 01:00 libC2D2.so
+lrw-r--r--  1 root root        20 2009-01-01 01:00 libEGL_adreno.so -> egl/libEGL_adreno.so
+lrw-r--r--  1 root root        23 2009-01-01 01:00 libGLESv2_adreno.so -> egl/libGLESv2_adreno.so
+-rw-r--r--  1 root root     36600 2009-01-01 01:00 libOmxCore.so
+-rw-r--r--  1 root root    311504 2009-01-01 01:00 libOmxVdec.so
+-rw-r--r--  1 root root    307208 2009-01-01 01:00 libOmxVenc.so
+-rw-r--r--  1 root root    199536 2009-01-01 01:00 libRSDriver_adreno.so
+-rw-r--r--  1 root root     85336 2009-01-01 01:00 libadreno_utils.so
+-rw-r--r--  1 root root     14912 2009-01-01 01:00 libbccQTI.so
+-rw-r--r--  1 root root     16200 2009-01-01 01:00 libc2dcolorconvert.so
+-rw-r--r--  1 root root     12200 2009-01-01 01:00 libdrmutils.so
+-rw-r--r--  1 root root     21264 2009-01-01 01:00 libgrallocutils.so
+-rw-r--r--  1 root root   2210632 2009-01-01 01:00 libgsl.so
+-rw-r--r--  1 root root      6616 2009-01-01 01:00 libhypv_intercept.so
+-rw-r--r--  1 root root   1222000 2009-01-01 01:00 libllvm-glnext.so
+-rw-r--r--  1 root root  15346920 2009-01-01 01:00 libllvm-qgl.so
+-rw-r--r--  1 root root     14384 2009-01-01 01:00 libqdMetaData.so
+-rw-r--r--  1 root root     28416 2009-01-01 01:00 libqdutils.so
+-rw-r--r--  1 root root     51304 2009-01-01 01:00 libqservice.so
+-rw-r--r--  1 root root    632936 2009-01-01 01:00 librs_adreno.so
+-rw-r--r--  1 root root     15008 2009-01-01 01:00 librs_adreno_sha1.so
+drwxr-xr-x  2 root shell     4096 2009-01-01 01:00 mediacas
+drwxr-xr-x  2 root shell     4096 2009-01-01 01:00 mediadrm
+drwxr-xr-x  2 root shell     4096 2009-01-01 01:00 soundfx
+-rw-r--r--  1 root root    127792 2009-01-01 01:00 vendor.display.config@1.0.so
+-rw-r--r--  1 root root    104672 2009-01-01 01:00 vendor.display.config@1.1.so
+-rw-r--r--  1 root root    109752 2009-01-01 01:00 vendor.display.config@1.2.so
+-rw-r--r--  1 root root    115032 2009-01-01 01:00 vendor.display.config@1.3.so
+-rw-r--r--  1 root root    121752 2009-01-01 01:00 vendor.display.config@1.4.so
+-rw-r--r--  1 root root    126424 2009-01-01 01:00 vendor.display.config@1.5.so
+-rw-r--r--  1 root root    133696 2009-01-01 01:00 vendor.display.config@1.6.so
+-rw-r--r--  1 root root    153888 2009-01-01 01:00 vendor.display.config@1.7.so
+-rw-r--r--  1 root root    152032 2009-01-01 01:00 vendor.display.config@1.8.so
+-rw-r--r--  1 root root    159488 2009-01-01 01:00 vendor.display.config@1.9.so
+-rw-r--r--  1 root root     80584 2009-01-01 01:00 vendor.oculus.hardware.graphics.composer@1.0.so
+-rw-r--r--  1 root root    112488 2009-01-01 01:00 vendor.oculus.hardware.graphics.composer@1.1.so

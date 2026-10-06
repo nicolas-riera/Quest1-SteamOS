@@ -1,0 +1,21 @@
+# Device dumps, firmware and Meta blobs: personal use only, never in history
+backup/
+roms/
+build/
+
+# Third-party binaries
+tools/magisk/
+src/qbridge/third_party/
+
+# Build outputs
+*.o
+*.so
+*.so.*
+*.img
+*.ko
+src/steamvr-quest1/quest1/bin/
+
+# Editor / tool state
+.vscode/
+.claude/
+__pycache__/

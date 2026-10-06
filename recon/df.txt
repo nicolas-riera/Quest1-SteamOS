@@ -1,0 +1,7 @@
+Filesystem       Size  Used Avail Use% Mounted on
+/dev/root        2.4G  1.8G  541M  79% /
+tmpfs            1.8G  616K  1.8G   1% /dev
+tmpfs            1.8G     0  1.8G   0% /mnt
+tmpfs            1.8G     0  1.8G   0% /apex
+/dev/block/sda10  51G  1.5G   50G   4% /data
+/data/media       51G  1.5G   50G   4% /storage/emulated

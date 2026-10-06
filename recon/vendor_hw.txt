@@ -1,0 +1,85 @@
+/vendor/etc/vintf:
+compatibility_matrix.xml
+manifest
+manifest.xml
+
+/vendor/lib64/egl:
+eglSubDriverAndroid.so
+libEGL_adreno.so
+libGLESv1_CM_adreno.so
+libGLESv2_adreno.so
+libQTapGLES.so
+libq3dtools_adreno.so
+libq3dtools_esx.so
+ls: /vendor/lib64/hw/android.hardware.keymaster@3.0-impl.so: Permission denied
+ls: /vendor/lib64/hw/gatekeeper.msm8998.so: Permission denied
+ls: /vendor/lib64/hw/android.hardware.audio.effect@5.0-impl.so: Permission denied
+ls: /vendor/lib64/hw/android.hardware.soundtrigger@2.2-impl.so: Permission denied
+ls: /vendor/lib64/hw/android.hardware.graphics.allocator@2.0-impl.so: Permission denied
+ls: /vendor/lib64/hw/android.hardware.gatekeeper@1.0-impl.so: Permission denied
+ls: /vendor/lib64/hw/android.hardware.boot@1.0-impl.so: Permission denied
+ls: /vendor/lib64/hw/bootctrl.msm8998.so: Permission denied
+ls: /vendor/lib64/hw/android.hardware.audio@5.0-impl.so: Permission denied
+ls: /vendor/lib64/hw/audio.r_submix.default.so: Permission denied
+ls: /vendor/lib64/hw/audio.primary.msm8998.so: Permission denied
+ls: /vendor/lib64/hw/hwcomposer.msm8998.so: Permission denied
+ls: /vendor/lib64/hw/android.hardware.memtrack@1.0-impl.so: Permission denied
+ls: /vendor/lib64/hw/memtrack.msm8998.so: Permission denied
+ls: /vendor/lib64/hw/keystore.msm8998.so: Permission denied
+ls: /vendor/lib64/hw/local_time.default.so: Permission denied
+ls: /vendor/lib64/hw/android.hardware.bluetooth@1.0-impl-qti.so: Permission denied
+ls: /vendor/lib64/hw/audio.usb.default.so: Permission denied
+ls: /vendor/lib64/hw/android.hardware.drm@1.0-impl.so: Permission denied
+ls: /vendor/lib64/hw/audio.primary.default.so: Permission denied
+
+/vendor/lib64/hw:
+android.hardware.graphics.mapper@2.0-impl-2.1.so
+android.hardware.renderscript@1.0-impl.so
+gralloc.default.so
+gralloc.msm8998.so
+vendor.oculus.hardware.graphics.composer@1.1-impl-monterey.so
+vulkan.msm8998.so
+        <name>android.hardware.audio</name>
+            <name>IDevicesFactory</name>
+        <name>android.hardware.audio.effect</name>
+            <name>IEffectsFactory</name>
+        <name>android.hardware.bluetooth</name>
+            <name>IBluetoothHci</name>
+        <name>android.hardware.boot</name>
+            <name>IBootControl</name>
+        <name>android.hardware.configstore</name>
+            <name>ISurfaceFlingerConfigs</name>
+        <name>android.hardware.drm</name>
+            <name>ICryptoFactory</name>
+            <name>IDrmFactory</name>
+        <name>android.hardware.gatekeeper</name>
+            <name>IGatekeeper</name>
+        <name>android.hardware.graphics.allocator</name>
+            <name>IAllocator</name>
+        <name>android.hardware.graphics.composer</name>
+            <name>IComposer</name>
+        <name>android.hardware.graphics.mapper</name>
+            <name>IMapper</name>
+        <name>android.hardware.keymaster</name>
+            <name>IKeymasterDevice</name>
+        <name>android.hardware.media.omx</name>
+            <name>IOmx</name>
+            <name>IOmxStore</name>
+        <name>android.hardware.memtrack</name>
+            <name>IMemtrack</name>
+        <name>android.hardware.renderscript</name>
+            <name>IDevice</name>
+        <name>android.hardware.soundtrigger</name>
+            <name>ISoundTriggerHw</name>
+        <name>android.hardware.tetheroffload.config</name>
+            <name>IOffloadConfig</name>
+        <name>android.hardware.wifi</name>
+            <name>IWifi</name>
+        <name>android.hardware.wifi.hostapd</name>
+            <name>IHostapd</name>
+        <name>android.hardware.wifi.supplicant</name>
+            <name>ISupplicant</name>
+        <name>com.qualcomm.qti.bluetooth_audio</name>
+            <name>IBluetoothAudio</name>
+        <name>vendor.display.config</name>
+            <name>IDisplayConfig</name>

@@ -1,0 +1,89 @@
+#!/bin/busybox sh
+# Native Quest 1 initramfs (Holo/SteamOS as PID 1, no Android).
+# Always brings up a debug path first: USB gadget = CDC-NCM (telnet 192.168.77.1)
+# + CDC-ACM (shell on ttyGS0), kernel log in pstore/ramoops.
+# MODE (from /etc/holo-mode): shell = stay in initramfs; holo = switch_root to holo.img.
+/bin/busybox --install -s /bin
+export PATH=/bin
+MODE=$(cat /etc/holo-mode 2>/dev/null || echo shell)
+
+mkdir -p /proc /sys /dev /run /tmp /data /newroot
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+mkdir -p /dev/pts && mount -t devpts devpts /dev/pts
+mount -t tmpfs -o mode=755 tmpfs /run
+mount -t pstore pstore /sys/fs/pstore 2>/dev/null
+mount -t configfs configfs /sys/kernel/config
+exec >/dev/kmsg 2>&1
+log() { echo "holo-init: $*"; }
+log "mode=$MODE"
+
+# --- USB gadget ------------------------------------------------------------
+G=/sys/kernel/config/usb_gadget/g1
+mkdir -p $G && cd $G
+echo 0x1d6b > idVendor; echo 0x0104 > idProduct; echo 0x0200 > bcdUSB
+echo 0xEF > bDeviceClass; echo 0x02 > bDeviceSubClass; echo 0x01 > bDeviceProtocol
+mkdir -p strings/0x409
+cat /sys/class/block/sda/device/serial 2>/dev/null > strings/0x409/serialnumber || echo holoquest > strings/0x409/serialnumber
+echo "Valve-on-Quest" > strings/0x409/manufacturer
+echo "Holo Quest debug" > strings/0x409/product
+mkdir -p functions/ncm.usb0 functions/acm.GS0 configs/c.1/strings/0x409
+echo "NCM+ACM" > configs/c.1/strings/0x409/configuration
+echo 500 > configs/c.1/MaxPower
+ln -s functions/ncm.usb0 configs/c.1/
+ln -s functions/acm.GS0 configs/c.1/
+UDC=$(ls /sys/class/udc | head -1)
+echo "$UDC" > UDC && log "gadget on $UDC" || log "gadget bind FAILED"
+cd /
+
+# network: headset 192.168.77.1, PC gets 192.168.77.2 by DHCP
+for i in 1 2 3 4 5 6 7 8 9 10; do [ -e /sys/class/net/usb0 ] && break; sleep 0.5; done
+ifconfig lo 127.0.0.1 up
+ifconfig usb0 192.168.77.1 netmask 255.255.255.0 up && log "usb0 up"
+cat > /run/udhcpd.conf <<EOF
+start 192.168.77.2
+end 192.168.77.2
+interface usb0
+lease_file /run/udhcpd.leases
+option subnet 255.255.255.0
+EOF
+touch /run/udhcpd.leases
+udhcpd /run/udhcpd.conf
+telnetd -l /bin/sh -b 192.168.77.1
+
+# serial shell, respawned
+( while :; do [ -e /dev/ttyGS0 ] && setsid sh -c 'exec sh </dev/ttyGS0 >/dev/ttyGS0 2>&1'; sleep 1; done ) &
+
+# --- display smoke test (shell mode only) -------------------------------------
+[ "$MODE" = shell ] && [ -x /bin/fbtest ] && ( fbtest > /run/fbtest.log 2>&1 & )
+
+if [ "$MODE" = holo ]; then
+	UD=/dev/$(grep -l PARTNAME=userdata /sys/class/block/sd*/uevent | head -1 | cut -d/ -f5)
+	log "userdata=$UD"
+	if mount -t ext4 -o rw,noatime $UD /data && LOOP=$(losetup -f) && losetup $LOOP /data/steamos/holo.img \
+		&& mount -t ext4 -o rw,noatime $LOOP /newroot; then
+		mkdir -p /newroot/userdata
+		mount --move /data /newroot/userdata
+		# hand over: the gadget (usb0 + ttyGS0) stays bound; systemd-networkd and
+		# serial-getty@ttyGS0 take it from here. Kill every initramfs process.
+		log "switching to holo"
+		kill -9 -1; sleep 0.2
+		umount /dev/pts
+		mount --move /dev /newroot/dev; mount --move /run /newroot/run
+		mount --move /proc /newroot/proc; mount --move /sys /newroot/sys
+		# rescue path that survives switch_root: busybox telnetd + udhcpd chrooted
+		# into Holo, running from /run/holo-init
+		H=/newroot/run/holo-init; mkdir -p $H
+		cp /bin/busybox $H/; ln -sf busybox $H/sh
+		sed -e 's|/run/udhcpd.leases|/run/holo-init/udhcpd.leases|' /newroot/run/udhcpd.conf > $H/udhcpd.conf
+		touch $H/udhcpd.leases
+		chroot /newroot /run/holo-init/busybox udhcpd /run/holo-init/udhcpd.conf
+		chroot /newroot /run/holo-init/busybox telnetd -l /run/holo-init/sh -b 192.168.77.1
+		exec switch_root /newroot /usr/lib/systemd/systemd --log-target=kmsg --log-level=info
+	fi
+	log "holo mount failed, staying in initramfs"
+fi
+
+log "ready: telnet 192.168.77.1 or serial ttyGS0"
+while :; do sleep 3600; done

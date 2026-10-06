@@ -1,0 +1,5435 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 6556fa7..78f6aea 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -388,6 +388,8 @@ option_with_deps(XRT_BUILD_DRIVER_XREAL_AIR "Enable Xreal Air HMD driver" DEPEND
+ option_with_deps(XRT_BUILD_DRIVER_SIMULAVR "Enable simula driver" DEPENDS XRT_HAVE_REALSENSE)
+ option_with_deps(XRT_BUILD_DRIVER_SOLARXR "Enable SolarXR driver" DEPENDS XRT_HAVE_LINUX XRT_MODULE_IPC)
+ option(XRT_BUILD_DRIVER_SIMULATED "Enable simulated driver" ON)
++option(XRT_BUILD_DRIVER_QUEST1 "Enable native Quest 1 driver (libsyncboss through libhybris)" ON)
++option(XRT_BUILD_DRIVER_QBRIDGE "Enable qbridge (Quest via Meta runtime) driver" ON)
+ 
+ option(XRT_BUILD_SAMPLES "Enable compiling sample code implementations that will not be linked into any final targets" ON)
+ set(XRT_IPC_MSG_SOCK_FILENAME monado_comp_ipc CACHE STRING "Service socket filename")
+@@ -478,6 +480,8 @@ list(
+ 	"CONTACTGLOVE"
+ 	"DAYDREAM"
+ 	"SIMULATED"
++	"QBRIDGE"
++	"QUEST1"
+ 	"HANDTRACKING"
+ 	"HDK"
+ 	"HYDRA"
+@@ -570,6 +574,13 @@ if(XRT_HAVE_VULKAN AND NOT ANDROID)
+ 	set(VK_USE_PLATFORM_DISPLAY_KHR TRUE)
+ endif()
+ 
++option(XRT_HYBRIS_AHB "Share swapchains as AHardwareBuffers through libhybris" ON)
++if(XRT_HYBRIS_AHB AND NOT ANDROID)
++	set(VK_USE_PLATFORM_ANDROID_KHR TRUE)
++	add_compile_definitions(XRT_HYBRIS_AHB)
++	include_directories(SYSTEM /opt/hybris/include/ahb /opt/hybris/include)
++endif()
++
+ include(CompilerFlags.cmake)
+ 
+ # Default to PIC code
+diff --git a/src/xrt/auxiliary/util/CMakeLists.txt b/src/xrt/auxiliary/util/CMakeLists.txt
+index d42a418..e0e5a70 100644
+--- a/src/xrt/auxiliary/util/CMakeLists.txt
++++ b/src/xrt/auxiliary/util/CMakeLists.txt
+@@ -276,3 +276,8 @@ if(XRT_HAVE_OPENCV)
+ 	target_link_libraries(aux_util_scribble PUBLIC ${OpenCV_LIBRARIES})
+ 	target_include_directories(aux_util_scribble SYSTEM PRIVATE ${OpenCV_INCLUDE_DIRS})
+ endif()
++
++if(XRT_HYBRIS_AHB AND NOT ANDROID)
++	target_sources(aux_util PRIVATE u_hybris_ahb.c ../android/android_ahardwarebuffer_allocator.c)
++	target_link_libraries(aux_util PUBLIC -L/opt/hybris/lib -lhybris-common -Wl,-rpath,/opt/hybris/lib)
++endif()
+diff --git a/src/xrt/auxiliary/util/u_hybris_ahb.c b/src/xrt/auxiliary/util/u_hybris_ahb.c
+new file mode 100644
+index 0000000..3515915
+--- /dev/null
++++ b/src/xrt/auxiliary/util/u_hybris_ahb.c
+@@ -0,0 +1,86 @@
++/*
++ * hybris_ahb: the NDK AHardwareBuffer API for glibc programs, forwarded to the
++ * Android 10 libnativewindow through libhybris. Lets Monado use its Android
++ * (AHardwareBuffer) swapchain path on Linux, the only image sharing the
++ * Quest's Vulkan driver supports.
++ */
++#include <dlfcn.h>
++#include <pthread.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++
++#include <android/hardware_buffer.h>
++#include <hybris/common/binding.h>
++
++static struct {
++	int (*allocate)(const AHardwareBuffer_Desc *, AHardwareBuffer **);
++	void (*acquire)(AHardwareBuffer *);
++	void (*release)(AHardwareBuffer *);
++	void (*describe)(const AHardwareBuffer *, AHardwareBuffer_Desc *);
++	int (*is_supported)(const AHardwareBuffer_Desc *);
++	int (*send)(const AHardwareBuffer *, int);
++	int (*recv)(int, AHardwareBuffer **);
++} nw;
++
++static pthread_once_t once = PTHREAD_ONCE_INIT;
++
++static void load(void)
++{
++	void *h = android_dlopen("libnativewindow.so", RTLD_NOW);
++	if (!h) {
++		fprintf(stderr, "hybris_ahb: cannot load libnativewindow.so through libhybris\n");
++		abort();
++	}
++	nw.allocate = android_dlsym(h, "AHardwareBuffer_allocate");
++	nw.acquire = android_dlsym(h, "AHardwareBuffer_acquire");
++	nw.release = android_dlsym(h, "AHardwareBuffer_release");
++	nw.describe = android_dlsym(h, "AHardwareBuffer_describe");
++	nw.is_supported = android_dlsym(h, "AHardwareBuffer_isSupported");
++	nw.send = android_dlsym(h, "AHardwareBuffer_sendHandleToUnixSocket");
++	nw.recv = android_dlsym(h, "AHardwareBuffer_recvHandleFromUnixSocket");
++}
++
++#define NW() pthread_once(&once, load)
++
++int AHardwareBuffer_allocate(const AHardwareBuffer_Desc *desc, AHardwareBuffer **out)
++{
++	NW();
++	return nw.allocate(desc, out);
++}
++
++void AHardwareBuffer_acquire(AHardwareBuffer *buffer)
++{
++	NW();
++	nw.acquire(buffer);
++}
++
++void AHardwareBuffer_release(AHardwareBuffer *buffer)
++{
++	NW();
++	nw.release(buffer);
++}
++
++void AHardwareBuffer_describe(const AHardwareBuffer *buffer, AHardwareBuffer_Desc *out)
++{
++	NW();
++	nw.describe(buffer, out);
++}
++
++int AHardwareBuffer_isSupported(const AHardwareBuffer_Desc *desc)
++{
++	NW();
++	return nw.is_supported ? nw.is_supported(desc) : 1;
++}
++
++int AHardwareBuffer_sendHandleToUnixSocket(const AHardwareBuffer *buffer, int fd)
++{
++	NW();
++	return nw.send(buffer, fd);
++}
++
++int AHardwareBuffer_recvHandleFromUnixSocket(int fd, AHardwareBuffer **out)
++{
++	NW();
++	return nw.recv(fd, out);
++}
+diff --git a/src/xrt/compositor/main/CMakeLists.txt b/src/xrt/compositor/main/CMakeLists.txt
+index cc7d3b5..5ba2840 100644
+--- a/src/xrt/compositor/main/CMakeLists.txt
++++ b/src/xrt/compositor/main/CMakeLists.txt
+@@ -21,6 +21,8 @@ add_library(
+ 	comp_target_swapchain.h
+ 	comp_window.h
+ 	comp_window_debug_image.c
++	comp_window_qbridge.c
++	comp_window_mdp.c
+ 	comp_mirror_to_debug_gui.c
+ 	comp_mirror_to_debug_gui.h
+ 	)
+@@ -120,3 +122,8 @@ if(ANDROID)
+ endif()
+ 
+ target_link_libraries(comp_main PRIVATE comp_multi)
++target_include_directories(comp_main SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/msm)
++
++if(XRT_BUILD_DRIVER_QBRIDGE)
++	target_link_libraries(comp_main PRIVATE drv_qbridge)
++endif()
+diff --git a/src/xrt/compositor/main/comp_compositor.c b/src/xrt/compositor/main/comp_compositor.c
+index a8fbd01..ca0e07c 100644
+--- a/src/xrt/compositor/main/comp_compositor.c
++++ b/src/xrt/compositor/main/comp_compositor.c
+@@ -838,6 +838,8 @@ const struct comp_target_factory *ctfs[] = {
+ #ifdef VK_USE_PLATFORM_DISPLAY_KHR
+     &comp_target_factory_vk_display,
+ #endif
++    &comp_target_factory_mdp,
++    &comp_target_factory_qbridge,
+     &comp_target_factory_debug_image,
+ };
+ 
+diff --git a/src/xrt/compositor/main/comp_window.h b/src/xrt/compositor/main/comp_window.h
+index eb41c3c..5214613 100644
+--- a/src/xrt/compositor/main/comp_window.h
++++ b/src/xrt/compositor/main/comp_window.h
+@@ -33,6 +33,8 @@ extern "C" {
+  * @ingroup comp_main
+  */
+ extern const struct comp_target_factory comp_target_factory_debug_image;
++extern const struct comp_target_factory comp_target_factory_qbridge;
++extern const struct comp_target_factory comp_target_factory_mdp;
+ 
+ #ifdef VK_USE_PLATFORM_XCB_KHR
+ 
+diff --git a/src/xrt/compositor/main/comp_window_mdp.c b/src/xrt/compositor/main/comp_window_mdp.c
+new file mode 100644
+index 0000000..7655bd4
+--- /dev/null
++++ b/src/xrt/compositor/main/comp_window_mdp.c
+@@ -0,0 +1,688 @@
++// Copyright 2026, Quest1-SteamOS contributors
++// SPDX-License-Identifier: BSL-1.0
++/*!
++ * @file
++ * @brief  Compositor target for the Quest 1 panels through the MSM MDSS fbdev atomic commit.
++ *
++ * Zero copy: the target images are gralloc buffers (AHardwareBuffers through
++ * libhybris, needs hwservicemanager + the graphics allocator HAL running) that
++ * Vulkan renders into and the display engine scans out directly. Each half of
++ * the 2880x1600 buffer goes to its own DMA pipe (one per panel/mixer).
++ *
++ * Frame pacing follows the vsync events of the video mode panels; commit
++ * fences only signal one commit later, so they are kept as release fences for
++ * reusing images.
++ *
++ * @ingroup comp_main
++ */
++
++#include "util/u_logging.h"
++#include "util/u_misc.h"
++#include "util/u_time.h"
++#include "os/os_threading.h"
++#include "os/os_time.h"
++
++#include "main/comp_window.h"
++#include "main/comp_compositor.h"
++
++#include <dlfcn.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <poll.h>
++#include <stdio.h>
++#include <string.h>
++#include <sys/ioctl.h>
++#include <unistd.h>
++#include <linux/fb.h>
++
++#define __user
++// msm_mdp.h has an enum value GC, also an Xlib type.
++#define GC msm_mdp_GC
++#include <linux/msm_mdp_ext.h>
++#undef GC
++
++#define VK_USE_PLATFORM_ANDROID_KHR
++#include <vulkan/vulkan_android.h>
++
++extern void *
++android_dlopen(const char *filename, int flag);
++extern void *
++android_dlsym(void *handle, const char *symbol);
++
++#define MDP_IMAGES 3
++#define MDP_W 2880
++#define MDP_H 1600
++#define MDP_HALF (MDP_W / 2)
++#define MDP_PERIOD_NS (U_TIME_1S_IN_NS / 72)
++//! Time the compositor gets between waking up and the vsync that shows its frame.
++#define MDP_RENDER_BUDGET_NS (15 * U_TIME_1MS_IN_NS)
++#define PRIV_FLAGS_UBWC_ALIGNED 0x08000000
++
++typedef struct
++{
++	int version, numFds, numInts;
++	int data[];
++} mdp_native_handle;
++
++struct mdp_target
++{
++	struct comp_target base;
++
++	int fb_fd;
++	int vsync_fd;
++	struct os_thread_helper vsync_thread;
++	int64_t last_vsync_ns;   //!< Protected by vsync_thread's mutex.
++	int64_t last_present_ns; //!< Protected by vsync_thread's mutex.
++
++	const mdp_native_handle *(*get_native_handle)(const AHardwareBuffer *);
++
++	struct comp_target_image images[MDP_IMAGES];
++	AHardwareBuffer *ahb[MDP_IMAGES];
++	VkDeviceMemory memory[MDP_IMAGES];
++	int buffer_fd[MDP_IMAGES];
++	bool ubwc[MDP_IMAGES];
++	uint32_t stride_px[MDP_IMAGES];
++	int release_fence[MDP_IMAGES]; //!< Signals when the image is no longer scanned out.
++	uint32_t next_image;
++
++	int64_t frame_id;
++	int64_t last_display_ns;
++
++	//! Timing statistics, logged every few seconds.
++	struct
++	{
++		int64_t since_ns;
++		uint32_t presents;
++		int64_t fence_wait_ns, gpu_wait_ns, max_gpu_wait_ns, late_ns;
++		uint32_t late;
++	} stats;
++	bool has_init_vulkan;
++	bool unblanked; //!< Protected by vsync_thread's mutex.
++};
++
++static inline struct mdp_target *
++mdpt(struct comp_target *ct)
++{
++	return (struct mdp_target *)ct;
++}
++
++static void
++close_fd(int *fd)
++{
++	if (*fd >= 0) {
++		close(*fd);
++		*fd = -1;
++	}
++}
++
++
++/*
++ *
++ * Vsync.
++ *
++ */
++
++/*!
++ * Panels on while frames come in, off otherwise: when the last app goes away
++ * the compositor stops presenting and the display engine would keep scanning
++ * out the last frame (OLED burn-in). The GPU runs at full clock only while
++ * showing frames; msm-adreno-tz never ramps up without Android's services.
++ * Call with vsync_thread's mutex held.
++ */
++static void
++set_panels_locked(struct mdp_target *t, bool on)
++{
++	if (on == t->unblanked) {
++		return;
++	}
++	int gov = open("/sys/class/kgsl/kgsl-3d0/devfreq/governor", O_WRONLY | O_CLOEXEC);
++	if (gov >= 0) {
++		const char *g = on ? "performance" : "msm-adreno-tz";
++		if (write(gov, g, strlen(g)) < 0) {
++			U_LOG_W("mdp: cannot set the GPU governor: %s", strerror(errno));
++		}
++		close(gov);
++	}
++	if (ioctl(t->fb_fd, FBIOBLANK, on ? FB_BLANK_UNBLANK : FB_BLANK_POWERDOWN) < 0) {
++		U_LOG_E("mdp: FBIOBLANK %s: %s", on ? "unblank" : "powerdown", strerror(errno));
++	}
++	if (on) {
++		unsigned int vsync_on = 1;
++		ioctl(t->fb_fd, MSMFB_OVERLAY_VSYNC_CTRL, &vsync_on);
++	}
++	t->unblanked = on;
++	U_LOG_I("mdp: panels %s", on ? "on" : "off");
++}
++
++static void *
++vsync_thread_func(void *ptr)
++{
++	struct mdp_target *t = ptr;
++	os_thread_helper_name(&t->vsync_thread, "Quest1 vsync");
++
++	char buf[64];
++	os_thread_helper_lock(&t->vsync_thread);
++	while (os_thread_helper_is_running_locked(&t->vsync_thread)) {
++		os_thread_helper_unlock(&t->vsync_thread);
++
++		struct pollfd p = {t->vsync_fd, POLLPRI | POLLERR, 0};
++		int64_t ts = 0;
++		if (poll(&p, 1, 100) > 0) {
++			lseek(t->vsync_fd, 0, SEEK_SET);
++			ssize_t n = read(t->vsync_fd, buf, sizeof(buf) - 1);
++			buf[n > 0 ? n : 0] = '\0';
++			long long v = 0;
++			if (sscanf(buf, "VSYNC=%lld", &v) == 1) {
++				ts = v; // CLOCK_MONOTONIC ns
++			}
++		}
++
++		os_thread_helper_lock(&t->vsync_thread);
++		if (ts > 0) {
++			t->last_vsync_ns = ts;
++		}
++		if (t->unblanked && os_monotonic_get_ns() - t->last_present_ns > U_TIME_1S_IN_NS) {
++			set_panels_locked(t, false);
++		}
++	}
++	os_thread_helper_unlock(&t->vsync_thread);
++	return NULL;
++}
++
++static int64_t
++get_last_vsync(struct mdp_target *t)
++{
++	os_thread_helper_lock(&t->vsync_thread);
++	int64_t v = t->last_vsync_ns;
++	os_thread_helper_unlock(&t->vsync_thread);
++	return v;
++}
++
++
++/*
++ *
++ * Images.
++ *
++ */
++
++static void
++free_images(struct mdp_target *t)
++{
++	struct vk_bundle *vk = &t->base.c->base.vk;
++	for (uint32_t i = 0; i < MDP_IMAGES; i++) {
++		if (t->images[i].view != VK_NULL_HANDLE) {
++			vk->vkDestroyImageView(vk->device, t->images[i].view, NULL);
++		}
++		if (t->images[i].handle != VK_NULL_HANDLE) {
++			vk->vkDestroyImage(vk->device, t->images[i].handle, NULL);
++		}
++		if (t->memory[i] != VK_NULL_HANDLE) {
++			vk->vkFreeMemory(vk->device, t->memory[i], NULL);
++		}
++		if (t->ahb[i] != NULL) {
++			AHardwareBuffer_release(t->ahb[i]);
++		}
++		close_fd(&t->release_fence[i]);
++		t->images[i] = (struct comp_target_image){0};
++		t->memory[i] = VK_NULL_HANDLE;
++		t->ahb[i] = NULL;
++		t->buffer_fd[i] = -1;
++	}
++	t->base.images = NULL;
++	t->base.image_count = 0;
++}
++
++static bool
++create_image(struct mdp_target *t, uint32_t i, VkImageUsageFlags usage, VkFormat view_format)
++{
++	struct comp_target *ct = &t->base;
++	struct vk_bundle *vk = &ct->c->base.vk;
++	PFN_vkGetAndroidHardwareBufferPropertiesANDROID get_props =
++	    (PFN_vkGetAndroidHardwareBufferPropertiesANDROID)vk->vkGetDeviceProcAddr(
++	        vk->device, "vkGetAndroidHardwareBufferPropertiesANDROID");
++	if (get_props == NULL) {
++		COMP_ERROR(ct->c, "mdp: VK_ANDROID_external_memory_android_hardware_buffer not enabled");
++		return false;
++	}
++
++	AHardwareBuffer_Desc desc = {
++	    .width = MDP_W,
++	    .height = MDP_H,
++	    .layers = 1,
++	    .format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM,
++	    .usage = AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT | AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE |
++	             AHARDWAREBUFFER_USAGE_COMPOSER_OVERLAY,
++	};
++	int r = AHardwareBuffer_allocate(&desc, &t->ahb[i]);
++	if (r != 0) {
++		COMP_ERROR(ct->c, "mdp: AHardwareBuffer_allocate: %d (is the graphics allocator HAL running?)", r);
++		return false;
++	}
++	AHardwareBuffer_describe(t->ahb[i], &desc);
++	const mdp_native_handle *nh = t->get_native_handle(t->ahb[i]);
++	// gralloc private_handle_t: fd, fd_metadata, magic, flags, ...
++	t->buffer_fd[i] = nh->data[0];
++	t->ubwc[i] = ((uint32_t)nh->data[3] & PRIV_FLAGS_UBWC_ALIGNED) != 0;
++	t->stride_px[i] = desc.stride;
++
++	VkAndroidHardwareBufferFormatPropertiesANDROID fmt = {
++	    .sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_ANDROID};
++	VkAndroidHardwareBufferPropertiesANDROID props = {
++	    .sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID, .pNext = &fmt};
++	VkResult ret = get_props(vk->device, t->ahb[i], &props);
++	if (ret != VK_SUCCESS) {
++		COMP_ERROR(ct->c, "mdp: vkGetAndroidHardwareBufferPropertiesANDROID: %d", ret);
++		return false;
++	}
++
++	VkFormat formats[2] = {VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_SRGB};
++	VkImageFormatListCreateInfo list = {
++	    .sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO, .viewFormatCount = 2, .pViewFormats = formats};
++	VkExternalMemoryImageCreateInfo ext = {
++	    .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
++	    .pNext = &list,
++	    .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID,
++	};
++	VkImageCreateInfo ici = {
++	    .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
++	    .pNext = &ext,
++	    .flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT,
++	    .imageType = VK_IMAGE_TYPE_2D,
++	    .format = VK_FORMAT_R8G8B8A8_UNORM,
++	    .extent = {MDP_W, MDP_H, 1},
++	    .mipLevels = 1,
++	    .arrayLayers = 1,
++	    .samples = VK_SAMPLE_COUNT_1_BIT,
++	    .tiling = VK_IMAGE_TILING_OPTIMAL,
++	    .usage = usage,
++	    .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
++	};
++	ret = vk->vkCreateImage(vk->device, &ici, NULL, &t->images[i].handle);
++	if (ret != VK_SUCCESS) {
++		COMP_ERROR(ct->c, "mdp: vkCreateImage (usage %#x): %d", usage, ret);
++		return false;
++	}
++
++	VkImportAndroidHardwareBufferInfoANDROID imp = {
++	    .sType = VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID, .buffer = t->ahb[i]};
++	VkMemoryDedicatedAllocateInfo ded = {
++	    .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO, .pNext = &imp, .image = t->images[i].handle};
++	VkMemoryAllocateInfo mai = {
++	    .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
++	    .pNext = &ded,
++	    .allocationSize = props.allocationSize,
++	    .memoryTypeIndex = (uint32_t)__builtin_ctz(props.memoryTypeBits),
++	};
++	ret = vk->vkAllocateMemory(vk->device, &mai, NULL, &t->memory[i]);
++	if (ret == VK_SUCCESS) {
++		ret = vk->vkBindImageMemory(vk->device, t->images[i].handle, t->memory[i], 0);
++	}
++	if (ret != VK_SUCCESS) {
++		COMP_ERROR(ct->c, "mdp: AHB import: %d", ret);
++		return false;
++	}
++
++	VkImageViewCreateInfo vci = {
++	    .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
++	    .image = t->images[i].handle,
++	    .viewType = VK_IMAGE_VIEW_TYPE_2D,
++	    .format = view_format,
++	    .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
++	};
++	ret = vk->vkCreateImageView(vk->device, &vci, NULL, &t->images[i].view);
++	return ret == VK_SUCCESS;
++}
++
++static void
++target_create_images(struct comp_target *ct,
++                     const struct comp_target_create_images_info *create_info,
++                     struct vk_bundle_queue *present_queue)
++{
++	struct mdp_target *t = mdpt(ct);
++
++	// The buffers are R8G8B8A8_UNORM; render through an sRGB view if asked.
++	bool srgb = false;
++	for (uint32_t i = 0; i < create_info->format_count; i++) {
++		VkFormat f = create_info->formats[i];
++		if (f == VK_FORMAT_R8G8B8A8_SRGB || f == VK_FORMAT_B8G8R8A8_SRGB) {
++			srgb = true;
++			break;
++		}
++		if (f == VK_FORMAT_R8G8B8A8_UNORM || f == VK_FORMAT_B8G8R8A8_UNORM) {
++			break;
++		}
++	}
++	VkFormat view_format = srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
++
++	free_images(t);
++	for (uint32_t i = 0; i < MDP_IMAGES; i++) {
++		if (!create_image(t, i, create_info->image_usage, view_format)) {
++			free_images(t);
++			return;
++		}
++	}
++	t->next_image = 0;
++	t->base.image_count = MDP_IMAGES;
++	t->base.images = t->images;
++	t->base.width = MDP_W;
++	t->base.height = MDP_H;
++	t->base.format = view_format;
++	t->base.final_layout = VK_IMAGE_LAYOUT_GENERAL;
++	COMP_INFO(ct->c, "mdp: %d gralloc buffers %ux%u (stride %u px, %s, %s view)", MDP_IMAGES, MDP_W, MDP_H,
++	          t->stride_px[0], t->ubwc[0] ? "UBWC" : "linear", srgb ? "sRGB" : "UNORM");
++}
++
++
++/*
++ *
++ * Target members.
++ *
++ */
++
++static bool
++target_init_pre_vulkan(struct comp_target *ct)
++{
++	return true;
++}
++
++static bool
++target_init_post_vulkan(struct comp_target *ct, uint32_t preferred_width, uint32_t preferred_height)
++{
++	mdpt(ct)->has_init_vulkan = true;
++	return true;
++}
++
++static bool
++target_check_ready(struct comp_target *ct)
++{
++	return true;
++}
++
++static bool
++target_has_images(struct comp_target *ct)
++{
++	return mdpt(ct)->base.images != NULL;
++}
++
++static VkResult
++target_acquire(struct comp_target *ct, uint32_t *out_index)
++{
++	struct mdp_target *t = mdpt(ct);
++	uint32_t i = t->next_image;
++	t->next_image = (i + 1) % MDP_IMAGES;
++
++	// Wait until the display engine no longer reads this buffer.
++	int64_t t0 = os_monotonic_get_ns();
++	if (t->release_fence[i] >= 0) {
++		struct pollfd p = {t->release_fence[i], POLLIN, 0};
++		if (poll(&p, 1, 100) == 0) {
++			COMP_WARN(ct->c, "mdp: release fence of image %u timed out", i);
++		}
++		close_fd(&t->release_fence[i]);
++	}
++	t->stats.fence_wait_ns += os_monotonic_get_ns() - t0;
++	*out_index = i;
++	return VK_SUCCESS;
++}
++
++static VkResult
++target_present(struct comp_target *ct,
++               struct vk_bundle_queue *present_queue,
++               uint32_t index,
++               uint64_t timeline_semaphore_value,
++               int64_t desired_present_time_ns,
++               int64_t present_slop_ns)
++{
++	struct mdp_target *t = mdpt(ct);
++	struct vk_bundle *vk = &t->base.c->base.vk;
++
++	//! @todo Pass an acquire fence (sync fd) instead of waiting for the GPU here.
++	int64_t t0 = os_monotonic_get_ns();
++	vk_queue_lock(present_queue);
++	vk->vkQueueWaitIdle(present_queue->queue);
++	vk_queue_unlock(present_queue);
++	int64_t t1 = os_monotonic_get_ns();
++	int64_t gpu_wait = t1 - t0;
++	t->stats.gpu_wait_ns += gpu_wait;
++	if (gpu_wait > t->stats.max_gpu_wait_ns) {
++		t->stats.max_gpu_wait_ns = gpu_wait;
++	}
++	if (t1 > desired_present_time_ns) {
++		t->stats.late++;
++		t->stats.late_ns += t1 - desired_present_time_ns;
++	}
++	t->stats.presents++;
++	if (t->stats.since_ns == 0) {
++		t->stats.since_ns = t1;
++	} else if (t1 - t->stats.since_ns > 2 * U_TIME_1S_IN_NS) {
++		double n = t->stats.presents, el = (double)(t1 - t->stats.since_ns) / 1e9;
++		COMP_INFO(ct->c, "mdp: %.1f fps, fence wait %.2f ms, gpu wait %.2f ms (max %.2f), late %u (%.2f ms avg)",
++		          n / el, t->stats.fence_wait_ns / n / 1e6,
++		          t->stats.gpu_wait_ns / n / 1e6, t->stats.max_gpu_wait_ns / 1e6, t->stats.late,
++		          t->stats.late ? t->stats.late_ns / (double)t->stats.late / 1e6 : 0.0);
++		t->stats = (typeof(t->stats)){.since_ns = t1};
++	}
++
++	os_thread_helper_lock(&t->vsync_thread);
++	t->last_present_ns = t1;
++	set_panels_locked(t, true);
++	os_thread_helper_unlock(&t->vsync_thread);
++
++	// One DMA pipe per panel; each pipe fetches its half of the buffer.
++	struct mdp_input_layer layers[2];
++	memset(layers, 0, sizeof(layers));
++	const uint32_t pipes[2] = {64, 128}; // DMA0, DMA1
++	for (int h = 0; h < 2; h++) {
++		struct mdp_input_layer *l = &layers[h];
++		l->pipe_ndx = pipes[h];
++		l->alpha = 0xff;
++		l->blend_op = BLEND_OP_OPAQUE;
++		l->color_space = MDP_CSC_ITU_R_709;
++		l->src_rect = (struct mdp_rect){h * MDP_HALF, 0, MDP_HALF, MDP_H};
++		l->dst_rect = (struct mdp_rect){h * MDP_HALF, 0, MDP_HALF, MDP_H};
++		l->buffer.width = t->stride_px[index];
++		l->buffer.height = MDP_H;
++		l->buffer.format = t->ubwc[index] ? MDP_RGBA_8888_UBWC : MDP_RGBA_8888;
++		l->buffer.planes[0].fd = t->buffer_fd[index];
++		l->buffer.planes[0].stride = t->stride_px[index] * 4;
++		l->buffer.plane_count = 1;
++		l->buffer.fence = -1;
++	}
++	struct mdp_layer_commit c;
++	memset(&c, 0, sizeof(c));
++	c.version = MDP_COMMIT_VERSION_1_0;
++	c.commit_v1.input_layers = layers;
++	c.commit_v1.input_layer_cnt = 2;
++	c.commit_v1.release_fence = -1;
++	c.commit_v1.retire_fence = -1;
++	if (ioctl(t->fb_fd, MSMFB_ATOMIC_COMMIT, &c) < 0) {
++		COMP_ERROR(ct->c, "mdp: MSMFB_ATOMIC_COMMIT: %s (layer errors %d %d)", strerror(errno),
++		           layers[0].error_code, layers[1].error_code);
++		return VK_ERROR_SURFACE_LOST_KHR;
++	}
++	close_fd(&c.commit_v1.retire_fence);
++	close_fd(&t->release_fence[index]);
++	t->release_fence[index] = c.commit_v1.release_fence;
++	return VK_SUCCESS;
++}
++
++static VkResult
++target_wait_for_present(struct comp_target *ct, time_duration_ns timeout_ns)
++{
++	return VK_ERROR_EXTENSION_NOT_PRESENT;
++}
++
++static void
++target_flush(struct comp_target *ct)
++{}
++
++static void
++target_calc_frame_pacing(struct comp_target *ct,
++                         int64_t *out_frame_id,
++                         int64_t *out_wake_up_time_ns,
++                         int64_t *out_desired_present_time_ns,
++                         int64_t *out_present_slop_ns,
++                         int64_t *out_predicted_display_time_ns)
++{
++	struct mdp_target *t = mdpt(ct);
++	int64_t now = os_monotonic_get_ns();
++	int64_t vsync = get_last_vsync(t);
++	if (vsync <= 0) {
++		vsync = now;
++	}
++
++	// First vsync that leaves the compositor its render budget, and never the
++	// same one twice.
++	int64_t target = vsync + MDP_PERIOD_NS;
++	while (target < now + MDP_RENDER_BUDGET_NS || target <= t->last_display_ns) {
++		target += MDP_PERIOD_NS;
++	}
++	t->last_display_ns = target;
++
++	*out_frame_id = ++t->frame_id;
++	*out_wake_up_time_ns = target - MDP_RENDER_BUDGET_NS;
++	*out_desired_present_time_ns = target;
++	*out_present_slop_ns = U_TIME_HALF_MS_IN_NS;
++	// The commit is latched at that vsync and scanned out during the next period.
++	*out_predicted_display_time_ns = target + MDP_PERIOD_NS / 2;
++}
++
++static void
++target_mark_timing_point(struct comp_target *ct, enum comp_target_timing_point point, int64_t frame_id, int64_t when_ns)
++{}
++
++static VkResult
++target_update_timings(struct comp_target *ct)
++{
++	return VK_SUCCESS;
++}
++
++static void
++target_info_gpu(struct comp_target *ct, int64_t frame_id, int64_t gpu_start_ns, int64_t gpu_end_ns, int64_t when_ns)
++{}
++
++static VkResult
++target_queue_supports_present(struct comp_target *ct, struct vk_bundle_queue *queue, VkBool32 *out_supported)
++{
++	*out_supported = VK_TRUE;
++	return VK_SUCCESS;
++}
++
++static void
++target_set_title(struct comp_target *ct, const char *title)
++{}
++
++static bool
++target_is_shared_presentable_image(struct comp_target *ct)
++{
++	return false;
++}
++
++static void
++target_destroy(struct comp_target *ct)
++{
++	struct mdp_target *t = mdpt(ct);
++	os_thread_helper_destroy(&t->vsync_thread);
++	if (t->has_init_vulkan) {
++		free_images(t);
++	}
++	if (t->fb_fd >= 0) {
++		unsigned int off = 0;
++		ioctl(t->fb_fd, MSMFB_OVERLAY_VSYNC_CTRL, &off);
++		t->unblanked = true; // force: also blank what an earlier process left on
++		set_panels_locked(t, false);
++	}
++	close_fd(&t->vsync_fd);
++	close_fd(&t->fb_fd);
++	free(t);
++}
++
++
++/*
++ *
++ * Factory.
++ *
++ */
++
++static bool
++factory_detect(const struct comp_target_factory *ctf, struct comp_compositor *c)
++{
++	return access("/dev/syncboss0", F_OK) == 0 && access("/sys/class/graphics/fb0/vsync_event", R_OK) == 0;
++}
++
++static bool
++factory_create_target(const struct comp_target_factory *ctf, struct comp_compositor *c, struct comp_target **out_ct)
++{
++	void *nw = android_dlopen("libnativewindow.so", RTLD_NOW);
++	void *get_handle = nw != NULL ? android_dlsym(nw, "AHardwareBuffer_getNativeHandle") : NULL;
++	if (get_handle == NULL) {
++		COMP_ERROR(c, "mdp: no AHardwareBuffer_getNativeHandle in libnativewindow.so");
++		return false;
++	}
++
++	struct mdp_target *t = U_TYPED_CALLOC(struct mdp_target);
++	t->fb_fd = open("/dev/fb0", O_RDWR | O_CLOEXEC);
++	t->vsync_fd = open("/sys/class/graphics/fb0/vsync_event", O_RDONLY | O_CLOEXEC);
++	for (uint32_t i = 0; i < MDP_IMAGES; i++) {
++		t->buffer_fd[i] = -1;
++		t->release_fence[i] = -1;
++	}
++	if (t->fb_fd < 0 || t->vsync_fd < 0) {
++		COMP_ERROR(c, "mdp: cannot open /dev/fb0 or its vsync_event: %s", strerror(errno));
++		close_fd(&t->fb_fd);
++		close_fd(&t->vsync_fd);
++		free(t);
++		return false;
++	}
++	*(void **)&t->get_native_handle = get_handle;
++
++	unsigned int on = 1;
++	if (ioctl(t->fb_fd, MSMFB_OVERLAY_VSYNC_CTRL, &on) < 0) {
++		COMP_WARN(c, "mdp: MSMFB_OVERLAY_VSYNC_CTRL: %s", strerror(errno));
++	}
++	os_thread_helper_init(&t->vsync_thread);
++	os_thread_helper_start(&t->vsync_thread, vsync_thread_func, t);
++
++	t->base.name = "mdp";
++	t->base.c = c;
++	t->base.init_pre_vulkan = target_init_pre_vulkan;
++	t->base.init_post_vulkan = target_init_post_vulkan;
++	t->base.check_ready = target_check_ready;
++	t->base.create_images = target_create_images;
++	t->base.has_images = target_has_images;
++	t->base.acquire = target_acquire;
++	t->base.present = target_present;
++	t->base.wait_for_present = target_wait_for_present;
++	t->base.flush = target_flush;
++	t->base.calc_frame_pacing = target_calc_frame_pacing;
++	t->base.mark_timing_point = target_mark_timing_point;
++	t->base.update_timings = target_update_timings;
++	t->base.info_gpu = target_info_gpu;
++	t->base.set_title = target_set_title;
++	t->base.queue_supports_present = target_queue_supports_present;
++	t->base.is_shared_presentable_image = target_is_shared_presentable_image;
++	t->base.destroy = target_destroy;
++	t->base.wait_for_present_supported = false;
++	*out_ct = &t->base;
++	COMP_INFO(c, "mdp: compositor target created");
++	return true;
++}
++
++static const char *mdp_device_extensions[] = {
++    VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME,
++    VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME,
++};
++
++const struct comp_target_factory comp_target_factory_mdp = {
++    .name = "Quest 1 panels (MSM MDSS atomic commit)",
++    .identifier = "mdp",
++    .requires_vulkan_for_create = false,
++    .is_deferred = false,
++    .required_instance_version = 0,
++    .required_instance_extensions = NULL,
++    .required_instance_extension_count = 0,
++    .optional_device_extensions = mdp_device_extensions,
++    .optional_device_extension_count = ARRAY_SIZE(mdp_device_extensions),
++    .detect = factory_detect,
++    .create_target = factory_create_target,
++};
+diff --git a/src/xrt/compositor/main/comp_window_qbridge.c b/src/xrt/compositor/main/comp_window_qbridge.c
+new file mode 100644
+index 0000000..d4f38bc
+--- /dev/null
++++ b/src/xrt/compositor/main/comp_window_qbridge.c
+@@ -0,0 +1,410 @@
++// Copyright 2026, qbridge contributors
++// SPDX-License-Identifier: BSL-1.0
++/*!
++ * @file
++ * @brief  Compositor target rendering into the qbridge app's AHardwareBuffers.
++ *
++ * The app (Meta OpenXR runtime) allocates the buffers and displays them as a
++ * projection layer; this target imports them through
++ * VK_ANDROID_external_memory_android_hardware_buffer (Quest Vulkan driver via
++ * libhybris) and hands each finished image back with the pose it used.
++ *
++ * @ingroup comp_main
++ */
++
++#include "util/u_misc.h"
++#include "util/u_pacing.h"
++#include "os/os_time.h"
++
++#include "main/comp_window.h"
++#include "main/comp_compositor.h"
++
++#include "qbridge/qbridge_interface.h"
++
++#define VK_USE_PLATFORM_ANDROID_KHR
++#include <vulkan/vulkan_android.h>
++
++
++struct qbridge_target
++{
++	struct comp_target base;
++	struct qb_sys *sys;
++	struct u_pacing_compositor *upc;
++
++	struct comp_target_image images[QB_MAX_SLOTS];
++	VkDeviceMemory memory[QB_MAX_SLOTS];
++	uint64_t generation;
++	int64_t index;
++	bool has_init_vulkan;
++};
++
++static inline struct qbridge_target *
++qbt(struct comp_target *ct)
++{
++	return (struct qbridge_target *)ct;
++}
++
++static bool
++target_init_pre_vulkan(struct comp_target *ct)
++{
++	return true;
++}
++
++static bool
++target_init_post_vulkan(struct comp_target *ct, uint32_t preferred_width, uint32_t preferred_height)
++{
++	qbt(ct)->has_init_vulkan = true;
++	return true;
++}
++
++static bool
++target_check_ready(struct comp_target *ct)
++{
++	struct qbridge_target *t = qbt(ct);
++	os_mutex_lock(&t->sys->mutex);
++	bool ready = t->sys->link.fd >= 0;
++	os_mutex_unlock(&t->sys->mutex);
++	return ready;
++}
++
++static void
++free_images(struct qbridge_target *t)
++{
++	struct vk_bundle *vk = &t->base.c->base.vk;
++	for (uint32_t i = 0; i < QB_MAX_SLOTS; i++) {
++		if (t->images[i].view != VK_NULL_HANDLE)
++			vk->vkDestroyImageView(vk->device, t->images[i].view, NULL);
++		if (t->images[i].handle != VK_NULL_HANDLE)
++			vk->vkDestroyImage(vk->device, t->images[i].handle, NULL);
++		if (t->memory[i] != VK_NULL_HANDLE)
++			vk->vkFreeMemory(vk->device, t->memory[i], NULL);
++		t->images[i] = (struct comp_target_image){0};
++		t->memory[i] = VK_NULL_HANDLE;
++	}
++	t->base.images = NULL;
++	t->base.image_count = 0;
++}
++
++static void
++target_create_images(struct comp_target *ct,
++                     const struct comp_target_create_images_info *create_info,
++                     struct vk_bundle_queue *present_queue)
++{
++	struct qbridge_target *t = qbt(ct);
++	struct vk_bundle *vk = &t->base.c->base.vk;
++	PFN_vkGetAndroidHardwareBufferPropertiesANDROID get_props =
++	    (PFN_vkGetAndroidHardwareBufferPropertiesANDROID)vk->vkGetDeviceProcAddr(
++	        vk->device, "vkGetAndroidHardwareBufferPropertiesANDROID");
++	if (get_props == NULL) {
++		COMP_ERROR(ct->c, "qbridge: VK_ANDROID_external_memory_android_hardware_buffer not enabled");
++		return;
++	}
++
++	// The buffers are R8G8B8A8_UNORM; render through an sRGB view if asked.
++	bool srgb = false;
++	for (uint32_t i = 0; i < create_info->format_count; i++) {
++		if (create_info->formats[i] == VK_FORMAT_R8G8B8A8_SRGB || create_info->formats[i] == VK_FORMAT_B8G8R8A8_SRGB) {
++			srgb = true;
++			break;
++		}
++		if (create_info->formats[i] == VK_FORMAT_R8G8B8A8_UNORM ||
++		    create_info->formats[i] == VK_FORMAT_B8G8R8A8_UNORM) {
++			break;
++		}
++	}
++	VkFormat view_format = srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
++
++	free_images(t);
++	os_mutex_lock(&t->sys->mutex);
++	struct qb_link *l = &t->sys->link;
++	uint32_t w = l->buffers.width, h = l->buffers.height;
++	bool ok = l->fd >= 0;
++	for (uint32_t i = 0; ok && i < QB_MAX_SLOTS; i++) {
++		VkAndroidHardwareBufferFormatPropertiesANDROID fmt = {
++		    .sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_ANDROID};
++		VkAndroidHardwareBufferPropertiesANDROID props = {
++		    .sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID, .pNext = &fmt};
++		VkResult r = get_props(vk->device, l->ahb[i], &props);
++		if (r != VK_SUCCESS) {
++			COMP_ERROR(ct->c, "qbridge: vkGetAndroidHardwareBufferPropertiesANDROID: %d", r);
++			ok = false;
++			break;
++		}
++
++		VkFormat formats[2] = {VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_SRGB};
++		VkImageFormatListCreateInfo list = {
++		    .sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO, .viewFormatCount = 2, .pViewFormats = formats};
++		VkExternalMemoryImageCreateInfo ext = {
++		    .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
++		    .pNext = &list,
++		    .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID,
++		};
++		VkImageCreateInfo ici = {
++		    .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
++		    .pNext = &ext,
++		    .flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT,
++		    .imageType = VK_IMAGE_TYPE_2D,
++		    .format = VK_FORMAT_R8G8B8A8_UNORM,
++		    .extent = {w, h, 1},
++		    .mipLevels = 1,
++		    .arrayLayers = 1,
++		    .samples = VK_SAMPLE_COUNT_1_BIT,
++		    .tiling = VK_IMAGE_TILING_OPTIMAL,
++		    .usage = create_info->image_usage,
++		    .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
++		};
++		r = vk->vkCreateImage(vk->device, &ici, NULL, &t->images[i].handle);
++		if (r != VK_SUCCESS) {
++			COMP_ERROR(ct->c, "qbridge: vkCreateImage (usage %#x): %d", create_info->image_usage, r);
++			ok = false;
++			break;
++		}
++
++		VkImportAndroidHardwareBufferInfoANDROID imp = {
++		    .sType = VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID, .buffer = l->ahb[i]};
++		VkMemoryDedicatedAllocateInfo ded = {
++		    .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO, .pNext = &imp, .image = t->images[i].handle};
++		VkMemoryAllocateInfo mai = {
++		    .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
++		    .pNext = &ded,
++		    .allocationSize = props.allocationSize,
++		    .memoryTypeIndex = (uint32_t)__builtin_ctz(props.memoryTypeBits),
++		};
++		r = vk->vkAllocateMemory(vk->device, &mai, NULL, &t->memory[i]);
++		if (r == VK_SUCCESS)
++			r = vk->vkBindImageMemory(vk->device, t->images[i].handle, t->memory[i], 0);
++		if (r != VK_SUCCESS) {
++			COMP_ERROR(ct->c, "qbridge: AHB import: %d", r);
++			ok = false;
++			break;
++		}
++
++		VkImageViewCreateInfo vci = {
++		    .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
++		    .image = t->images[i].handle,
++		    .viewType = VK_IMAGE_VIEW_TYPE_2D,
++		    .format = view_format,
++		    .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
++		};
++		r = vk->vkCreateImageView(vk->device, &vci, NULL, &t->images[i].view);
++		if (r != VK_SUCCESS) {
++			ok = false;
++			break;
++		}
++	}
++	t->generation = l->generation;
++	os_mutex_unlock(&t->sys->mutex);
++
++	if (!ok) {
++		free_images(t);
++		return;
++	}
++	t->base.image_count = QB_MAX_SLOTS;
++	t->base.images = t->images;
++	t->base.width = w;
++	t->base.height = h;
++	t->base.format = view_format;
++	t->base.final_layout = VK_IMAGE_LAYOUT_GENERAL;
++	COMP_INFO(ct->c, "qbridge: imported %d AHardwareBuffers %ux%u (%s view)", QB_MAX_SLOTS, w, h,
++	          srgb ? "sRGB" : "UNORM");
++}
++
++static bool
++target_has_images(struct comp_target *ct)
++{
++	return qbt(ct)->base.images != NULL;
++}
++
++static VkResult
++target_acquire(struct comp_target *ct, uint32_t *out_index)
++{
++	struct qbridge_target *t = qbt(ct);
++	for (int tries = 0; tries < 200; tries++) {
++		os_mutex_lock(&t->sys->mutex);
++		bool stale = t->sys->link.fd < 0 || t->sys->link.generation != t->generation;
++		int slot = stale ? -1 : qb_link_acquire(&t->sys->link);
++		os_mutex_unlock(&t->sys->mutex);
++		if (stale) {
++			//! @todo Recreate images when the app reconnects.
++			return VK_ERROR_SURFACE_LOST_KHR;
++		}
++		if (slot >= 0) {
++			t->index = slot;
++			*out_index = (uint32_t)slot;
++			return VK_SUCCESS;
++		}
++		os_nanosleep(U_TIME_1MS_IN_NS / 2);
++	}
++	return VK_TIMEOUT;
++}
++
++static VkResult
++target_present(struct comp_target *ct,
++               struct vk_bundle_queue *present_queue,
++               uint32_t index,
++               uint64_t timeline_semaphore_value,
++               int64_t desired_present_time_ns,
++               int64_t present_slop_ns)
++{
++	struct qbridge_target *t = qbt(ct);
++	struct vk_bundle *vk = &t->base.c->base.vk;
++
++	// The app samples the image as soon as it gets FRAME: finish the GPU work
++	// first (no shared sync object across the two processes yet).
++	vk_queue_lock(present_queue);
++	vk->vkQueueWaitIdle(present_queue->queue);
++	vk_queue_unlock(present_queue);
++
++	os_mutex_lock(&t->sys->mutex);
++	qb_link_present(&t->sys->link, (int)index, t->sys->render_seq);
++	os_mutex_unlock(&t->sys->mutex);
++	t->index = -1;
++	return VK_SUCCESS;
++}
++
++static VkResult
++target_wait_for_present(struct comp_target *ct, time_duration_ns timeout_ns)
++{
++	return VK_ERROR_EXTENSION_NOT_PRESENT;
++}
++
++static void
++target_flush(struct comp_target *ct)
++{}
++
++static void
++target_calc_frame_pacing(struct comp_target *ct,
++                         int64_t *out_frame_id,
++                         int64_t *out_wake_up_time_ns,
++                         int64_t *out_desired_present_time_ns,
++                         int64_t *out_present_slop_ns,
++                         int64_t *out_predicted_display_time_ns)
++{
++	struct qbridge_target *t = qbt(ct);
++	int64_t frame_id = -1, wake = 0, desired = 0, slop = 0, predicted = 0, period = 0, min_period = 0;
++	u_pc_predict(t->upc, os_monotonic_get_ns(), &frame_id, &wake, &desired, &slop, &predicted, &period,
++	             &min_period);
++	*out_frame_id = frame_id;
++	*out_wake_up_time_ns = wake;
++	*out_desired_present_time_ns = desired;
++	*out_present_slop_ns = slop;
++	*out_predicted_display_time_ns = predicted;
++}
++
++static void
++target_mark_timing_point(struct comp_target *ct, enum comp_target_timing_point point, int64_t frame_id, int64_t when_ns)
++{
++	struct qbridge_target *t = qbt(ct);
++	switch (point) {
++	case COMP_TARGET_TIMING_POINT_WAKE_UP: u_pc_mark_point(t->upc, U_TIMING_POINT_WAKE_UP, frame_id, when_ns); break;
++	case COMP_TARGET_TIMING_POINT_BEGIN: u_pc_mark_point(t->upc, U_TIMING_POINT_BEGIN, frame_id, when_ns); break;
++	case COMP_TARGET_TIMING_POINT_SUBMIT_BEGIN:
++		u_pc_mark_point(t->upc, U_TIMING_POINT_SUBMIT_BEGIN, frame_id, when_ns);
++		break;
++	case COMP_TARGET_TIMING_POINT_SUBMIT_END:
++		u_pc_mark_point(t->upc, U_TIMING_POINT_SUBMIT_END, frame_id, when_ns);
++		break;
++	default: break;
++	}
++}
++
++static VkResult
++target_update_timings(struct comp_target *ct)
++{
++	return VK_SUCCESS;
++}
++
++static void
++target_info_gpu(struct comp_target *ct, int64_t frame_id, int64_t gpu_start_ns, int64_t gpu_end_ns, int64_t when_ns)
++{
++	u_pc_info_gpu(qbt(ct)->upc, frame_id, gpu_start_ns, gpu_end_ns, when_ns);
++}
++
++static VkResult
++target_queue_supports_present(struct comp_target *ct, struct vk_bundle_queue *queue, VkBool32 *out_supported)
++{
++	*out_supported = VK_TRUE;
++	return VK_SUCCESS;
++}
++
++static void
++target_set_title(struct comp_target *ct, const char *title)
++{}
++
++static bool
++target_is_shared_presentable_image(struct comp_target *ct)
++{
++	return false;
++}
++
++static void
++target_destroy(struct comp_target *ct)
++{
++	struct qbridge_target *t = qbt(ct);
++	if (t->has_init_vulkan) {
++		free_images(t);
++	}
++	u_pc_destroy(&t->upc);
++	free(t);
++}
++
++static bool
++factory_detect(const struct comp_target_factory *ctf, struct comp_compositor *c)
++{
++	return getenv("QBRIDGE_ENABLE") != NULL;
++}
++
++static bool
++factory_create_target(const struct comp_target_factory *ctf, struct comp_compositor *c, struct comp_target **out_ct)
++{
++	struct qb_sys *sys = qb_sys_get();
++	if (sys == NULL) {
++		return false;
++	}
++	struct qbridge_target *t = U_TYPED_CALLOC(struct qbridge_target);
++	t->sys = sys;
++	t->index = -1;
++	t->base.name = "qbridge";
++	t->base.c = c;
++	t->base.init_pre_vulkan = target_init_pre_vulkan;
++	t->base.init_post_vulkan = target_init_post_vulkan;
++	t->base.check_ready = target_check_ready;
++	t->base.create_images = target_create_images;
++	t->base.has_images = target_has_images;
++	t->base.acquire = target_acquire;
++	t->base.present = target_present;
++	t->base.wait_for_present = target_wait_for_present;
++	t->base.flush = target_flush;
++	t->base.calc_frame_pacing = target_calc_frame_pacing;
++	t->base.mark_timing_point = target_mark_timing_point;
++	t->base.update_timings = target_update_timings;
++	t->base.info_gpu = target_info_gpu;
++	t->base.set_title = target_set_title;
++	t->base.queue_supports_present = target_queue_supports_present;
++	t->base.is_shared_presentable_image = target_is_shared_presentable_image;
++	t->base.destroy = target_destroy;
++	t->base.wait_for_present_supported = false;
++	u_pc_fake_create(c->settings.nominal_frame_interval_ns, os_monotonic_get_ns(), &t->upc);
++	*out_ct = &t->base;
++	COMP_INFO(c, "qbridge: compositor target created");
++	return true;
++}
++
++static const char *qbridge_device_extensions[] = {
++    VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME,
++    VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME,
++};
++
++const struct comp_target_factory comp_target_factory_qbridge = {
++    .name = "qbridge (Meta runtime on the same Quest)",
++    .identifier = "qbridge",
++    .requires_vulkan_for_create = false,
++    .is_deferred = false,
++    .required_instance_version = 0,
++    .required_instance_extensions = NULL,
++    .required_instance_extension_count = 0,
++    .optional_device_extensions = qbridge_device_extensions,
++    .optional_device_extension_count = ARRAY_SIZE(qbridge_device_extensions),
++    .detect = factory_detect,
++    .create_target = factory_create_target,
++};
+diff --git a/src/xrt/compositor/main/msm/linux/msm_mdp.h b/src/xrt/compositor/main/msm/linux/msm_mdp.h
+new file mode 100644
+index 0000000..481814c
+--- /dev/null
++++ b/src/xrt/compositor/main/msm/linux/msm_mdp.h
+@@ -0,0 +1,1474 @@
++#ifndef _UAPI_MSM_MDP_H_
++#define _UAPI_MSM_MDP_H_
++
++#ifndef __KERNEL__
++#include <stdint.h>
++#else
++#include <linux/types.h>
++#endif
++#include <linux/fb.h>
++
++#define MSMFB_IOCTL_MAGIC 'm'
++#define MSMFB_GRP_DISP          _IOW(MSMFB_IOCTL_MAGIC, 1, unsigned int)
++#define MSMFB_BLIT              _IOW(MSMFB_IOCTL_MAGIC, 2, unsigned int)
++#define MSMFB_SUSPEND_SW_REFRESHER _IOW(MSMFB_IOCTL_MAGIC, 128, unsigned int)
++#define MSMFB_RESUME_SW_REFRESHER _IOW(MSMFB_IOCTL_MAGIC, 129, unsigned int)
++#define MSMFB_CURSOR _IOW(MSMFB_IOCTL_MAGIC, 130, struct fb_cursor)
++#define MSMFB_SET_LUT _IOW(MSMFB_IOCTL_MAGIC, 131, struct fb_cmap)
++#define MSMFB_HISTOGRAM _IOWR(MSMFB_IOCTL_MAGIC, 132, struct mdp_histogram_data)
++/* new ioctls's for set/get ccs matrix */
++#define MSMFB_GET_CCS_MATRIX  _IOWR(MSMFB_IOCTL_MAGIC, 133, struct mdp_ccs)
++#define MSMFB_SET_CCS_MATRIX  _IOW(MSMFB_IOCTL_MAGIC, 134, struct mdp_ccs)
++#define MSMFB_OVERLAY_SET       _IOWR(MSMFB_IOCTL_MAGIC, 135, \
++						struct mdp_overlay)
++#define MSMFB_OVERLAY_UNSET     _IOW(MSMFB_IOCTL_MAGIC, 136, unsigned int)
++
++#define MSMFB_OVERLAY_PLAY      _IOW(MSMFB_IOCTL_MAGIC, 137, \
++						struct msmfb_overlay_data)
++#define MSMFB_OVERLAY_QUEUE	MSMFB_OVERLAY_PLAY
++
++#define MSMFB_GET_PAGE_PROTECTION _IOR(MSMFB_IOCTL_MAGIC, 138, \
++					struct mdp_page_protection)
++#define MSMFB_SET_PAGE_PROTECTION _IOW(MSMFB_IOCTL_MAGIC, 139, \
++					struct mdp_page_protection)
++#define MSMFB_OVERLAY_GET      _IOR(MSMFB_IOCTL_MAGIC, 140, \
++						struct mdp_overlay)
++#define MSMFB_OVERLAY_PLAY_ENABLE     _IOW(MSMFB_IOCTL_MAGIC, 141, unsigned int)
++#define MSMFB_OVERLAY_BLT       _IOWR(MSMFB_IOCTL_MAGIC, 142, \
++						struct msmfb_overlay_blt)
++#define MSMFB_OVERLAY_BLT_OFFSET     _IOW(MSMFB_IOCTL_MAGIC, 143, unsigned int)
++#define MSMFB_HISTOGRAM_START	_IOR(MSMFB_IOCTL_MAGIC, 144, \
++						struct mdp_histogram_start_req)
++#define MSMFB_HISTOGRAM_STOP	_IOR(MSMFB_IOCTL_MAGIC, 145, unsigned int)
++#define MSMFB_NOTIFY_UPDATE	_IOWR(MSMFB_IOCTL_MAGIC, 146, unsigned int)
++
++#define MSMFB_OVERLAY_3D       _IOWR(MSMFB_IOCTL_MAGIC, 147, \
++						struct msmfb_overlay_3d)
++
++#define MSMFB_MIXER_INFO       _IOWR(MSMFB_IOCTL_MAGIC, 148, \
++						struct msmfb_mixer_info_req)
++#define MSMFB_OVERLAY_PLAY_WAIT _IOWR(MSMFB_IOCTL_MAGIC, 149, \
++						struct msmfb_overlay_data)
++#define MSMFB_WRITEBACK_INIT _IO(MSMFB_IOCTL_MAGIC, 150)
++#define MSMFB_WRITEBACK_START _IO(MSMFB_IOCTL_MAGIC, 151)
++#define MSMFB_WRITEBACK_STOP _IO(MSMFB_IOCTL_MAGIC, 152)
++#define MSMFB_WRITEBACK_QUEUE_BUFFER _IOW(MSMFB_IOCTL_MAGIC, 153, \
++						struct msmfb_data)
++#define MSMFB_WRITEBACK_DEQUEUE_BUFFER _IOW(MSMFB_IOCTL_MAGIC, 154, \
++						struct msmfb_data)
++#define MSMFB_WRITEBACK_TERMINATE _IO(MSMFB_IOCTL_MAGIC, 155)
++#define MSMFB_MDP_PP _IOWR(MSMFB_IOCTL_MAGIC, 156, struct msmfb_mdp_pp)
++#define MSMFB_OVERLAY_VSYNC_CTRL _IOW(MSMFB_IOCTL_MAGIC, 160, unsigned int)
++#define MSMFB_VSYNC_CTRL  _IOW(MSMFB_IOCTL_MAGIC, 161, unsigned int)
++#define MSMFB_BUFFER_SYNC  _IOW(MSMFB_IOCTL_MAGIC, 162, struct mdp_buf_sync)
++#define MSMFB_OVERLAY_COMMIT      _IO(MSMFB_IOCTL_MAGIC, 163)
++#define MSMFB_DISPLAY_COMMIT      _IOW(MSMFB_IOCTL_MAGIC, 164, \
++						struct mdp_display_commit)
++#define MSMFB_METADATA_SET  _IOW(MSMFB_IOCTL_MAGIC, 165, struct msmfb_metadata)
++#define MSMFB_METADATA_GET  _IOW(MSMFB_IOCTL_MAGIC, 166, struct msmfb_metadata)
++#define MSMFB_WRITEBACK_SET_MIRRORING_HINT _IOW(MSMFB_IOCTL_MAGIC, 167, \
++						unsigned int)
++#define MSMFB_ASYNC_BLIT              _IOW(MSMFB_IOCTL_MAGIC, 168, unsigned int)
++#define MSMFB_OVERLAY_PREPARE		_IOWR(MSMFB_IOCTL_MAGIC, 169, \
++						struct mdp_overlay_list)
++#define MSMFB_LPM_ENABLE	_IOWR(MSMFB_IOCTL_MAGIC, 170, unsigned int)
++#define MSMFB_MDP_PP_GET_FEATURE_VERSION _IOWR(MSMFB_IOCTL_MAGIC, 171, \
++					      struct mdp_pp_feature_version)
++
++#define FB_TYPE_3D_PANEL 0x10101010
++#define MDP_IMGTYPE2_START 0x10000
++#define MSMFB_DRIVER_VERSION	0xF9E8D701
++/* Maximum number of formats supported by MDP*/
++#define MDP_IMGTYPE_END 0x100
++
++/* HW Revisions for different MDSS targets */
++#define MDSS_GET_MAJOR(rev)		((rev) >> 28)
++#define MDSS_GET_MINOR(rev)		(((rev) >> 16) & 0xFFF)
++#define MDSS_GET_STEP(rev)		((rev) & 0xFFFF)
++#define MDSS_GET_MAJOR_MINOR(rev)	((rev) >> 16)
++
++#define IS_MDSS_MAJOR_MINOR_SAME(rev1, rev2)	\
++	(MDSS_GET_MAJOR_MINOR((rev1)) == MDSS_GET_MAJOR_MINOR((rev2)))
++
++#define MDSS_MDP_REV(major, minor, step)	\
++	((((major) & 0x000F) << 28) |		\
++	 (((minor) & 0x0FFF) << 16) |		\
++	 ((step)   & 0xFFFF))
++
++#define MDSS_MDP_HW_REV_100	MDSS_MDP_REV(1, 0, 0) /* 8974 v1.0 */
++#define MDSS_MDP_HW_REV_101	MDSS_MDP_REV(1, 1, 0) /* 8x26 v1.0 */
++#define MDSS_MDP_HW_REV_101_1	MDSS_MDP_REV(1, 1, 1) /* 8x26 v2.0, 8926 v1.0 */
++#define MDSS_MDP_HW_REV_101_2	MDSS_MDP_REV(1, 1, 2) /* 8926 v2.0 */
++#define MDSS_MDP_HW_REV_102	MDSS_MDP_REV(1, 2, 0) /* 8974 v2.0 */
++#define MDSS_MDP_HW_REV_102_1	MDSS_MDP_REV(1, 2, 1) /* 8974 v3.0 (Pro) */
++#define MDSS_MDP_HW_REV_103	MDSS_MDP_REV(1, 3, 0) /* 8084 v1.0 */
++#define MDSS_MDP_HW_REV_103_1	MDSS_MDP_REV(1, 3, 1) /* 8084 v1.1 */
++#define MDSS_MDP_HW_REV_105	MDSS_MDP_REV(1, 5, 0) /* 8994 v1.0 */
++#define MDSS_MDP_HW_REV_106	MDSS_MDP_REV(1, 6, 0) /* 8916 v1.0 */
++#define MDSS_MDP_HW_REV_107	MDSS_MDP_REV(1, 7, 0) /* 8996 v1 */
++#define MDSS_MDP_HW_REV_107_1	MDSS_MDP_REV(1, 7, 1) /* 8996 v2 */
++#define MDSS_MDP_HW_REV_107_2	MDSS_MDP_REV(1, 7, 2) /* 8996 v3 */
++#define MDSS_MDP_HW_REV_108	MDSS_MDP_REV(1, 8, 0) /* 8939 v1.0 */
++#define MDSS_MDP_HW_REV_109	MDSS_MDP_REV(1, 9, 0) /* 8994 v2.0 */
++#define MDSS_MDP_HW_REV_110	MDSS_MDP_REV(1, 10, 0) /* 8992 v1.0 */
++#define MDSS_MDP_HW_REV_200	MDSS_MDP_REV(2, 0, 0) /* 8092 v1.0 */
++#define MDSS_MDP_HW_REV_112	MDSS_MDP_REV(1, 12, 0) /* 8952 v1.0 */
++#define MDSS_MDP_HW_REV_114	MDSS_MDP_REV(1, 14, 0) /* 8937 v1.0 */
++#define MDSS_MDP_HW_REV_115	MDSS_MDP_REV(1, 15, 0) /* msmgold */
++#define MDSS_MDP_HW_REV_116	MDSS_MDP_REV(1, 16, 0) /* msmtitanium */
++#define MDSS_MDP_HW_REV_300	MDSS_MDP_REV(3, 0, 0)  /* msm8998 */
++#define MDSS_MDP_HW_REV_301	MDSS_MDP_REV(3, 0, 1)  /* msm8998 v1.0 */
++#define MDSS_MDP_HW_REV_320	MDSS_MDP_REV(3, 2, 0)  /* sdm660 */
++#define MDSS_MDP_HW_REV_330	MDSS_MDP_REV(3, 3, 0)  /* sdm630 */
++
++enum {
++	NOTIFY_UPDATE_INIT,
++	NOTIFY_UPDATE_DEINIT,
++	NOTIFY_UPDATE_START,
++	NOTIFY_UPDATE_STOP,
++	NOTIFY_UPDATE_POWER_OFF,
++};
++
++enum {
++	NOTIFY_TYPE_NO_UPDATE,
++	NOTIFY_TYPE_SUSPEND,
++	NOTIFY_TYPE_UPDATE,
++	NOTIFY_TYPE_BL_UPDATE,
++	NOTIFY_TYPE_BL_AD_ATTEN_UPDATE,
++};
++
++enum {
++	MDP_RGB_565,      /* RGB 565 planer */
++	MDP_XRGB_8888,    /* RGB 888 padded */
++	MDP_Y_CBCR_H2V2,  /* Y and CbCr, pseudo planer w/ Cb is in MSB */
++	MDP_Y_CBCR_H2V2_ADRENO,
++	MDP_ARGB_8888,    /* ARGB 888 */
++	MDP_RGB_888,      /* RGB 888 planer */
++	MDP_Y_CRCB_H2V2,  /* Y and CrCb, pseudo planer w/ Cr is in MSB */
++	MDP_YCRYCB_H2V1,  /* YCrYCb interleave */
++	MDP_CBYCRY_H2V1,  /* CbYCrY interleave */
++	MDP_Y_CRCB_H2V1,  /* Y and CrCb, pseduo planer w/ Cr is in MSB */
++	MDP_Y_CBCR_H2V1,   /* Y and CrCb, pseduo planer w/ Cr is in MSB */
++	MDP_Y_CRCB_H1V2,
++	MDP_Y_CBCR_H1V2,
++	MDP_RGBA_8888,    /* ARGB 888 */
++	MDP_BGRA_8888,	  /* ABGR 888 */
++	MDP_RGBX_8888,	  /* RGBX 888 */
++	MDP_Y_CRCB_H2V2_TILE,  /* Y and CrCb, pseudo planer tile */
++	MDP_Y_CBCR_H2V2_TILE,  /* Y and CbCr, pseudo planer tile */
++	MDP_Y_CR_CB_H2V2,  /* Y, Cr and Cb, planar */
++	MDP_Y_CR_CB_GH2V2,  /* Y, Cr and Cb, planar aligned to Android YV12 */
++	MDP_Y_CB_CR_H2V2,  /* Y, Cb and Cr, planar */
++	MDP_Y_CRCB_H1V1,  /* Y and CrCb, pseduo planer w/ Cr is in MSB */
++	MDP_Y_CBCR_H1V1,  /* Y and CbCr, pseduo planer w/ Cb is in MSB */
++	MDP_YCRCB_H1V1,   /* YCrCb interleave */
++	MDP_YCBCR_H1V1,   /* YCbCr interleave */
++	MDP_BGR_565,      /* BGR 565 planer */
++	MDP_BGR_888,      /* BGR 888 */
++	MDP_Y_CBCR_H2V2_VENUS,
++	MDP_BGRX_8888,   /* BGRX 8888 */
++	MDP_RGBA_8888_TILE,	  /* RGBA 8888 in tile format */
++	MDP_ARGB_8888_TILE,	  /* ARGB 8888 in tile format */
++	MDP_ABGR_8888_TILE,	  /* ABGR 8888 in tile format */
++	MDP_BGRA_8888_TILE,	  /* BGRA 8888 in tile format */
++	MDP_RGBX_8888_TILE,	  /* RGBX 8888 in tile format */
++	MDP_XRGB_8888_TILE,	  /* XRGB 8888 in tile format */
++	MDP_XBGR_8888_TILE,	  /* XBGR 8888 in tile format */
++	MDP_BGRX_8888_TILE,	  /* BGRX 8888 in tile format */
++	MDP_YCBYCR_H2V1,  /* YCbYCr interleave */
++	MDP_RGB_565_TILE,	  /* RGB 565 in tile format */
++	MDP_BGR_565_TILE,	  /* BGR 565 in tile format */
++	MDP_ARGB_1555,	/*ARGB 1555*/
++	MDP_RGBA_5551,	/*RGBA 5551*/
++	MDP_ARGB_4444,	/*ARGB 4444*/
++	MDP_RGBA_4444,	/*RGBA 4444*/
++	MDP_RGB_565_UBWC,
++	MDP_RGBA_8888_UBWC,
++	MDP_Y_CBCR_H2V2_UBWC,
++	MDP_RGBX_8888_UBWC,
++	MDP_Y_CRCB_H2V2_VENUS,
++	MDP_IMGTYPE_LIMIT,
++	MDP_RGB_BORDERFILL,	/* border fill pipe */
++	MDP_XRGB_1555,
++	MDP_RGBX_5551,
++	MDP_XRGB_4444,
++	MDP_RGBX_4444,
++	MDP_ABGR_1555,
++	MDP_BGRA_5551,
++	MDP_XBGR_1555,
++	MDP_BGRX_5551,
++	MDP_ABGR_4444,
++	MDP_BGRA_4444,
++	MDP_XBGR_4444,
++	MDP_BGRX_4444,
++	MDP_ABGR_8888,
++	MDP_XBGR_8888,
++	MDP_RGBA_1010102,
++	MDP_ARGB_2101010,
++	MDP_RGBX_1010102,
++	MDP_XRGB_2101010,
++	MDP_BGRA_1010102,
++	MDP_ABGR_2101010,
++	MDP_BGRX_1010102,
++	MDP_XBGR_2101010,
++	MDP_RGBA_1010102_UBWC,
++	MDP_RGBX_1010102_UBWC,
++	MDP_Y_CBCR_H2V2_P010,
++	MDP_Y_CBCR_H2V2_TP10_UBWC,
++	MDP_CRYCBY_H2V1,  /* CrYCbY interleave */
++	MDP_IMGTYPE_LIMIT1 = MDP_IMGTYPE_END,
++	MDP_FB_FORMAT = MDP_IMGTYPE2_START,    /* framebuffer format */
++	MDP_IMGTYPE_LIMIT2 /* Non valid image type after this enum */
++};
++
++#define MDP_CRYCBY_H2V1 MDP_CRYCBY_H2V1
++
++enum {
++	PMEM_IMG,
++	FB_IMG,
++};
++
++enum {
++	HSIC_HUE = 0,
++	HSIC_SAT,
++	HSIC_INT,
++	HSIC_CON,
++	NUM_HSIC_PARAM,
++};
++
++enum mdss_mdp_max_bw_mode {
++	MDSS_MAX_BW_LIMIT_DEFAULT = 0x1,
++	MDSS_MAX_BW_LIMIT_CAMERA = 0x2,
++	MDSS_MAX_BW_LIMIT_HFLIP = 0x4,
++	MDSS_MAX_BW_LIMIT_VFLIP = 0x8,
++};
++
++#define MDSS_MDP_ROT_ONLY		0x80
++#define MDSS_MDP_RIGHT_MIXER		0x100
++#define MDSS_MDP_DUAL_PIPE		0x200
++
++/* mdp_blit_req flag values */
++#define MDP_ROT_NOP 0
++#define MDP_FLIP_LR 0x1
++#define MDP_FLIP_UD 0x2
++#define MDP_ROT_90 0x4
++#define MDP_ROT_180 (MDP_FLIP_UD|MDP_FLIP_LR)
++#define MDP_ROT_270 (MDP_ROT_90|MDP_FLIP_UD|MDP_FLIP_LR)
++#define MDP_DITHER 0x8
++#define MDP_BLUR 0x10
++#define MDP_BLEND_FG_PREMULT 0x20000
++#define MDP_IS_FG 0x40000
++#define MDP_SOLID_FILL 0x00000020
++#define MDP_VPU_PIPE 0x00000040
++#define MDP_DEINTERLACE 0x80000000
++#define MDP_SHARPENING  0x40000000
++#define MDP_NO_DMA_BARRIER_START	0x20000000
++#define MDP_NO_DMA_BARRIER_END		0x10000000
++#define MDP_NO_BLIT			0x08000000
++#define MDP_BLIT_WITH_DMA_BARRIERS	0x000
++#define MDP_BLIT_WITH_NO_DMA_BARRIERS    \
++	(MDP_NO_DMA_BARRIER_START | MDP_NO_DMA_BARRIER_END)
++#define MDP_BLIT_SRC_GEM                0x04000000
++#define MDP_BLIT_DST_GEM                0x02000000
++#define MDP_BLIT_NON_CACHED		0x01000000
++#define MDP_OV_PIPE_SHARE		0x00800000
++#define MDP_DEINTERLACE_ODD		0x00400000
++#define MDP_OV_PLAY_NOWAIT		0x00200000
++#define MDP_SOURCE_ROTATED_90		0x00100000
++#define MDP_OVERLAY_PP_CFG_EN		0x00080000
++#define MDP_BACKEND_COMPOSITION		0x00040000
++#define MDP_BORDERFILL_SUPPORTED	0x00010000
++#define MDP_SECURE_OVERLAY_SESSION      0x00008000
++#define MDP_SECURE_DISPLAY_OVERLAY_SESSION	0x00002000
++#define MDP_OV_PIPE_FORCE_DMA		0x00004000
++#define MDP_MEMORY_ID_TYPE_FB		0x00001000
++#define MDP_BWC_EN			0x00000400
++#define MDP_DECIMATION_EN		0x00000800
++#define MDP_SMP_FORCE_ALLOC		0x00200000
++#define MDP_TRANSP_NOP 0xffffffff
++#define MDP_ALPHA_NOP 0xff
++
++#define MDP_FB_PAGE_PROTECTION_NONCACHED         (0)
++#define MDP_FB_PAGE_PROTECTION_WRITECOMBINE      (1)
++#define MDP_FB_PAGE_PROTECTION_WRITETHROUGHCACHE (2)
++#define MDP_FB_PAGE_PROTECTION_WRITEBACKCACHE    (3)
++#define MDP_FB_PAGE_PROTECTION_WRITEBACKWACACHE  (4)
++/* Sentinel: Don't use! */
++#define MDP_FB_PAGE_PROTECTION_INVALID           (5)
++/* Count of the number of MDP_FB_PAGE_PROTECTION_... values. */
++#define MDP_NUM_FB_PAGE_PROTECTION_VALUES        (5)
++
++#define MDP_DEEP_COLOR_YUV444    0x1
++#define MDP_DEEP_COLOR_RGB30B    0x2
++#define MDP_DEEP_COLOR_RGB36B    0x4
++#define MDP_DEEP_COLOR_RGB48B    0x8
++
++struct mdp_rect {
++	uint32_t x;
++	uint32_t y;
++	uint32_t w;
++	uint32_t h;
++};
++
++struct mdp_img {
++	uint32_t width;
++	uint32_t height;
++	uint32_t format;
++	uint32_t offset;
++	int memory_id;		/* the file descriptor */
++	uint32_t priv;
++};
++
++struct mult_factor {
++	uint32_t numer;
++	uint32_t denom;
++};
++
++/*
++ * {3x3} + {3} ccs matrix
++ */
++
++#define MDP_CCS_RGB2YUV 	0
++#define MDP_CCS_YUV2RGB 	1
++
++#define MDP_CCS_SIZE	9
++#define MDP_BV_SIZE	3
++
++struct mdp_ccs {
++	int direction;			/* MDP_CCS_RGB2YUV or YUV2RGB */
++	uint16_t ccs[MDP_CCS_SIZE];	/* 3x3 color coefficients */
++	uint16_t bv[MDP_BV_SIZE];	/* 1x3 bias vector */
++};
++
++struct mdp_csc {
++	int id;
++	uint32_t csc_mv[9];
++	uint32_t csc_pre_bv[3];
++	uint32_t csc_post_bv[3];
++	uint32_t csc_pre_lv[6];
++	uint32_t csc_post_lv[6];
++};
++
++/* The version of the mdp_blit_req structure so that
++ * user applications can selectively decide which functionality
++ * to include
++ */
++
++#define MDP_BLIT_REQ_VERSION 3
++
++struct color {
++	uint32_t r;
++	uint32_t g;
++	uint32_t b;
++	uint32_t alpha;
++};
++
++struct mdp_blit_req {
++	struct mdp_img src;
++	struct mdp_img dst;
++	struct mdp_rect src_rect;
++	struct mdp_rect dst_rect;
++	struct color const_color;
++	uint32_t alpha;
++	uint32_t transp_mask;
++	uint32_t flags;
++	int sharpening_strength;  /* -127 <--> 127, default 64 */
++	uint8_t color_space;
++	uint32_t fps;
++};
++
++struct mdp_blit_req_list {
++	uint32_t count;
++	struct mdp_blit_req req[];
++};
++
++#define MSMFB_DATA_VERSION 2
++
++struct msmfb_data {
++	uint32_t offset;
++	int memory_id;
++	int id;
++	uint32_t flags;
++	uint32_t priv;
++	uint32_t iova;
++};
++
++#define MSMFB_NEW_REQUEST -1
++
++struct msmfb_overlay_data {
++	uint32_t id;
++	struct msmfb_data data;
++	uint32_t version_key;
++	struct msmfb_data plane1_data;
++	struct msmfb_data plane2_data;
++	struct msmfb_data dst_data;
++};
++
++struct msmfb_img {
++	uint32_t width;
++	uint32_t height;
++	uint32_t format;
++};
++
++#define MSMFB_WRITEBACK_DEQUEUE_BLOCKING 0x1
++struct msmfb_writeback_data {
++	struct msmfb_data buf_info;
++	struct msmfb_img img;
++};
++
++#define MDP_PP_OPS_ENABLE 0x1
++#define MDP_PP_OPS_READ 0x2
++#define MDP_PP_OPS_WRITE 0x4
++#define MDP_PP_OPS_DISABLE 0x8
++#define MDP_PP_IGC_FLAG_ROM0	0x10
++#define MDP_PP_IGC_FLAG_ROM1	0x20
++
++
++#define MDSS_PP_DSPP_CFG	0x000
++#define MDSS_PP_SSPP_CFG	0x100
++#define MDSS_PP_LM_CFG	0x200
++#define MDSS_PP_WB_CFG	0x300
++
++#define MDSS_PP_ARG_MASK	0x3C00
++#define MDSS_PP_ARG_NUM		4
++#define MDSS_PP_ARG_SHIFT	10
++#define MDSS_PP_LOCATION_MASK	0x0300
++#define MDSS_PP_LOGICAL_MASK	0x00FF
++
++#define MDSS_PP_ADD_ARG(var, arg) ((var) | (0x1 << (MDSS_PP_ARG_SHIFT + (arg))))
++#define PP_ARG(x, var) ((var) & (0x1 << (MDSS_PP_ARG_SHIFT + (x))))
++#define PP_LOCAT(var) ((var) & MDSS_PP_LOCATION_MASK)
++#define PP_BLOCK(var) ((var) & MDSS_PP_LOGICAL_MASK)
++
++
++struct mdp_qseed_cfg {
++	uint32_t table_num;
++	uint32_t ops;
++	uint32_t len;
++	uint32_t *data;
++};
++
++struct mdp_sharp_cfg {
++	uint32_t flags;
++	uint32_t strength;
++	uint32_t edge_thr;
++	uint32_t smooth_thr;
++	uint32_t noise_thr;
++};
++
++struct mdp_qseed_cfg_data {
++	uint32_t block;
++	struct mdp_qseed_cfg qseed_data;
++};
++
++#define MDP_OVERLAY_PP_CSC_CFG         0x1
++#define MDP_OVERLAY_PP_QSEED_CFG       0x2
++#define MDP_OVERLAY_PP_PA_CFG          0x4
++#define MDP_OVERLAY_PP_IGC_CFG         0x8
++#define MDP_OVERLAY_PP_SHARP_CFG       0x10
++#define MDP_OVERLAY_PP_HIST_CFG        0x20
++#define MDP_OVERLAY_PP_HIST_LUT_CFG    0x40
++#define MDP_OVERLAY_PP_PA_V2_CFG       0x80
++#define MDP_OVERLAY_PP_PCC_CFG	       0x100
++
++#define MDP_CSC_FLAG_ENABLE	0x1
++#define MDP_CSC_FLAG_YUV_IN	0x2
++#define MDP_CSC_FLAG_YUV_OUT	0x4
++
++#define MDP_CSC_MATRIX_COEFF_SIZE	9
++#define MDP_CSC_CLAMP_SIZE		6
++#define MDP_CSC_BIAS_SIZE		3
++
++struct mdp_csc_cfg {
++	/* flags for enable CSC, toggling RGB,YUV input/output */
++	uint32_t flags;
++	uint32_t csc_mv[MDP_CSC_MATRIX_COEFF_SIZE];
++	uint32_t csc_pre_bv[MDP_CSC_BIAS_SIZE];
++	uint32_t csc_post_bv[MDP_CSC_BIAS_SIZE];
++	uint32_t csc_pre_lv[MDP_CSC_CLAMP_SIZE];
++	uint32_t csc_post_lv[MDP_CSC_CLAMP_SIZE];
++};
++
++struct mdp_csc_cfg_data {
++	uint32_t block;
++	struct mdp_csc_cfg csc_data;
++};
++
++struct mdp_pa_cfg {
++	uint32_t flags;
++	uint32_t hue_adj;
++	uint32_t sat_adj;
++	uint32_t val_adj;
++	uint32_t cont_adj;
++};
++
++struct mdp_pa_mem_col_cfg {
++	uint32_t color_adjust_p0;
++	uint32_t color_adjust_p1;
++	uint32_t hue_region;
++	uint32_t sat_region;
++	uint32_t val_region;
++};
++
++#define MDP_SIX_ZONE_LUT_SIZE		384
++
++/* PA Write/Read extension flags */
++#define MDP_PP_PA_HUE_ENABLE		0x10
++#define MDP_PP_PA_SAT_ENABLE		0x20
++#define MDP_PP_PA_VAL_ENABLE		0x40
++#define MDP_PP_PA_CONT_ENABLE		0x80
++#define MDP_PP_PA_SIX_ZONE_ENABLE	0x100
++#define MDP_PP_PA_SKIN_ENABLE		0x200
++#define MDP_PP_PA_SKY_ENABLE		0x400
++#define MDP_PP_PA_FOL_ENABLE		0x800
++
++/* PA masks */
++/* Masks used in PA v1_7 only */
++#define MDP_PP_PA_MEM_PROT_HUE_EN	0x1
++#define MDP_PP_PA_MEM_PROT_SAT_EN	0x2
++#define MDP_PP_PA_MEM_PROT_VAL_EN	0x4
++#define MDP_PP_PA_MEM_PROT_CONT_EN	0x8
++#define MDP_PP_PA_MEM_PROT_SIX_EN	0x10
++#define MDP_PP_PA_MEM_PROT_BLEND_EN	0x20
++/* Masks used in all PAv2 versions */
++#define MDP_PP_PA_HUE_MASK		0x1000
++#define MDP_PP_PA_SAT_MASK		0x2000
++#define MDP_PP_PA_VAL_MASK		0x4000
++#define MDP_PP_PA_CONT_MASK		0x8000
++#define MDP_PP_PA_SIX_ZONE_HUE_MASK	0x10000
++#define MDP_PP_PA_SIX_ZONE_SAT_MASK	0x20000
++#define MDP_PP_PA_SIX_ZONE_VAL_MASK	0x40000
++#define MDP_PP_PA_MEM_COL_SKIN_MASK	0x80000
++#define MDP_PP_PA_MEM_COL_SKY_MASK	0x100000
++#define MDP_PP_PA_MEM_COL_FOL_MASK	0x200000
++#define MDP_PP_PA_MEM_PROTECT_EN	0x400000
++#define MDP_PP_PA_SAT_ZERO_EXP_EN	0x800000
++
++/* Flags for setting PA saturation and value hold */
++#define MDP_PP_PA_LEFT_HOLD		0x1
++#define MDP_PP_PA_RIGHT_HOLD		0x2
++
++struct mdp_pa_v2_data {
++	/* Mask bits for PA features */
++	uint32_t flags;
++	uint32_t global_hue_adj;
++	uint32_t global_sat_adj;
++	uint32_t global_val_adj;
++	uint32_t global_cont_adj;
++	struct mdp_pa_mem_col_cfg skin_cfg;
++	struct mdp_pa_mem_col_cfg sky_cfg;
++	struct mdp_pa_mem_col_cfg fol_cfg;
++	uint32_t six_zone_len;
++	uint32_t six_zone_thresh;
++	uint32_t *six_zone_curve_p0;
++	uint32_t *six_zone_curve_p1;
++};
++
++struct mdp_pa_mem_col_data_v1_7 {
++	uint32_t color_adjust_p0;
++	uint32_t color_adjust_p1;
++	uint32_t color_adjust_p2;
++	uint32_t blend_gain;
++	uint8_t sat_hold;
++	uint8_t val_hold;
++	uint32_t hue_region;
++	uint32_t sat_region;
++	uint32_t val_region;
++};
++
++struct mdp_pa_data_v1_7 {
++	uint32_t mode;
++	uint32_t global_hue_adj;
++	uint32_t global_sat_adj;
++	uint32_t global_val_adj;
++	uint32_t global_cont_adj;
++	struct mdp_pa_mem_col_data_v1_7 skin_cfg;
++	struct mdp_pa_mem_col_data_v1_7 sky_cfg;
++	struct mdp_pa_mem_col_data_v1_7 fol_cfg;
++	uint32_t six_zone_thresh;
++	uint32_t six_zone_adj_p0;
++	uint32_t six_zone_adj_p1;
++	uint8_t six_zone_sat_hold;
++	uint8_t six_zone_val_hold;
++	uint32_t six_zone_len;
++	uint32_t *six_zone_curve_p0;
++	uint32_t *six_zone_curve_p1;
++};
++
++
++struct mdp_pa_v2_cfg_data {
++	uint32_t version;
++	uint32_t block;
++	uint32_t flags;
++	struct mdp_pa_v2_data pa_v2_data;
++	void *cfg_payload;
++};
++
++
++enum {
++	mdp_igc_rec601 = 1,
++	mdp_igc_rec709,
++	mdp_igc_srgb,
++	mdp_igc_custom,
++	mdp_igc_rec_max,
++};
++
++struct mdp_igc_lut_data {
++	uint32_t block;
++	uint32_t version;
++	uint32_t len, ops;
++	uint32_t *c0_c1_data;
++	uint32_t *c2_data;
++	void *cfg_payload;
++};
++
++struct mdp_igc_lut_data_v1_7 {
++	uint32_t table_fmt;
++	uint32_t len;
++	uint32_t *c0_c1_data;
++	uint32_t *c2_data;
++};
++
++struct mdp_igc_lut_data_payload {
++	uint32_t table_fmt;
++	uint32_t len;
++	uint64_t __user c0_c1_data;
++	uint64_t __user c2_data;
++	uint32_t strength;
++};
++
++struct mdp_histogram_cfg {
++	uint32_t ops;
++	uint32_t block;
++	uint8_t frame_cnt;
++	uint8_t bit_mask;
++	uint16_t num_bins;
++};
++
++struct mdp_hist_lut_data_v1_7 {
++	uint32_t len;
++	uint32_t *data;
++};
++
++struct mdp_hist_lut_data {
++	uint32_t block;
++	uint32_t version;
++	uint32_t hist_lut_first;
++	uint32_t ops;
++	uint32_t len;
++	uint32_t *data;
++	void *cfg_payload;
++};
++
++struct mdp_pcc_coeff {
++	uint32_t c, r, g, b, rr, gg, bb, rg, gb, rb, rgb_0, rgb_1;
++};
++
++struct mdp_pcc_coeff_v1_7 {
++	uint32_t c, r, g, b, rg, gb, rb, rgb;
++};
++
++struct mdp_pcc_data_v1_7 {
++	struct mdp_pcc_coeff_v1_7 r, g, b;
++};
++
++struct mdp_pcc_cfg_data {
++	uint32_t version;
++	uint32_t block;
++	uint32_t ops;
++	struct mdp_pcc_coeff r, g, b;
++	void *cfg_payload;
++};
++
++enum {
++	mdp_lut_igc,
++	mdp_lut_pgc,
++	mdp_lut_hist,
++	mdp_lut_rgb,
++	mdp_lut_max,
++};
++struct mdp_overlay_pp_params {
++	uint32_t config_ops;
++	struct mdp_csc_cfg csc_cfg;
++	struct mdp_qseed_cfg qseed_cfg[2];
++	struct mdp_pa_cfg pa_cfg;
++	struct mdp_pa_v2_data pa_v2_cfg;
++	struct mdp_igc_lut_data igc_cfg;
++	struct mdp_sharp_cfg sharp_cfg;
++	struct mdp_histogram_cfg hist_cfg;
++	struct mdp_hist_lut_data hist_lut_cfg;
++	/* PAv2 cfg data for PA 2.x versions */
++	struct mdp_pa_v2_cfg_data pa_v2_cfg_data;
++	struct mdp_pcc_cfg_data pcc_cfg_data;
++};
++
++/**
++ * enum mdss_mdp_blend_op - Different blend operations set by userspace
++ *
++ * @BLEND_OP_NOT_DEFINED:    No blend operation defined for the layer.
++ * @BLEND_OP_OPAQUE:         Apply a constant blend operation. The layer
++ *                           would appear opaque in case fg plane alpha is
++ *                           0xff.
++ * @BLEND_OP_PREMULTIPLIED:  Apply source over blend rule. Layer already has
++ *                           alpha pre-multiplication done. If fg plane alpha
++ *                           is less than 0xff, apply modulation as well. This
++ *                           operation is intended on layers having alpha
++ *                           channel.
++ * @BLEND_OP_COVERAGE:       Apply source over blend rule. Layer is not alpha
++ *                           pre-multiplied. Apply pre-multiplication. If fg
++ *                           plane alpha is less than 0xff, apply modulation as
++ *                           well.
++ * @BLEND_OP_MAX:            Used to track maximum blend operation possible by
++ *                           mdp.
++ */
++enum mdss_mdp_blend_op {
++	BLEND_OP_NOT_DEFINED = 0,
++	BLEND_OP_OPAQUE,
++	BLEND_OP_PREMULTIPLIED,
++	BLEND_OP_COVERAGE,
++	BLEND_OP_MAX,
++};
++
++#define DECIMATED_DIMENSION(dim, deci) (((dim) + ((1 << (deci)) - 1)) >> (deci))
++#define MAX_PLANES	4
++struct mdp_scale_data {
++	uint8_t enable_pxl_ext;
++
++	int init_phase_x[MAX_PLANES];
++	int phase_step_x[MAX_PLANES];
++	int init_phase_y[MAX_PLANES];
++	int phase_step_y[MAX_PLANES];
++
++	int num_ext_pxls_left[MAX_PLANES];
++	int num_ext_pxls_right[MAX_PLANES];
++	int num_ext_pxls_top[MAX_PLANES];
++	int num_ext_pxls_btm[MAX_PLANES];
++
++	int left_ftch[MAX_PLANES];
++	int left_rpt[MAX_PLANES];
++	int right_ftch[MAX_PLANES];
++	int right_rpt[MAX_PLANES];
++
++	int top_rpt[MAX_PLANES];
++	int btm_rpt[MAX_PLANES];
++	int top_ftch[MAX_PLANES];
++	int btm_ftch[MAX_PLANES];
++
++	uint32_t roi_w[MAX_PLANES];
++};
++
++/**
++ * enum mdp_overlay_pipe_type - Different pipe type set by userspace
++ *
++ * @PIPE_TYPE_AUTO:    Not specified, pipe will be selected according to flags.
++ * @PIPE_TYPE_VIG:     VIG pipe.
++ * @PIPE_TYPE_RGB:     RGB pipe.
++ * @PIPE_TYPE_DMA:     DMA pipe.
++ * @PIPE_TYPE_CURSOR:  CURSOR pipe.
++ * @PIPE_TYPE_MAX:     Used to track maximum number of pipe type.
++ */
++enum mdp_overlay_pipe_type {
++	PIPE_TYPE_AUTO = 0,
++	PIPE_TYPE_VIG,
++	PIPE_TYPE_RGB,
++	PIPE_TYPE_DMA,
++	PIPE_TYPE_CURSOR,
++	PIPE_TYPE_MAX,
++};
++
++/**
++ * struct mdp_overlay - overlay surface structure
++ * @src:	Source image information (width, height, format).
++ * @src_rect:	Source crop rectangle, portion of image that will be fetched.
++ *		This should always be within boundaries of source image.
++ * @dst_rect:	Destination rectangle, the position and size of image on screen.
++ *		This should always be within panel boundaries.
++ * @z_order:	Blending stage to occupy in display, if multiple layers are
++ *		present, highest z_order usually means the top most visible
++ *		layer. The range acceptable is from 0-3 to support blending
++ *		up to 4 layers.
++ * @is_fg:	This flag is used to disable blending of any layers with z_order
++ *		less than this overlay. It means that any layers with z_order
++ *		less than this layer will not be blended and will be replaced
++ *		by the background border color.
++ * @alpha:	Used to set plane opacity. The range can be from 0-255, where
++ *		0 means completely transparent and 255 means fully opaque.
++ * @transp_mask: Color used as color key for transparency. Any pixel in fetched
++ *		image matching this color will be transparent when blending.
++ *		The color should be in same format as the source image format.
++ * @flags:	This is used to customize operation of overlay. See MDP flags
++ *		for more information.
++ * @pipe_type:  Used to specify the type of overlay pipe.
++ * @user_data:	DEPRECATED* Used to store user application specific information.
++ * @bg_color:	Solid color used to fill the overlay surface when no source
++ *		buffer is provided.
++ * @horz_deci:	Horizontal decimation value, this indicates the amount of pixels
++ *		dropped for each pixel that is fetched from a line. The value
++ *		given should be power of two of decimation amount.
++ *		0: no decimation
++ *		1: decimate by 2 (drop 1 pixel for each pixel fetched)
++ *		2: decimate by 4 (drop 3 pixels for each pixel fetched)
++ *		3: decimate by 8 (drop 7 pixels for each pixel fetched)
++ *		4: decimate by 16 (drop 15 pixels for each pixel fetched)
++ * @vert_deci:	Vertical decimation value, this indicates the amount of lines
++ *		dropped for each line that is fetched from overlay. The value
++ *		given should be power of two of decimation amount.
++ *		0: no decimation
++ *		1: decimation by 2 (drop 1 line for each line fetched)
++ *		2: decimation by 4 (drop 3 lines for each line fetched)
++ *		3: decimation by 8 (drop 7 lines for each line fetched)
++ *		4: decimation by 16 (drop 15 lines for each line fetched)
++ * @overlay_pp_cfg: Overlay post processing configuration, for more information
++ *		see struct mdp_overlay_pp_params.
++ * @priority:	Priority is returned by the driver when overlay is set for the
++ *		first time. It indicates the priority of the underlying pipe
++ *		serving the overlay. This priority can be used by user-space
++ *		in source split when pipes are re-used and shuffled around to
++ *		reduce fallbacks.
++ */
++struct mdp_overlay {
++	struct msmfb_img src;
++	struct mdp_rect src_rect;
++	struct mdp_rect dst_rect;
++	uint32_t z_order;	/* stage number */
++	uint32_t is_fg;		/* control alpha & transp */
++	uint32_t alpha;
++	uint32_t blend_op;
++	uint32_t transp_mask;
++	uint32_t flags;
++	uint32_t pipe_type;
++	uint32_t id;
++	uint8_t priority;
++	uint32_t user_data[6];
++	uint32_t bg_color;
++	uint8_t horz_deci;
++	uint8_t vert_deci;
++	struct mdp_overlay_pp_params overlay_pp_cfg;
++	struct mdp_scale_data scale;
++	uint8_t color_space;
++	uint32_t frame_rate;
++};
++
++struct msmfb_overlay_3d {
++	uint32_t is_3d;
++	uint32_t width;
++	uint32_t height;
++};
++
++
++struct msmfb_overlay_blt {
++	uint32_t enable;
++	uint32_t offset;
++	uint32_t width;
++	uint32_t height;
++	uint32_t bpp;
++};
++
++struct mdp_histogram {
++	uint32_t frame_cnt;
++	uint32_t bin_cnt;
++	uint32_t *r;
++	uint32_t *g;
++	uint32_t *b;
++};
++
++#define MISR_CRC_BATCH_SIZE 32
++enum {
++	DISPLAY_MISR_EDP,
++	DISPLAY_MISR_DSI0,
++	DISPLAY_MISR_DSI1,
++	DISPLAY_MISR_HDMI,
++	DISPLAY_MISR_LCDC,
++	DISPLAY_MISR_MDP,
++	DISPLAY_MISR_ATV,
++	DISPLAY_MISR_DSI_CMD,
++	DISPLAY_MISR_MAX
++};
++
++enum {
++	MISR_OP_NONE,
++	MISR_OP_SFM,
++	MISR_OP_MFM,
++	MISR_OP_BM,
++	MISR_OP_MAX
++};
++
++struct mdp_misr {
++	uint32_t block_id;
++	uint32_t frame_count;
++	uint32_t crc_op_mode;
++	uint32_t crc_value[MISR_CRC_BATCH_SIZE];
++};
++
++/*
++
++	mdp_block_type defines the identifiers for pipes in MDP 4.3 and up
++
++	MDP_BLOCK_RESERVED is provided for backward compatibility and is
++	deprecated. It corresponds to DMA_P. So MDP_BLOCK_DMA_P should be used
++	instead.
++
++	MDP_LOGICAL_BLOCK_DISP_0 identifies the display pipe which fb0 uses,
++	same for others.
++
++*/
++
++enum {
++	MDP_BLOCK_RESERVED = 0,
++	MDP_BLOCK_OVERLAY_0,
++	MDP_BLOCK_OVERLAY_1,
++	MDP_BLOCK_VG_1,
++	MDP_BLOCK_VG_2,
++	MDP_BLOCK_RGB_1,
++	MDP_BLOCK_RGB_2,
++	MDP_BLOCK_DMA_P,
++	MDP_BLOCK_DMA_S,
++	MDP_BLOCK_DMA_E,
++	MDP_BLOCK_OVERLAY_2,
++	MDP_LOGICAL_BLOCK_DISP_0 = 0x10,
++	MDP_LOGICAL_BLOCK_DISP_1,
++	MDP_LOGICAL_BLOCK_DISP_2,
++	MDP_BLOCK_MAX,
++};
++
++/*
++ * mdp_histogram_start_req is used to provide the parameters for
++ * histogram start request
++ */
++
++struct mdp_histogram_start_req {
++	uint32_t block;
++	uint8_t frame_cnt;
++	uint8_t bit_mask;
++	uint16_t num_bins;
++};
++
++/*
++ * mdp_histogram_data is used to return the histogram data, once
++ * the histogram is done/stopped/cance
++ */
++
++struct mdp_histogram_data {
++	uint32_t block;
++	uint32_t bin_cnt;
++	uint32_t *c0;
++	uint32_t *c1;
++	uint32_t *c2;
++	uint32_t *extra_info;
++};
++
++
++#define GC_LUT_ENTRIES_V1_7	512
++
++struct mdp_ar_gc_lut_data {
++	uint32_t x_start;
++	uint32_t slope;
++	uint32_t offset;
++};
++
++#define MDP_PP_PGC_ROUNDING_ENABLE 0x10
++struct mdp_pgc_lut_data {
++	uint32_t version;
++	uint32_t block;
++	uint32_t flags;
++	uint8_t num_r_stages;
++	uint8_t num_g_stages;
++	uint8_t num_b_stages;
++	struct mdp_ar_gc_lut_data *r_data;
++	struct mdp_ar_gc_lut_data *g_data;
++	struct mdp_ar_gc_lut_data *b_data;
++	void *cfg_payload;
++};
++
++#define PGC_LUT_ENTRIES 1024
++struct mdp_pgc_lut_data_v1_7 {
++	uint32_t  len;
++	uint32_t  *c0_data;
++	uint32_t  *c1_data;
++	uint32_t  *c2_data;
++};
++
++/*
++ * mdp_rgb_lut_data is used to provide parameters for configuring the
++ * generic RGB lut in case of gamma correction or other LUT updation usecases
++ */
++struct mdp_rgb_lut_data {
++	uint32_t flags;
++	uint32_t lut_type;
++	struct fb_cmap cmap;
++};
++
++enum {
++	mdp_rgb_lut_gc,
++	mdp_rgb_lut_hist,
++};
++
++struct mdp_lut_cfg_data {
++	uint32_t lut_type;
++	union {
++		struct mdp_igc_lut_data igc_lut_data;
++		struct mdp_pgc_lut_data pgc_lut_data;
++		struct mdp_hist_lut_data hist_lut_data;
++		struct mdp_rgb_lut_data rgb_lut_data;
++	} data;
++};
++
++struct mdp_bl_scale_data {
++	uint32_t min_lvl;
++	uint32_t scale;
++};
++
++struct mdp_pa_cfg_data {
++	uint32_t block;
++	struct mdp_pa_cfg pa_data;
++};
++
++#define MDP_DITHER_DATA_V1_7_SZ 16
++
++struct mdp_dither_data_v1_7 {
++	uint32_t g_y_depth;
++	uint32_t r_cr_depth;
++	uint32_t b_cb_depth;
++	uint32_t len;
++	uint32_t data[MDP_DITHER_DATA_V1_7_SZ];
++	uint32_t temporal_en;
++};
++
++struct mdp_pa_dither_data {
++	uint64_t data_flags;
++	uint32_t matrix_sz;
++	uint64_t __user matrix_data;
++	uint32_t strength;
++	uint32_t offset_en;
++};
++
++struct mdp_dither_cfg_data {
++	uint32_t version;
++	uint32_t block;
++	uint32_t flags;
++	uint32_t mode;
++	uint32_t g_y_depth;
++	uint32_t r_cr_depth;
++	uint32_t b_cb_depth;
++	void *cfg_payload;
++};
++
++#define MDP_GAMUT_TABLE_NUM		8
++#define MDP_GAMUT_TABLE_NUM_V1_7	4
++#define MDP_GAMUT_SCALE_OFF_TABLE_NUM	3
++#define MDP_GAMUT_TABLE_V1_7_SZ 1229
++#define MDP_GAMUT_SCALE_OFF_SZ 16
++#define MDP_GAMUT_TABLE_V1_7_COARSE_SZ 32
++
++struct mdp_gamut_cfg_data {
++	uint32_t block;
++	uint32_t flags;
++	uint32_t version;
++	/* v1 version specific params */
++	uint32_t gamut_first;
++	uint32_t tbl_size[MDP_GAMUT_TABLE_NUM];
++	uint16_t *r_tbl[MDP_GAMUT_TABLE_NUM];
++	uint16_t *g_tbl[MDP_GAMUT_TABLE_NUM];
++	uint16_t *b_tbl[MDP_GAMUT_TABLE_NUM];
++	/* params for newer versions of gamut */
++	void *cfg_payload;
++};
++
++enum {
++	mdp_gamut_fine_mode = 0x1,
++	mdp_gamut_coarse_mode,
++};
++
++struct mdp_gamut_data_v1_7 {
++	uint32_t mode;
++	uint32_t map_en;
++	uint32_t tbl_size[MDP_GAMUT_TABLE_NUM_V1_7];
++	uint32_t *c0_data[MDP_GAMUT_TABLE_NUM_V1_7];
++	uint32_t *c1_c2_data[MDP_GAMUT_TABLE_NUM_V1_7];
++	uint32_t  tbl_scale_off_sz[MDP_GAMUT_SCALE_OFF_TABLE_NUM];
++	uint32_t  *scale_off_data[MDP_GAMUT_SCALE_OFF_TABLE_NUM];
++};
++
++struct mdp_calib_config_data {
++	uint32_t ops;
++	uint32_t addr;
++	uint32_t data;
++};
++
++struct mdp_calib_config_buffer {
++	uint32_t ops;
++	uint32_t size;
++	uint32_t *buffer;
++};
++
++struct mdp_calib_dcm_state {
++	uint32_t ops;
++	uint32_t dcm_state;
++};
++
++enum {
++	DCM_UNINIT,
++	DCM_UNBLANK,
++	DCM_ENTER,
++	DCM_EXIT,
++	DCM_BLANK,
++	DTM_ENTER,
++	DTM_EXIT,
++};
++
++#define MDSS_PP_SPLIT_LEFT_ONLY		0x10000000
++#define MDSS_PP_SPLIT_RIGHT_ONLY	0x20000000
++#define MDSS_PP_SPLIT_MASK		0x30000000
++
++#define MDSS_MAX_BL_BRIGHTNESS 255
++#define AD_BL_LIN_LEN 256
++#define AD_BL_ATT_LUT_LEN 33
++
++#define MDSS_AD_MODE_AUTO_BL	0x0
++#define MDSS_AD_MODE_AUTO_STR	0x1
++#define MDSS_AD_MODE_TARG_STR	0x3
++#define MDSS_AD_MODE_MAN_STR	0x7
++#define MDSS_AD_MODE_CALIB	0xF
++
++#define MDP_PP_AD_INIT	0x10
++#define MDP_PP_AD_CFG	0x20
++
++struct mdss_ad_init {
++	uint32_t asym_lut[33];
++	uint32_t color_corr_lut[33];
++	uint8_t i_control[2];
++	uint16_t black_lvl;
++	uint16_t white_lvl;
++	uint8_t var;
++	uint8_t limit_ampl;
++	uint8_t i_dither;
++	uint8_t slope_max;
++	uint8_t slope_min;
++	uint8_t dither_ctl;
++	uint8_t format;
++	uint8_t auto_size;
++	uint16_t frame_w;
++	uint16_t frame_h;
++	uint8_t logo_v;
++	uint8_t logo_h;
++	uint32_t alpha;
++	uint32_t alpha_base;
++	uint32_t al_thresh;
++	uint32_t bl_lin_len;
++	uint32_t bl_att_len;
++	uint32_t *bl_lin;
++	uint32_t *bl_lin_inv;
++	uint32_t *bl_att_lut;
++};
++
++#define MDSS_AD_BL_CTRL_MODE_EN 1
++#define MDSS_AD_BL_CTRL_MODE_DIS 0
++struct mdss_ad_cfg {
++	uint32_t mode;
++	uint32_t al_calib_lut[33];
++	uint16_t backlight_min;
++	uint16_t backlight_max;
++	uint16_t backlight_scale;
++	uint16_t amb_light_min;
++	uint16_t filter[2];
++	uint16_t calib[4];
++	uint8_t strength_limit;
++	uint8_t t_filter_recursion;
++	uint16_t stab_itr;
++	uint32_t bl_ctrl_mode;
++};
++
++struct mdss_ad_bl_cfg {
++	uint32_t bl_min_delta;
++	uint32_t bl_low_limit;
++};
++
++/* ops uses standard MDP_PP_* flags */
++struct mdss_ad_init_cfg {
++	uint32_t ops;
++	union {
++		struct mdss_ad_init init;
++		struct mdss_ad_cfg cfg;
++	} params;
++};
++
++/* mode uses MDSS_AD_MODE_* flags */
++struct mdss_ad_input {
++	uint32_t mode;
++	union {
++		uint32_t amb_light;
++		uint32_t strength;
++		uint32_t calib_bl;
++	} in;
++	uint32_t output;
++};
++
++#define MDSS_CALIB_MODE_BL	0x1
++struct mdss_calib_cfg {
++	uint32_t ops;
++	uint32_t calib_mask;
++};
++
++enum {
++	mdp_op_pcc_cfg,
++	mdp_op_csc_cfg,
++	mdp_op_lut_cfg,
++	mdp_op_qseed_cfg,
++	mdp_bl_scale_cfg,
++	mdp_op_pa_cfg,
++	mdp_op_pa_v2_cfg,
++	mdp_op_dither_cfg,
++	mdp_op_gamut_cfg,
++	mdp_op_calib_cfg,
++	mdp_op_ad_cfg,
++	mdp_op_ad_input,
++	mdp_op_calib_mode,
++	mdp_op_calib_buffer,
++	mdp_op_calib_dcm_state,
++	mdp_op_max,
++	mdp_op_pa_dither_cfg,
++	mdp_op_ad_bl_cfg,
++	mdp_op_pp_max = 255,
++};
++#define mdp_op_pa_dither_cfg mdp_op_pa_dither_cfg
++#define mdp_op_pp_max mdp_op_pp_max
++
++#define mdp_op_ad_bl_cfg mdp_op_ad_bl_cfg
++
++enum {
++	WB_FORMAT_NV12,
++	WB_FORMAT_RGB_565,
++	WB_FORMAT_RGB_888,
++	WB_FORMAT_xRGB_8888,
++	WB_FORMAT_ARGB_8888,
++	WB_FORMAT_BGRA_8888,
++	WB_FORMAT_BGRX_8888,
++	WB_FORMAT_ARGB_8888_INPUT_ALPHA /* Need to support */
++};
++
++struct msmfb_mdp_pp {
++	uint32_t op;
++	union {
++		struct mdp_pcc_cfg_data pcc_cfg_data;
++		struct mdp_csc_cfg_data csc_cfg_data;
++		struct mdp_lut_cfg_data lut_cfg_data;
++		struct mdp_qseed_cfg_data qseed_cfg_data;
++		struct mdp_bl_scale_data bl_scale_data;
++		struct mdp_pa_cfg_data pa_cfg_data;
++		struct mdp_pa_v2_cfg_data pa_v2_cfg_data;
++		struct mdp_dither_cfg_data dither_cfg_data;
++		struct mdp_gamut_cfg_data gamut_cfg_data;
++		struct mdp_calib_config_data calib_cfg;
++		struct mdss_ad_init_cfg ad_init_cfg;
++		struct mdss_calib_cfg mdss_calib_cfg;
++		struct mdss_ad_input ad_input;
++		struct mdp_calib_config_buffer calib_buffer;
++		struct mdp_calib_dcm_state calib_dcm;
++		struct mdss_ad_bl_cfg ad_bl_cfg;
++	} data;
++};
++
++#define FB_METADATA_VIDEO_INFO_CODE_SUPPORT 1
++enum {
++	metadata_op_none,
++	metadata_op_base_blend,
++	metadata_op_frame_rate,
++	metadata_op_vic,
++	metadata_op_wb_format,
++	metadata_op_wb_secure,
++	metadata_op_get_caps,
++	metadata_op_crc,
++	metadata_op_get_ion_fd,
++	metadata_op_max
++};
++
++struct mdp_blend_cfg {
++	uint32_t is_premultiplied;
++};
++
++struct mdp_mixer_cfg {
++	uint32_t writeback_format;
++	uint32_t alpha;
++};
++
++struct mdss_hw_caps {
++	uint32_t mdp_rev;
++	uint8_t rgb_pipes;
++	uint8_t vig_pipes;
++	uint8_t dma_pipes;
++	uint8_t max_smp_cnt;
++	uint8_t smp_per_pipe;
++	uint32_t features;
++};
++
++struct msmfb_metadata {
++	uint32_t op;
++	uint32_t flags;
++	union {
++		struct mdp_misr misr_request;
++		struct mdp_blend_cfg blend_cfg;
++		struct mdp_mixer_cfg mixer_cfg;
++		uint32_t panel_frame_rate;
++		uint32_t video_info_code;
++		struct mdss_hw_caps caps;
++		uint8_t secure_en;
++		int fbmem_ionfd;
++	} data;
++};
++
++#define MDP_MAX_FENCE_FD	32
++#define MDP_BUF_SYNC_FLAG_WAIT	1
++#define MDP_BUF_SYNC_FLAG_RETIRE_FENCE	0x10
++
++struct mdp_buf_sync {
++	uint32_t flags;
++	uint32_t acq_fen_fd_cnt;
++	uint32_t session_id;
++	int *acq_fen_fd;
++	int *rel_fen_fd;
++	int *retire_fen_fd;
++};
++
++struct mdp_async_blit_req_list {
++	struct mdp_buf_sync sync;
++	uint32_t count;
++	struct mdp_blit_req req[];
++};
++
++#define MDP_DISPLAY_COMMIT_OVERLAY	1
++
++struct mdp_display_commit {
++	uint32_t flags;
++	uint32_t wait_for_finish;
++	struct fb_var_screeninfo var;
++	/*
++	 * user needs to follow guidelines as per below rules
++	 * 1. source split is enabled: l_roi = roi and r_roi = 0
++	 * 2. source split is disabled:
++	 *	2.1 split display: l_roi = l_roi and r_roi = r_roi
++	 *	2.2 non split display: l_roi = roi and r_roi = 0
++	 */
++	struct mdp_rect l_roi;
++	struct mdp_rect r_roi;
++};
++
++/**
++ * struct mdp_overlay_list - argument for ioctl MSMFB_OVERLAY_PREPARE
++ * @num_overlays:	Number of overlay layers as part of the frame.
++ * @overlay_list:	Pointer to a list of overlay structures identifying
++ *			the layers as part of the frame
++ * @flags:		Flags can be used to extend behavior.
++ * @processed_overlays:	Output parameter indicating how many pipes were
++ *			successful. If there are no errors this number should
++ *			match num_overlays. Otherwise it will indicate the last
++ *			successful index for overlay that couldn't be set.
++ */
++struct mdp_overlay_list {
++	uint32_t num_overlays;
++	struct mdp_overlay **overlay_list;
++	uint32_t flags;
++	uint32_t processed_overlays;
++};
++
++struct mdp_page_protection {
++	uint32_t page_protection;
++};
++
++
++struct mdp_mixer_info {
++	int pndx;
++	int pnum;
++	int ptype;
++	int mixer_num;
++	int z_order;
++};
++
++#define MAX_PIPE_PER_MIXER  7
++
++struct msmfb_mixer_info_req {
++	int mixer_num;
++	int cnt;
++	struct mdp_mixer_info info[MAX_PIPE_PER_MIXER];
++};
++
++enum {
++	DISPLAY_SUBSYSTEM_ID,
++	ROTATOR_SUBSYSTEM_ID,
++};
++
++enum {
++	MDP_IOMMU_DOMAIN_CP,
++	MDP_IOMMU_DOMAIN_NS,
++};
++
++enum {
++	MDP_WRITEBACK_MIRROR_OFF,
++	MDP_WRITEBACK_MIRROR_ON,
++	MDP_WRITEBACK_MIRROR_PAUSE,
++	MDP_WRITEBACK_MIRROR_RESUME,
++};
++
++/*
++ * The enum values are continued below as preprocessor macro definitions
++ */
++enum mdp_color_space {
++	MDP_CSC_ITU_R_601,
++	MDP_CSC_ITU_R_601_FR,
++	MDP_CSC_ITU_R_709,
++};
++
++/*
++ * These definitions are a continuation of the mdp_color_space enum above
++ */
++#define MDP_CSC_ITU_R_2020	(MDP_CSC_ITU_R_709 + 1)
++#define MDP_CSC_ITU_R_2020_FR	(MDP_CSC_ITU_R_2020 + 1)
++
++enum {
++	mdp_igc_v1_7 = 1,
++	mdp_igc_vmax,
++	mdp_hist_lut_v1_7,
++	mdp_hist_lut_vmax,
++	mdp_pgc_v1_7,
++	mdp_pgc_vmax,
++	mdp_dither_v1_7,
++	mdp_dither_vmax,
++	mdp_gamut_v1_7,
++	mdp_gamut_vmax,
++	mdp_pa_v1_7,
++	mdp_pa_vmax,
++	mdp_pcc_v1_7,
++	mdp_pcc_vmax,
++	mdp_pp_legacy,
++	mdp_dither_pa_v1_7,
++	mdp_igc_v3,
++	mdp_pp_unknown = 255
++};
++
++#define mdp_dither_pa_v1_7 mdp_dither_pa_v1_7
++#define mdp_pp_unknown mdp_pp_unknown
++#define mdp_igc_v3 mdp_igc_v3
++
++/* PP Features */
++enum {
++	IGC = 1,
++	PCC,
++	GC,
++	PA,
++	GAMUT,
++	DITHER,
++	QSEED,
++	HIST_LUT,
++	HIST,
++	PP_FEATURE_MAX,
++	PA_DITHER,
++	PP_MAX_FEATURES = 25,
++};
++
++#define PA_DITHER PA_DITHER
++#define PP_MAX_FEATURES PP_MAX_FEATURES
++
++struct mdp_pp_feature_version {
++	uint32_t pp_feature;
++	uint32_t version_info;
++};
++#endif /*_UAPI_MSM_MDP_H_*/
+diff --git a/src/xrt/compositor/main/msm/linux/msm_mdp_ext.h b/src/xrt/compositor/main/msm/linux/msm_mdp_ext.h
+new file mode 100644
+index 0000000..f5a1ec7
+--- /dev/null
++++ b/src/xrt/compositor/main/msm/linux/msm_mdp_ext.h
+@@ -0,0 +1,860 @@
++#ifndef _MSM_MDP_EXT_H_
++#define _MSM_MDP_EXT_H_
++
++#include <linux/msm_mdp.h>
++
++#define MDP_IOCTL_MAGIC 'S'
++/* atomic commit ioctl used for validate and commit request */
++#define MSMFB_ATOMIC_COMMIT	_IOWR(MDP_IOCTL_MAGIC, 128, void *)
++
++/*
++ * Ioctl for updating the layer position asynchronously. Initially, pipes
++ * should be configured with MDP_LAYER_ASYNC flag set during the atomic commit,
++ * after which any number of position update calls can be made. This would
++ * enable multiple position updates within a single vsync. However, the screen
++ * update would happen only after vsync, which would pick the latest update.
++ *
++ * Limitations:
++ * - Currently supported only for video mode panels with single LM or dual LM
++ *   with source_split enabled.
++ * - Only position update is supported with no scaling/cropping.
++ * - Async layers should have unique z_order.
++ */
++#define MSMFB_ASYNC_POSITION_UPDATE _IOWR(MDP_IOCTL_MAGIC, 129, \
++					struct mdp_position_update)
++
++/*
++ * Ioctl for sending the config information.
++ * QSEED3 coefficeint LUT tables is passed by the user space using this IOCTL.
++ */
++#define MSMFB_MDP_SET_CFG _IOW(MDP_IOCTL_MAGIC, 130, \
++					      struct mdp_set_cfg)
++
++/*
++ * Ioctl for setting the PLL PPM.
++ * PLL PPM is passed by the user space using this IOCTL.
++ */
++#define MSMFB_MDP_SET_PANEL_PPM _IOW(MDP_IOCTL_MAGIC, 131, int)
++
++/*
++ * To allow proper structure padding for 64bit/32bit target
++ */
++#ifdef __LP64
++#define MDP_LAYER_COMMIT_V1_PAD 2
++#else
++#define MDP_LAYER_COMMIT_V1_PAD 3
++#endif
++
++/**********************************************************************
++LAYER FLAG CONFIGURATION
++**********************************************************************/
++/* left-right layer flip flag */
++#define MDP_LAYER_FLIP_LR		0x1
++
++/* up-down layer flip flag */
++#define MDP_LAYER_FLIP_UD		0x2
++
++/*
++ * This flag enables pixel extension for the current layer. Validate/commit
++ * call uses scale parameters when this flag is enabled.
++ */
++#define MDP_LAYER_ENABLE_PIXEL_EXT	0x4
++
++/* Flag indicates that layer is foreground layer */
++#define MDP_LAYER_FORGROUND		0x8
++
++/* Flag indicates that layer is associated with secure session */
++#define MDP_LAYER_SECURE_SESSION	0x10
++
++/*
++ * Flag indicates that layer is drawing solid fill. Validate/commit call
++ * does not expect buffer when this flag is enabled.
++ */
++#define MDP_LAYER_SOLID_FILL		0x20
++
++/* Layer format is deinterlace */
++#define MDP_LAYER_DEINTERLACE		0x40
++
++/* layer contains bandwidth compressed format data */
++#define MDP_LAYER_BWC			0x80
++
++/* layer is async position updatable */
++#define MDP_LAYER_ASYNC			0x100
++
++/* layer contains postprocessing configuration data */
++#define MDP_LAYER_PP			0x200
++
++/* Flag indicates that layer is associated with secure display session */
++#define MDP_LAYER_SECURE_DISPLAY_SESSION 0x400
++
++/* Flag enabled qseed3 scaling for the current layer */
++#define MDP_LAYER_ENABLE_QSEED3_SCALE   0x800
++
++/*
++ * layer will work in multirect mode, where single hardware should
++ * fetch multiple rectangles with a single hardware
++ */
++#define MDP_LAYER_MULTIRECT_ENABLE		0x1000
++
++/*
++ * if flag present and multirect is enabled, multirect will work in parallel
++ * fetch mode, otherwise it will default to serial fetch mode.
++ */
++#define MDP_LAYER_MULTIRECT_PARALLEL_MODE	0x2000
++
++
++/* Flag indicates that layer is associated with secure camera session */
++#define MDP_LAYER_SECURE_CAMERA_SESSION		0x4000
++
++/**********************************************************************
++DESTINATION SCALER FLAG CONFIGURATION
++**********************************************************************/
++
++/* Enable/disable Destination scaler */
++#define MDP_DESTSCALER_ENABLE		0x1
++
++/*
++ * Indicating mdp_destination_scaler_data contains
++ * Scaling parameter update. Can be set anytime.
++ */
++#define MDP_DESTSCALER_SCALE_UPDATE	0x2
++
++/*
++ * Indicating mdp_destination_scaler_data contains
++ * Detail enhancement setting update. Can be set anytime.
++ */
++#define MDP_DESTSCALER_ENHANCER_UPDATE	0x4
++
++/*
++ * Indicating a partial update to panel ROI. ROI can be
++ * applied anytime when Destination scaler is enabled.
++ */
++#define MDP_DESTSCALER_ROI_ENABLE	0x8
++
++/**********************************************************************
++VALIDATE/COMMIT FLAG CONFIGURATION
++**********************************************************************/
++
++/*
++ * Client enables it to inform that call is to validate layers before commit.
++ * If this flag is not set then driver will use MSMFB_ATOMIC_COMMIT for commit.
++ */
++#define MDP_VALIDATE_LAYER			0x01
++
++/*
++ * This flag is only valid for commit call. Commit behavior is synchronous
++ * when this flag is defined. It blocks current call till processing is
++ * complete. Behavior is asynchronous otherwise.
++ */
++#define MDP_COMMIT_WAIT_FOR_FINISH		0x02
++
++/*
++ * This flag is only valid for commit call and used for debugging purpose. It
++ * forces the to wait for sync fences.
++ */
++#define MDP_COMMIT_SYNC_FENCE_WAIT		0x04
++
++/* Flag to enable AVR(Adaptive variable refresh) feature. */
++#define MDP_COMMIT_AVR_EN			0x08
++
++/*
++ * Flag to select one shot mode when AVR feature is enabled.
++ * Default mode is continuous mode.
++ */
++#define MDP_COMMIT_AVR_ONE_SHOT_MODE		0x10
++
++/* Flag to indicate dual partial ROI update */
++#define MDP_COMMIT_PARTIAL_UPDATE_DUAL_ROI	0x20
++
++/* Flag to update brightness when commit */
++#define MDP_COMMIT_UPDATE_BRIGHTNESS		0x40
++
++/* Flag to enable concurrent writeback for the frame */
++#define MDP_COMMIT_CWB_EN 0x800
++
++/*
++ * Flag to select DSPP as the data point for CWB. If CWB
++ * is enabled without this flag, LM will be selected as data point.
++ */
++#define MDP_COMMIT_CWB_DSPP 0x1000
++
++/*
++ * Flag to indicate that rectangle number is being assigned
++ * by userspace in multi-rectangle mode
++ */
++#define MDP_COMMIT_RECT_NUM 0x2000
++
++#define MDP_COMMIT_VERSION_1_0		0x00010000
++
++#define OUT_LAYER_COLOR_SPACE
++
++/* From CEA.861.3 */
++#define MDP_HDR_EOTF_SMTPE_ST2084	0x2
++#define MDP_HDR_EOTF_HLG		0x3
++
++/* From Vesa DPv1.4 - Pixel Encoding - Table 2-120 */
++#define MDP_PIXEL_ENCODING_RGB		0x0
++#define MDP_PIXEL_ENCODING_YCBCR_444	0x1
++#define MDP_PIXEL_ENCODING_YCBCR_422	0x2
++#define MDP_PIXEL_ENCODING_YCBCR_420	0x3
++#define MDP_PIXEL_ENCODING_Y_ONLY	0x4
++#define MDP_PIXEL_ENCODING_RAW		0x5
++
++/* From Vesa DPv1.4 - Colorimetry Formats - Table 2-120 */
++/* RGB - used with MDP_DP_PIXEL_ENCODING_RGB */
++#define MDP_COLORIMETRY_RGB_SRGB		0x0
++#define MDP_COLORIMETRY_RGB_WIDE_FIXED_POINT	0x1
++#define MDP_COLORIMETRY_RGB_WIDE_FLOAT_POINT	0x2
++#define MDP_COLORIMETRY_RGB_ADOBE		0x3
++#define MDP_COLORIMETRY_RGB_DPI_P3		0x4
++#define MDP_COLORIMETRY_RGB_CUSTOM		0x5
++#define MDP_COLORIMETRY_RGB_ITU_R_BT_2020	0x6
++
++/* YUV - used with MDP_DP_PIXEL_ENCODING_YCBCR(444 or 422 or 420) */
++#define MDP_COLORIMETRY_YCBCR_ITU_R_BT_601		0x0
++#define MDP_COLORIMETRY_YCBCR_ITU_R_BT_709		0x1
++#define MDP_COLORIMETRY_YCBCR_XV_YCC_601		0x2
++#define MDP_COLORIMETRY_YCBCR_XV_YCC_709		0x3
++#define MDP_COLORIMETRY_YCBCR_S_YCC_601		0x4
++#define MDP_COLORIMETRY_YCBCR_ADOBE_YCC_601		0x5
++#define MDP_COLORIMETRY_YCBCR_ITU_R_BT_2020_YCBCR_CONST	0x6
++#define MDP_COLORIMETRY_YCBCR_ITU_R_BT_2020_YCBCR	0x7
++
++/* Dynamic Range - Table 2-120 */
++/* Full range */
++#define MDP_DYNAMIC_RANGE_VESA	0x0
++/* Limited range */
++#define MDP_DYNAMIC_RANGE_CEA	0x1
++
++/* Bits per component(bpc) for Pixel encoding format RGB from Table 2-120 */
++#define MDP_RGB_6_BPC	0x0
++#define MDP_RGB_8_BPC	0x1
++#define MDP_RGB_10_BPC	0x2
++#define MDP_RGB_12_BPC	0x3
++#define MDP_RGB_16_BPC	0x4
++
++/*
++ * Bits per component(bpc) for Pixel encoding format YCbCr444, YCbCr422,
++ * YCbCr420 and Y only
++ * from Table 2-120
++ */
++#define MDP_YUV_8_BPC	0x1
++#define MDP_YUV_10_BPC	0x2
++#define MDP_YUV_12_BPC	0x3
++#define MDP_YUV_16_BPC	0x4
++
++/* Bits per component(bpc) for Pixel encoding format RAW from Table 2-120 */
++#define MDP_RAW_6_BPC	0x1
++#define MDP_RAW_7_BPC	0x2
++#define MDP_RAW_8_BPC	0x3
++#define MDP_RAW_10_BPC	0x4
++#define MDP_RAW_12_BPC	0x5
++#define MDP_RAW_14_BPC	0x6
++#define MDP_RAW16_BPC	0x7
++
++/* Content Type - Table 2-120 */
++#define MDP_CONTENT_TYPE_NOT_DEFINED	0x0
++#define MDP_CONTENT_TYPE_GRAPHICS		0x1
++#define MDP_CONTENT_TYPE_PHOTO			0x2
++#define MDP_CONTENT_TYPE_VIDEO		0x3
++#define MDP_CONTENT_TYPE_GAME		0x4
++
++/**********************************************************************
++Configuration structures
++All parameters are input to driver unless mentioned output parameter
++explicitly.
++**********************************************************************/
++struct mdp_layer_plane {
++	/* DMA buffer file descriptor information. */
++	int fd;
++
++	/* Pixel offset in the dma buffer. */
++	uint32_t offset;
++
++	/* Number of bytes in one scan line including padding bytes. */
++	uint32_t stride;
++};
++
++/* Configure the pipe to use a single color component. */
++#define MDP_LAYER_COLOR_R  0x1
++#define MDP_LAYER_COLOR_G  0x2
++#define MDP_LAYER_COLOR_B  0x3
++
++/* Have a layer "color" type for mura data. */
++#define MDP_LAYER_MURA  0x4
++
++struct mdp_layer_buffer {
++	/* layer width in pixels. */
++	uint32_t width;
++
++	/* layer height in pixels. */
++	uint32_t height;
++
++	/*
++	 * layer format in DRM-style fourcc, refer drm_fourcc.h for
++	 * standard formats
++	 */
++	uint32_t format;
++
++	/* plane to hold the fd, offset, etc for all color components */
++	struct mdp_layer_plane planes[MAX_PLANES];
++
++	/* valid planes count in layer planes list */
++	uint32_t plane_count;
++
++	/* compression ratio factor, value depends on the pixel format */
++	struct mult_factor comp_ratio;
++
++	/*
++	 * SyncFence associated with this buffer. It is used in two ways.
++	 *
++	 * 1. Driver waits to consume the buffer till producer signals in case
++	 * of primary and external display.
++	 *
++	 * 2. Writeback device uses buffer structure for output buffer where
++	 * driver is producer. However, client sends the fence with buffer to
++	 * indicate that consumer is still using the buffer and it is not ready
++	 * for new content.
++	 */
++	int	 fence;
++
++	/* 32bits reserved value for future usage. */
++	union {
++		struct {
++			/* use a single color channel from this buffer */
++			uint8_t color_type;
++		};
++		uint32_t reserved;
++	};
++};
++
++/*
++ * One layer holds configuration for one pipe. If client wants to stage single
++ * layer on two pipes then it should send two different layers with relative
++ * (x,y) information. Client must send same information during validate and
++ * commit call. Commit call may fail if client sends different layer information
++ * attached to same pipe during validate and commit. Device invalidate the pipe
++ * once it receives the vsync for that commit.
++ */
++struct mdp_input_layer {
++	/*
++	 * Flag to enable/disable properties for layer configuration. Refer
++	 * layer flag configuration section for all possible flags.
++	 */
++	uint32_t		flags;
++
++	/*
++	 * Pipe selection for this layer by client. Client provides the index
++	 * in validate and commit call. Device reserves the pipe once validate
++	 * is successful. Device only uses validated pipe during commit call.
++	 * If client sends different layer/pipe configuration in validate &
++	 * commit then commit may fail.
++	 */
++	uint32_t		pipe_ndx;
++
++	/*
++	 * Horizontal decimation value, this indicates the amount of pixels
++	 * dropped for each pixel that is fetched from a line. It does not
++	 * result in bandwidth reduction because pixels are still fetched from
++	 * memory but dropped internally by hardware.
++	 * The decimation value given should be power of two of decimation
++	 * amount.
++	 * 0: no decimation
++	 * 1: decimate by 2 (drop 1 pixel for each pixel fetched)
++	 * 2: decimate by 4 (drop 3 pixels for each pixel fetched)
++	 * 3: decimate by 8 (drop 7 pixels for each pixel fetched)
++	 * 4: decimate by 16 (drop 15 pixels for each pixel fetched)
++	 */
++	uint8_t			horz_deci;
++
++	/*
++	 * Vertical decimation value, this indicates the amount of lines
++	 * dropped for each line that is fetched from overlay. It saves
++	 * bandwidth because decimated pixels are not fetched.
++	 * The decimation value given should be power of two of decimation
++	 * amount.
++	 * 0: no decimation
++	 * 1: decimation by 2 (drop 1 line for each line fetched)
++	 * 2: decimation by 4 (drop 3 lines for each line fetched)
++	 * 3: decimation by 8 (drop 7 lines for each line fetched)
++	 * 4: decimation by 16 (drop 15 lines for each line fetched)
++	 */
++	uint8_t			vert_deci;
++
++	/*
++	 * Used to set plane opacity. The range can be from 0-255, where
++	 * 0 means completely transparent and 255 means fully opaque.
++	 */
++	uint8_t			alpha;
++
++	/*
++	 * Blending stage to occupy in display, if multiple layers are present,
++	 * highest z_order usually means the top most visible layer. The range
++	 * acceptable is from 0-7 to support blending up to 8 layers.
++	 */
++	uint16_t		z_order;
++
++	/*
++	 * Color used as color key for transparency. Any pixel in fetched
++	 * image matching this color will be transparent when blending.
++	 * The color should be in same format as the source image format.
++	 */
++	uint32_t		transp_mask;
++
++	/*
++	 * Solid color used to fill the overlay surface when no source
++	 * buffer is provided.
++	 */
++	uint32_t		bg_color;
++
++	/* blend operation defined in "mdss_mdp_blend_op" enum. */
++	enum mdss_mdp_blend_op		blend_op;
++
++	/* color space of the source */
++	enum mdp_color_space	color_space;
++
++	/*
++	 * Source crop rectangle, portion of image that will be fetched. This
++	 * should always be within boundaries of source image.
++	 */
++	struct mdp_rect		src_rect;
++
++	/*
++	 * Destination rectangle, the position and size of image on screen.
++	 * This should always be within panel boundaries.
++	 */
++	struct mdp_rect		dst_rect;
++
++	/* Scaling parameters. */
++	void __user	*scale;
++
++	/* Buffer attached with each layer. Device uses it for commit call. */
++	struct mdp_layer_buffer	buffer;
++
++	/*
++	 * Source side post processing configuration information for each
++	 * layer.
++	 */
++	void __user		*pp_info;
++
++	/*
++	 * This is an output parameter.
++	 *
++	 * Only for validate call. Frame buffer device sets error code
++	 * based on validate call failure scenario.
++	 */
++	int			error_code;
++
++	/*
++	 * For source pipes supporting multi-rectangle, this field identifies
++	 * the rectangle index of the source pipe.
++	 */
++	uint32_t		rect_num;
++
++	/* 32bits reserved value for future usage. */
++	uint32_t		reserved[5];
++};
++
++struct mdp_output_layer {
++	/*
++	 * Flag to enable/disable properties for layer configuration. Refer
++	 * layer flag config section for all possible flags.
++	 */
++	uint32_t			flags;
++
++	/*
++	 * Writeback destination selection for output. Client provides the index
++	 * in validate and commit call.
++	 */
++	uint32_t			writeback_ndx;
++
++	/* Buffer attached with output layer. Device uses it for commit call */
++	struct mdp_layer_buffer		buffer;
++
++	/* color space of the destination */
++	enum mdp_color_space		color_space;
++
++	/* 32bits reserved value for future usage. */
++	uint32_t			reserved[5];
++};
++
++/*
++ * Destination scaling info structure holds setup paramaters for upscaling
++ * setting in the destination scaling block.
++ */
++struct mdp_destination_scaler_data {
++	/*
++	 * Flag to switch between mode for destination scaler. Please Refer to
++	 * destination scaler flag config for all possible setting.
++	 */
++	uint32_t			flags;
++
++	/*
++	 * Destination scaler selection index. Client provides the index in
++	 * validate and commit call.
++	 */
++	uint32_t			dest_scaler_ndx;
++
++	/*
++	 * LM width configuration per Destination scaling updates
++	 */
++	uint32_t			lm_width;
++
++	/*
++	 * LM height configuration per Destination scaling updates
++	 */
++	uint32_t			lm_height;
++
++	/*
++	 * The scaling parameters for all the mode except disable. For
++	 * disabling the scaler, there is no need to provide the scale.
++	 * A userspace pointer points to struct mdp_scale_data_v2.
++	 */
++	uint64_t	__user scale;
++
++	/*
++	 * Panel ROI is used when partial update is required in
++	 * current commit call.
++	 */
++	struct mdp_rect	panel_roi;
++};
++
++/*
++ * Commit structure holds layer stack send by client for validate and commit
++ * call. If layers are different between validate and commit call then commit
++ * call will also do validation. In such case, commit may fail.
++ */
++struct mdp_layer_commit_v1 {
++	/*
++	 * Flag to enable/disable properties for commit/validate call. Refer
++	 * validate/commit flag config section for all possible flags.
++	 */
++	uint32_t		flags;
++
++	/*
++	 * This is an output parameter.
++	 *
++	 * Frame buffer device provides release fence handle to client. It
++	 * triggers release fence when display hardware has consumed all the
++	 * buffers attached to this commit call and buffer is ready for reuse
++	 * for primary and external. For writeback case, it triggers it when
++	 * output buffer is ready for consumer.
++	 */
++	int			release_fence;
++
++	/*
++	 * Left_roi is optional configuration. Client configures it only when
++	 * partial update is enabled. It defines the "region of interest" on
++	 * left part of panel when it is split display. For non-split display,
++	 * it defines the "region of interest" on the panel.
++	 */
++	struct mdp_rect		left_roi;
++
++	/*
++	 * Right_roi is optional configuration. Client configures it only when
++	 * partial update is enabled. It defines the "region of interest" on
++	 * right part of panel for split display configuration. It is not
++	 * required for non-split display.
++	 */
++	struct mdp_rect		right_roi;
++
++	 /* Pointer to a list of input layers for composition. */
++	struct mdp_input_layer __user *input_layers;
++
++	/* Input layer count present in input list */
++	uint32_t		input_layer_cnt;
++
++	/*
++	 * Output layer for writeback display. It supports only one
++	 * layer as output layer. This is not required for primary
++	 * and external displays
++	 */
++	struct mdp_output_layer __user *output_layer;
++
++	/*
++	 * This is an output parameter.
++	 *
++	 * Frame buffer device provides retire fence handle if
++	 * COMMIT_RETIRE_FENCE flag is set in commit call. It triggers
++	 * retire fence when current layers are swapped with new layers
++	 * on display hardware. For video mode panel and writeback,
++	 * retire fence and release fences are triggered at the same
++	 * time while command mode panel triggers release fence first
++	 * (on pingpong done) and retire fence (on rdptr done)
++	 * after that.
++	 */
++	int			retire_fence;
++
++	/*
++	 * Scaler data and control for setting up destination scaler.
++	 * A userspace pointer that points to a list of
++	 * struct mdp_destination_scaler_data.
++	 */
++	void __user		*dest_scaler;
++
++	/*
++	 * Represents number of Destination scaler data provied by userspace.
++	 */
++	uint32_t		dest_scaler_cnt;
++
++	/* Backlight level that would update when display commit */
++	uint32_t		bl_level;
++
++	/* 32-bits reserved value for future usage. */
++	uint32_t		reserved[MDP_LAYER_COMMIT_V1_PAD];
++};
++
++/*
++ * mdp_overlay_list - argument for ioctl MSMFB_ATOMIC_COMMIT
++ */
++struct mdp_layer_commit {
++	/*
++	 * 32bit version indicates the commit structure selection
++	 * from union. Lower 16bits indicates the minor version while
++	 * higher 16bits indicates the major version. It selects the
++	 * commit structure based on major version selection. Minor version
++	 * indicates that reserved fields are in use.
++	 *
++	 * Current supported version is 1.0 (Major:1 Minor:0)
++	 */
++	uint32_t version;
++	union {
++		/* Layer commit/validate definition for V1 */
++		struct mdp_layer_commit_v1 commit_v1;
++	};
++};
++
++struct mdp_point {
++	uint32_t x;
++	uint32_t y;
++};
++
++/*
++ * Async updatable layers. One layer holds configuration for one pipe.
++ */
++struct mdp_async_layer {
++	/*
++	 * Flag to enable/disable properties for layer configuration. Refer
++	 * layer flag config section for all possible flags.
++	 */
++	uint32_t flags;
++
++	/*
++	 * Pipe selection for this layer by client. Client provides the
++	 * pipe index that the device reserved during ATOMIC_COMMIT.
++	 */
++	uint32_t		pipe_ndx;
++
++	/* Source start x,y. */
++	struct mdp_point	src;
++
++	/* Destination start x,y. */
++	struct mdp_point	dst;
++
++	/*
++	 * This is an output parameter.
++	 *
++	 * Frame buffer device sets error code based on the failure.
++	 */
++	int			error_code;
++
++	uint32_t		reserved[3];
++};
++
++/*
++ * mdp_position_update - argument for ioctl MSMFB_ASYNC_POSITION_UPDATE
++ */
++struct mdp_position_update {
++	 /* Pointer to a list of async updatable input layers */
++	struct mdp_async_layer __user *input_layers;
++
++	/* Input layer count present in input list */
++	uint32_t input_layer_cnt;
++};
++
++#define MAX_DET_CURVES		3
++struct mdp_det_enhance_data {
++	uint32_t enable;
++	int16_t sharpen_level1;
++	int16_t sharpen_level2;
++	uint16_t clip;
++	uint16_t limit;
++	uint16_t thr_quiet;
++	uint16_t thr_dieout;
++	uint16_t thr_low;
++	uint16_t thr_high;
++	uint16_t prec_shift;
++	int16_t adjust_a[MAX_DET_CURVES];
++	int16_t adjust_b[MAX_DET_CURVES];
++	int16_t adjust_c[MAX_DET_CURVES];
++};
++
++/* Flags to enable Scaler and its sub components */
++#define ENABLE_SCALE			0x1
++#define ENABLE_DETAIL_ENHANCE		0x2
++#define ENABLE_DIRECTION_DETECTION	0x4
++
++/* LUT configuration flags */
++#define SCALER_LUT_SWAP			0x1
++#define SCALER_LUT_DIR_WR		0x2
++#define SCALER_LUT_Y_CIR_WR		0x4
++#define SCALER_LUT_UV_CIR_WR		0x8
++#define SCALER_LUT_Y_SEP_WR		0x10
++#define SCALER_LUT_UV_SEP_WR		0x20
++
++/* Y/RGB and UV filter configuration */
++#define FILTER_EDGE_DIRECTED_2D		0x0
++#define FILTER_CIRCULAR_2D		0x1
++#define FILTER_SEPARABLE_1D		0x2
++#define FILTER_BILINEAR			0x3
++
++/* Alpha filters */
++#define FILTER_ALPHA_DROP_REPEAT	0x0
++#define FILTER_ALPHA_BILINEAR		0x1
++
++/**
++ * struct mdp_scale_data_v2
++ * Driver uses this new Data structure for storing all scaling params
++ * This structure contains all pixel extension data and QSEED3 filter
++ * configuration and coefficient table indices
++ */
++struct mdp_scale_data_v2 {
++	uint32_t enable;
++
++	/* Init phase values */
++	int32_t init_phase_x[MAX_PLANES];
++	int32_t phase_step_x[MAX_PLANES];
++	int32_t init_phase_y[MAX_PLANES];
++	int32_t phase_step_y[MAX_PLANES];
++
++	/* This should be set to toal horizontal pixels
++	 * left + right +  width */
++	uint32_t num_ext_pxls_left[MAX_PLANES];
++
++	/* Unused param for backward compatibility */
++	uint32_t num_ext_pxls_right[MAX_PLANES];
++
++	/*  This should be set to vertical pixels
++	 *  top + bottom + height */
++	uint32_t num_ext_pxls_top[MAX_PLANES];
++
++	/* Unused param for backward compatibility */
++	uint32_t num_ext_pxls_btm[MAX_PLANES];
++
++	/* over fetch pixels */
++	int32_t left_ftch[MAX_PLANES];
++	int32_t left_rpt[MAX_PLANES];
++	int32_t right_ftch[MAX_PLANES];
++	int32_t right_rpt[MAX_PLANES];
++
++	/* Repeat pixels */
++	uint32_t top_rpt[MAX_PLANES];
++	uint32_t btm_rpt[MAX_PLANES];
++	uint32_t top_ftch[MAX_PLANES];
++	uint32_t btm_ftch[MAX_PLANES];
++
++	uint32_t roi_w[MAX_PLANES];
++
++	/* alpha plane can only be scaled using bilinear or pixel
++	 * repeat/drop, specify these for Y and UV planes only */
++	uint32_t preload_x[MAX_PLANES];
++	uint32_t preload_y[MAX_PLANES];
++	uint32_t src_width[MAX_PLANES];
++	uint32_t src_height[MAX_PLANES];
++
++	uint32_t dst_width;
++	uint32_t dst_height;
++
++	uint32_t y_rgb_filter_cfg;
++	uint32_t uv_filter_cfg;
++	uint32_t alpha_filter_cfg;
++	uint32_t blend_cfg;
++
++	uint32_t lut_flag;
++	uint32_t dir_lut_idx;
++
++	/* for Y(RGB) and UV planes*/
++	uint32_t y_rgb_cir_lut_idx;
++	uint32_t uv_cir_lut_idx;
++	uint32_t y_rgb_sep_lut_idx;
++	uint32_t uv_sep_lut_idx;
++
++	struct mdp_det_enhance_data detail_enhance;
++
++	/* reserved value for future usage. */
++	uint64_t reserved[8];
++};
++
++/**
++ * struct mdp_scale_luts_info
++ * This struct pointer is received as payload in SET_CFG_IOCTL when the flags
++ * is set to MDP_QSEED3_LUT_CFG
++ * @dir_lut:      Direction detection coefficients table
++ * @cir_lut:      Circular coefficeints table
++ * @sep_lut:      Separable coefficeints table
++ * @dir_lut_size: Size of direction coefficients table
++ * @cir_lut_size: Size of circular coefficients table
++ * @sep_lut_size: Size of separable coefficients table
++ */
++struct mdp_scale_luts_info {
++	uint64_t __user dir_lut;
++	uint64_t __user cir_lut;
++	uint64_t __user sep_lut;
++	uint32_t dir_lut_size;
++	uint32_t cir_lut_size;
++	uint32_t sep_lut_size;
++};
++
++#define MDP_QSEED3_LUT_CFG 0x1
++
++struct mdp_set_cfg {
++	uint64_t flags;
++	uint32_t len;
++	uint64_t __user payload;
++};
++
++#define HDR_PRIMARIES_COUNT 3
++
++#define MDP_HDR_STREAM
++
++struct mdp_hdr_stream {
++	uint32_t eotf;
++	uint32_t display_primaries_x[HDR_PRIMARIES_COUNT];
++	uint32_t display_primaries_y[HDR_PRIMARIES_COUNT];
++	uint32_t white_point_x;
++	uint32_t white_point_y;
++	uint32_t max_luminance;
++	uint32_t min_luminance;
++	uint32_t max_content_light_level;
++	uint32_t max_average_light_level;
++	/* DP related */
++	uint32_t pixel_encoding;
++	uint32_t colorimetry;
++	uint32_t range;
++	uint32_t bits_per_component;
++	uint32_t content_type;
++	uint32_t reserved[5];
++};
++
++/* hdr hdmi state takes possible values of 1, 2 and 4 respectively */
++#define HDR_ENABLE  (1 << 0)
++#define HDR_DISABLE (1 << 1)
++#define HDR_RESET   (1 << 2)
++
++/*
++ * HDR Control
++ * This encapsulates the HDR metadata as well as a state control
++ * for the HDR metadata as required by the HDMI spec to send the
++ * relevant metadata depending on the state of the HDR playback.
++ * hdr_state: Controls HDR state, takes values HDR_ENABLE, HDR_DISABLE
++ * and HDR_RESET.
++ * hdr_meta: Metadata sent by the userspace for the HDR clip.
++ */
++
++#define DRM_MSM_EXT_PANEL_HDR_CTRL
++struct mdp_hdr_stream_ctrl {
++	__u8 hdr_state;                   /* HDR state */
++	struct mdp_hdr_stream hdr_stream; /* HDR metadata */
++};
++
++#endif
+diff --git a/src/xrt/drivers/CMakeLists.txt b/src/xrt/drivers/CMakeLists.txt
+index 5ec9910..ba8e20e 100644
+--- a/src/xrt/drivers/CMakeLists.txt
++++ b/src/xrt/drivers/CMakeLists.txt
+@@ -698,3 +698,19 @@ if(ENABLED_HEADSET_DRIVERS)
+ else()
+ 	message(FATAL_ERROR "You must enable at least one headset driver to build Monado.")
+ endif()
++
++if(XRT_BUILD_DRIVER_QUEST1)
++	add_library(drv_quest1 STATIC quest1/quest1_hmd.c quest1/quest1_interface.h)
++	target_include_directories(drv_quest1 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
++	target_link_libraries(drv_quest1 PRIVATE xrt-interfaces aux_util aux_math aux_os)
++	target_link_libraries(drv_quest1 PUBLIC -L/opt/hybris/lib -lhybris-common)
++	list(APPEND ENABLED_HEADSET_DRIVERS quest1)
++endif()
++
++if(XRT_BUILD_DRIVER_QBRIDGE)
++	add_library(drv_qbridge STATIC qbridge/qbridge_device.c qbridge/qb_link.c qbridge/qbridge_interface.h)
++	target_include_directories(drv_qbridge PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} qbridge /opt/hybris/include)
++	target_link_libraries(drv_qbridge PRIVATE xrt-interfaces aux_util aux_math aux_os)
++	target_link_libraries(drv_qbridge PUBLIC -L/opt/hybris/lib -lhybris-common)
++	list(APPEND ENABLED_HEADSET_DRIVERS qbridge)
++endif()
+diff --git a/src/xrt/drivers/qbridge/qb_link.c b/src/xrt/drivers/qbridge/qb_link.c
+new file mode 100644
+index 0000000..1fba55d
+--- /dev/null
++++ b/src/xrt/drivers/qbridge/qb_link.c
+@@ -0,0 +1,202 @@
++#define _GNU_SOURCE
++#include "qb_link.h"
++
++#include <dlfcn.h>
++#include <errno.h>
++#include <poll.h>
++#include <stddef.h>
++#include <stdio.h>
++#include <string.h>
++#include <sys/socket.h>
++#include <sys/un.h>
++#include <unistd.h>
++
++#include <hybris/common/binding.h>
++
++#define LOG(...) fprintf(stderr, "qb_link: " __VA_ARGS__)
++
++/* Bionic's libnativewindow, loaded through libhybris. */
++static int (*p_recv_handle)(int fd, struct AHardwareBuffer **out);
++static void (*p_ahb_release)(struct AHardwareBuffer *buf);
++
++static bool load_nativewindow(void)
++{
++	if (p_recv_handle)
++		return true;
++	void *h = android_dlopen("libnativewindow.so", RTLD_NOW);
++	if (!h) {
++		LOG("android_dlopen(libnativewindow.so) failed\n");
++		return false;
++	}
++	p_recv_handle = android_dlsym(h, "AHardwareBuffer_recvHandleFromUnixSocket");
++	p_ahb_release = android_dlsym(h, "AHardwareBuffer_release");
++	return p_recv_handle && p_ahb_release;
++}
++
++int qb_link_init(struct qb_link *l)
++{
++	memset(l, 0, sizeof(*l));
++	l->fd = -1;
++	if (!load_nativewindow())
++		return -ENOENT;
++	l->listen_fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
++	if (l->listen_fd < 0)
++		return -errno;
++	struct sockaddr_un addr = {.sun_family = AF_UNIX};
++	memcpy(addr.sun_path + 1, QB_SOCKET_NAME, strlen(QB_SOCKET_NAME));
++	socklen_t len = offsetof(struct sockaddr_un, sun_path) + 1 + strlen(QB_SOCKET_NAME);
++	if (bind(l->listen_fd, (struct sockaddr *)&addr, len) || listen(l->listen_fd, 1)) {
++		int e = -errno;
++		close(l->listen_fd);
++		return e;
++	}
++	return 0;
++}
++
++static bool recv_exact(int fd, void *buf, size_t len, uint32_t type)
++{
++	ssize_t n = recv(fd, buf, len, 0);
++	if (n != (ssize_t)len || ((struct qb_header *)buf)->type != type) {
++		LOG("handshake: expected msg %u (%zu bytes), got %zd\n", type, len, n);
++		return false;
++	}
++	return true;
++}
++
++void qb_link_disconnect(struct qb_link *l)
++{
++	if (l->fd >= 0)
++		close(l->fd);
++	l->fd = -1;
++	for (int i = 0; i < QB_MAX_SLOTS; i++) {
++		if (l->ahb[i])
++			p_ahb_release(l->ahb[i]);
++		l->ahb[i] = NULL;
++		l->slot_busy[i] = false;
++	}
++	l->have_pose = false;
++}
++
++bool qb_link_accept(struct qb_link *l, int timeout_ms)
++{
++	if (l->fd >= 0)
++		return true;
++	struct pollfd p = {l->listen_fd, POLLIN, 0};
++	if (poll(&p, 1, timeout_ms) <= 0)
++		return false;
++	int fd = accept4(l->listen_fd, NULL, NULL, SOCK_CLOEXEC);
++	if (fd < 0)
++		return false;
++	l->fd = fd;
++	if (!recv_exact(fd, &l->hello, sizeof(l->hello), QB_MSG_HELLO) ||
++	    !recv_exact(fd, &l->buffers, sizeof(l->buffers), QB_MSG_BUFFERS) ||
++	    l->buffers.count != QB_MAX_SLOTS)
++		goto fail;
++	for (uint32_t i = 0; i < l->buffers.count; i++) {
++		if (p_recv_handle(fd, &l->ahb[i]) != 0) {
++			LOG("recvHandleFromUnixSocket failed\n");
++			goto fail;
++		}
++	}
++	l->generation++;
++	LOG("app connected: eye %ux%u @ %.0f Hz, hands %u, %u buffers %ux%u\n", l->hello.eye_width,
++	    l->hello.eye_height, l->hello.refresh_rate, l->hello.has_hand_tracking, l->buffers.count,
++	    l->buffers.width, l->buffers.height);
++	return true;
++fail:
++	qb_link_disconnect(l);
++	return false;
++}
++
++static bool handle(struct qb_link *l, const uint8_t *buf, ssize_t n)
++{
++	const struct qb_header *h = (const void *)buf;
++	if (h->type == QB_MSG_POSE && n >= (ssize_t)sizeof(struct qb_pose_msg)) {
++		memcpy(&l->pose, buf, sizeof(l->pose));
++		l->have_pose = true;
++		return true;
++	}
++	if (h->type == QB_MSG_RELEASE && n >= (ssize_t)sizeof(struct qb_release)) {
++		const struct qb_release *r = (const void *)buf;
++		if (r->slot < QB_MAX_SLOTS)
++			l->slot_busy[r->slot] = false;
++	}
++	return false;
++}
++
++static bool drain(struct qb_link *l, int timeout_ms, bool want_pose)
++{
++	_Alignas(16) uint8_t buf[sizeof(struct qb_pose_msg) + 64];
++	bool got_pose = false;
++	for (;;) {
++		int flags = MSG_DONTWAIT;
++		if (want_pose && !got_pose) {
++			struct pollfd p = {l->fd, POLLIN, 0};
++			if (poll(&p, 1, timeout_ms) <= 0)
++				return true;
++		}
++		ssize_t n = recv(l->fd, buf, sizeof(buf), flags);
++		if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
++			LOG("app disconnected\n");
++			qb_link_disconnect(l);
++			return false;
++		}
++		if (n < 0)
++			return true;
++		if (n >= (ssize_t)sizeof(struct qb_header))
++			got_pose |= handle(l, buf, n);
++	}
++}
++
++bool qb_link_poll(struct qb_link *l)
++{
++	return l->fd >= 0 && drain(l, 0, false);
++}
++
++bool qb_link_wait_pose(struct qb_link *l, int timeout_ms)
++{
++	return l->fd >= 0 && drain(l, timeout_ms, true);
++}
++
++int qb_link_acquire(struct qb_link *l)
++{
++	if (l->fd < 0)
++		return -1;
++	for (int i = 0; i < QB_MAX_SLOTS; i++)
++		if (!l->slot_busy[i])
++			return i;
++	return -1;
++}
++
++static bool send_msg(struct qb_link *l, const void *msg, size_t len)
++{
++	if (l->fd < 0)
++		return false;
++	if (send(l->fd, msg, len, MSG_NOSIGNAL) != (ssize_t)len) {
++		qb_link_disconnect(l);
++		return false;
++	}
++	return true;
++}
++
++bool qb_link_present(struct qb_link *l, int slot, uint64_t pose_seq)
++{
++	if (slot < 0 || slot >= QB_MAX_SLOTS)
++		return false;
++	struct qb_frame f = {{QB_MSG_FRAME, sizeof(f)}, (uint32_t)slot, 0, pose_seq};
++	l->slot_busy[slot] = true;
++	return send_msg(l, &f, sizeof(f));
++}
++
++bool qb_link_haptic(struct qb_link *l, int hand, float amplitude, float frequency, int64_t duration_ns)
++{
++	struct qb_haptic h = {{QB_MSG_HAPTIC, sizeof(h)}, (uint32_t)hand, amplitude, frequency, duration_ns};
++	return send_msg(l, &h, sizeof(h));
++}
++
++void qb_link_fini(struct qb_link *l)
++{
++	qb_link_disconnect(l);
++	if (l->listen_fd >= 0)
++		close(l->listen_fd);
++}
+diff --git a/src/xrt/drivers/qbridge/qb_link.h b/src/xrt/drivers/qbridge/qb_link.h
+new file mode 100644
+index 0000000..2a5f7d4
+--- /dev/null
++++ b/src/xrt/drivers/qbridge/qb_link.h
+@@ -0,0 +1,62 @@
++/*
++ * qb_link: Linux (glibc + libhybris) end of the qbridge socket.
++ * Accepts the Android app, receives its shared AHardwareBuffers and tracking
++ * samples, hands out free image slots and announces finished frames.
++ * Not thread-safe: drive it from one thread (or lock around it).
++ */
++#ifndef QB_LINK_H
++#define QB_LINK_H
++
++#include <stdbool.h>
++#include <stdint.h>
++
++#include "qbridge_proto.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++struct AHardwareBuffer;
++
++struct qb_link {
++	int listen_fd;
++	int fd;                        /* connected app, -1 if none */
++	struct qb_hello hello;
++	struct qb_buffers buffers;
++	struct AHardwareBuffer *ahb[QB_MAX_SLOTS];
++	bool slot_busy[QB_MAX_SLOTS];  /* owned by the app (being displayed) */
++	struct qb_pose_msg pose;       /* latest tracking sample */
++	bool have_pose;
++	uint64_t generation;           /* bumped on every (re)connection */
++};
++
++/* Create the abstract listening socket. Returns 0 or -errno. */
++int qb_link_init(struct qb_link *l);
++
++/* Accept an app if one is waiting and run the handshake (HELLO, BUFFERS and
++ * the AHardwareBuffers). timeout_ms < 0 blocks. Returns true when connected. */
++bool qb_link_accept(struct qb_link *l, int timeout_ms);
++
++/* Drain pending messages (POSE, RELEASE) without blocking. Returns false if
++ * the app went away (buffers are then released). */
++bool qb_link_poll(struct qb_link *l);
++
++/* Block until a new POSE arrives (or timeout). Returns false on disconnect. */
++bool qb_link_wait_pose(struct qb_link *l, int timeout_ms);
++
++/* A slot the app doesn't hold, or -1. Linux owns it until qb_link_present. */
++int qb_link_acquire(struct qb_link *l);
++
++/* Rendering into `slot` is complete (GPU work finished); give it to the app. */
++bool qb_link_present(struct qb_link *l, int slot, uint64_t pose_seq);
++
++bool qb_link_haptic(struct qb_link *l, int hand, float amplitude, float frequency, int64_t duration_ns);
++
++void qb_link_disconnect(struct qb_link *l);
++void qb_link_fini(struct qb_link *l);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
+diff --git a/src/xrt/drivers/qbridge/qbridge_device.c b/src/xrt/drivers/qbridge/qbridge_device.c
+new file mode 100644
+index 0000000..a5ba991
+--- /dev/null
++++ b/src/xrt/drivers/qbridge/qbridge_device.c
+@@ -0,0 +1,459 @@
++// Copyright 2026, qbridge contributors
++// SPDX-License-Identifier: BSL-1.0
++/*!
++ * @file
++ * @brief  qbridge HMD and Touch controller devices.
++ *
++ * Views are returned exactly as the app sampled them (latest sample) and the
++ * sample number is remembered, so the frame goes back to the app tagged with
++ * the pose it was rendered for; Meta's compositor then reprojects it.
++ *
++ * @ingroup drv_qbridge
++ */
++
++#include "qbridge_interface.h"
++
++#include "math/m_api.h"
++#include "os/os_time.h"
++#include "util/u_device.h"
++#include "util/u_distortion_mesh.h"
++#include "util/u_logging.h"
++#include "util/u_misc.h"
++#include "util/u_time.h"
++#include "util/u_visibility_mask.h"
++
++#include <poll.h>
++#include <stdio.h>
++#include <string.h>
++
++
++/*
++ *
++ * Bridge thread.
++ *
++ */
++
++static struct qb_sys g_sys;
++static bool g_sys_init;
++
++static void *
++qb_sys_thread(void *ptr)
++{
++	struct qb_sys *s = ptr;
++	struct qb_link *l = &s->link;
++
++	os_thread_helper_lock(&s->oth);
++	while (os_thread_helper_is_running_locked(&s->oth)) {
++		os_thread_helper_unlock(&s->oth);
++
++		// Wait for activity without holding the mutex.
++		struct pollfd p = {l->fd >= 0 ? l->fd : l->listen_fd, POLLIN, 0};
++		poll(&p, 1, 100);
++
++		os_mutex_lock(&s->mutex);
++		if (l->fd < 0) {
++			if (qb_link_accept(l, 0))
++				U_LOG_I("qbridge: app connected (%ux%u per eye)", l->hello.eye_width, l->hello.eye_height);
++		} else if (qb_link_poll(l) && l->have_pose && l->pose.seq != s->latest.seq) {
++			s->latest = l->pose;
++			s->have_pose = true;
++		} else if (l->fd < 0) {
++			s->have_pose = false;
++			U_LOG_W("qbridge: app disconnected");
++		}
++		os_mutex_unlock(&s->mutex);
++
++		os_thread_helper_lock(&s->oth);
++	}
++	os_thread_helper_unlock(&s->oth);
++	return NULL;
++}
++
++struct qb_sys *
++qb_sys_get(void)
++{
++	// Monado creates devices and the compositor target on one thread at startup.
++	if (g_sys_init)
++		return &g_sys;
++	struct qb_sys *s = &g_sys;
++	int r = qb_link_init(&s->link);
++	if (r != 0) {
++		U_LOG_E("qbridge: qb_link_init failed: %s", strerror(-r));
++		return NULL;
++	}
++	os_mutex_init(&s->mutex);
++	os_thread_helper_init(&s->oth);
++	os_thread_helper_start(&s->oth, qb_sys_thread, s);
++	g_sys_init = true;
++	U_LOG_I("qbridge: listening, start the qbridge app on the headset");
++	return s;
++}
++
++bool
++qb_sys_wait_ready(struct qb_sys *s, int timeout_ms)
++{
++	for (int t = 0; t < timeout_ms; t += 20) {
++		os_mutex_lock(&s->mutex);
++		bool ready = s->link.fd >= 0 && s->have_pose;
++		os_mutex_unlock(&s->mutex);
++		if (ready)
++			return true;
++		os_nanosleep(20 * U_TIME_1MS_IN_NS);
++	}
++	return false;
++}
++
++
++/*
++ *
++ * Conversions.
++ *
++ */
++
++static struct xrt_pose
++to_pose(const struct qb_pose *p)
++{
++	struct xrt_pose o = {
++	    {p->orientation.x, p->orientation.y, p->orientation.z, p->orientation.w},
++	    {p->position.x, p->position.y, p->position.z},
++	};
++	return o;
++}
++
++static enum xrt_space_relation_flags
++to_flags(uint32_t f)
++{
++	int o = 0;
++	if (f & QB_POSE_ORIENTATION_VALID)
++		o |= XRT_SPACE_RELATION_ORIENTATION_VALID_BIT;
++	if (f & QB_POSE_POSITION_VALID)
++		o |= XRT_SPACE_RELATION_POSITION_VALID_BIT;
++	if (f & QB_POSE_ORIENTATION_TRACKED)
++		o |= XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT;
++	if (f & QB_POSE_POSITION_TRACKED)
++		o |= XRT_SPACE_RELATION_POSITION_TRACKED_BIT;
++	return (enum xrt_space_relation_flags)o;
++}
++
++static struct xrt_fov
++to_fov(const struct qb_fov *f)
++{
++	struct xrt_fov o = {f->left, f->right, f->up, f->down};
++	return o;
++}
++
++
++/*
++ *
++ * HMD.
++ *
++ */
++
++struct qbridge_hmd
++{
++	struct xrt_device base;
++	struct qb_sys *sys;
++};
++
++static xrt_result_t
++hmd_get_tracked_pose(struct xrt_device *xdev,
++                     enum xrt_input_name name,
++                     int64_t at_timestamp_ns,
++                     struct xrt_space_relation *out_relation)
++{
++	struct qbridge_hmd *h = (struct qbridge_hmd *)xdev;
++	if (name != XRT_INPUT_GENERIC_HEAD_POSE) {
++		return XRT_ERROR_INPUT_UNSUPPORTED;
++	}
++	struct xrt_space_relation rel = XRT_SPACE_RELATION_ZERO;
++	os_mutex_lock(&h->sys->mutex);
++	if (h->sys->have_pose) {
++		rel.pose = to_pose(&h->sys->latest.head);
++		rel.relation_flags = to_flags(h->sys->latest.head_flags);
++	}
++	os_mutex_unlock(&h->sys->mutex);
++	*out_relation = rel;
++	return XRT_SUCCESS;
++}
++
++static xrt_result_t
++hmd_get_view_poses(struct xrt_device *xdev,
++                   const struct xrt_vec3 *default_eye_relation,
++                   int64_t at_timestamp_ns,
++                   enum xrt_view_type view_type,
++                   uint32_t view_count,
++                   struct xrt_space_relation *out_head_relation,
++                   struct xrt_fov *out_fovs,
++                   struct xrt_pose *out_poses)
++{
++	struct qbridge_hmd *h = (struct qbridge_hmd *)xdev;
++	if (view_count != 2 || !h->sys->have_pose) {
++		return u_device_get_view_poses(xdev, default_eye_relation, at_timestamp_ns, view_type, view_count,
++		                               out_head_relation, out_fovs, out_poses);
++	}
++
++	os_mutex_lock(&h->sys->mutex);
++	const struct qb_pose_msg *s = &h->sys->latest;
++	struct xrt_pose head = to_pose(&s->head);
++	struct xrt_pose head_inv;
++	math_pose_invert(&head, &head_inv);
++	out_head_relation->pose = head;
++	out_head_relation->relation_flags = to_flags(s->head_flags);
++	for (uint32_t i = 0; i < 2; i++) {
++		// Eye poses come in base space; Monado wants them relative to the head.
++		struct xrt_pose eye = to_pose(&s->eye_pose[i]);
++		math_pose_transform(&head_inv, &eye, &out_poses[i]);
++		out_fovs[i] = to_fov(&s->eye_fov[i]);
++	}
++	h->sys->render_seq = s->seq;
++	os_mutex_unlock(&h->sys->mutex);
++	return XRT_SUCCESS;
++}
++
++static xrt_result_t
++hmd_get_visibility_mask(struct xrt_device *xdev,
++                        enum xrt_visibility_mask_type type,
++                        uint32_t view_index,
++                        struct xrt_visibility_mask **out_mask)
++{
++	struct xrt_fov fov = xdev->hmd->distortion.fov[view_index];
++	u_visibility_mask_get_default(type, &fov, out_mask);
++	return XRT_SUCCESS;
++}
++
++static void
++hmd_destroy(struct xrt_device *xdev)
++{
++	u_device_free(xdev);
++}
++
++struct xrt_device *
++qbridge_hmd_create(struct qb_sys *s)
++{
++	enum u_device_alloc_flags flags = (enum u_device_alloc_flags)(U_DEVICE_ALLOC_HMD | U_DEVICE_ALLOC_TRACKING_NONE);
++	struct qbridge_hmd *h = U_DEVICE_ALLOCATE(struct qbridge_hmd, flags, 1, 0);
++	h->sys = s;
++
++	h->base.update_inputs = u_device_noop_update_inputs;
++	h->base.get_tracked_pose = hmd_get_tracked_pose;
++	h->base.get_view_poses = hmd_get_view_poses;
++	h->base.get_visibility_mask = hmd_get_visibility_mask;
++	h->base.destroy = hmd_destroy;
++
++	h->base.name = XRT_DEVICE_GENERIC_HMD;
++	h->base.device_type = XRT_DEVICE_TYPE_HMD;
++	h->base.inputs[0].name = XRT_INPUT_GENERIC_HEAD_POSE;
++	h->base.supported.orientation_tracking = true;
++	h->base.supported.position_tracking = true;
++	snprintf(h->base.str, XRT_DEVICE_NAME_LEN, "Quest (qbridge)");
++	snprintf(h->base.serial, XRT_DEVICE_NAME_LEN, "qbridge-hmd");
++	h->base.tracking_origin->type = XRT_TRACKING_TYPE_OTHER;
++	snprintf(h->base.tracking_origin->name, XRT_TRACKING_NAME_LEN, "Meta stage space");
++
++	size_t idx = 0;
++	h->base.hmd->blend_modes[idx++] = XRT_BLEND_MODE_OPAQUE;
++	h->base.hmd->blend_mode_count = idx;
++
++	os_mutex_lock(&s->mutex);
++	uint32_t w = s->link.hello.eye_width, hgt = s->link.hello.eye_height;
++	float hz = s->link.hello.refresh_rate > 0 ? s->link.hello.refresh_rate : 72.0f;
++	for (int e = 0; e < 2; e++) {
++		h->base.hmd->distortion.fov[e] = to_fov(&s->latest.eye_fov[e]);
++	}
++	os_mutex_unlock(&s->mutex);
++
++	// Side by side, exactly the layout of the shared buffers. Meta's compositor
++	// owns lens distortion, so none here.
++	h->base.hmd->screens[0].w_pixels = w * 2;
++	h->base.hmd->screens[0].h_pixels = hgt;
++	h->base.hmd->screens[0].nominal_frame_interval_ns = (int64_t)(1e9 / hz);
++	for (int e = 0; e < 2; e++) {
++		h->base.hmd->views[e].display.w_pixels = w;
++		h->base.hmd->views[e].display.h_pixels = hgt;
++		h->base.hmd->views[e].viewport.x_pixels = e * w;
++		h->base.hmd->views[e].viewport.y_pixels = 0;
++		h->base.hmd->views[e].viewport.w_pixels = w;
++		h->base.hmd->views[e].viewport.h_pixels = hgt;
++		h->base.hmd->views[e].rot = u_device_rotation_ident;
++	}
++	u_distortion_mesh_set_none(&h->base);
++	return &h->base;
++}
++
++
++/*
++ *
++ * Touch controllers.
++ *
++ */
++
++enum qb_touch_input
++{
++	// Hand specific: X/Y/menu on the left, A/B/system on the right.
++	QB_IN_PRIMARY_CLICK = 0,
++	QB_IN_PRIMARY_TOUCH,
++	QB_IN_SECONDARY_CLICK,
++	QB_IN_SECONDARY_TOUCH,
++	QB_IN_MENU_CLICK,
++	QB_IN_SQUEEZE_VALUE,
++	QB_IN_TRIGGER_TOUCH,
++	QB_IN_TRIGGER_VALUE,
++	QB_IN_THUMBSTICK_CLICK,
++	QB_IN_THUMBSTICK_TOUCH,
++	QB_IN_THUMBSTICK,
++	QB_IN_GRIP_POSE,
++	QB_IN_AIM_POSE,
++	QB_IN_COUNT
++};
++
++static struct xrt_binding_input_pair simple_inputs_touch[4] = {
++    {XRT_INPUT_SIMPLE_SELECT_CLICK, XRT_INPUT_TOUCH_TRIGGER_VALUE},
++    {XRT_INPUT_SIMPLE_MENU_CLICK, XRT_INPUT_TOUCH_MENU_CLICK},
++    {XRT_INPUT_SIMPLE_GRIP_POSE, XRT_INPUT_TOUCH_GRIP_POSE},
++    {XRT_INPUT_SIMPLE_AIM_POSE, XRT_INPUT_TOUCH_AIM_POSE},
++};
++
++static struct xrt_binding_output_pair simple_outputs_touch[1] = {
++    {XRT_OUTPUT_NAME_SIMPLE_VIBRATION, XRT_OUTPUT_NAME_TOUCH_HAPTIC},
++};
++
++static struct xrt_binding_profile binding_profiles_touch[1] = {
++    {
++        .name = XRT_DEVICE_SIMPLE_CONTROLLER,
++        .inputs = simple_inputs_touch,
++        .input_count = ARRAY_SIZE(simple_inputs_touch),
++        .outputs = simple_outputs_touch,
++        .output_count = ARRAY_SIZE(simple_outputs_touch),
++    },
++};
++
++struct qbridge_controller
++{
++	struct xrt_device base;
++	struct qb_sys *sys;
++	int hand;
++};
++
++static xrt_result_t
++ctrl_get_tracked_pose(struct xrt_device *xdev,
++                      enum xrt_input_name name,
++                      int64_t at_timestamp_ns,
++                      struct xrt_space_relation *out_relation)
++{
++	struct qbridge_controller *c = (struct qbridge_controller *)xdev;
++	if (name != XRT_INPUT_TOUCH_GRIP_POSE && name != XRT_INPUT_TOUCH_AIM_POSE) {
++		return XRT_ERROR_INPUT_UNSUPPORTED;
++	}
++	struct xrt_space_relation rel = XRT_SPACE_RELATION_ZERO;
++	os_mutex_lock(&c->sys->mutex);
++	const struct qb_controller *q = &c->sys->latest.controller[c->hand];
++	if (c->sys->have_pose && q->active) {
++		bool grip = name == XRT_INPUT_TOUCH_GRIP_POSE;
++		rel.pose = to_pose(grip ? &q->grip : &q->aim);
++		rel.relation_flags = to_flags(grip ? q->grip_flags : q->aim_flags);
++		if (grip) {
++			rel.linear_velocity = (struct xrt_vec3){q->linear_velocity.x, q->linear_velocity.y,
++			                                        q->linear_velocity.z};
++			rel.angular_velocity = (struct xrt_vec3){q->angular_velocity.x, q->angular_velocity.y,
++			                                         q->angular_velocity.z};
++			rel.relation_flags |= XRT_SPACE_RELATION_LINEAR_VELOCITY_VALID_BIT |
++			                      XRT_SPACE_RELATION_ANGULAR_VELOCITY_VALID_BIT;
++		}
++	}
++	os_mutex_unlock(&c->sys->mutex);
++	*out_relation = rel;
++	return XRT_SUCCESS;
++}
++
++static xrt_result_t
++ctrl_update_inputs(struct xrt_device *xdev)
++{
++	struct qbridge_controller *c = (struct qbridge_controller *)xdev;
++	struct xrt_input *in = c->base.inputs;
++	int64_t now = os_monotonic_get_ns();
++
++	os_mutex_lock(&c->sys->mutex);
++	struct qb_controller q = c->sys->latest.controller[c->hand];
++	os_mutex_unlock(&c->sys->mutex);
++
++	bool left = c->hand == 0;
++	uint32_t b = q.buttons;
++	in[QB_IN_PRIMARY_CLICK].value.boolean = b & (left ? QB_BTN_X : QB_BTN_A);
++	in[QB_IN_PRIMARY_TOUCH].value.boolean = b & (left ? QB_TOUCH_X : QB_TOUCH_A);
++	in[QB_IN_SECONDARY_CLICK].value.boolean = b & (left ? QB_BTN_Y : QB_BTN_B);
++	in[QB_IN_SECONDARY_TOUCH].value.boolean = b & (left ? QB_TOUCH_Y : QB_TOUCH_B);
++	in[QB_IN_MENU_CLICK].value.boolean = left && (b & QB_BTN_MENU);
++	in[QB_IN_SQUEEZE_VALUE].value.vec1.x = q.squeeze;
++	in[QB_IN_TRIGGER_TOUCH].value.boolean = b & QB_TOUCH_TRIGGER;
++	in[QB_IN_TRIGGER_VALUE].value.vec1.x = q.trigger;
++	in[QB_IN_THUMBSTICK_CLICK].value.boolean = b & QB_BTN_THUMBSTICK;
++	in[QB_IN_THUMBSTICK_TOUCH].value.boolean = b & QB_TOUCH_THUMBSTICK;
++	in[QB_IN_THUMBSTICK].value.vec2.x = q.thumbstick_x;
++	in[QB_IN_THUMBSTICK].value.vec2.y = q.thumbstick_y;
++	for (int i = 0; i < QB_IN_COUNT; i++) {
++		in[i].timestamp = now;
++		in[i].active = q.active != 0;
++	}
++	return XRT_SUCCESS;
++}
++
++static xrt_result_t
++ctrl_set_output(struct xrt_device *xdev, enum xrt_output_name name, const struct xrt_output_value *value)
++{
++	struct qbridge_controller *c = (struct qbridge_controller *)xdev;
++	if (name != XRT_OUTPUT_NAME_TOUCH_HAPTIC) {
++		return XRT_ERROR_OUTPUT_UNSUPPORTED;
++	}
++	os_mutex_lock(&c->sys->mutex);
++	qb_link_haptic(&c->sys->link, c->hand, value->vibration.amplitude, value->vibration.frequency,
++	               value->vibration.duration_ns);
++	os_mutex_unlock(&c->sys->mutex);
++	return XRT_SUCCESS;
++}
++
++static void
++ctrl_destroy(struct xrt_device *xdev)
++{
++	u_device_free(xdev);
++}
++
++struct xrt_device *
++qbridge_controller_create(struct qb_sys *s, int hand, struct xrt_tracking_origin *origin)
++{
++	enum u_device_alloc_flags flags = U_DEVICE_ALLOC_TRACKING_NONE;
++	struct qbridge_controller *c = U_DEVICE_ALLOCATE(struct qbridge_controller, flags, QB_IN_COUNT, 1);
++	c->sys = s;
++	c->hand = hand;
++	bool left = hand == 0;
++
++	u_device_populate_function_pointers(&c->base, ctrl_get_tracked_pose, ctrl_destroy);
++	c->base.update_inputs = ctrl_update_inputs;
++	c->base.set_output = ctrl_set_output;
++	c->base.name = XRT_DEVICE_TOUCH_CONTROLLER;
++	c->base.device_type = left ? XRT_DEVICE_TYPE_LEFT_HAND_CONTROLLER : XRT_DEVICE_TYPE_RIGHT_HAND_CONTROLLER;
++	c->base.tracking_origin = origin;
++	c->base.supported.orientation_tracking = true;
++	c->base.supported.position_tracking = true;
++	snprintf(c->base.str, XRT_DEVICE_NAME_LEN, "Quest %s Touch (qbridge)", left ? "Left" : "Right");
++	snprintf(c->base.serial, XRT_DEVICE_NAME_LEN, "qbridge-%s", left ? "left" : "right");
++
++	struct xrt_input *in = c->base.inputs;
++	in[QB_IN_PRIMARY_CLICK].name = left ? XRT_INPUT_TOUCH_X_CLICK : XRT_INPUT_TOUCH_A_CLICK;
++	in[QB_IN_PRIMARY_TOUCH].name = left ? XRT_INPUT_TOUCH_X_TOUCH : XRT_INPUT_TOUCH_A_TOUCH;
++	in[QB_IN_SECONDARY_CLICK].name = left ? XRT_INPUT_TOUCH_Y_CLICK : XRT_INPUT_TOUCH_B_CLICK;
++	in[QB_IN_SECONDARY_TOUCH].name = left ? XRT_INPUT_TOUCH_Y_TOUCH : XRT_INPUT_TOUCH_B_TOUCH;
++	in[QB_IN_MENU_CLICK].name = left ? XRT_INPUT_TOUCH_MENU_CLICK : XRT_INPUT_TOUCH_SYSTEM_CLICK;
++	in[QB_IN_SQUEEZE_VALUE].name = XRT_INPUT_TOUCH_SQUEEZE_VALUE;
++	in[QB_IN_TRIGGER_TOUCH].name = XRT_INPUT_TOUCH_TRIGGER_TOUCH;
++	in[QB_IN_TRIGGER_VALUE].name = XRT_INPUT_TOUCH_TRIGGER_VALUE;
++	in[QB_IN_THUMBSTICK_CLICK].name = XRT_INPUT_TOUCH_THUMBSTICK_CLICK;
++	in[QB_IN_THUMBSTICK_TOUCH].name = XRT_INPUT_TOUCH_THUMBSTICK_TOUCH;
++	in[QB_IN_THUMBSTICK].name = XRT_INPUT_TOUCH_THUMBSTICK;
++	in[QB_IN_GRIP_POSE].name = XRT_INPUT_TOUCH_GRIP_POSE;
++	in[QB_IN_AIM_POSE].name = XRT_INPUT_TOUCH_AIM_POSE;
++	c->base.outputs[0].name = XRT_OUTPUT_NAME_TOUCH_HAPTIC;
++
++	c->base.binding_profiles = binding_profiles_touch;
++	c->base.binding_profile_count = ARRAY_SIZE(binding_profiles_touch);
++	return &c->base;
++}
+diff --git a/src/xrt/drivers/qbridge/qbridge_interface.h b/src/xrt/drivers/qbridge/qbridge_interface.h
+new file mode 100644
+index 0000000..12acfc5
+--- /dev/null
++++ b/src/xrt/drivers/qbridge/qbridge_interface.h
+@@ -0,0 +1,56 @@
++// Copyright 2026, qbridge contributors
++// SPDX-License-Identifier: BSL-1.0
++/*!
++ * @file
++ * @brief  qbridge: Monado devices and compositor target backed by Meta's
++ *         runtime on the same Quest, through the qbridge Android app.
++ * @ingroup drv_qbridge
++ */
++
++#pragma once
++
++#include "xrt/xrt_device.h"
++#include "os/os_threading.h"
++
++#include "qb_link.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/*!
++ * Process-wide bridge state, shared by the devices and the compositor target
++ * (both live in monado-service). A thread keeps the link fed with tracking.
++ */
++struct qb_sys
++{
++	struct os_mutex mutex;
++	struct os_thread_helper oth;
++	struct qb_link link;
++
++	//! Latest tracking sample from the app.
++	struct qb_pose_msg latest;
++	bool have_pose;
++
++	//! Sample the compositor last rendered with (sent back with the frame).
++	uint64_t render_seq;
++};
++
++//! Get (and on first call start) the bridge. NULL if the socket can't be set up.
++struct qb_sys *
++qb_sys_get(void);
++
++//! Wait until the app is connected and has sent a first pose.
++bool
++qb_sys_wait_ready(struct qb_sys *s, int timeout_ms);
++
++struct xrt_device *
++qbridge_hmd_create(struct qb_sys *s);
++
++//! hand: 0 = left, 1 = right. Shares the HMD's tracking origin.
++struct xrt_device *
++qbridge_controller_create(struct qb_sys *s, int hand, struct xrt_tracking_origin *origin);
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/src/xrt/drivers/qbridge/qbridge_proto.h b/src/xrt/drivers/qbridge/qbridge_proto.h
+new file mode 100644
+index 0000000..9836345
+--- /dev/null
++++ b/src/xrt/drivers/qbridge/qbridge_proto.h
+@@ -0,0 +1,132 @@
++/*
++ * qbridge wire protocol, shared by the Android app (bionic, client) and the
++ * Linux side (glibc, server) running in the Holo chroot on the same Quest.
++ *
++ * Transport: SOCK_SEQPACKET on the abstract unix address QB_SOCKET_NAME
++ * (abstract sockets are per network namespace, which the chroot shares).
++ * Every packet starts with struct qb_header. AHardwareBuffers travel with
++ * AHardwareBuffer_sendHandleToUnixSocket right after a QB_MSG_BUFFERS packet.
++ *
++ * Frame flow (images are side-by-side stereo, left eye on the left half):
++ *   app  -> linux  HELLO     display/eye configuration
++ *   app  -> linux  BUFFERS   + QB_MAX_SLOTS AHardwareBuffers
++ *   app  -> linux  POSE      every app frame, for its predicted display time
++ *   linux-> app    FRAME     slot `slot` now holds an image rendered with
++ *                            the views of POSE `pose_seq`; slot belongs to app
++ *   app  -> linux  RELEASE   slot is no longer displayed, linux may reuse it
++ *   linux-> app    HAPTIC    controller vibration
++ */
++#ifndef QBRIDGE_PROTO_H
++#define QBRIDGE_PROTO_H
++
++#include <stdint.h>
++
++#define QB_SOCKET_NAME "qbridge"   /* abstract: "\0qbridge" */
++#define QB_PROTO_VERSION 1
++#define QB_MAX_SLOTS 3
++#define QB_HAND_JOINTS 26          /* XR_HAND_JOINT_COUNT_EXT */
++
++enum qb_msg_type {
++	QB_MSG_HELLO = 1,
++	QB_MSG_BUFFERS = 2,
++	QB_MSG_POSE = 3,
++	QB_MSG_FRAME = 4,
++	QB_MSG_RELEASE = 5,
++	QB_MSG_HAPTIC = 6,
++};
++
++struct qb_header {
++	uint32_t type;
++	uint32_t size; /* whole packet, header included */
++};
++
++struct qb_quat { float x, y, z, w; };
++struct qb_vec3 { float x, y, z; };
++struct qb_pose { struct qb_quat orientation; struct qb_vec3 position; };
++struct qb_fov { float left, right, up, down; }; /* radians, OpenXR convention */
++
++/* Pose validity bits (mirror XrSpaceLocationFlags semantics). */
++#define QB_POSE_ORIENTATION_VALID   (1u << 0)
++#define QB_POSE_POSITION_VALID      (1u << 1)
++#define QB_POSE_ORIENTATION_TRACKED (1u << 2)
++#define QB_POSE_POSITION_TRACKED    (1u << 3)
++
++struct qb_hello {
++	struct qb_header hdr;
++	uint32_t version;
++	uint32_t eye_width, eye_height; /* recommended per-eye size */
++	float refresh_rate;
++	uint32_t has_hand_tracking;
++};
++
++struct qb_buffers {
++	struct qb_header hdr;
++	uint32_t count;               /* AHardwareBuffers following on the socket */
++	uint32_t width, height;       /* full side-by-side image */
++	uint32_t format;              /* AHARDWAREBUFFER_FORMAT_* */
++};
++
++/* Touch controller inputs, one per hand. */
++#define QB_BTN_A          (1u << 0)  /* right hand */
++#define QB_BTN_B          (1u << 1)
++#define QB_BTN_X          (1u << 2)  /* left hand */
++#define QB_BTN_Y          (1u << 3)
++#define QB_BTN_MENU       (1u << 4)
++#define QB_BTN_THUMBSTICK (1u << 5)
++#define QB_TOUCH_A        (1u << 8)
++#define QB_TOUCH_B        (1u << 9)
++#define QB_TOUCH_X        (1u << 10)
++#define QB_TOUCH_Y        (1u << 11)
++#define QB_TOUCH_THUMBSTICK (1u << 12)
++#define QB_TOUCH_TRIGGER  (1u << 13)
++
++struct qb_controller {
++	uint32_t active;              /* controller connected and tracked */
++	uint32_t grip_flags, aim_flags;
++	struct qb_pose grip, aim;
++	struct qb_vec3 linear_velocity, angular_velocity; /* grip, base space */
++	uint32_t buttons;             /* QB_BTN_* | QB_TOUCH_* */
++	float trigger, squeeze;
++	float thumbstick_x, thumbstick_y;
++};
++
++struct qb_hand {
++	uint32_t active;
++	struct qb_pose joints[QB_HAND_JOINTS];
++	float radii[QB_HAND_JOINTS];
++	uint32_t joint_flags[QB_HAND_JOINTS];
++};
++
++struct qb_pose_msg {
++	struct qb_header hdr;
++	uint64_t seq;
++	int64_t display_time_ns;      /* CLOCK_MONOTONIC, predicted display time */
++	uint32_t head_flags;
++	struct qb_pose head;          /* XR_REFERENCE_SPACE_TYPE_STAGE (fallback LOCAL) */
++	struct qb_pose eye_pose[2];
++	struct qb_fov eye_fov[2];
++	struct qb_controller controller[2]; /* 0 = left, 1 = right */
++	struct qb_hand hand[2];
++};
++
++struct qb_frame {
++	struct qb_header hdr;
++	uint32_t slot;
++	uint32_t _pad;
++	uint64_t pose_seq;            /* POSE whose eye views were used to render */
++};
++
++struct qb_release {
++	struct qb_header hdr;
++	uint32_t slot;
++};
++
++struct qb_haptic {
++	struct qb_header hdr;
++	uint32_t hand;                /* 0 = left, 1 = right */
++	float amplitude;              /* 0..1, 0 stops */
++	float frequency;              /* Hz, 0 = runtime default */
++	int64_t duration_ns;
++};
++
++#endif
+diff --git a/src/xrt/drivers/quest1/quest1_hmd.c b/src/xrt/drivers/quest1/quest1_hmd.c
+new file mode 100644
+index 0000000..2f20f24
+--- /dev/null
++++ b/src/xrt/drivers/quest1/quest1_hmd.c
+@@ -0,0 +1,499 @@
++// Copyright 2026, Quest1-SteamOS contributors
++// SPDX-License-Identifier: BSL-1.0
++/*!
++ * @file
++ * @brief  Native Quest 1 HMD: 3DoF from the SyncBoss IMU, display for the 2880x1600 framebuffer.
++ *
++ * libsyncboss.so is Meta's bionic C library for the SyncBoss MCU; it is loaded
++ * with libhybris (the process needs LD_PRELOAD=libbionictls.so). Records come
++ * from a 32-entry ring at 1 kHz; layouts are in docs/syncboss-imu.md.
++ *
++ * @ingroup drv_quest1
++ */
++
++#include "quest1_interface.h"
++
++#include "math/m_api.h"
++#include "math/m_imu_3dof.h"
++#include "math/m_mathinclude.h"
++#include "math/m_relation_history.h"
++#include "math/m_vec3.h"
++#include "os/os_threading.h"
++#include "os/os_time.h"
++#include "util/u_debug.h"
++#include "util/u_device.h"
++#include "util/u_distortion_mesh.h"
++#include "util/u_logging.h"
++#include "util/u_misc.h"
++#include "util/u_time.h"
++#include "util/u_var.h"
++
++#include <dlfcn.h>
++#include <stdio.h>
++#include <string.h>
++#include <unistd.h>
++
++extern void *
++android_dlopen(const char *filename, int flag);
++extern void *
++android_dlsym(void *handle, const char *symbol);
++
++DEBUG_GET_ONCE_LOG_OPTION(quest1_log, "QUEST1_LOG", U_LOGGING_INFO)
++// Head axis i = sign * IMU axis, e.g. "-y,x,z". Head frame: +X right, +Y up, +Z back.
++// Calibrated on the device 2026-10-05: up = -x, look-down = +y, turn-left = -x, tilt-left = -z (IMU frame).
++DEBUG_GET_ONCE_OPTION(quest1_imu_axes, "QUEST1_IMU_AXES", "-y,-x,-z")
++
++#define Q1_TRACE(h, ...) U_LOG_XDEV_IFL_T(&h->base, h->log_level, __VA_ARGS__)
++#define Q1_DEBUG(h, ...) U_LOG_XDEV_IFL_D(&h->base, h->log_level, __VA_ARGS__)
++#define Q1_INFO(h, ...) U_LOG_XDEV_IFL_I(&h->base, h->log_level, __VA_ARGS__)
++#define Q1_ERROR(h, ...) U_LOG_XDEV_IFL_E(&h->base, h->log_level, __VA_ARGS__)
++
++#define Q1_PANEL_W 1440
++#define Q1_PANEL_H 1600
++#define Q1_REFRESH_HZ 72
++
++
++/*
++ *
++ * libsyncboss.
++ *
++ */
++
++struct sb_record
++{
++	uint64_t seq;
++	uint32_t type; // 0 = headset IMU
++	uint32_t pad;
++	uint8_t data[96];
++};
++
++struct sb_imu_event
++{
++	uint64_t zero;
++	uint64_t timestamp_us;
++	float temperature;
++	float accel[3]; // m/s²
++	float gyro[3];  // rad/s
++	uint32_t pad;
++};
++
++struct sb_api
++{
++	int (*init)(void **handle, const void *opts);
++	int (*deinit)(void *handle);
++	int (*imu_enable)(void *handle);
++	int (*imu_disable)(void *handle);
++	int (*wait)(void *handle, uint32_t timeout_ms, struct sb_record *out);
++};
++
++static bool
++sb_load(struct sb_api *api)
++{
++	void *lib = android_dlopen("libsyncboss.so", RTLD_NOW);
++	if (lib == NULL) {
++		return false;
++	}
++	api->init = android_dlsym(lib, "syncboss_init");
++	api->deinit = android_dlsym(lib, "syncboss_deinit");
++	api->imu_enable = android_dlsym(lib, "syncboss_imu_enable");
++	api->imu_disable = android_dlsym(lib, "syncboss_imu_disable");
++	api->wait = android_dlsym(lib, "syncboss_wait_on_stream_data_exclusive");
++	return api->init != NULL && api->imu_enable != NULL && api->wait != NULL;
++}
++
++
++/*
++ *
++ * Device.
++ *
++ */
++
++struct quest1_hmd
++{
++	struct xrt_device base;
++
++	struct sb_api sb;
++	void *sb_handle;
++	struct os_thread_helper oth;
++
++	//! IMU axis remap: head[i] = axis_sign[i] * imu[axis_index[i]].
++	int axis_index[3];
++	float axis_sign[3];
++
++	//! Only touched by the IMU thread.
++	struct
++	{
++		struct m_imu_3dof fusion;
++		struct xrt_vec3 gyro_bias;
++		uint64_t still_since_ns;
++		bool bias_valid;
++		int64_t clock_offset_ns; //!< monotonic - IMU clock
++		bool have_offset;
++		uint64_t samples;
++	} imu;
++
++	struct m_relation_history *history;
++	enum u_logging_level log_level;
++};
++
++static inline struct quest1_hmd *
++q1(struct xrt_device *xdev)
++{
++	return (struct quest1_hmd *)xdev;
++}
++
++static bool
++parse_axes(struct quest1_hmd *h, const char *spec)
++{
++	const char *p = spec;
++	for (int i = 0; i < 3; i++) {
++		float sign = 1.0f;
++		if (*p == '-' || *p == '+') {
++			sign = *p == '-' ? -1.0f : 1.0f;
++			p++;
++		}
++		if (*p < 'x' || *p > 'z') {
++			return false;
++		}
++		h->axis_index[i] = *p - 'x';
++		h->axis_sign[i] = sign;
++		p++;
++		if (i < 2 && *p++ != ',') {
++			return false;
++		}
++	}
++	return *p == '\0';
++}
++
++static struct xrt_vec3
++remap(const struct quest1_hmd *h, const float v[3])
++{
++	return (struct xrt_vec3){
++	    h->axis_sign[0] * v[h->axis_index[0]],
++	    h->axis_sign[1] * v[h->axis_index[1]],
++	    h->axis_sign[2] * v[h->axis_index[2]],
++	};
++}
++
++/*!
++ * The fusion only removes gyro bias on request: estimate it whenever the
++ * headset has been still for a second (bias at rest is ~0.01 rad/s).
++ */
++static void
++update_gyro_bias(struct quest1_hmd *h, uint64_t ts_ns, const struct xrt_vec3 *accel, const struct xrt_vec3 *gyro)
++{
++	struct xrt_vec3 d = m_vec3_sub(*gyro, h->imu.gyro_bias);
++	bool still = m_vec3_len(d) < (h->imu.bias_valid ? 0.03f : 0.1f) &&
++	             fabsf(m_vec3_len(*accel) - (float)MATH_GRAVITY_M_S2) < 0.5f;
++	if (!still) {
++		h->imu.still_since_ns = 0;
++		return;
++	}
++	if (h->imu.still_since_ns == 0) {
++		h->imu.still_since_ns = ts_ns;
++	}
++	if (ts_ns - h->imu.still_since_ns < U_TIME_1S_IN_NS) {
++		return;
++	}
++	float alpha = h->imu.bias_valid ? 0.001f : 0.05f;
++	h->imu.gyro_bias = m_vec3_add(h->imu.gyro_bias, m_vec3_mul_scalar(d, alpha));
++	h->imu.bias_valid = true;
++}
++
++static void
++handle_imu(struct quest1_hmd *h, const struct sb_imu_event *e)
++{
++	uint64_t imu_ns = e->timestamp_us * U_TIME_1US_IN_NS;
++	int64_t now = os_monotonic_get_ns();
++
++	// The IMU clock is the MCU's: map it to monotonic with the smallest observed
++	// delivery delay, letting it creep up slowly to follow drift.
++	int64_t offset = now - (int64_t)imu_ns;
++	if (!h->imu.have_offset || offset < h->imu.clock_offset_ns) {
++		h->imu.clock_offset_ns = offset;
++		h->imu.have_offset = true;
++	} else {
++		h->imu.clock_offset_ns += (offset - h->imu.clock_offset_ns) / 4096;
++	}
++
++	struct xrt_vec3 accel = remap(h, e->accel);
++	struct xrt_vec3 gyro = remap(h, e->gyro);
++	update_gyro_bias(h, imu_ns, &accel, &gyro);
++	struct xrt_vec3 gyro_unbiased = m_vec3_sub(gyro, h->imu.gyro_bias);
++
++	m_imu_3dof_update(&h->imu.fusion, imu_ns, &accel, &gyro_unbiased);
++	h->imu.samples++;
++
++	struct xrt_space_relation rel = XRT_SPACE_RELATION_ZERO;
++	rel.pose.orientation = h->imu.fusion.rot;
++	// Angular velocity is in the base space.
++	math_quat_rotate_vec3(&rel.pose.orientation, &gyro_unbiased, &rel.angular_velocity);
++	rel.relation_flags = (enum xrt_space_relation_flags)(
++	    XRT_SPACE_RELATION_ORIENTATION_VALID_BIT | XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT |
++	    XRT_SPACE_RELATION_ANGULAR_VELOCITY_VALID_BIT | XRT_SPACE_RELATION_POSITION_VALID_BIT);
++	m_relation_history_push(h->history, &rel, (int64_t)imu_ns + h->imu.clock_offset_ns);
++
++	if (h->imu.samples % 5000 == 0) {
++		Q1_DEBUG(h, "imu %llu samples, bias [%.4f %.4f %.4f], %.1f °C",
++		         (unsigned long long)h->imu.samples, h->imu.gyro_bias.x, h->imu.gyro_bias.y,
++		         h->imu.gyro_bias.z, e->temperature);
++	}
++}
++
++static void *
++imu_thread(void *ptr)
++{
++	struct quest1_hmd *h = ptr;
++	os_thread_helper_name(&h->oth, "Quest1 IMU");
++
++	os_thread_helper_lock(&h->oth);
++	while (os_thread_helper_is_running_locked(&h->oth)) {
++		os_thread_helper_unlock(&h->oth);
++
++		struct sb_record rec;
++		int r = h->sb.wait(h->sb_handle, 100, &rec);
++		if (r == 0 && rec.type == 0) {
++			struct sb_imu_event e;
++			memcpy(&e, rec.data, sizeof(e));
++			handle_imu(h, &e);
++		} else if (r != 0 && r != -11) {
++			Q1_ERROR(h, "syncboss_wait_on_stream_data_exclusive: %d", r);
++			os_nanosleep(100 * U_TIME_1MS_IN_NS);
++		}
++
++		os_thread_helper_lock(&h->oth);
++	}
++	os_thread_helper_unlock(&h->oth);
++	return NULL;
++}
++
++static xrt_result_t
++hmd_get_tracked_pose(struct xrt_device *xdev,
++                     enum xrt_input_name name,
++                     int64_t at_timestamp_ns,
++                     struct xrt_space_relation *out_relation)
++{
++	struct quest1_hmd *h = q1(xdev);
++	if (name != XRT_INPUT_GENERIC_HEAD_POSE) {
++		U_LOG_XDEV_UNSUPPORTED_INPUT(&h->base, h->log_level, name);
++		return XRT_ERROR_INPUT_UNSUPPORTED;
++	}
++	struct xrt_space_relation rel = XRT_SPACE_RELATION_ZERO;
++	if (m_relation_history_get(h->history, at_timestamp_ns, &rel) == M_RELATION_HISTORY_RESULT_INVALID) {
++		rel.pose.orientation.w = 1.0f;
++		rel.relation_flags = (enum xrt_space_relation_flags)(XRT_SPACE_RELATION_ORIENTATION_VALID_BIT |
++		                                                     XRT_SPACE_RELATION_POSITION_VALID_BIT);
++	}
++	*out_relation = rel;
++	return XRT_SUCCESS;
++}
++
++static void
++hmd_destroy(struct xrt_device *xdev)
++{
++	struct quest1_hmd *h = q1(xdev);
++	os_thread_helper_destroy(&h->oth);
++	if (h->sb_handle != NULL) {
++		if (h->sb.imu_disable != NULL) {
++			h->sb.imu_disable(h->sb_handle);
++		}
++		if (h->sb.deinit != NULL) {
++			h->sb.deinit(h->sb_handle);
++		}
++	}
++	u_var_remove_root(h);
++	m_imu_3dof_close(&h->imu.fusion);
++	m_relation_history_destroy(&h->history);
++	u_device_free(&h->base);
++}
++
++/*
++ *
++ * Lens distortion: Meta's runtime defaults for the Quest 1 (Oculus SDK
++ * LensConfig, CatmullRom10), see docs/quest1-lens.md.
++ *
++ */
++
++#define Q1_PANEL_W_M 0.0594f
++#define Q1_PANEL_H_M 0.0660f
++#define Q1_METERS_PER_TAN_ANGLE 0.0389f
++#define Q1_LENS_TO_SCREEN_X 0.002986f // panel centre - lens centre, mirrored per eye
++#define Q1_LENS_TO_SCREEN_Y -0.00272f
++
++static const float q1_k[11] = {1.0f,    1.0374f, 1.0810f, 1.1330f, 1.1970f, 1.2754f,
++                               1.3771f, 1.5133f, 1.7018f, 1.9732f, 2.3000f};
++
++//! Scale from screen radius² to tan-angle, exactly as the runtime evaluates it (MaxR = 1).
++static float
++q1_catmull_rom10(float rsq)
++{
++	const float *K = q1_k;
++	float f = 10.0f * rsq;
++	int k = (int)floorf(f);
++	k = k < 0 ? 0 : (k > 10 ? 10 : k);
++	float t = f - (float)k;
++	float p0, m0, p1, m1;
++	if (k == 0) {
++		p0 = 1.0f;
++		m0 = K[1] - K[0];
++		p1 = K[1];
++		m1 = 0.5f * (K[2] - K[0]);
++	} else if (k < 9) {
++		p0 = K[k];
++		m0 = 0.5f * (K[k + 1] - K[k - 1]);
++		p1 = K[k + 1];
++		m1 = 0.5f * (K[k + 2] - K[k]);
++	} else if (k == 9) {
++		p0 = K[9];
++		m0 = 0.5f * (K[10] - K[8]);
++		p1 = K[10];
++		m1 = K[10] - K[9];
++	} else {
++		p0 = K[10];
++		m0 = K[10] - K[9];
++		p1 = p0 + m0;
++		m1 = m0;
++	}
++	float omt = 1.0f - t;
++	return (p0 * (1.0f + 2.0f * t) + m0 * t) * omt * omt + (p1 * (1.0f + 2.0f * omt) - m1 * omt) * t * t;
++}
++
++static xrt_result_t
++hmd_compute_distortion(struct xrt_device *xdev, uint32_t view, float u, float v, struct xrt_uv_triplet *out)
++{
++	const struct xrt_fov *fov = &xdev->hmd->distortion.fov[view];
++
++	// Point on this eye's panel relative to the lens centre, y up, in tan units at the centre.
++	float sx = view == 0 ? -1.0f : 1.0f;
++	float x = ((u - 0.5f) * Q1_PANEL_W_M + sx * Q1_LENS_TO_SCREEN_X) / Q1_METERS_PER_TAN_ANGLE;
++	float y = ((0.5f - v) * Q1_PANEL_H_M + Q1_LENS_TO_SCREEN_Y) / Q1_METERS_PER_TAN_ANGLE;
++	float rsq = x * x + y * y;
++	float s = q1_catmull_rom10(rsq);
++
++	float tl = tanf(fov->angle_left), tr = tanf(fov->angle_right);
++	float tu = tanf(fov->angle_up), td = tanf(fov->angle_down);
++	const float chroma[3] = {0.996f - 0.007f * rsq, 1.0f, 1.006f + 0.020f * rsq};
++	struct xrt_vec2 *uv[3] = {&out->r, &out->g, &out->b};
++	for (int c = 0; c < 3; c++) {
++		float tx = x * s * chroma[c], ty = y * s * chroma[c];
++		uv[c]->x = (tx - tl) / (tr - tl);
++		uv[c]->y = (tu - ty) / (tu - td);
++	}
++	return XRT_SUCCESS;
++}
++
++static void
++setup_display(struct quest1_hmd *h)
++{
++	struct xrt_hmd_parts *hmd = h->base.hmd;
++
++	hmd->screens[0].w_pixels = 2 * Q1_PANEL_W;
++	hmd->screens[0].h_pixels = Q1_PANEL_H;
++	hmd->screens[0].nominal_frame_interval_ns = U_TIME_1S_IN_NS / Q1_REFRESH_HZ;
++	hmd->view_count = 2;
++
++	// Meta's runtime: up 47°, down 53°, outer 52°, inner 42°.
++	const struct xrt_fov fov_left = {.angle_left = DEG_TO_RAD(-52.0), .angle_right = DEG_TO_RAD(42.0),
++	                                 .angle_up = DEG_TO_RAD(47.0), .angle_down = DEG_TO_RAD(-53.0)};
++	for (int e = 0; e < 2; e++) {
++		hmd->distortion.fov[e] = fov_left;
++		if (e == 1) { // mirror for the right eye
++			hmd->distortion.fov[e].angle_left = -fov_left.angle_right;
++			hmd->distortion.fov[e].angle_right = -fov_left.angle_left;
++		}
++
++		// The panels show the framebuffer rotated by 180°: the left eye sees the
++		// right half, upside down.
++		hmd->views[e].display.w_pixels = Q1_PANEL_W;
++		hmd->views[e].display.h_pixels = Q1_PANEL_H;
++		hmd->views[e].viewport.x_pixels = e == 0 ? Q1_PANEL_W : 0;
++		hmd->views[e].viewport.y_pixels = 0;
++		hmd->views[e].viewport.w_pixels = Q1_PANEL_W;
++		hmd->views[e].viewport.h_pixels = Q1_PANEL_H;
++		hmd->views[e].rot = u_device_rotation_180;
++	}
++
++	size_t idx = 0;
++	hmd->blend_modes[idx++] = XRT_BLEND_MODE_OPAQUE;
++	hmd->blend_mode_count = idx;
++
++	hmd->distortion.models = XRT_DISTORTION_MODEL_COMPUTE;
++	hmd->distortion.preferred = XRT_DISTORTION_MODEL_COMPUTE;
++	h->base.compute_distortion = hmd_compute_distortion;
++	u_distortion_mesh_fill_in_compute(&h->base);
++}
++
++bool
++quest1_detect(void)
++{
++	return access("/dev/syncboss0", F_OK) == 0;
++}
++
++struct xrt_device *
++quest1_hmd_create(void)
++{
++	enum u_device_alloc_flags flags = (enum u_device_alloc_flags)(U_DEVICE_ALLOC_HMD | U_DEVICE_ALLOC_TRACKING_NONE);
++	struct quest1_hmd *h = U_DEVICE_ALLOCATE(struct quest1_hmd, flags, 1, 0);
++	h->log_level = debug_get_log_option_quest1_log();
++
++	h->base.update_inputs = u_device_noop_update_inputs;
++	h->base.get_tracked_pose = hmd_get_tracked_pose;
++	h->base.get_view_poses = u_device_get_view_poses;
++	h->base.get_visibility_mask = u_device_get_visibility_mask;
++	h->base.destroy = hmd_destroy;
++	h->base.name = XRT_DEVICE_GENERIC_HMD;
++	h->base.device_type = XRT_DEVICE_TYPE_HMD;
++	h->base.inputs[0].name = XRT_INPUT_GENERIC_HEAD_POSE;
++	h->base.supported.orientation_tracking = true;
++	h->base.supported.position_tracking = false;
++	snprintf(h->base.str, XRT_DEVICE_NAME_LEN, "Oculus Quest (native)");
++	snprintf(h->base.serial, XRT_DEVICE_NAME_LEN, "quest1-hmd");
++	h->base.tracking_origin->type = XRT_TRACKING_TYPE_OTHER;
++	snprintf(h->base.tracking_origin->name, XRT_TRACKING_NAME_LEN, "Quest 1 IMU");
++
++	m_imu_3dof_init(&h->imu.fusion, M_IMU_3DOF_USE_GRAVITY_DUR_20MS);
++	m_relation_history_create(&h->history);
++	os_thread_helper_init(&h->oth);
++	setup_display(h);
++
++	const char *axes = debug_get_option_quest1_imu_axes();
++	if (!parse_axes(h, axes)) {
++		Q1_ERROR(h, "bad QUEST1_IMU_AXES '%s', expected e.g. '-y,x,z'", axes);
++		goto err;
++	}
++
++	if (!sb_load(&h->sb)) {
++		Q1_ERROR(h, "cannot load libsyncboss.so through libhybris (Android blobs mounted? LD_PRELOAD=libbionictls.so?)");
++		goto err;
++	}
++	// syncboss_init_options_t: [2] interface version (must be 1), [3] disable
++	// telemetry (it waits forever for Android's hwservicemanager).
++	uint8_t opts[16] = {0, 0, 1, 1};
++	int r = h->sb.init(&h->sb_handle, opts);
++	if (r != 0) {
++		Q1_ERROR(h, "syncboss_init: %d", r);
++		h->sb_handle = NULL;
++		goto err;
++	}
++	r = h->sb.imu_enable(h->sb_handle);
++	if (r != 0) {
++		Q1_ERROR(h, "syncboss_imu_enable: %d", r);
++		goto err;
++	}
++	if (os_thread_helper_start(&h->oth, imu_thread, h) != 0) {
++		Q1_ERROR(h, "cannot start the IMU thread");
++		goto err;
++	}
++
++	u_var_add_root(h, "Quest 1 HMD", true);
++	u_var_add_log_level(h, &h->log_level, "log_level");
++	u_var_add_ro_vec3_f32(h, &h->imu.gyro_bias, "gyro_bias");
++	m_imu_3dof_add_vars(&h->imu.fusion, h, "fusion.");
++
++	Q1_INFO(h, "IMU running (axes %s)", axes);
++	return &h->base;
++
++err:
++	hmd_destroy(&h->base);
++	return NULL;
++}
+diff --git a/src/xrt/drivers/quest1/quest1_interface.h b/src/xrt/drivers/quest1/quest1_interface.h
+new file mode 100644
+index 0000000..c6237e2
+--- /dev/null
++++ b/src/xrt/drivers/quest1/quest1_interface.h
+@@ -0,0 +1,35 @@
++// Copyright 2026, Quest1-SteamOS contributors
++// SPDX-License-Identifier: BSL-1.0
++/*!
++ * @file
++ * @brief  Native Oculus Quest 1 driver: headset IMU through Meta's libsyncboss (libhybris).
++ * @ingroup drv_quest1
++ */
++
++#pragma once
++
++#include "xrt/xrt_device.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/*!
++ * @defgroup drv_quest1 Native Quest 1 driver
++ * @ingroup drv
++ *
++ * Runs on the Quest 1 itself with no Android: the SyncBoss MCU is driven through
++ * Meta's libsyncboss.so loaded with libhybris, giving the headset IMU at 1 kHz.
++ */
++
++//! True when the SyncBoss device node exists (we are on a Quest).
++bool
++quest1_detect(void);
++
++//! 3DoF HMD, display set up for the 2880x1600 framebuffer that the panels show rotated by 180°.
++struct xrt_device *
++quest1_hmd_create(void);
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/src/xrt/include/xrt/xrt_handles.h b/src/xrt/include/xrt/xrt_handles.h
+index 3657498..341bcb3 100644
+--- a/src/xrt/include/xrt/xrt_handles.h
++++ b/src/xrt/include/xrt/xrt_handles.h
+@@ -188,7 +188,10 @@ xrt_shmem_is_valid(xrt_shmem_handle_t handle)
+  *
+  */
+ 
+-#if defined(XRT_OS_ANDROID) && defined(XRT_OS_ANDROID_USE_AHB) && (__ANDROID_API__ >= 26)
++#if (defined(XRT_OS_ANDROID) && defined(XRT_OS_ANDROID_USE_AHB) && (__ANDROID_API__ >= 26)) || defined(XRT_HYBRIS_AHB)
++#ifdef XRT_HYBRIS_AHB
++#include <android/hardware_buffer.h>
++#endif
+ typedef struct AHardwareBuffer AHardwareBuffer;
+ 
+ /*!
+@@ -236,7 +239,7 @@ xrt_graphics_buffer_is_valid(xrt_graphics_buffer_handle_t handle)
+  */
+ #define XRT_GRAPHICS_BUFFER_HANDLE_INVALID NULL
+ 
+-#elif defined(XRT_OS_ANDROID) && !defined(XRT_OS_ANDROID_USE_AHB) || defined(XRT_OS_LINUX) || defined(XRT_OS_OSX)
++#elif defined(XRT_OS_ANDROID) && !defined(XRT_OS_ANDROID_USE_AHB) || (defined(XRT_OS_LINUX) && !defined(XRT_HYBRIS_AHB)) || defined(XRT_OS_OSX)
+ 
+ /*!
+  * The type underlying buffers shared between compositor clients and the main
+diff --git a/src/xrt/state_trackers/oxr/oxr_vulkan.c b/src/xrt/state_trackers/oxr/oxr_vulkan.c
+index efcbf2d..b443f93 100644
+--- a/src/xrt/state_trackers/oxr/oxr_vulkan.c
++++ b/src/xrt/state_trackers/oxr/oxr_vulkan.c
+@@ -112,9 +112,10 @@ static const char *required_vk_instance_extensions[] = {
+ };
+ 
+ static const char *optional_vk_instance_extensions[] = {
+-#if defined(VK_EXT_debug_utils)
++#if defined(VK_EXT_debug_utils) && !defined(XRT_HYBRIS_AHB) // the Quest driver lists it but fails to enable it
+     VK_EXT_DEBUG_UTILS_EXTENSION_NAME,
+ #endif
++    NULL, // never empty; skipped by the loop
+ };
+ 
+ // The device extensions do vary by platform, but in a very regular way.
+diff --git a/src/xrt/targets/common/CMakeLists.txt b/src/xrt/targets/common/CMakeLists.txt
+index f3f46c9..dbbad67 100644
+--- a/src/xrt/targets/common/CMakeLists.txt
++++ b/src/xrt/targets/common/CMakeLists.txt
+@@ -297,3 +297,13 @@ if(ANDROID)
+ 
+ 	target_link_libraries(target_instance_no_comp PRIVATE aux_android)
+ endif()
++
++if(XRT_BUILD_DRIVER_QUEST1)
++	target_sources(target_lists PRIVATE target_builder_quest1.c)
++	target_link_libraries(target_lists PRIVATE drv_quest1)
++endif()
++
++if(XRT_BUILD_DRIVER_QBRIDGE)
++	target_sources(target_lists PRIVATE target_builder_qbridge.c)
++	target_link_libraries(target_lists PRIVATE drv_qbridge)
++endif()
+diff --git a/src/xrt/targets/common/target_builder_interface.h b/src/xrt/targets/common/target_builder_interface.h
+index e36c1dd..5d1529d 100644
+--- a/src/xrt/targets/common/target_builder_interface.h
++++ b/src/xrt/targets/common/target_builder_interface.h
+@@ -158,6 +158,16 @@ struct xrt_builder *
+ t_builder_rgb_tracking_create(void);
+ #endif
+ 
++#ifdef XRT_BUILD_DRIVER_QUEST1
++struct xrt_builder *
++t_builder_quest1_create(void);
++#endif
++
++#ifdef XRT_BUILD_DRIVER_QBRIDGE
++struct xrt_builder *
++t_builder_qbridge_create(void);
++#endif
++
+ #ifdef T_BUILDER_SIMULATED
+ /*!
+  * Builder for @ref drv_simulated devices.
+diff --git a/src/xrt/targets/common/target_builder_qbridge.c b/src/xrt/targets/common/target_builder_qbridge.c
+new file mode 100644
+index 0000000..31b9f04
+--- /dev/null
++++ b/src/xrt/targets/common/target_builder_qbridge.c
+@@ -0,0 +1,94 @@
++// Copyright 2026, qbridge contributors
++// SPDX-License-Identifier: BSL-1.0
++/*!
++ * @file
++ * @brief  Builder for the qbridge devices (Quest tracking through Meta's runtime).
++ * @ingroup xrt_iface
++ */
++
++#include "xrt/xrt_config_drivers.h"
++#include "xrt/xrt_prober.h"
++#include "xrt/xrt_system.h"
++
++#include "util/u_debug.h"
++#include "util/u_logging.h"
++#include "util/u_misc.h"
++
++#include "target_builder_helpers.h"
++#include "target_builder_interface.h"
++
++#include "qbridge/qbridge_interface.h"
++
++DEBUG_GET_ONCE_BOOL_OPTION(qbridge_enable, "QBRIDGE_ENABLE", false)
++DEBUG_GET_ONCE_NUM_OPTION(qbridge_wait_ms, "QBRIDGE_WAIT_MS", 120000)
++
++static const char *driver_list[] = {
++    "qbridge",
++};
++
++static xrt_result_t
++qbridge_estimate_system(struct xrt_builder *xb,
++                        cJSON *config,
++                        struct xrt_prober *xp,
++                        struct xrt_builder_estimate *estimate)
++{
++	estimate->certain.head = true;
++	estimate->certain.left = true;
++	estimate->certain.right = true;
++	estimate->priority = 100;
++	return XRT_SUCCESS;
++}
++
++static xrt_result_t
++qbridge_open_system_impl(struct xrt_builder *xb,
++                         cJSON *config,
++                         struct xrt_prober *xp,
++                         struct xrt_tracking_origin *origin,
++                         struct xrt_system_devices *xsysd,
++                         struct xrt_frame_context *xfctx,
++                         struct t_builder_options *tbo)
++{
++	struct qb_sys *s = qb_sys_get();
++	if (s == NULL) {
++		return XRT_ERROR_DEVICE_CREATION_FAILED;
++	}
++	U_LOG_I("qbridge: waiting for the qbridge app on the headset...");
++	if (!qb_sys_wait_ready(s, (int)debug_get_num_option_qbridge_wait_ms())) {
++		U_LOG_E("qbridge: the app did not connect");
++		return XRT_ERROR_DEVICE_CREATION_FAILED;
++	}
++
++	struct xrt_device *head = qbridge_hmd_create(s);
++	struct xrt_device *left = qbridge_controller_create(s, 0, head->tracking_origin);
++	struct xrt_device *right = qbridge_controller_create(s, 1, head->tracking_origin);
++
++	xsysd->static_xdevs[xsysd->static_xdev_count++] = head;
++	xsysd->static_xdevs[xsysd->static_xdev_count++] = left;
++	xsysd->static_xdevs[xsysd->static_xdev_count++] = right;
++	tbo->head = head;
++	tbo->left = left;
++	tbo->right = right;
++	return XRT_SUCCESS;
++}
++
++static void
++qbridge_destroy(struct xrt_builder *xb)
++{
++	free(xb);
++}
++
++struct xrt_builder *
++t_builder_qbridge_create(void)
++{
++	struct t_builder *ub = U_TYPED_CALLOC(struct t_builder);
++	ub->base.estimate_system = qbridge_estimate_system;
++	ub->base.open_system = t_builder_open_system_static_roles;
++	ub->base.destroy = qbridge_destroy;
++	ub->base.identifier = "qbridge";
++	ub->base.name = "Quest via Meta runtime (qbridge)";
++	ub->base.driver_identifiers = driver_list;
++	ub->base.driver_identifier_count = ARRAY_SIZE(driver_list);
++	ub->base.exclude_from_automatic_discovery = !debug_get_bool_option_qbridge_enable();
++	ub->open_system_static_roles = qbridge_open_system_impl;
++	return &ub->base;
++}
+diff --git a/src/xrt/targets/common/target_builder_quest1.c b/src/xrt/targets/common/target_builder_quest1.c
+new file mode 100644
+index 0000000..472cba6
+--- /dev/null
++++ b/src/xrt/targets/common/target_builder_quest1.c
+@@ -0,0 +1,76 @@
++// Copyright 2026, Quest1-SteamOS contributors
++// SPDX-License-Identifier: BSL-1.0
++/*!
++ * @file
++ * @brief  Builder for the native Quest 1 devices.
++ * @ingroup xrt_iface
++ */
++
++#include "xrt/xrt_config_drivers.h"
++#include "xrt/xrt_prober.h"
++#include "xrt/xrt_system.h"
++
++#include "util/u_logging.h"
++#include "util/u_misc.h"
++
++#include "target_builder_helpers.h"
++#include "target_builder_interface.h"
++
++#include "quest1/quest1_interface.h"
++
++static const char *driver_list[] = {
++    "quest1",
++};
++
++static xrt_result_t
++quest1_estimate_system(struct xrt_builder *xb,
++                       cJSON *config,
++                       struct xrt_prober *xp,
++                       struct xrt_builder_estimate *estimate)
++{
++	if (quest1_detect()) {
++		estimate->certain.head = true;
++		estimate->priority = 50;
++	}
++	return XRT_SUCCESS;
++}
++
++static xrt_result_t
++quest1_open_system_impl(struct xrt_builder *xb,
++                        cJSON *config,
++                        struct xrt_prober *xp,
++                        struct xrt_tracking_origin *origin,
++                        struct xrt_system_devices *xsysd,
++                        struct xrt_frame_context *xfctx,
++                        struct t_builder_options *tbo)
++{
++	struct xrt_device *head = quest1_hmd_create();
++	if (head == NULL) {
++		return XRT_ERROR_DEVICE_CREATION_FAILED;
++	}
++	xsysd->static_xdevs[xsysd->static_xdev_count++] = head;
++	tbo->head = head;
++	return XRT_SUCCESS;
++}
++
++static void
++quest1_destroy(struct xrt_builder *xb)
++{
++	free(xb);
++}
++
++struct xrt_builder *
++t_builder_quest1_create(void)
++{
++	struct t_builder *ub = U_TYPED_CALLOC(struct t_builder);
++	ub->base.estimate_system = quest1_estimate_system;
++	ub->base.open_system = t_builder_open_system_static_roles;
++	ub->base.destroy = quest1_destroy;
++	ub->base.identifier = "quest1";
++	ub->base.name = "Oculus Quest 1 (native)";
++	ub->base.driver_identifiers = driver_list;
++	ub->base.driver_identifier_count = ARRAY_SIZE(driver_list);
++	ub->base.exclude_from_automatic_discovery = false;
++	ub->open_system_static_roles = quest1_open_system_impl;
++	return &ub->base;
++}
+diff --git a/src/xrt/targets/common/target_lists.c b/src/xrt/targets/common/target_lists.c
+index 78efb9b..74bf1f2 100644
+--- a/src/xrt/targets/common/target_lists.c
++++ b/src/xrt/targets/common/target_lists.c
+@@ -112,6 +112,12 @@
+  * Builders
+  */
+ xrt_builder_create_func_t target_builder_list[] = {
++#ifdef XRT_BUILD_DRIVER_QUEST1
++    t_builder_quest1_create,
++#endif
++#ifdef XRT_BUILD_DRIVER_QBRIDGE
++    t_builder_qbridge_create,
++#endif
+ #ifdef T_BUILDER_QWERTY // High up to override any real hardware.
+     t_builder_qwerty_create,
+ #endif // T_BUILDER_QWERTY
