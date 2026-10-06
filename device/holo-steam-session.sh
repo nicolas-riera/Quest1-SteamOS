@@ -32,6 +32,18 @@ if [ "${QUEST1_STEAM_GPU:-1}" = 1 ]; then
 	export STEAM_CEF_GPU_CMD_PREFIX=steam-webhelper-gpu
 	set -- -cef-disable-gpu-sandbox ${QUEST1_STEAM_CEF_ARGS--cef-disable-xcomposite-workaround} "$@"
 fi
+# Steam's VR UI: the webhelper browser process hands it to SteamVR (vrclient: OPAQUE_FD textures
+# and timeline semaphores shared with vrcompositor), so its Vulkan must be the Adreno's: libhybris
+# TLS, quest1_vkshim with the SteamVR compat layer, Steam's bundled libvulkan redirected to the
+# shim. Without it vkCreateInstance fails (-9), every SetOverlayTexture fails and the SteamVR
+# dashboard panel stays empty. Set for the whole client: Steam verifies its files
+# (BVerifyInstalledFiles), so steamwebhelper.sh cannot carry it. QUEST1_STEAM_VR=0 turns it off.
+if [ "${QUEST1_STEAM_VR:-1}" = 1 ]; then
+	V=/usr/local/lib/quest1-vk-steam
+	export LD_LIBRARY_PATH=$V:$LD_LIBRARY_PATH
+	export LD_PRELOAD=/opt/hybris/lib/libbionictls.so:$V/libquest1_vkredirect.so${LD_PRELOAD:+:$LD_PRELOAD}
+	export QUEST1_VK_REDIRECT=$V/libvulkan.so.1 QUEST1_VKSHIM_WSI=1 QUEST1_STEAMVR_COMPAT=1
+fi
 # exit status 42 = "restart me" (after a self-update), as steam.sh handles it
 while :; do
 	$S/steamrtarm64/steam "$@"
@@ -51,13 +63,16 @@ cat > /usr/local/bin/steam-webhelper-gpu <<'EOF'
 # quest1_vkshim (QUEST1_VKSHIM_WSI), ANGLE's dlopen of its bundled libvulkan redirected to the shim.
 # ANGLE features for the Adreno 512.555 blob: its vertex-binding-stride dynamic state draws nothing
 # (supportsExtendedDynamicState off), flipped vkCmdBlitImage is wrong (disableFlippingBlitWithCommand).
+# GPU memory: Chromium's default budget made this process map ~1.5 GB of KGSL memory, which the
+# 3.8 GB shared CPU/GPU RAM cannot afford next to SteamVR (swap storms, SSH timeouts): capped.
 # Extra GPU process args: QUEST1_STEAM_GPU_ARGS. See docs/steam-gpu.md.
 V=/usr/local/lib/quest1-vk-steam
 export LD_LIBRARY_PATH=$V${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 export LD_PRELOAD=/opt/hybris/lib/libbionictls.so:$V/libquest1_vkredirect.so${LD_PRELOAD:+:$LD_PRELOAD}
 export QUEST1_VKSHIM_WSI=1 QUEST1_VKSHIM_LAYER=none QUEST1_VK_REDIRECT=$V/libvulkan.so.1
 exec "$@" --use-angle=vulkan --disable-angle-features=supportsExtendedDynamicState \
-	--enable-angle-features=disableFlippingBlitWithCommand $QUEST1_STEAM_GPU_ARGS
+	--enable-angle-features=disableFlippingBlitWithCommand \
+	--force-gpu-mem-available-mb=192 --force-gpu-mem-discardable-limit-mb=64 $QUEST1_STEAM_GPU_ARGS
 EOF
 chmod 755 /usr/local/bin/steam-webhelper-gpu
 ln -sfn steam-webhelper-gpu "/usr/local/bin/'steam-webhelper-gpu'"
