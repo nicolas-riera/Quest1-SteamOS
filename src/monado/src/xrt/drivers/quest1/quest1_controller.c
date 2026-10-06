@@ -380,6 +380,9 @@ quest1_controller_create(struct xrt_device *hmd, bool left)
 	}
 	os_mutex_init(&c->mutex);
 	c->hmd = hmd;
+	// The arm model is relative to the head: share its tracking origin. With the default one
+	// (type NONE) the builder would add its 3DoF controller offset (±0.2, 1.3, -0.5) on top.
+	c->base.tracking_origin = hmd->tracking_origin;
 	c->left = left;
 	c->log_level = U_LOGGING_INFO;
 	c->yaw_offset = (struct xrt_quat)XRT_QUAT_IDENTITY;
