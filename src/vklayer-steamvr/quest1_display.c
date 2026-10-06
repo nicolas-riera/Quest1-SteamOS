@@ -35,6 +35,11 @@ static struct
 	uint64_t app, acquire, gpu, posed; //!< summed ns
 } qd_stats;
 
+//! async present: time from vkQueuePresentKHR to the image being rendered (summed, completer thread)
+static _Atomic uint64_t qd_stats_gpu_latency;
+
+static void qd_stats_gpu(uint64_t latency_ns) { atomic_fetch_add(&qd_stats_gpu_latency, latency_ns); }
+
 static void qd_stats_present(uint64_t entry, uint64_t gpu_done, uint64_t posed_done)
 {
 	if (qd_stats.last_return)
@@ -48,9 +53,10 @@ static void qd_stats_present(uint64_t entry, uint64_t gpu_done, uint64_t posed_d
 	} else if (posed_done - qd_stats.since > 5000000000ull) {
 		double n = (double)qd_stats.n;
 		LOG("display: %.1f fps; per frame: vrcompositor %.2f ms (of which acquire %.2f), gpu wait %.2f, "
-		    "pose wait %.2f\n",
+		    "pose wait %.2f, present-to-rendered %.2f\n",
 		    n * 1e9 / (posed_done - qd_stats.since), qd_stats.app / n / 1e6, qd_stats.acquire / n / 1e6,
-		    qd_stats.gpu / n / 1e6, qd_stats.posed / n / 1e6);
+		    qd_stats.gpu / n / 1e6, qd_stats.posed / n / 1e6,
+		    atomic_exchange(&qd_stats_gpu_latency, 0) / n / 1e6);
 		uint64_t keep = qd_stats.last_return;
 		memset(&qd_stats, 0, sizeof(qd_stats));
 		qd_stats.since = qd_stats.last_return = keep;
@@ -420,6 +426,18 @@ struct qd_swapchain
 	VkCommandPool pool;
 	VkCommandBuffer to_app[QD_MAX_IMAGES], to_driver[QD_MAX_IMAGES];
 	VkFence fence;
+	VkFence fences[QD_MAX_IMAGES]; //!< async present: signaled when the image is rendered
+
+	// async present (default; QUEST1_DISPLAY_SYNC=1 waits in vkQueuePresentKHR instead): presented
+	// images still rendering, handed to the driver in order by the completer thread (under mutex)
+	struct
+	{
+		uint32_t index;
+		uint64_t frame, t_present;
+	} pend[8];
+	uint32_t pend_head, pend_tail;
+	pthread_t completer;
+	bool completer_running, stopping, sync_present;
 
 	pthread_mutex_t mutex;
 	pthread_cond_t cond;
@@ -501,6 +519,45 @@ static void *qd_reader(void *arg)
 	pthread_cond_broadcast(&sc->cond);
 	pthread_mutex_unlock(&sc->mutex);
 	LOG("display receiver disconnected\n");
+	return NULL;
+}
+
+static void qd_stats_gpu(uint64_t latency_ns);
+
+//! Async present: hand each presented image to the driver once the GPU has rendered it, in order.
+static void *qd_completer(void *arg)
+{
+	struct qd_swapchain *sc = arg;
+	pthread_setname_np(pthread_self(), "q1 display done");
+	pthread_mutex_lock(&sc->mutex);
+	for (;;) {
+		while (sc->pend_head == sc->pend_tail && !sc->stopping)
+			pthread_cond_wait(&sc->cond, &sc->mutex);
+		if (sc->pend_head == sc->pend_tail)
+			break;
+		uint32_t idx = sc->pend[sc->pend_head % 8].index;
+		uint64_t frame = sc->pend[sc->pend_head % 8].frame, t_present = sc->pend[sc->pend_head % 8].t_present;
+		pthread_mutex_unlock(&sc->mutex);
+
+		wait_fence(sc->d, sc->device, sc->fences[idx]);
+		sc->d->ResetFences(sc->device, 1, &sc->fences[idx]);
+		qd_stats_gpu(now_ns() - t_present);
+
+		pthread_mutex_lock(&sc->mutex);
+		sc->pend_head++;
+		sc->app_owned[idx] = false;
+		if (sc->sock >= 0) {
+			struct qd_msg m = {QD_PRESENT};
+			m.index = idx;
+			m.frame = frame;
+			m.flags = QD_PRESENT_POSED;
+			m.vblank_ns = sc->frame_tick[idx];
+			if (send(sc->sock, &m, sizeof(m), MSG_NOSIGNAL) == sizeof(m))
+				sc->driver_owned[idx] = true;
+		}
+		pthread_cond_broadcast(&sc->cond);
+	}
+	pthread_mutex_unlock(&sc->mutex);
 	return NULL;
 }
 
@@ -689,6 +746,8 @@ static VKAPI_ATTR VkResult VKAPI_CALL qd_CreateSwapchainKHR(VkDevice device, con
 		}
 		VkFenceCreateInfo fci = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
 		r = d->CreateFence(device, &fci, NULL, &sc->fence);
+		for (uint32_t i = 0; i < sc->count && r == VK_SUCCESS; i++)
+			r = d->CreateFence(device, &fci, NULL, &sc->fences[i]);
 	}
 	if (r != VK_SUCCESS) {
 		LOG("display swapchain creation failed: %d\n", r);
@@ -707,6 +766,11 @@ static VKAPI_ATTR VkResult VKAPI_CALL qd_CreateSwapchainKHR(VkDevice device, con
 	if (sc->sock >= 0) {
 		sc->reader_running = pthread_create(&sc->reader, NULL, qd_reader, sc) == 0;
 	}
+	const char *sync = getenv("QUEST1_DISPLAY_SYNC");
+	sc->sync_present = sync && atoi(sync) != 0;
+	if (!sc->sync_present)
+		sc->completer_running = pthread_create(&sc->completer, NULL, qd_completer, sc) == 0;
+	sc->sync_present = !sc->completer_running;
 
 	pthread_mutex_lock(&g_lock);
 	for (int i = 0; i < QD_MAX_SWAPCHAINS; i++)
@@ -727,6 +791,16 @@ static void qd_destroy(struct qd_swapchain *sc)
 		shutdown(sc->sock, SHUT_RDWR);
 	if (sc->reader_running)
 		pthread_join(sc->reader, NULL);
+	if (sc->completer_running) {
+		pthread_mutex_lock(&sc->mutex);
+		sc->stopping = true;
+		pthread_cond_broadcast(&sc->cond);
+		pthread_mutex_unlock(&sc->mutex);
+		pthread_join(sc->completer, NULL);
+	}
+	for (uint32_t i = 0; i < QD_MAX_IMAGES; i++)
+		if (sc->fences[i])
+			sc->d->DestroyFence(sc->device, sc->fences[i], NULL);
 	if (sc->fence)
 		sc->d->DestroyFence(sc->device, sc->fence, NULL);
 	if (sc->pool)
@@ -880,6 +954,47 @@ static VKAPI_ATTR VkResult VKAPI_CALL qd_QueuePresentKHR(VkQueue queue, const Vk
 			si.pWaitDstStageMask = stages;
 			si.commandBufferCount = 1;
 			si.pCommandBuffers = &sc->to_driver[idx];
+			if (!sc->sync_present) {
+				// async: the completer thread hands the image over once rendered; meanwhile the
+				// driver publishes the next frame's pose now, so vrcompositor starts it at once
+				r = QueueSubmit(queue, 1, &si, sc->fences[idx]);
+				pthread_mutex_lock(&sc->mutex);
+				uint64_t frame = ++sc->frame;
+				if (r == VK_SUCCESS && sc->sock >= 0) {
+					struct qd_msg m = {QD_POSE};
+					m.index = idx;
+					m.frame = frame;
+					if (send(sc->sock, &m, sizeof(m), MSG_NOSIGNAL) == sizeof(m)) {
+						struct timespec dl;
+						clock_gettime(CLOCK_REALTIME, &dl);
+						dl.tv_nsec += 4000000;
+						if (dl.tv_nsec >= 1000000000) {
+							dl.tv_sec++;
+							dl.tv_nsec -= 1000000000;
+						}
+						while (sc->posed_frame < frame && sc->sock >= 0 &&
+						       pthread_cond_timedwait(&sc->cond, &sc->mutex, &dl) != ETIMEDOUT)
+							;
+					}
+				}
+				if (r == VK_SUCCESS) {
+					sc->pend[sc->pend_tail % 8].index = idx;
+					sc->pend[sc->pend_tail % 8].frame = frame;
+					sc->pend[sc->pend_tail % 8].t_present = t_entry;
+					sc->pend_tail++;
+				} else {
+					sc->app_owned[idx] = false;
+				}
+				pthread_cond_broadcast(&sc->cond);
+				pthread_mutex_unlock(&sc->mutex);
+				qd_stats_present(t_entry, t_entry, now_ns());
+				waited = true;
+				if (pi->pResults)
+					pi->pResults[s] = r;
+				if (r != VK_SUCCESS && result == VK_SUCCESS)
+					result = r;
+				continue;
+			}
 			r = QueueSubmit(queue, 1, &si, sc->fence);
 			if (r == VK_SUCCESS) {
 				wait_fence(sc->d, sc->device, sc->fence);
