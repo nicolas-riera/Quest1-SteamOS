@@ -32,6 +32,18 @@ if [ "${QUEST1_STEAM_GPU:-1}" = 1 ]; then
 	export STEAM_CEF_GPU_CMD_PREFIX=steam-webhelper-gpu
 	set -- -cef-disable-gpu-sandbox ${QUEST1_STEAM_CEF_ARGS--cef-disable-xcomposite-workaround} "$@"
 fi
+# Steam's VR UI: the webhelper browser process hands it to SteamVR (vrclient: OPAQUE_FD textures
+# and timeline semaphores shared with vrcompositor), so its Vulkan must be the Adreno's: libhybris
+# TLS, quest1_vkshim with the SteamVR compat layer, Steam's bundled libvulkan redirected to the
+# shim. Without it vkCreateInstance fails (-9), every SetOverlayTexture fails and the SteamVR
+# dashboard panel stays empty. Set for the whole client: Steam verifies its files
+# (BVerifyInstalledFiles), so steamwebhelper.sh cannot carry it. QUEST1_STEAM_VR=0 turns it off.
+if [ "${QUEST1_STEAM_VR:-1}" = 1 ]; then
+	V=/usr/local/lib/quest1-vk-steam
+	export LD_LIBRARY_PATH=$V:$LD_LIBRARY_PATH
+	export LD_PRELOAD=/opt/hybris/lib/libbionictls.so:$V/libquest1_vkredirect.so${LD_PRELOAD:+:$LD_PRELOAD}
+	export QUEST1_VK_REDIRECT=$V/libvulkan.so.1 QUEST1_VKSHIM_WSI=1 QUEST1_STEAMVR_COMPAT=1
+fi
 # exit status 42 = "restart me" (after a self-update), as steam.sh handles it
 while :; do
 	$S/steamrtarm64/steam "$@"

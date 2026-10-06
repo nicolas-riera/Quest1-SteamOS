@@ -256,6 +256,14 @@ private:
 	uint32_t probeWidth = 0;
 	bool probed = false;
 	bool CreateProbe(uint32_t width);
+	// debug: touch /tmp/quest1-snap and the next displayed frame lands in /tmp/quest1-snap.ppm
+	VkBuffer snapBuf = VK_NULL_HANDLE;
+	VkDeviceMemory snapMem = VK_NULL_HANDLE;
+	uint8_t *snapMap = nullptr;
+	uint32_t snapW = 0, snapH = 0;
+	bool snapped = false;
+	bool CreateHostBuffer(VkDeviceSize size, VkBuffer *buf, VkDeviceMemory *mem, uint8_t **map);
+	void WriteSnapshot(VkFormat format);
 
 	VkInstance vkInstance = VK_NULL_HANDLE;
 	VkPhysicalDevice phys = VK_NULL_HANDLE;
@@ -701,6 +709,26 @@ bool XrBackend::BlitHalves(const Backbuffer &bb, uint32_t srcWidth, uint32_t src
 		                      0, nullptr);
 		probed = true;
 	}
+	snapped = false;
+	if (srcLayout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL && access("/tmp/quest1-snap", F_OK) == 0) {
+		if (snapW != srcWidth || snapH != srcHeight) {
+			snapMap = nullptr;
+			if (CreateHostBuffer((VkDeviceSize)srcWidth * srcHeight * 4, &snapBuf, &snapMem, &snapMap))
+				snapW = srcWidth, snapH = srcHeight;
+		}
+		if (snapMap) {
+			VkBufferImageCopy rc{};
+			rc.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+			rc.imageExtent = {srcWidth, srcHeight, 1};
+			pvkCmdCopyImageToBuffer(cmd, bb.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, snapBuf, 1, &rc);
+			VkMemoryBarrier hb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+			hb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+			hb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+			pvkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &hb, 0,
+			                      nullptr, 0, nullptr);
+			snapped = true;
+		}
+	}
 
 	// backbuffer back to vrcompositor, swapchain images to the OpenXR runtime
 	bar[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
@@ -728,6 +756,60 @@ bool XrBackend::BlitHalves(const Backbuffer &bb, uint32_t srcWidth, uint32_t src
 		;
 	pvkResetFences(device, 1, &fence);
 	return r == VK_SUCCESS;
+}
+
+bool XrBackend::CreateHostBuffer(VkDeviceSize size, VkBuffer *buf, VkDeviceMemory *mem, uint8_t **map)
+{
+	VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+	bci.size = size;
+	bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+	if (pvkCreateBuffer(device, &bci, nullptr, buf) != VK_SUCCESS)
+		return false;
+	VkMemoryRequirements mr{};
+	pvkGetBufferMemoryRequirements(device, *buf, &mr);
+	VkPhysicalDeviceMemoryProperties mp{};
+	pvkGetPhysicalDeviceMemoryProperties(phys, &mp);
+	const VkMemoryPropertyFlags want = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+	uint32_t type = UINT32_MAX;
+	for (uint32_t t = 0; t < mp.memoryTypeCount && type == UINT32_MAX; t++)
+		if ((mr.memoryTypeBits & (1u << t)) && (mp.memoryTypes[t].propertyFlags & want) == want)
+			type = t;
+	VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+	mai.allocationSize = mr.size;
+	mai.memoryTypeIndex = type;
+	void *p = nullptr;
+	if (type == UINT32_MAX || pvkAllocateMemory(device, &mai, nullptr, mem) != VK_SUCCESS ||
+	    pvkBindBufferMemory(device, *buf, *mem, 0) != VK_SUCCESS ||
+	    pvkMapMemory(device, *mem, 0, VK_WHOLE_SIZE, 0, &p) != VK_SUCCESS) {
+		Log("quest1: cannot create a host-visible buffer of %llu bytes\n", (unsigned long long)size);
+		return false;
+	}
+	*map = (uint8_t *)p;
+	return true;
+}
+
+//! The snapshot as a binary PPM (RGB), then the trigger file is removed.
+void XrBackend::WriteSnapshot(VkFormat format)
+{
+	bool bgr = format == VK_FORMAT_B8G8R8A8_UNORM || format == VK_FORMAT_B8G8R8A8_SRGB;
+	FILE *f = fopen("/tmp/quest1-snap.ppm.tmp", "wb");
+	if (f) {
+		fprintf(f, "P6\n%u %u\n255\n", snapW, snapH);
+		std::vector<uint8_t> row(snapW * 3);
+		for (uint32_t y = 0; y < snapH; y++) {
+			const uint8_t *s = snapMap + (size_t)y * snapW * 4;
+			for (uint32_t x = 0; x < snapW; x++) {
+				row[x * 3 + 0] = s[x * 4 + (bgr ? 2 : 0)];
+				row[x * 3 + 1] = s[x * 4 + 1];
+				row[x * 3 + 2] = s[x * 4 + (bgr ? 0 : 2)];
+			}
+			fwrite(row.data(), 1, row.size(), f);
+		}
+		fclose(f);
+		rename("/tmp/quest1-snap.ppm.tmp", "/tmp/quest1-snap.ppm");
+	}
+	unlink("/tmp/quest1-snap");
+	Log("quest1: snapshot %ux%u written to /tmp/quest1-snap.ppm\n", snapW, snapH);
 }
 
 bool XrBackend::CreateProbe(uint32_t width)
@@ -1083,6 +1165,8 @@ void XrBackend::FrameThread()
 				pxrWaitSwapchainImage(swapchain[eye], &wi);
 			}
 			BlitHalves(*bb, srcW, srcH, srcLayout, idx);
+			if (snapped)
+				WriteSnapshot((VkFormat)displayDesc.format);
 			if (probed) {
 				// brightest row of each probed column
 				uint32_t bestRow[4] = {};
