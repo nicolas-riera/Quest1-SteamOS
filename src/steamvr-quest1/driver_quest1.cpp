@@ -207,6 +207,8 @@ public:
 	std::atomic<uint64_t> predictNs{30000000}; //!< pose publication -> photons through vrcompositor, the driver, Monado
 	//! debug, from /tmp/quest1-pose-mode: 0 submit the render pose, 1 submit the display-time pose
 	std::atomic<int> submitMode{0};
+	//! 3DoF neck model: the eyes turn about the neck, NeckToEye above and in front of it
+	std::atomic<bool> neckModel{true};
 	XrFovf fov[2] = {};
 	float ipd = 0.063f;
 	uint32_t eyeWidth = 0, eyeHeight = 0;
@@ -322,6 +324,8 @@ bool XrBackend::Init()
 		headHeight = (float)atof(h);
 	if (const char *t = getenv("QUEST1_POSE_TAG"))
 		poseTag = atoi(t) != 0;
+	if (const char *n = getenv("QUEST1_NECK_MODEL"))
+		neckModel = atoi(n) != 0;
 	if (const char *ms = getenv("QUEST1_POSE_PREDICT_MS"))
 		predictNs = (uint64_t)(atof(ms) * 1e6);
 	if (!LoadLibraries())
@@ -541,6 +545,18 @@ bool XrBackend::LocateAhead(DriverPose_t &pose, XrPosef *xrPose)
 	    !(loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) {
 		pose.result = TrackingResult_Running_OutOfRange;
 		return false;
+	}
+	if (neckModel) {
+		// Oculus SDK defaults: eyes 7.5 cm above and 8.05 cm in front of the neck pivot.
+		// Level head = no offset, so headHeight stays the eye height.
+		const XrVector3f n = {0, 0.075f, -0.0805f};
+		const XrQuaternionf &q = loc.pose.orientation;
+		XrVector3f t = {2 * (q.y * n.z - q.z * n.y), 2 * (q.z * n.x - q.x * n.z), 2 * (q.x * n.y - q.y * n.x)};
+		XrVector3f r = {n.x + q.w * t.x + (q.y * t.z - q.z * t.y), n.y + q.w * t.y + (q.z * t.x - q.x * t.z),
+		                n.z + q.w * t.z + (q.x * t.y - q.y * t.x)};
+		loc.pose.position.x += r.x - n.x;
+		loc.pose.position.y += r.y - n.y;
+		loc.pose.position.z += r.z - n.z;
 	}
 	*xrPose = loc.pose;
 	pose.qRotation = {loc.pose.orientation.w, loc.pose.orientation.x, loc.pose.orientation.y,
@@ -1216,21 +1232,22 @@ public:
 		return VRInitError_None;
 	}
 
-	//! debug: "<submit mode> <prediction ms>" in /tmp/quest1-pose-mode, applied at once
+	//! debug: "<submit mode> <prediction ms> <neck model 0/1>" in /tmp/quest1-pose-mode, applied at once
 	void ReadDebugMode()
 	{
 		FILE *f = fopen("/tmp/quest1-pose-mode", "r");
 		if (!f)
 			return;
-		int mode = 0;
+		int mode = 0, neck = 1;
 		float ms = 30;
-		if (fscanf(f, "%d %f", &mode, &ms) >= 1) {
+		if (fscanf(f, "%d %f %d", &mode, &ms, &neck) >= 1) {
 			uint64_t ns = (uint64_t)(ms * 1e6);
-			if (mode != xr.submitMode || ns != xr.predictNs)
-				Log("quest1: debug mode: submit %s pose, prediction %.0f ms\n",
-				    mode ? "display-time" : "render", ms);
+			if (mode != xr.submitMode || ns != xr.predictNs || (neck != 0) != xr.neckModel)
+				Log("quest1: debug mode: submit %s pose, prediction %.0f ms, neck model %s\n",
+				    mode ? "display-time" : "render", ms, neck ? "on" : "off");
 			xr.submitMode = mode;
 			xr.predictNs = ns;
+			xr.neckModel = neck != 0;
 		}
 		fclose(f);
 	}
