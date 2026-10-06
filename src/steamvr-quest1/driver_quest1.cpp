@@ -125,7 +125,7 @@ static double MonotonicSeconds()
 	X(vkGetImageMemoryRequirements)                                                                                \
 	X(vkAllocateMemory)                                                                                            \
 	X(vkFreeMemory)                                                                                                \
-	X(vkBindImageMemory)
+	X(vkBindImageMemory)                                                                                           	X(vkCreateBuffer)                                                                                              	X(vkGetBufferMemoryRequirements)                                                                               	X(vkBindBufferMemory)                                                                                          	X(vkMapMemory)                                                                                                 	X(vkCmdCopyImageToBuffer)
 
 #define DECLARE(name) static PFN_##name p##name;
 XR_FUNCS(DECLARE)
@@ -204,11 +204,21 @@ public:
 	std::function<void(uint64_t presentedFrame)> onPresent;
 	std::atomic<double> lastPresent{0}; //!< MonotonicSeconds of the last display present
 	float headHeight = 1.65f;    //!< a 3DoF head sits at this height above SteamVR's floor
-	uint64_t predictNs = 30000000; //!< pose publication -> photons through vrcompositor, the driver, Monado
+	std::atomic<uint64_t> predictNs{30000000}; //!< pose publication -> photons through vrcompositor, the driver, Monado
+	//! debug, from /tmp/quest1-pose-mode: 0 submit the render pose, 1 submit the display-time pose
+	std::atomic<int> submitMode{0};
 	XrFovf fov[2] = {};
 	float ipd = 0.063f;
 	uint32_t eyeWidth = 0, eyeHeight = 0;
 	float displayHz = 72.0f;
+	// debug (QUEST1_POSE_TAG=1): frames are posed alternately straight ahead / looking down, and
+	// three rows of each displayed frame are read back, to see which pose a frame was rendered with
+	bool poseTag = false;
+	static float PoseTagPitch(uint64_t frame)
+	{
+		static const float deg[5] = {0, 30, -30, 40, -40};
+		return deg[frame % 5] / 57.2958f;
+	}
 
 	// virtual display
 	void Present(SharedTextureHandle_t backbuffer);
@@ -238,6 +248,12 @@ private:
 	std::vector<XrSwapchainImageVulkan2KHR> images[2];
 	VkFormat backbufferFormat = VK_FORMAT_R8G8B8A8_SRGB;
 	bool waitIdle = false;
+	VkBuffer probeBuf = VK_NULL_HANDLE;
+	VkDeviceMemory probeMem = VK_NULL_HANDLE;
+	uint8_t *probeMap = nullptr;
+	uint32_t probeWidth = 0;
+	bool probed = false;
+	bool CreateProbe(uint32_t width);
 
 	VkInstance vkInstance = VK_NULL_HANDLE;
 	VkPhysicalDevice phys = VK_NULL_HANDLE;
@@ -304,6 +320,8 @@ bool XrBackend::Init()
 		useVirtualDisplay = atoi(v) != 0;
 	if (const char *h = getenv("QUEST1_EYE_HEIGHT"))
 		headHeight = (float)atof(h);
+	if (const char *t = getenv("QUEST1_POSE_TAG"))
+		poseTag = atoi(t) != 0;
 	if (const char *ms = getenv("QUEST1_POSE_PREDICT_MS"))
 		predictNs = (uint64_t)(atof(ms) * 1e6);
 	if (!LoadLibraries())
@@ -646,6 +664,27 @@ bool XrBackend::BlitHalves(const Backbuffer &bb, uint32_t srcWidth, uint32_t src
 		pvkCmdBlitImage(cmd, bb.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, images[eye][index[eye]].image,
 		                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, scaled ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
 	}
+	probed = false;
+	if (poseTag && srcLayout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL && CreateProbe(srcHeight)) {
+		// in each eye, the columns at horizontal tangents -0.6 and +0.6
+		VkBufferImageCopy rc[4] = {};
+		for (int i = 0; i < 4; i++) {
+			int eye = i / 2;
+			float l = tanf(-fov[eye].angleLeft), r = tanf(fov[eye].angleRight);
+			float tx = i % 2 ? 0.6f : -0.6f;
+			rc[i].bufferOffset = (VkDeviceSize)i * srcHeight * 4;
+			rc[i].imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+			rc[i].imageOffset = {(int32_t)(srcWidth / 2 * (eye + (tx + l) / (l + r))), 0, 0};
+			rc[i].imageExtent = {1, srcHeight, 1};
+		}
+		pvkCmdCopyImageToBuffer(cmd, bb.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, probeBuf, 4, rc);
+		VkMemoryBarrier hb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+		hb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		hb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+		pvkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &hb, 0, nullptr,
+		                      0, nullptr);
+		probed = true;
+	}
 
 	// backbuffer back to vrcompositor, swapchain images to the OpenXR runtime
 	bar[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
@@ -673,6 +712,40 @@ bool XrBackend::BlitHalves(const Backbuffer &bb, uint32_t srcWidth, uint32_t src
 		;
 	pvkResetFences(device, 1, &fence);
 	return r == VK_SUCCESS;
+}
+
+bool XrBackend::CreateProbe(uint32_t width)
+{
+	if (probeMap)
+		return width == probeWidth;
+	VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+	bci.size = (VkDeviceSize)width * 4 * 4;
+	bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+	if (pvkCreateBuffer(device, &bci, nullptr, &probeBuf) != VK_SUCCESS)
+		return false;
+	VkMemoryRequirements mr{};
+	pvkGetBufferMemoryRequirements(device, probeBuf, &mr);
+	VkPhysicalDeviceMemoryProperties mp{};
+	pvkGetPhysicalDeviceMemoryProperties(phys, &mp);
+	const VkMemoryPropertyFlags want = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+	uint32_t type = UINT32_MAX;
+	for (uint32_t t = 0; t < mp.memoryTypeCount && type == UINT32_MAX; t++)
+		if ((mr.memoryTypeBits & (1u << t)) && (mp.memoryTypes[t].propertyFlags & want) == want)
+			type = t;
+	VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+	mai.allocationSize = mr.size;
+	mai.memoryTypeIndex = type;
+	void *map = nullptr;
+	if (type == UINT32_MAX || pvkAllocateMemory(device, &mai, nullptr, &probeMem) != VK_SUCCESS ||
+	    pvkBindBufferMemory(device, probeBuf, probeMem, 0) != VK_SUCCESS ||
+	    pvkMapMemory(device, probeMem, 0, VK_WHOLE_SIZE, 0, &map) != VK_SUCCESS) {
+		Log("quest1: cannot create the pose probe buffer\n");
+		poseTag = false;
+		return false;
+	}
+	probeMap = (uint8_t *)map;
+	probeWidth = width;
+	return true;
 }
 
 void XrBackend::Present(SharedTextureHandle_t backbuffer)
@@ -994,15 +1067,30 @@ void XrBackend::FrameThread()
 				pxrWaitSwapchainImage(swapchain[eye], &wi);
 			}
 			BlitHalves(*bb, srcW, srcH, srcLayout, idx);
+			if (probed) {
+				// brightest row of each probed column
+				uint32_t bestRow[4] = {};
+				for (int i = 0; i < 4; i++) {
+					uint32_t best = 0;
+					for (uint32_t y = 0; y < probeWidth; y++) {
+						const uint8_t *px = probeMap + ((size_t)i * probeWidth + y) * 4;
+						uint32_t v = px[0] + px[1] + px[2];
+						if (v > best)
+							best = v, bestRow[i] = y;
+					}
+				}
+				Log("quest1: probe frame %llu pitch %+.0f: rows L %u %u R %u %u\n", (unsigned long long)displayFrame,
+				    PoseTagPitch(displayFrame) * 57.2958f, bestRow[0], bestRow[1], bestRow[2], bestRow[3]);
+			}
 			for (int eye = 0; eye < 2; eye++)
 				pxrReleaseSwapchainImage(swapchain[eye], nullptr);
 
 			// the pose SteamVR rendered this frame with (published when the previous one was
 			// presented); otherwise (virtual display, first frame) this frame's own
 			XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
-			if (displayIndex < 0 || !PoseForFrame(displayFrame, &head.pose)) {
+			if (displayIndex < 0 || submitMode == 1 || !PoseForFrame(displayFrame, &head.pose)) {
 				pxrLocateSpace(view, local, fs.predictedDisplayTime, &head);
-				if (displayIndex >= 0 && poseMisses++ < 3 && totalMissLogs++ < 6)
+				if (displayIndex >= 0 && submitMode != 1 && poseMisses++ < 3 && totalMissLogs++ < 6)
 					Log("quest1: no recorded pose for display frame %llu\n", (unsigned long long)displayFrame);
 			}
 			for (int eye = 0; eye < 2; eye++) {
@@ -1112,8 +1200,10 @@ public:
 			pthread_setname_np(pthread_self(), "quest1 poses");
 			// while vrcompositor presents, poses are published by PublishFramePose only; before
 			// that (start-up, virtual display) at 250 Hz
-			while (poseThreadRunning) {
+			for (unsigned tick = 0; poseThreadRunning; tick++) {
 				std::this_thread::sleep_for(std::chrono::milliseconds(4));
+				if (tick % 128 == 0)
+					ReadDebugMode();
 				if (MonotonicSeconds() - xr.lastPresent < 0.2)
 					continue;
 				XrPosef unused;
@@ -1124,6 +1214,25 @@ public:
 		});
 		xr.onPresent = [this](uint64_t presentedFrame) { PublishFramePose(presentedFrame + 1); };
 		return VRInitError_None;
+	}
+
+	//! debug: "<submit mode> <prediction ms>" in /tmp/quest1-pose-mode, applied at once
+	void ReadDebugMode()
+	{
+		FILE *f = fopen("/tmp/quest1-pose-mode", "r");
+		if (!f)
+			return;
+		int mode = 0;
+		float ms = 30;
+		if (fscanf(f, "%d %f", &mode, &ms) >= 1) {
+			uint64_t ns = (uint64_t)(ms * 1e6);
+			if (mode != xr.submitMode || ns != xr.predictNs)
+				Log("quest1: debug mode: submit %s pose, prediction %.0f ms\n",
+				    mode ? "display-time" : "render", ms);
+			xr.submitMode = mode;
+			xr.predictNs = ns;
+		}
+		fclose(f);
 	}
 
 	void Publish(const DriverPose_t &p)
@@ -1138,8 +1247,14 @@ public:
 	{
 		XrPosef xrPose;
 		DriverPose_t p;
-		if (xr.LocateAhead(p, &xrPose))
+		if (xr.LocateAhead(p, &xrPose)) {
+			if (xr.poseTag) {
+				float half = XrBackend::PoseTagPitch(frame) / 2; // a pitch
+				xrPose.orientation = {sinf(half), 0, 0, cosf(half)};
+				p.qRotation = {cosf(half), sinf(half), 0, 0};
+			}
 			xr.RecordFramePose(frame, xrPose);
+		}
 		Publish(p);
 	}
 
@@ -1198,12 +1313,15 @@ public:
 	}
 	void GetProjectionRaw(EVREye eye, float *left, float *right, float *top, float *bottom) override
 	{
-		// OpenVR tangents: y grows downwards, so "top" is negative for an upward angle
+		// vrcompositor's display output puts "top" at the bottom of the eye viewport: with
+		// top = -tan(up), the horizon was measured ~130 rows (0.23 tan) too low on the 47° up /
+		// 53° down Quest optics, which warps the world as the head turns. So top gets the lower
+		// tangent (negative) and bottom the upper one, as in OpenXR.
 		const XrFovf &f = xr.fov[eye == Eye_Left ? 0 : 1];
 		*left = tanf(f.angleLeft);
 		*right = tanf(f.angleRight);
-		*top = -tanf(f.angleUp);
-		*bottom = -tanf(f.angleDown);
+		*top = tanf(f.angleDown);
+		*bottom = tanf(f.angleUp);
 	}
 	DistortionCoordinates_t ComputeDistortion(EVREye, float u, float v) override
 	{
