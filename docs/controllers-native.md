@@ -245,3 +245,43 @@ firmware path set, and the property area. No Android daemon is needed for this p
 4. Haptic pulse is felt; it stops when 0 is sent.
 5. `min(host-ts)` is about equal for the headset and the controllers (shared time base).
 6. Controller IMU axis convention, for Monado 3DoF.
+
+## 8. In SteamVR (driver_quest1)
+
+`src/steamvr-quest1/controllers.cpp` reads both controllers from Monado through OpenXR actions on
+the driver's own session (profile `/interaction_profiles/oculus/touch_controller`) and adds two
+SteamVR controllers:
+
+* `controller_type` **oculus_touch**, so the Touch bindings that games ship apply. Input profile
+  `{quest1}/input/quest1_touch_profile.json`, legacy bindings and dashboard
+  (`openvr.component.vrcompositor`) bindings next to it; render models
+  `oculus_quest_controller_{left,right}` from SteamVR's own resources.
+* Components: `/input/system/click` (left Menu, right Oculus button; both toggle the dashboard),
+  `a|x`, `b|y` click+touch, `trigger` value+touch, `grip` value (+touch = value > 0.05, the Touch
+  grip has no capacitive sensor), `joystick` x/y/click/touch, `thumbrest/touch`, `/output/haptic`
+  (`VREvent_Input_HapticVibration` → `xrApplyHapticFeedback`).
+* Pose: Monado's orientation is the controller IMU frame. `aim = yaw * imu * imuToAim`, with
+  `imuToAim` = rotX(40°) by default (Monado's `rift_s` convention for the same controllers) or a
+  per-hand calibration. SteamVR's device pose is the Oculus "raw" controller frame; the Quest
+  render model gives `openxr_aim` and `openxr_grip` in that frame (60° apart), so the driver
+  reports `raw = aim * rotX(60) * inverse(openxr_grip)` via `qDriverFromHead`.
+* Heading: aligned with the head on the first pose and when the system button is held 1.2 s
+  (Monado recenters the IMU heading at 1 s; the driver then aligns the aim heading).
+* Position: Monado's if it ever reports `POSITION_TRACKED`, else an arm model in the driver
+  (elbow 17 cm beside, 45 cm below, 5 cm in front of the head, turning with the head heading;
+  30 cm forearm along the aim). Monado's own 3DoF controllers used to live in a different
+  tracking origin than the HMD (fixed in `quest1_controller.c`; needs a Monado rebuild).
+
+### Calibrating the IMU mounting (two static poses, both hands at once)
+
+```
+echo forward > /tmp/quest1-ctrl-cal   # both controllers pointing straight ahead, level, no roll
+echo down > /tmp/quest1-ctrl-cal      # both pointing at the floor, buttons facing forward
+```
+
+Hold each pose still for 2 s before the command. World up is aim +Y in the first pose and aim +Z
+in the second, which fixes `imuToAim`. The result is logged (`calibrated: imu->aim ...`, with the
+angle between the poses, 90° expected) and saved to `~steamos/.config/quest1-controllers.txt`
+(loaded at every start). `echo reset > /tmp/quest1-ctrl-cal` returns to the default. Knobs:
+`/tmp/quest1-ctrl` = `<default pitch deg> <velocities 0|1> <debug 0|1>` (debug logs the IMU up
+vector, aim heading/pitch and positions once a second).
