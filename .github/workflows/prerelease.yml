@@ -1,0 +1,90 @@
+# Every push to main: build the native boot image from public sources (tools/build-boot.sh) and
+# publish it as a GitHub prerelease, with the scripts that fastboot-boot it (release/).
+name: Prerelease
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: prerelease
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install the build dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -yq --no-install-recommends bc bison flex libssl-dev \
+            device-tree-compiler cpio gcc-aarch64-linux-gnu libc6-dev-arm64-cross unzip zip
+
+      # the kernel only changes with these files: reuse it otherwise
+      - uses: actions/cache@v4
+        id: kernel
+        with:
+          path: kernel-out
+          key: kernel-${{ hashFiles('kernel/quest1-kernel.patch', 'kernel/lse_emul.c', 'kernel/steamos.config', 'recon/kernel.config', 'tools/build-boot.sh') }}
+
+      - name: Build the kernel
+        if: steps.kernel.outputs.cache-hit != 'true'
+        run: tools/build-boot.sh kernel "$RUNNER_TEMP/w" kernel-out
+
+      - name: Build the boot image
+        run: tools/build-boot.sh image "$RUNNER_TEMP/w" kernel-out pkg/boot-native-holo.img
+
+      - name: Package
+        id: pkg
+        run: |
+          N=${{ github.run_number }}; SHA=$(git rev-parse --short HEAD)
+          TAG=build-$N; NAME=Quest1-SteamOS-build-$N-$SHA
+          cp release/boot-quest1.bat release/boot-quest1.sh pkg/
+          chmod 755 pkg/boot-quest1.sh
+          (cd pkg && sha256sum boot-native-holo.img > SHA256SUMS.txt)
+          mkdir dist && (cd pkg && zip -q -X ../dist/$NAME.zip *)
+          cp pkg/* dist/
+          # commits of this push (or the last one when the range is unknown)
+          BEFORE=${{ github.event.before }}
+          if git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then RANGE=$BEFORE..HEAD; else RANGE=-1; fi
+          {
+            echo "Automatic build of \`$SHA\`. **Prerelease: untested on a headset unless a commit says so.**"
+            echo
+            echo "### Changes"
+            git log --no-merges --format='- %s (%h)' $RANGE
+            echo
+            echo "### Use"
+            echo "1. Download \`$NAME.zip\` and unzip it."
+            echo "2. Plug in an Oculus Quest 1 whose bootloader is **already unlocked**."
+            echo "3. Run \`boot-quest1.bat\` (Windows) or \`boot-quest1.sh\` (Linux, macOS)."
+            echo
+            echo "The script only runs \`fastboot boot\`: the image is loaded in RAM and **nothing is written to the headset**."
+            echo "Rebooting the headset brings back its normal system."
+            echo
+            echo "The SteamOS system itself (\`/data/steamos/holo.img\` on the headset) is not part of this release yet:"
+            echo "without it, the headset stops in a rescue shell (\`telnet 192.168.77.1\` over USB). See the README."
+            echo
+            echo "The boot image holds the Quest kernel (GPL-2.0, [Meta's source](https://github.com/facebookincubator/oculus-linux-kernel)"
+            echo "+ this repository's \`kernel/\` changes), BusyBox (GPL-2.0, Debian) and \`initrd/\`. No Meta firmware or blob is included."
+          } > notes.md
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "title=Build $N ($SHA)" >> "$GITHUB_OUTPUT"
+
+      - name: Publish the prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.pkg.outputs.tag }}" dist/* --prerelease \
+            --target "$GITHUB_SHA" --title "${{ steps.pkg.outputs.title }}" --notes-file notes.md
+          # keep the 10 latest automatic builds
+          gh release list --limit 200 --json tagName,isPrerelease,createdAt \
+            --jq '[.[] | select(.isPrerelease and (.tagName | startswith("build-")))] | sort_by(.createdAt) | reverse | .[10:] | .[].tagName' |
+            while read -r t; do gh release delete "$t" --yes --cleanup-tag; done

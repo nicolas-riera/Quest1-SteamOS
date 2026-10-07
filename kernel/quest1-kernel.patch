@@ -1,0 +1,996 @@
+diff --git a/arch/arm64/kernel/Makefile b/arch/arm64/kernel/Makefile
+index 18938199..f81f9bef 100644
+--- a/arch/arm64/kernel/Makefile
++++ b/arch/arm64/kernel/Makefile
+@@ -45,6 +45,7 @@ arm64-obj-$(CONFIG_KGDB)		+= kgdb.o
+ arm64-obj-$(CONFIG_EFI)			+= efi.o efi-entry.stub.o
+ arm64-obj-$(CONFIG_PCI)			+= pci.o
+ arm64-obj-$(CONFIG_ARMV8_DEPRECATED)	+= armv8_deprecated.o
++arm64-obj-y				+= lse_emul.o
+ arm64-obj-$(CONFIG_ACPI)		+= acpi.o
+ arm64-obj-$(CONFIG_RANDOMIZE_BASE)	+= kaslr.o
+ arm64-obj-$(CONFIG_MSM_APP_API)		+= app_api.o
+diff --git a/drivers/base/bus.c b/drivers/base/bus.c
+index ecca4ae2..36f28071 100644
+--- a/drivers/base/bus.c
++++ b/drivers/base/bus.c
+@@ -652,10 +652,7 @@ static void remove_probe_files(struct bus_type *bus)
+ static ssize_t uevent_store(struct device_driver *drv, const char *buf,
+ 			    size_t count)
+ {
+-	enum kobject_action action;
+-
+-	if (kobject_action_type(buf, count, &action) == 0)
+-		kobject_uevent(&drv->p->kobj, action);
++	kobject_synth_uevent(&drv->p->kobj, buf, count);	/* holo backport */
+ 	return count;
+ }
+ static DRIVER_ATTR_WO(uevent);
+@@ -872,10 +869,7 @@ static void klist_devices_put(struct klist_node *n)
+ static ssize_t bus_uevent_store(struct bus_type *bus,
+ 				const char *buf, size_t count)
+ {
+-	enum kobject_action action;
+-
+-	if (kobject_action_type(buf, count, &action) == 0)
+-		kobject_uevent(&bus->p->subsys.kobj, action);
++	kobject_synth_uevent(&bus->p->subsys.kobj, buf, count);	/* holo backport */
+ 	return count;
+ }
+ static BUS_ATTR(uevent, S_IWUSR, NULL, bus_uevent_store);
+diff --git a/drivers/base/core.c b/drivers/base/core.c
+index 146d8c08..eed96362 100644
+--- a/drivers/base/core.c
++++ b/drivers/base/core.c
+@@ -420,11 +420,7 @@ out:
+ static ssize_t uevent_store(struct device *dev, struct device_attribute *attr,
+ 			    const char *buf, size_t count)
+ {
+-	enum kobject_action action;
+-
+-	if (kobject_action_type(buf, count, &action) == 0)
+-		kobject_uevent(&dev->kobj, action);
+-	else
++	if (kobject_synth_uevent(&dev->kobj, buf, count))	/* holo backport */
+ 		dev_err(dev, "uevent: unknown action-string\n");
+ 	return count;
+ }
+diff --git a/drivers/staging/oculus/Makefile b/drivers/staging/oculus/Makefile
+index f611a26d..5896c601 100644
+--- a/drivers/staging/oculus/Makefile
++++ b/drivers/staging/oculus/Makefile
+@@ -32,5 +32,5 @@ obj-$(CONFIG_RT600_CTRL) 		+= rt600-ctrl.o
+ obj-$(CONFIG_TOP_PANEL_SENSOR)		+= top_panel_sensor.o
+ obj-$(CONFIG_SPI_STP)			+= stp/
+ obj-$(CONFIG_VIRTUAL_SENSOR_UTILS)	+= virtual_sensor_utils.o
+-obj-y					+= internal/
++# obj-y += internal/  # not published by Meta
+ obj-y					+= mcu/
+diff --git a/drivers/usb/gadget/function/f_ncm.c b/drivers/usb/gadget/function/f_ncm.c
+index 8be8d10a..c19c0fae 100644
+--- a/drivers/usb/gadget/function/f_ncm.c
++++ b/drivers/usb/gadget/function/f_ncm.c
+@@ -530,6 +530,7 @@ static inline void ncm_reset_values(struct f_ncm *ncm)
+ {
+ 	ncm->parser_opts = &ndp16_opts;
+ 	ncm->is_crc = false;
++	ncm->ndp_sign = ncm->parser_opts->ndp_sign;	/* holo: ndp_sign */
+ 	ncm->port.cdc_filter = DEFAULT_FILTER;
+ 
+ 	/* doesn't make sense for ncm, fixed size used */
+@@ -780,10 +781,14 @@ static int ncm_setup(struct usb_function *f, const struct usb_ctrlrequest *ctrl)
+ 		switch (w_value) {
+ 		case 0x0000:
+ 			ncm->parser_opts = &ndp16_opts;
++			ncm->ndp_sign = ncm->parser_opts->ndp_sign |
++				(ncm->is_crc ? NCM_NDP_HDR_CRC : NCM_NDP_HDR_NOCRC);
+ 			DBG(cdev, "NCM16 selected\n");
+ 			break;
+ 		case 0x0001:
+ 			ncm->parser_opts = &ndp32_opts;
++			ncm->ndp_sign = ncm->parser_opts->ndp_sign |
++				(ncm->is_crc ? NCM_NDP_HDR_CRC : NCM_NDP_HDR_NOCRC);
+ 			DBG(cdev, "NCM32 selected\n");
+ 			break;
+ 		default:
+diff --git a/fs/stat.c b/fs/stat.c
+index 004dd77c..7c4673e2 100644
+--- a/fs/stat.c
++++ b/fs/stat.c
+@@ -16,6 +16,7 @@
+ #include <linux/pagemap.h>
+ 
+ #include <asm/uaccess.h>
++#include "mount.h"
+ #include <asm/unistd.h>
+ 
+ void generic_fillattr(struct inode *inode, struct kstat *stat)
+@@ -288,6 +289,68 @@ SYSCALL_DEFINE2(newlstat, const char __user *, filename,
+ }
+ 
+ #if !defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_SYS_NEWFSTATAT)
++SYSCALL_DEFINE5(statx, int, dfd, const char __user *, filename, unsigned, flags,
++		unsigned int, mask, struct statx __user *, buffer)
++{
++	struct kstat stat;
++	struct statx tmp;
++	struct path path;
++	unsigned int lookup_flags = LOOKUP_FOLLOW | LOOKUP_AUTOMOUNT;
++	int error;
++
++	if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_EMPTY_PATH | AT_STATX_SYNC_TYPE))
++		return -EINVAL;
++	if ((flags & AT_STATX_SYNC_TYPE) == AT_STATX_SYNC_TYPE)
++		return -EINVAL;
++	if (mask & 0x80000000U)	/* STATX__RESERVED */
++		return -EINVAL;
++	if (flags & AT_SYMLINK_NOFOLLOW)
++		lookup_flags &= ~LOOKUP_FOLLOW;
++	if (flags & AT_NO_AUTOMOUNT)
++		lookup_flags &= ~LOOKUP_AUTOMOUNT;
++	if (flags & AT_EMPTY_PATH)
++		lookup_flags |= LOOKUP_EMPTY;
++retry:
++	error = user_path_at(dfd, filename, lookup_flags, &path);
++	if (error)
++		return error;
++	error = vfs_getattr(&path, &stat);
++	if (!error) {
++		memset(&tmp, 0, sizeof(tmp));
++		tmp.stx_mask = STATX_BASIC_STATS | STATX_MNT_ID;
++		tmp.stx_blksize = stat.blksize;
++		tmp.stx_attributes_mask = STATX_ATTR_MOUNT_ROOT;
++		if (path.mnt->mnt_root == path.dentry)
++			tmp.stx_attributes |= STATX_ATTR_MOUNT_ROOT;
++		tmp.stx_nlink = stat.nlink;
++		tmp.stx_uid = from_kuid_munged(current_user_ns(), stat.uid);
++		tmp.stx_gid = from_kgid_munged(current_user_ns(), stat.gid);
++		tmp.stx_mode = stat.mode;
++		tmp.stx_ino = stat.ino;
++		tmp.stx_size = stat.size;
++		tmp.stx_blocks = stat.blocks;
++		tmp.stx_atime.tv_sec = stat.atime.tv_sec;
++		tmp.stx_atime.tv_nsec = stat.atime.tv_nsec;
++		tmp.stx_mtime.tv_sec = stat.mtime.tv_sec;
++		tmp.stx_mtime.tv_nsec = stat.mtime.tv_nsec;
++		tmp.stx_ctime.tv_sec = stat.ctime.tv_sec;
++		tmp.stx_ctime.tv_nsec = stat.ctime.tv_nsec;
++		tmp.stx_rdev_major = MAJOR(stat.rdev);
++		tmp.stx_rdev_minor = MINOR(stat.rdev);
++		tmp.stx_dev_major = MAJOR(stat.dev);
++		tmp.stx_dev_minor = MINOR(stat.dev);
++		tmp.stx_mnt_id = real_mount(path.mnt)->mnt_id;
++		if (copy_to_user(buffer, &tmp, sizeof(tmp)))
++			error = -EFAULT;
++	}
++	path_put(&path);
++	if (retry_estale(error, lookup_flags)) {
++		lookup_flags |= LOOKUP_REVAL;
++		goto retry;
++	}
++	return error;
++}
++
+ SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
+ 		struct stat __user *, statbuf, int, flag)
+ {
+diff --git a/include/linux/kobject.h b/include/linux/kobject.h
+index 41ba63c9..2091a1d9 100644
+--- a/include/linux/kobject.h
++++ b/include/linux/kobject.h
+@@ -236,6 +236,7 @@ int kobject_uevent_env(struct kobject *kobj, enum kobject_action action,
+ __printf(2, 3)
+ int add_uevent_var(struct kobj_uevent_env *env, const char *format, ...);
+ 
++int kobject_synth_uevent(struct kobject *kobj, const char *buf, size_t count);
+ int kobject_action_type(const char *buf, size_t count,
+ 			enum kobject_action *type);
+ 
+diff --git a/include/linux/pid.h b/include/linux/pid.h
+index 97b745dd..f8970f48 100644
+--- a/include/linux/pid.h
++++ b/include/linux/pid.h
+@@ -2,6 +2,7 @@
+ #define _LINUX_PID_H
+ 
+ #include <linux/rcupdate.h>
++#include <linux/wait.h>
+ 
+ enum pid_type
+ {
+@@ -63,9 +64,13 @@ struct pid
+ 	/* lists of tasks that use this pid */
+ 	struct hlist_head tasks[PIDTYPE_MAX];
+ 	struct rcu_head rcu;
++	wait_queue_head_t wait_pidfd;	/* holo backport */
+ 	struct upid numbers[1];
+ };
+ 
++extern const struct file_operations pidfd_fops;
++struct pid *pidfd_get_pid(unsigned int fd);
++
+ extern struct pid init_struct_pid;
+ 
+ struct pid_link
+diff --git a/include/linux/syscalls.h b/include/linux/syscalls.h
+index 5d2779aa..f76cdb40 100644
+--- a/include/linux/syscalls.h
++++ b/include/linux/syscalls.h
+@@ -907,6 +907,12 @@ asmlinkage long sys_execveat(int dfd, const char __user *filename,
+ 
+ asmlinkage long sys_membarrier(int cmd, int flags);
+ 
++struct statx;
++asmlinkage long sys_statx(int dfd, const char __user *path, unsigned flags,
++			  unsigned mask, struct statx __user *buffer);
++asmlinkage long sys_pidfd_open(pid_t pid, unsigned int flags);
++asmlinkage long sys_pidfd_send_signal(int pidfd, int sig,
++				       siginfo_t __user *info, unsigned int flags);
+ asmlinkage long sys_mlock2(unsigned long start, size_t len, int flags);
+ 
+ #endif
+diff --git a/include/uapi/asm-generic/unistd.h b/include/uapi/asm-generic/unistd.h
+index 1324b029..c8102f6c 100644
+--- a/include/uapi/asm-generic/unistd.h
++++ b/include/uapi/asm-generic/unistd.h
+@@ -715,9 +715,163 @@ __SYSCALL(__NR_userfaultfd, sys_userfaultfd)
+ __SYSCALL(__NR_membarrier, sys_membarrier)
+ #define __NR_mlock2 284
+ __SYSCALL(__NR_mlock2, sys_mlock2)
++/* holo backport: numbers match mainline, gaps are sys_ni_syscall */
++__SYSCALL(285, sys_ni_syscall)
++__SYSCALL(286, sys_ni_syscall)
++__SYSCALL(287, sys_ni_syscall)
++__SYSCALL(288, sys_ni_syscall)
++__SYSCALL(289, sys_ni_syscall)
++__SYSCALL(290, sys_ni_syscall)
++#define __NR_statx 291
++__SYSCALL(__NR_statx, sys_statx)
++__SYSCALL(292, sys_ni_syscall)
++__SYSCALL(293, sys_ni_syscall)
++__SYSCALL(294, sys_ni_syscall)
++__SYSCALL(295, sys_ni_syscall)
++__SYSCALL(296, sys_ni_syscall)
++__SYSCALL(297, sys_ni_syscall)
++__SYSCALL(298, sys_ni_syscall)
++__SYSCALL(299, sys_ni_syscall)
++__SYSCALL(300, sys_ni_syscall)
++__SYSCALL(301, sys_ni_syscall)
++__SYSCALL(302, sys_ni_syscall)
++__SYSCALL(303, sys_ni_syscall)
++__SYSCALL(304, sys_ni_syscall)
++__SYSCALL(305, sys_ni_syscall)
++__SYSCALL(306, sys_ni_syscall)
++__SYSCALL(307, sys_ni_syscall)
++__SYSCALL(308, sys_ni_syscall)
++__SYSCALL(309, sys_ni_syscall)
++__SYSCALL(310, sys_ni_syscall)
++__SYSCALL(311, sys_ni_syscall)
++__SYSCALL(312, sys_ni_syscall)
++__SYSCALL(313, sys_ni_syscall)
++__SYSCALL(314, sys_ni_syscall)
++__SYSCALL(315, sys_ni_syscall)
++__SYSCALL(316, sys_ni_syscall)
++__SYSCALL(317, sys_ni_syscall)
++__SYSCALL(318, sys_ni_syscall)
++__SYSCALL(319, sys_ni_syscall)
++__SYSCALL(320, sys_ni_syscall)
++__SYSCALL(321, sys_ni_syscall)
++__SYSCALL(322, sys_ni_syscall)
++__SYSCALL(323, sys_ni_syscall)
++__SYSCALL(324, sys_ni_syscall)
++__SYSCALL(325, sys_ni_syscall)
++__SYSCALL(326, sys_ni_syscall)
++__SYSCALL(327, sys_ni_syscall)
++__SYSCALL(328, sys_ni_syscall)
++__SYSCALL(329, sys_ni_syscall)
++__SYSCALL(330, sys_ni_syscall)
++__SYSCALL(331, sys_ni_syscall)
++__SYSCALL(332, sys_ni_syscall)
++__SYSCALL(333, sys_ni_syscall)
++__SYSCALL(334, sys_ni_syscall)
++__SYSCALL(335, sys_ni_syscall)
++__SYSCALL(336, sys_ni_syscall)
++__SYSCALL(337, sys_ni_syscall)
++__SYSCALL(338, sys_ni_syscall)
++__SYSCALL(339, sys_ni_syscall)
++__SYSCALL(340, sys_ni_syscall)
++__SYSCALL(341, sys_ni_syscall)
++__SYSCALL(342, sys_ni_syscall)
++__SYSCALL(343, sys_ni_syscall)
++__SYSCALL(344, sys_ni_syscall)
++__SYSCALL(345, sys_ni_syscall)
++__SYSCALL(346, sys_ni_syscall)
++__SYSCALL(347, sys_ni_syscall)
++__SYSCALL(348, sys_ni_syscall)
++__SYSCALL(349, sys_ni_syscall)
++__SYSCALL(350, sys_ni_syscall)
++__SYSCALL(351, sys_ni_syscall)
++__SYSCALL(352, sys_ni_syscall)
++__SYSCALL(353, sys_ni_syscall)
++__SYSCALL(354, sys_ni_syscall)
++__SYSCALL(355, sys_ni_syscall)
++__SYSCALL(356, sys_ni_syscall)
++__SYSCALL(357, sys_ni_syscall)
++__SYSCALL(358, sys_ni_syscall)
++__SYSCALL(359, sys_ni_syscall)
++__SYSCALL(360, sys_ni_syscall)
++__SYSCALL(361, sys_ni_syscall)
++__SYSCALL(362, sys_ni_syscall)
++__SYSCALL(363, sys_ni_syscall)
++__SYSCALL(364, sys_ni_syscall)
++__SYSCALL(365, sys_ni_syscall)
++__SYSCALL(366, sys_ni_syscall)
++__SYSCALL(367, sys_ni_syscall)
++__SYSCALL(368, sys_ni_syscall)
++__SYSCALL(369, sys_ni_syscall)
++__SYSCALL(370, sys_ni_syscall)
++__SYSCALL(371, sys_ni_syscall)
++__SYSCALL(372, sys_ni_syscall)
++__SYSCALL(373, sys_ni_syscall)
++__SYSCALL(374, sys_ni_syscall)
++__SYSCALL(375, sys_ni_syscall)
++__SYSCALL(376, sys_ni_syscall)
++__SYSCALL(377, sys_ni_syscall)
++__SYSCALL(378, sys_ni_syscall)
++__SYSCALL(379, sys_ni_syscall)
++__SYSCALL(380, sys_ni_syscall)
++__SYSCALL(381, sys_ni_syscall)
++__SYSCALL(382, sys_ni_syscall)
++__SYSCALL(383, sys_ni_syscall)
++__SYSCALL(384, sys_ni_syscall)
++__SYSCALL(385, sys_ni_syscall)
++__SYSCALL(386, sys_ni_syscall)
++__SYSCALL(387, sys_ni_syscall)
++__SYSCALL(388, sys_ni_syscall)
++__SYSCALL(389, sys_ni_syscall)
++__SYSCALL(390, sys_ni_syscall)
++__SYSCALL(391, sys_ni_syscall)
++__SYSCALL(392, sys_ni_syscall)
++__SYSCALL(393, sys_ni_syscall)
++__SYSCALL(394, sys_ni_syscall)
++__SYSCALL(395, sys_ni_syscall)
++__SYSCALL(396, sys_ni_syscall)
++__SYSCALL(397, sys_ni_syscall)
++__SYSCALL(398, sys_ni_syscall)
++__SYSCALL(399, sys_ni_syscall)
++__SYSCALL(400, sys_ni_syscall)
++__SYSCALL(401, sys_ni_syscall)
++__SYSCALL(402, sys_ni_syscall)
++__SYSCALL(403, sys_ni_syscall)
++__SYSCALL(404, sys_ni_syscall)
++__SYSCALL(405, sys_ni_syscall)
++__SYSCALL(406, sys_ni_syscall)
++__SYSCALL(407, sys_ni_syscall)
++__SYSCALL(408, sys_ni_syscall)
++__SYSCALL(409, sys_ni_syscall)
++__SYSCALL(410, sys_ni_syscall)
++__SYSCALL(411, sys_ni_syscall)
++__SYSCALL(412, sys_ni_syscall)
++__SYSCALL(413, sys_ni_syscall)
++__SYSCALL(414, sys_ni_syscall)
++__SYSCALL(415, sys_ni_syscall)
++__SYSCALL(416, sys_ni_syscall)
++__SYSCALL(417, sys_ni_syscall)
++__SYSCALL(418, sys_ni_syscall)
++__SYSCALL(419, sys_ni_syscall)
++__SYSCALL(420, sys_ni_syscall)
++__SYSCALL(421, sys_ni_syscall)
++__SYSCALL(422, sys_ni_syscall)
++__SYSCALL(423, sys_ni_syscall)
++#define __NR_pidfd_send_signal 424
++__SYSCALL(__NR_pidfd_send_signal, sys_pidfd_send_signal)
++__SYSCALL(425, sys_ni_syscall)
++__SYSCALL(426, sys_ni_syscall)
++__SYSCALL(427, sys_ni_syscall)
++__SYSCALL(428, sys_ni_syscall)
++__SYSCALL(429, sys_ni_syscall)
++__SYSCALL(430, sys_ni_syscall)
++__SYSCALL(431, sys_ni_syscall)
++__SYSCALL(432, sys_ni_syscall)
++__SYSCALL(433, sys_ni_syscall)
++#define __NR_pidfd_open 434
++__SYSCALL(__NR_pidfd_open, sys_pidfd_open)
+ 
+ #undef __NR_syscalls
+-#define __NR_syscalls 285
++#define __NR_syscalls 435
+ 
+ /*
+  * All syscalls below here should go away really,
+diff --git a/include/uapi/linux/fcntl.h b/include/uapi/linux/fcntl.h
+index f85ed3a5..303f7152 100644
+--- a/include/uapi/linux/fcntl.h
++++ b/include/uapi/linux/fcntl.h
+@@ -82,6 +82,10 @@
+                                            unlinking file.  */
+ #define AT_SYMLINK_FOLLOW	0x400   /* Follow symbolic links.  */
+ #define AT_NO_AUTOMOUNT		0x800	/* Suppress terminal automount traversal */
++#define AT_STATX_SYNC_TYPE	0x6000
++#define AT_STATX_SYNC_AS_STAT	0x0000
++#define AT_STATX_FORCE_SYNC	0x2000
++#define AT_STATX_DONT_SYNC	0x4000
+ #define AT_EMPTY_PATH		0x1000	/* Allow empty relative pathname */
+ 
+ 
+diff --git a/include/uapi/linux/sched.h b/include/uapi/linux/sched.h
+index cc89ddef..88212b12 100644
+--- a/include/uapi/linux/sched.h
++++ b/include/uapi/linux/sched.h
+@@ -9,6 +9,7 @@
+ #define CLONE_FS	0x00000200	/* set if fs info shared between processes */
+ #define CLONE_FILES	0x00000400	/* set if open files shared between processes */
+ #define CLONE_SIGHAND	0x00000800	/* set if signal handlers and blocked signals shared */
++#define CLONE_PIDFD	0x00001000	/* set if a pidfd should be placed in parent (holo backport) */
+ #define CLONE_PTRACE	0x00002000	/* set if we want to let tracing continue on the child too */
+ #define CLONE_VFORK	0x00004000	/* set if the parent wants the child to wake it up on mm_release */
+ #define CLONE_PARENT	0x00008000	/* set if we want to have the same parent as the cloner */
+diff --git a/include/uapi/linux/stat.h b/include/uapi/linux/stat.h
+index 7fec7e36..d576eb34 100644
+--- a/include/uapi/linux/stat.h
++++ b/include/uapi/linux/stat.h
+@@ -42,4 +42,55 @@
+ #endif
+ 
+ 
++#include <linux/types.h>
++
++struct statx_timestamp {
++	__s64	tv_sec;
++	__u32	tv_nsec;
++	__s32	__reserved;
++};
++
++struct statx {
++	__u32	stx_mask;
++	__u32	stx_blksize;
++	__u64	stx_attributes;
++	__u32	stx_nlink;
++	__u32	stx_uid;
++	__u32	stx_gid;
++	__u16	stx_mode;
++	__u16	__spare0[1];
++	__u64	stx_ino;
++	__u64	stx_size;
++	__u64	stx_blocks;
++	__u64	stx_attributes_mask;
++	struct statx_timestamp	stx_atime;
++	struct statx_timestamp	stx_btime;
++	struct statx_timestamp	stx_ctime;
++	struct statx_timestamp	stx_mtime;
++	__u32	stx_rdev_major;
++	__u32	stx_rdev_minor;
++	__u32	stx_dev_major;
++	__u32	stx_dev_minor;
++	__u64	stx_mnt_id;
++	__u64	__spare2;
++	__u64	__spare3[12];
++};
++
++#define STATX_TYPE		0x00000001U
++#define STATX_MODE		0x00000002U
++#define STATX_NLINK		0x00000004U
++#define STATX_UID		0x00000008U
++#define STATX_GID		0x00000010U
++#define STATX_ATIME		0x00000020U
++#define STATX_MTIME		0x00000040U
++#define STATX_CTIME		0x00000080U
++#define STATX_INO		0x00000100U
++#define STATX_SIZE		0x00000200U
++#define STATX_BLOCKS		0x00000400U
++#define STATX_BASIC_STATS	0x000007ffU
++#define STATX_BTIME		0x00000800U
++#define STATX_MNT_ID		0x00001000U
++
++#define STATX_ATTR_MOUNT_ROOT	0x00002000
++
+ #endif /* _UAPI_LINUX_STAT_H */
+diff --git a/include/uapi/linux/wait.h b/include/uapi/linux/wait.h
+index 9393eead..fda15da9 100644
+--- a/include/uapi/linux/wait.h
++++ b/include/uapi/linux/wait.h
+@@ -16,6 +16,7 @@
+ #define P_ALL		0
+ #define P_PID		1
+ #define P_PGID		2
++#define P_PIDFD		3
+ 
+ 
+ #endif /* _UAPI_LINUX_WAIT_H */
+diff --git a/kernel/cgroup.c b/kernel/cgroup.c
+index cd3d8196..e06694df 100644
+--- a/kernel/cgroup.c
++++ b/kernel/cgroup.c
+@@ -2019,8 +2019,13 @@ static struct dentry *cgroup_mount(struct file_system_type *fs_type,
+ 		cgroup_enable_task_cg_lists();
+ 
+ 	if (is_v2) {
+-		if (data) {
+-			pr_err("cgroup2: unknown option \"%s\"\n", (char *)data);
++		char *opts = data, *tok;
++
++		while (opts && (tok = strsep(&opts, ",")) != NULL) {	/* holo backport */
++			if (!*tok || !strcmp(tok, "nsdelegate") || !strcmp(tok, "favordynmods") ||
++			    !strncmp(tok, "memory_", 7))
++				continue;
++			pr_err("cgroup2: unknown option \"%s\"\n", tok);
+ 			return ERR_PTR(-EINVAL);
+ 		}
+ 		cgrp_dfl_root_visible = true;
+diff --git a/kernel/exit.c b/kernel/exit.c
+index 8e288e8e..f3ae1d4a 100644
+--- a/kernel/exit.c
++++ b/kernel/exit.c
+@@ -1581,11 +1581,19 @@ SYSCALL_DEFINE5(waitid, int, which, pid_t, upid, struct siginfo __user *,
+ 		if (upid <= 0)
+ 			return -EINVAL;
+ 		break;
++	case P_PIDFD:	/* holo backport */
++		type = PIDTYPE_PID;
++		if (upid < 0)
++			return -EINVAL;
++		pid = pidfd_get_pid(upid);
++		if (IS_ERR(pid))
++			return PTR_ERR(pid);
++		break;
+ 	default:
+ 		return -EINVAL;
+ 	}
+ 
+-	if (type < PIDTYPE_MAX)
++	if (type < PIDTYPE_MAX && !pid)
+ 		pid = find_get_pid(upid);
+ 
+ 	wo.wo_type	= type;
+diff --git a/kernel/fork.c b/kernel/fork.c
+index 58514ce4..cc0d8763 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -13,6 +13,7 @@
+ 
+ #include <linux/slab.h>
+ #include <linux/init.h>
++#include <linux/anon_inodes.h>
+ #include <linux/unistd.h>
+ #include <linux/module.h>
+ #include <linux/vmalloc.h>
+@@ -1810,6 +1811,9 @@ long _do_fork(unsigned long clone_flags,
+ 			trace = 0;
+ 	}
+ 
++	if ((clone_flags & CLONE_PIDFD) && (clone_flags & (CLONE_THREAD | CLONE_PARENT_SETTID)))
++		return -EINVAL;
++
+ 	p = copy_process(clone_flags, stack_start, stack_size,
+ 			 child_tidptr, NULL, trace, tls, NUMA_NO_NODE);
+ 	/*
+@@ -1830,6 +1834,14 @@ long _do_fork(unsigned long clone_flags,
+ 		if (clone_flags & CLONE_PARENT_SETTID)
+ 			put_user(nr, parent_tidptr);
+ 
++		if (clone_flags & CLONE_PIDFD) {	/* holo backport */
++			int pidfd = anon_inode_getfd("[pidfd]", &pidfd_fops, get_pid(pid),
++						     O_RDWR | O_CLOEXEC);
++			if (pidfd < 0)
++				put_pid(pid);
++			put_user(pidfd, parent_tidptr);
++		}
++
+ 		if (clone_flags & CLONE_VFORK) {
+ 			p->vfork_done = &vfork;
+ 			init_completion(&vfork);
+diff --git a/kernel/module.c b/kernel/module.c
+index ad492821..04fac1c9 100644
+--- a/kernel/module.c
++++ b/kernel/module.c
+@@ -1204,10 +1204,7 @@ static ssize_t store_uevent(struct module_attribute *mattr,
+ 			    struct module_kobject *mk,
+ 			    const char *buffer, size_t count)
+ {
+-	enum kobject_action action;
+-
+-	if (kobject_action_type(buffer, count, &action) == 0)
+-		kobject_uevent(&mk->kobj, action);
++	kobject_synth_uevent(&mk->kobj, buffer, count);	/* holo backport */
+ 	return count;
+ }
+ 
+diff --git a/kernel/pid.c b/kernel/pid.c
+index 5fe7cdb6..e729b976 100644
+--- a/kernel/pid.c
++++ b/kernel/pid.c
+@@ -35,6 +35,11 @@
+ #include <linux/hash.h>
+ #include <linux/pid_namespace.h>
+ #include <linux/init_task.h>
++#include <linux/anon_inodes.h>
++#include <linux/file.h>
++#include <linux/poll.h>
++#include <linux/seq_file.h>
++#include <linux/syscalls.h>
+ #include <linux/syscalls.h>
+ #include <linux/proc_ns.h>
+ #include <linux/proc_fs.h>
+@@ -330,6 +335,7 @@ struct pid *alloc_pid(struct pid_namespace *ns)
+ 
+ 	get_pid_ns(ns);
+ 	atomic_set(&pid->count, 1);
++	init_waitqueue_head(&pid->wait_pidfd);
+ 	for (type = 0; type < PIDTYPE_MAX; ++type)
+ 		INIT_HLIST_HEAD(&pid->tasks[type]);
+ 
+@@ -571,6 +577,151 @@ struct pid *find_ge_pid(int nr, struct pid_namespace *ns)
+  * machine.  From a minimum of 16 slots up to 4096 slots at one gigabyte or
+  * more.
+  */
++/* --- pidfd (holo backport of v5.3) --- */
++static int pidfd_release(struct inode *inode, struct file *file)
++{
++	struct pid *pid = file->private_data;
++
++	file->private_data = NULL;
++	put_pid(pid);
++	return 0;
++}
++
++static void pidfd_show_fdinfo(struct seq_file *m, struct file *f)
++{
++	struct pid *pid = f->private_data;
++	struct pid_namespace *ns = task_active_pid_ns(current);
++	pid_t nr = -1;
++
++	if (likely(pid_task(pid, PIDTYPE_PID)))
++		nr = pid_nr_ns(pid, ns);
++	seq_printf(m, "Pid:\t%d\n", nr);
++}
++
++static unsigned int pidfd_poll(struct file *file, struct poll_table_struct *pts)
++{
++	struct pid *pid = file->private_data;
++	struct task_struct *task;
++	unsigned int poll_flags = 0;
++
++	poll_wait(file, &pid->wait_pidfd, pts);
++
++	rcu_read_lock();
++	task = pid_task(pid, PIDTYPE_PID);
++	if (!task || (task->exit_state && thread_group_empty(task)))
++		poll_flags = POLLIN | POLLRDNORM;
++	rcu_read_unlock();
++	return poll_flags;
++}
++
++struct pidfd_info {
++	__u64 mask;
++	__u64 cgroupid;
++	__u32 pid, tgid, ppid, ruid, rgid, euid, egid, suid, sgid, fsuid, fsgid;
++	__s32 exit_code;
++	__u32 coredump_mask;
++	__u32 __spare1;
++};
++#define PIDFD_INFO_PID		(1UL << 0)
++#define PIDFD_INFO_CREDS	(1UL << 1)
++
++static long pidfd_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
++{
++	struct pid *pid = file->private_data;
++	struct pidfd_info __user *uinfo = (void __user *)arg;
++	struct pid_namespace *ns = task_active_pid_ns(current);
++	struct user_namespace *user_ns = current_user_ns();
++	struct pidfd_info kinfo;
++	struct task_struct *task;
++	const struct cred *c;
++	size_t usize = _IOC_SIZE(cmd);
++
++	/* only PIDFD_GET_INFO = _IOWR(0xFF, 11, struct pidfd_info) */
++	if (_IOC_TYPE(cmd) != 0xFF || _IOC_NR(cmd) != 11 || _IOC_DIR(cmd) != (_IOC_READ | _IOC_WRITE))
++		return -ENOTTY;
++	if (usize < 64)
++		return -EINVAL;
++	task = get_pid_task(pid, PIDTYPE_PID);
++	if (!task)
++		return -ESRCH;
++	memset(&kinfo, 0, sizeof(kinfo));
++	c = get_task_cred(task);
++	kinfo.ruid = from_kuid_munged(user_ns, c->uid);
++	kinfo.rgid = from_kgid_munged(user_ns, c->gid);
++	kinfo.euid = from_kuid_munged(user_ns, c->euid);
++	kinfo.egid = from_kgid_munged(user_ns, c->egid);
++	kinfo.suid = from_kuid_munged(user_ns, c->suid);
++	kinfo.sgid = from_kgid_munged(user_ns, c->sgid);
++	kinfo.fsuid = from_kuid_munged(user_ns, c->fsuid);
++	kinfo.fsgid = from_kgid_munged(user_ns, c->fsgid);
++	put_cred(c);
++	rcu_read_lock();
++	kinfo.ppid = task_ppid_nr_ns(task, ns);
++	rcu_read_unlock();
++	kinfo.tgid = task_tgid_nr_ns(task, ns);
++	kinfo.pid = task_pid_nr_ns(task, ns);
++	put_task_struct(task);
++	if (!kinfo.pid || !kinfo.tgid)
++		return -ESRCH;
++	kinfo.mask = PIDFD_INFO_PID | PIDFD_INFO_CREDS;
++	if (copy_to_user(uinfo, &kinfo, min_t(size_t, usize, sizeof(kinfo))))
++		return -EFAULT;
++	return 0;
++}
++
++const struct file_operations pidfd_fops = {
++	.release = pidfd_release,
++	.unlocked_ioctl = pidfd_ioctl,
++	.compat_ioctl = pidfd_ioctl,
++	.poll = pidfd_poll,
++	.show_fdinfo = pidfd_show_fdinfo,
++};
++
++struct pid *pidfd_get_pid(unsigned int fd)
++{
++	struct fd f = fdget(fd);
++	struct pid *pid;
++
++	if (!f.file)
++		return ERR_PTR(-EBADF);
++	if (f.file->f_op == &pidfd_fops)
++		pid = get_pid(f.file->private_data);
++	else
++		pid = ERR_PTR(-EBADF);
++	fdput(f);
++	return pid;
++}
++
++SYSCALL_DEFINE2(pidfd_open, pid_t, upid, unsigned int, flags)
++{
++	struct task_struct *task;
++	struct pid *p;
++	int fd;
++
++	if (flags & ~O_NONBLOCK)
++		return -EINVAL;
++	if (upid <= 0)
++		return -EINVAL;
++	p = find_get_pid(upid);
++	if (!p)
++		return -ESRCH;
++	task = get_pid_task(p, PIDTYPE_PID);
++	if (!task) {
++		put_pid(p);
++		return -ESRCH;
++	}
++	if (!thread_group_leader(task)) {
++		fd = -EINVAL;
++	} else {
++		fd = anon_inode_getfd("[pidfd]", &pidfd_fops, get_pid(p), O_RDWR | O_CLOEXEC | flags);
++		if (fd < 0)
++			put_pid(p);	/* the ref meant for the file */
++	}
++	put_task_struct(task);
++	put_pid(p);
++	return fd;
++}
++
+ void __init pidhash_init(void)
+ {
+ 	unsigned int i, pidhash_size;
+diff --git a/kernel/signal.c b/kernel/signal.c
+index 9759e9b7..54e51c18 100644
+--- a/kernel/signal.c
++++ b/kernel/signal.c
+@@ -20,6 +20,7 @@
+ #include <linux/coredump.h>
+ #include <linux/security.h>
+ #include <linux/syscalls.h>
++#include <linux/file.h>
+ #include <linux/ptrace.h>
+ #include <linux/signal.h>
+ #include <linux/signalfd.h>
+@@ -1642,6 +1643,9 @@ bool do_notify_parent(struct task_struct *tsk, int sig)
+  	/* do_notify_parent_cldstop should have been called instead.  */
+  	BUG_ON(task_is_stopped_or_traced(tsk));
+ 
++	/* holo backport: wake up all pidfd waiters */
++	wake_up_all(&task_pid(tsk)->wait_pidfd);
++
+ 	BUG_ON(!tsk->ptrace &&
+ 	       (tsk->group_leader != tsk || !thread_group_empty(tsk)));
+ 
+@@ -3005,6 +3009,50 @@ SYSCALL_DEFINE3(tgkill, pid_t, tgid, pid_t, pid, int, sig)
+ 	return do_tkill(tgid, pid, sig);
+ }
+ 
++/* holo backport of v5.1 pidfd_send_signal (pidfds from pidfd_open only) */
++SYSCALL_DEFINE4(pidfd_send_signal, int, pidfd, int, sig,
++		siginfo_t __user *, info, unsigned int, flags)
++{
++	struct fd f;
++	struct pid *pid;
++	siginfo_t kinfo;
++	int ret;
++
++	if (flags)
++		return -EINVAL;
++	f = fdget(pidfd);
++	if (!f.file)
++		return -EBADF;
++	ret = -EINVAL;
++	if (f.file->f_op != &pidfd_fops)
++		goto err;
++	pid = f.file->private_data;
++
++	if (info) {
++		ret = -EFAULT;
++		if (copy_from_user(&kinfo, info, sizeof(siginfo_t)))
++			goto err;
++		ret = -EINVAL;
++		if (unlikely(sig != kinfo.si_signo))
++			goto err;
++		ret = -EPERM;
++		if ((task_pid(current) != pid) &&
++		    (kinfo.si_code >= 0 || kinfo.si_code == SI_TKILL))
++			goto err;
++	} else {
++		memset(&kinfo, 0, sizeof(kinfo));
++		kinfo.si_signo = sig;
++		kinfo.si_errno = 0;
++		kinfo.si_code = SI_USER;
++		kinfo.si_pid = task_tgid_vnr(current);
++		kinfo.si_uid = from_kuid_munged(current_user_ns(), current_uid());
++	}
++	ret = kill_pid_info(sig, &kinfo, pid);
++err:
++	fdput(f);
++	return ret;
++}
++
+ /**
+  *  sys_tkill - send signal to one specific task
+  *  @pid: the PID of the task
+diff --git a/lib/kobject_uevent.c b/lib/kobject_uevent.c
+index f6c2c1e7..258a266f 100644
+--- a/lib/kobject_uevent.c
++++ b/lib/kobject_uevent.c
+@@ -16,6 +16,7 @@
+ 
+ #include <linux/spinlock.h>
+ #include <linux/string.h>
++#include <linux/ctype.h>
+ #include <linux/kobject.h>
+ #include <linux/export.h>
+ #include <linux/kmod.h>
+@@ -31,6 +32,111 @@ u64 uevent_seqnum;
+ #ifdef CONFIG_UEVENT_HELPER
+ char uevent_helper[UEVENT_HELPER_PATH_LEN] = CONFIG_UEVENT_HELPER_PATH;
+ #endif
++/* --- holo backport: kobject_synth_uevent (v4.13) --- */
++static bool holo_uuid_valid(const char *s)
++{
++	int i;
++
++	for (i = 0; i < 36; i++) {
++		if (i == 8 || i == 13 || i == 18 || i == 23) {
++			if (s[i] != '-')
++				return false;
++		} else if (!isxdigit(s[i])) {
++			return false;
++		}
++	}
++	return true;
++}
++
++static const char *action_arg_word_end(const char *buf, const char *buf_end, char delim)
++{
++	const char *next = buf;
++
++	while (next <= buf_end && *next != delim)
++		if (!isalnum(*next++))
++			return NULL;
++	if (next == buf)
++		return NULL;
++	return next;
++}
++
++static int kobject_action_args(const char *buf, size_t count, struct kobj_uevent_env **ret_env)
++{
++	struct kobj_uevent_env *env;
++	const char *next, *buf_end, *key;
++	int key_len;
++	int r = -EINVAL;
++
++	if (count && (buf[count - 1] == '\n' || buf[count - 1] == '\0'))
++		count--;
++	if (!count)
++		return -EINVAL;
++	env = kzalloc(sizeof(*env), GFP_KERNEL);
++	if (!env)
++		return -ENOMEM;
++	if (count < 36 || !holo_uuid_valid(buf) || add_uevent_var(env, "SYNTH_UUID=%.*s", 36, buf))
++		goto out;
++	next = buf + 36;
++	buf_end = buf + count - 1;
++	while (next <= buf_end) {
++		if (*next != ' ')
++			goto out;
++		key = ++next;
++		if (key > buf_end)
++			goto out;
++		buf = next;
++		next = action_arg_word_end(buf, buf_end, '=');
++		if (!next || next > buf_end || *next != '=')
++			goto out;
++		key_len = next - buf;
++		if (++next > buf_end)
++			goto out;
++		buf = next;
++		next = action_arg_word_end(buf, buf_end, ' ');
++		if (!next)
++			goto out;
++		if (add_uevent_var(env, "SYNTH_ARG_%.*s=%.*s", key_len, key, (int)(next - buf), buf))
++			goto out;
++	}
++	r = 0;
++out:
++	if (r)
++		kfree(env);
++	else
++		*ret_env = env;
++	return r;
++}
++
++int kobject_synth_uevent(struct kobject *kobj, const char *buf, size_t count)
++{
++	char *no_uuid_envp[] = { "SYNTH_UUID=0", NULL };
++	enum kobject_action action;
++	const char *action_args;
++	struct kobj_uevent_env *env;
++	size_t count_first;
++	int r;
++
++	action_args = strnchr(buf, count, ' ');
++	if (action_args) {
++		count_first = action_args - buf;
++		action_args++;
++		count -= count_first + 1;
++	} else {
++		count_first = count;
++	}
++	if (kobject_action_type(buf, count_first, &action))
++		return -EINVAL;
++	if (!action_args)
++		return kobject_uevent_env(kobj, action, no_uuid_envp);
++	r = kobject_action_args(action_args, count, &env);
++	if (r)	/* unparsable args: still deliver the plain event */
++		return kobject_uevent_env(kobj, action, no_uuid_envp);
++	r = kobject_uevent_env(kobj, action, env->envp);
++	kfree(env);
++	return r;
++}
++EXPORT_SYMBOL_GPL(kobject_synth_uevent);
++
+ #ifdef CONFIG_NET
+ struct uevent_sock {
+ 	struct list_head list;
+diff --git a/scripts/dtc/dtc-lexer.l b/scripts/dtc/dtc-lexer.l
+index c6006030..bc40a01f 100644
+--- a/scripts/dtc/dtc-lexer.l
++++ b/scripts/dtc/dtc-lexer.l
+@@ -38,7 +38,7 @@ LINECOMMENT	"//".*\n
+ #include "srcpos.h"
+ #include "dtc-parser.tab.h"
+ 
+-YYLTYPE yylloc;
++extern YYLTYPE yylloc;
+ extern bool treesource_error;
+ 
+ /* CAUTION: this will stop working if we ever use yyless() or yyunput() */
+diff --git a/scripts/dtc/dtc-lexer.lex.c_shipped b/scripts/dtc/dtc-lexer.lex.c_shipped
+index 2c862bc8..4f91c16c 100644
+--- a/scripts/dtc/dtc-lexer.lex.c_shipped
++++ b/scripts/dtc/dtc-lexer.lex.c_shipped
+@@ -631,7 +631,7 @@ char *yytext;
+ #include "srcpos.h"
+ #include "dtc-parser.tab.h"
+ 
+-YYLTYPE yylloc;
++extern YYLTYPE yylloc;
+ extern bool treesource_error;
+ 
+ /* CAUTION: this will stop working if we ever use yyless() or yyunput() */
