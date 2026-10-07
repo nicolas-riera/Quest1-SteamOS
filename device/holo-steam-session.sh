@@ -37,8 +37,10 @@ fi
 # TLS, quest1_vkshim with the SteamVR compat layer, Steam's bundled libvulkan redirected to the
 # shim. Without it vkCreateInstance fails (-9), every SetOverlayTexture fails and the SteamVR
 # dashboard panel stays empty. Set for the whole client: Steam verifies its files
-# (BVerifyInstalledFiles), so steamwebhelper.sh cannot carry it. QUEST1_STEAM_VR=0 turns it off.
-if [ "${QUEST1_STEAM_VR:-1}" = 1 ]; then
+# (BVerifyInstalledFiles), so steamwebhelper.sh cannot carry it. Off by default (QUEST1_STEAM_VR=1
+# turns it on) until Steam renders the VR UI on the Adreno: with llvmpipe GL the textures cannot
+# be shared and vrcompositor only gets failures.
+if [ "${QUEST1_STEAM_VR:-0}" = 1 ]; then
 	V=/usr/local/lib/quest1-vk-steam
 	export LD_LIBRARY_PATH=$V:$LD_LIBRARY_PATH
 	export LD_PRELOAD=/opt/hybris/lib/libbionictls.so:$V/libquest1_vkredirect.so${LD_PRELOAD:+:$LD_PRELOAD}
