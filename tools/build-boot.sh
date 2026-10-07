@@ -50,7 +50,12 @@ kernel() {
 	{ tr -d '\r' < "$P/recon/kernel.config"; tr -d '\r' < "$P/kernel/steamos.config"
 	  echo 'CONFIG_SYSTEM_TRUSTED_KEYS=""'; } > out/.config
 	make -C kernel O=$W/out DTC=/usr/bin/dtc olddefconfig >/dev/null
-	make -C kernel O=$W/out DTC=/usr/bin/dtc -j"$(nproc)" Image.gz-dtb 2>&1 | tail -5
+	# about 15 min on a 4-core CI runner: a progress line every 30 s, the log tail on failure
+	make -C kernel O=$W/out DTC=/usr/bin/dtc -j"$(nproc)" Image.gz-dtb > kernel.log 2>&1 & pid=$!
+	while kill -0 $pid 2>/dev/null; do
+		sleep 30; echo "kernel: $(grep -c '^  CC' kernel.log) files compiled"
+	done
+	wait $pid || { grep -E 'error|Error' kernel.log | head -20; tail -20 kernel.log; exit 1; }
 	cp out/arch/arm64/boot/Image.gz-dtb out/usr/gen_init_cpio out/.config "$KO/"
 }
 

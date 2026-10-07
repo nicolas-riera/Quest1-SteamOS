@@ -119,6 +119,7 @@ the headset they are used from its own partitions, mounted read-only.
 | [Lens](docs/quest1-lens.md) | Lens distortion, field of view and geometry |
 | [6DoF study](docs/tracking-6dof.md) | Paths to inside-out tracking |
 | [Tracking IPC](docs/tracking-ipc.md) | Talking to Meta's tracking service |
+| [SteamOS image](docs/rootfs-build.md) | What the system image holds, and the plan to build and install it reproducibly |
 | [Phase 0](docs/phase0-recon.md) | First survey of the headset (in French) |
 
 ## Building
