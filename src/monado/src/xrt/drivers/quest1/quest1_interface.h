@@ -90,6 +90,10 @@ quest1_controller_push_state(struct quest1_controller *c, int64_t when_ns, const
 void
 quest1_controller_set_disconnected(struct quest1_controller *c);
 
+//! Battery level reported by the controller, 0..1 (xrt_device::get_battery_status).
+void
+quest1_controller_set_battery(struct quest1_controller *c, float charge);
+
 void
 quest1_controller_set_haptic_fn(struct quest1_controller *c, quest1_haptic_fn fn, void *data);
 

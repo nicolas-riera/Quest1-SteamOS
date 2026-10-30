@@ -22,6 +22,7 @@
 // Live knobs (read every ~0.5 s) in /tmp/quest1-ctrl: "<default pitch deg> <velocities 0|1> <debug 0|1>".
 
 #include "controllers.h"
+#include "battery.h"
 
 #include <pthread.h>
 #include <sys/stat.h>
@@ -282,12 +283,14 @@ public:
 		for (float &v : last)
 			v = NAN; // send everything once
 		activated = true;
+		Quest1BatteryAttach(left ? Quest1Battery_Left : Quest1Battery_Right, container); // battery.cpp, via Monado
 		CLog("quest1: %s Touch controller activated (device %u)\n", left ? "left" : "right", id);
 		return VRInitError_None;
 	}
 
 	void Deactivate() override
 	{
+		Quest1BatteryAttach(left ? Quest1Battery_Left : Quest1Battery_Right, k_ulInvalidPropertyContainer);
 		activated = false;
 		id = k_unTrackedDeviceIndexInvalid;
 	}

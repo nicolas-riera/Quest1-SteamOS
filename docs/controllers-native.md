@@ -276,6 +276,15 @@ SteamVR controllers:
   (elbow 17 cm beside, 45 cm below, 5 cm in front of the head, turning with the head heading;
   30 cm forearm along the aim). Monado's own 3DoF controllers used to live in a different
   tracking origin than the HMD (fixed in `quest1_controller.c`; needs a Monado rebuild).
+* Battery (`src/steamvr-quest1/battery.cpp`): Monado's quest1 driver keeps each controller's level
+  from the enumeration (`battery_percent`, double) and record 8 (`battery_percent`, u8, ignored
+  while it is still the 100 placeholder) and reports it through `xrt_device::get_battery_status`
+  (never charging: AA cell). The SteamVR driver reads it every 10 s with libmonado
+  (`mnd_root_get_device_from_role("left"/"right")` + `mnd_root_get_device_battery_status`) and sets
+  `DeviceProvidesBatteryStatus` / `DeviceBatteryPercentage` / `DeviceIsCharging`; the headset comes
+  from `/sys/class/power_supply/battery`. Steam's VR UI shows `/user/head`'s level with a percentage
+  in the dashboard bar (it hides the UPower system battery while VR runs) and the controllers in
+  the quick access device list (in the bar only when at 25 % or less).
 
 ### Calibrating the IMU mounting (two static poses, both hands at once)
 

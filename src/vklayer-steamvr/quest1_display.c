@@ -17,6 +17,8 @@
 //      QUEST1_DISPLAY_SOCKET (default $XDG_RUNTIME_DIR/quest1-display.sock)
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <vulkan/vulkan_android.h>
+typedef struct AHardwareBuffer AHardwareBuffer;
 
 #include "quest1_display_proto.h"
 
@@ -33,6 +35,7 @@ static struct
 {
 	uint64_t since, last_return, n;
 	uint64_t app, acquire, gpu, posed; //!< summed ns
+	_Atomic uint64_t present_wait, present_waits; //!< vkWaitForPresentKHR (another thread)
 } qd_stats;
 
 //! async present: time from vkQueuePresentKHR to the image being rendered (summed, completer thread)
@@ -52,26 +55,33 @@ static void qd_stats_present(uint64_t entry, uint64_t gpu_done, uint64_t posed_d
 		qd_stats.since = posed_done;
 	} else if (posed_done - qd_stats.since > 5000000000ull) {
 		double n = (double)qd_stats.n;
+		uint64_t waits = atomic_exchange(&qd_stats.present_waits, 0);
+		uint64_t wait_ns = atomic_exchange(&qd_stats.present_wait, 0);
 		LOG("display: %.1f fps; per frame: vrcompositor %.2f ms (of which acquire %.2f), gpu wait %.2f, "
-		    "pose wait %.2f, present-to-rendered %.2f\n",
+		    "pose wait %.2f, present-to-rendered %.2f, present wait %.2f\n",
 		    n * 1e9 / (posed_done - qd_stats.since), qd_stats.app / n / 1e6, qd_stats.acquire / n / 1e6,
 		    qd_stats.gpu / n / 1e6, qd_stats.posed / n / 1e6,
-		    atomic_exchange(&qd_stats_gpu_latency, 0) / n / 1e6);
+		    atomic_exchange(&qd_stats_gpu_latency, 0) / n / 1e6, waits ? wait_ns / (double)waits / 1e6 : 0.0);
 		uint64_t keep = qd_stats.last_return;
-		memset(&qd_stats, 0, sizeof(qd_stats));
 		qd_stats.since = qd_stats.last_return = keep;
+		qd_stats.n = qd_stats.app = qd_stats.acquire = qd_stats.gpu = qd_stats.posed = 0;
 	}
 }
 
-// QUEST1_DISPLAY_TRACE=1: log the first display calls with their time (ms within the second)
+// QUEST1_DISPLAY_TRACE=N: log 120 display calls, after the first N-1, with their time (ms within the
+// second) and thread
 static void qd_trace(const char *what)
 {
 	static atomic_uint n;
-	if (!getenv("QUEST1_DISPLAY_TRACE") || atomic_fetch_add(&n, 1) >= 120)
+	const char *e = getenv("QUEST1_DISPLAY_TRACE");
+	if (!e)
+		return;
+	unsigned skip = atoi(e) > 1 ? (unsigned)atoi(e) - 1 : 0, i = atomic_fetch_add(&n, 1);
+	if (i < skip || i >= skip + 120)
 		return;
 	uint64_t t = now_ns();
-	LOG("trace %-12s %8.3f ms (vblank phase %6.3f ms)\n", what, (t % 1000000000ull) / 1e6,
-	    (t % (1000000000000ull / qd_mhz)) / 1e6);
+	LOG("trace %-12s %8.3f ms (vblank phase %6.3f ms) tid %ld\n", what, (t % 1000000000ull) / 1e6,
+	    (t % (1000000000000ull / qd_mhz)) / 1e6, (long)syscall(SYS_gettid));
 }
 static pthread_once_t qd_once = PTHREAD_ONCE_INIT;
 
@@ -444,7 +454,38 @@ struct qd_swapchain
 	bool app_owned[QD_MAX_IMAGES], driver_owned[QD_MAX_IMAGES];
 	uint64_t frame_tick[QD_MAX_IMAGES]; //!< qd_frame_tick when the image was acquired
 	uint64_t posed_frame;               //!< last frame whose QD_POSED came back
+	// present wait: the VkPresentIdKHR of each frame, and the last frame the driver latched
+	struct
+	{
+		uint64_t frame, id;
+	} present_ids[64];
+	uint64_t displayed_id, displayed_ns;
 	uint32_t next;
+
+	// direct scanout (quest1_scanout.c, QUEST1_DIRECT_SCANOUT=1): gralloc images committed on /dev/fb0
+	bool direct;
+	AHardwareBuffer *ahb[QD_MAX_IMAGES];
+	int buffer_fd[QD_MAX_IMAGES]; //!< owned by the AHardwareBuffer
+	uint32_t stride_px[QD_MAX_IMAGES];
+	bool ubwc[QD_MAX_IMAGES];
+	int release_fence[QD_MAX_IMAGES]; //!< of the commit that showed the image; -1 when none
+	// the right half (the eye vrcompositor draws at x = 1440) is drawn into a buffer of its own,
+	// see qs_CmdBeginRenderPass; the right half of images[] stays unused
+	AHardwareBuffer *ahb2[QD_MAX_IMAGES];
+	VkImage image2[QD_MAX_IMAGES];
+	VkDeviceMemory memory2[QD_MAX_IMAGES];
+	int buffer_fd2[QD_MAX_IMAGES];
+	uint32_t stride2_px[QD_MAX_IMAGES];
+	bool ubwc2[QD_MAX_IMAGES];
+	struct
+	{
+		int fd;
+		uint64_t frame;
+	} retire[8];                     //!< commits not on screen yet
+	uint32_t retire_head, retire_tail;
+	int wake_fd[2];
+	pthread_t fence_thread;
+	bool fence_thread_running;
 	uint64_t frame;
 	int sock;
 	pthread_t reader;
@@ -455,6 +496,8 @@ struct qd_swapchain
 	PFN_vkFreeMemory FreeMemory;
 	PFN_vkDestroyCommandPool DestroyCommandPool;
 };
+
+#include "quest1_scanout.c"
 
 #define QD_MAX_SWAPCHAINS 4
 static struct qd_swapchain *qd_swapchains[QD_MAX_SWAPCHAINS];
@@ -504,6 +547,16 @@ static void *qd_reader(void *arg)
 			pthread_mutex_unlock(&sc->mutex);
 			continue;
 		}
+		if (m.type == QD_DISPLAYED) {
+			pthread_mutex_lock(&sc->mutex);
+			// present ids only grow: the latched frame's id also covers the frames it replaced
+			if (sc->present_ids[m.frame % 64].frame == m.frame && sc->present_ids[m.frame % 64].id > sc->displayed_id)
+				sc->displayed_id = sc->present_ids[m.frame % 64].id;
+			sc->displayed_ns = m.vblank_ns;
+			pthread_cond_broadcast(&sc->cond);
+			pthread_mutex_unlock(&sc->mutex);
+			continue;
+		}
 		if (m.type != QD_RELEASE || m.index >= sc->count)
 			continue;
 		pthread_mutex_lock(&sc->mutex);
@@ -543,6 +596,14 @@ static void *qd_completer(void *arg)
 		sc->d->ResetFences(sc->device, 1, &sc->fences[idx]);
 		qd_stats_gpu(now_ns() - t_present);
 
+		if (sc->direct) {
+			pthread_mutex_lock(&sc->mutex);
+			sc->pend_head++;
+			pthread_mutex_unlock(&sc->mutex);
+			qs_commit(sc, idx, frame);
+			pthread_mutex_lock(&sc->mutex);
+			continue;
+		}
 		pthread_mutex_lock(&sc->mutex);
 		sc->pend_head++;
 		sc->app_owned[idx] = false;
@@ -689,7 +750,16 @@ static VKAPI_ATTR VkResult VKAPI_CALL qd_CreateSwapchainKHR(VkDevice device, con
 
 	int fds[QD_MAX_IMAGES];
 	VkResult r = VK_SUCCESS;
-	for (uint32_t i = 0; i < sc->count && r == VK_SUCCESS; i++) {
+	for (uint32_t i = 0; i < QD_MAX_IMAGES; i++)
+		fds[i] = sc->release_fence[i] = sc->buffer_fd[i] = -1;
+	sc->wake_fd[0] = sc->wake_fd[1] = -1;
+	sc->direct = qs_enabled() && ci->imageExtent.width == 2 * QS_PANEL_W && qs_load();
+	if (qs_enabled() && !sc->direct)
+		LOG("direct scanout: off (display %ux%u, needs %ux1600)\n", ci->imageExtent.width,
+		    ci->imageExtent.height, 2 * QS_PANEL_W);
+	if (sc->direct)
+		r = qs_create_images(sc, ci);
+	for (uint32_t i = 0; i < sc->count && r == VK_SUCCESS && !sc->direct; i++) {
 		VkImageCreateInfo c = *ici;
 		c.pNext = &emi;
 		if ((r = CreateImage(device, &c, NULL, &sc->images[i])) != VK_SUCCESS)
@@ -742,7 +812,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL qd_CreateSwapchainKHR(VkDevice device, con
 			qd_record_barrier(sc, sc->to_app[i], sc->images[i], VK_IMAGE_LAYOUT_UNDEFINED,
 			                  VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
 			qd_record_barrier(sc, sc->to_driver[i], sc->images[i], VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-			                  VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+			                  sc->direct ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 		}
 		VkFenceCreateInfo fci = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
 		r = d->CreateFence(device, &fci, NULL, &sc->fence);
@@ -756,18 +826,22 @@ static VKAPI_ATTR VkResult VKAPI_CALL qd_CreateSwapchainKHR(VkDevice device, con
 	}
 
 	sc->sock = qd_connect();
-	if (sc->sock >= 0 && !qd_send_swapchain(sc, fds)) {
+	// direct scanout: the driver only publishes poses, it never sees the images
+	if (sc->sock >= 0 && !sc->direct && !qd_send_swapchain(sc, fds)) {
 		LOG("sending the swapchain to the display receiver failed: %s\n", strerror(errno));
 		close(sc->sock);
 		sc->sock = -1;
 	}
 	for (uint32_t i = 0; i < sc->count; i++)
-		close(fds[i]);
+		if (fds[i] >= 0)
+			close(fds[i]);
 	if (sc->sock >= 0) {
 		sc->reader_running = pthread_create(&sc->reader, NULL, qd_reader, sc) == 0;
 	}
 	const char *sync = getenv("QUEST1_DISPLAY_SYNC");
-	sc->sync_present = sync && atoi(sync) != 0;
+	sc->sync_present = sync && atoi(sync) != 0 && !sc->direct;
+	if (sc->direct)
+		qs_start(sc);
 	if (!sc->sync_present)
 		sc->completer_running = pthread_create(&sc->completer, NULL, qd_completer, sc) == 0;
 	sc->sync_present = !sc->completer_running;
@@ -798,6 +872,13 @@ static void qd_destroy(struct qd_swapchain *sc)
 		pthread_mutex_unlock(&sc->mutex);
 		pthread_join(sc->completer, NULL);
 	}
+	if (sc->fence_thread_running) {
+		pthread_mutex_lock(&sc->mutex);
+		sc->stopping = true;
+		pthread_mutex_unlock(&sc->mutex);
+		qs_wake(sc);
+		pthread_join(sc->fence_thread, NULL);
+	}
 	for (uint32_t i = 0; i < QD_MAX_IMAGES; i++)
 		if (sc->fences[i])
 			sc->d->DestroyFence(sc->device, sc->fences[i], NULL);
@@ -810,6 +891,15 @@ static void qd_destroy(struct qd_swapchain *sc)
 			sc->DestroyImage(sc->device, sc->images[i], NULL);
 		if (sc->memory[i])
 			sc->FreeMemory(sc->device, sc->memory[i], NULL);
+	}
+	if (sc->direct) {
+		for (uint32_t i = 0; i < sc->count; i++) {
+			if (sc->image2[i])
+				sc->DestroyImage(sc->device, sc->image2[i], NULL);
+			if (sc->memory2[i])
+				sc->FreeMemory(sc->device, sc->memory2[i], NULL);
+		}
+		qs_destroy(sc);
 	}
 	free(sc);
 }
@@ -923,6 +1013,24 @@ static VKAPI_ATTR VkResult VKAPI_CALL qd_AcquireNextImage2KHR(VkDevice device, c
 	return qd_acquire(sc, info->timeout, info->semaphore, info->fence, index);
 }
 
+//! VkPresentIdKHR of swapchain s in this present, 0 without one
+static uint64_t qd_present_id(const VkPresentInfoKHR *pi, uint32_t s)
+{
+	for (const VkBaseInStructure *b = pi->pNext; b; b = b->pNext)
+		if (b->sType == VK_STRUCTURE_TYPE_PRESENT_ID_KHR) {
+			const VkPresentIdKHR *p = (const VkPresentIdKHR *)b;
+			return p->pPresentIds && s < p->swapchainCount ? p->pPresentIds[s] : 0;
+		}
+	return 0;
+}
+
+//! Call with sc->mutex held.
+static void qd_record_present_id(struct qd_swapchain *sc, uint64_t frame, uint64_t id)
+{
+	sc->present_ids[frame % 64].frame = frame;
+	sc->present_ids[frame % 64].id = id;
+}
+
 static VKAPI_ATTR VkResult VKAPI_CALL qd_QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *pi)
 {
 	qd_trace("present");
@@ -960,6 +1068,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL qd_QueuePresentKHR(VkQueue queue, const Vk
 				r = QueueSubmit(queue, 1, &si, sc->fences[idx]);
 				pthread_mutex_lock(&sc->mutex);
 				uint64_t frame = ++sc->frame;
+				qd_record_present_id(sc, frame, qd_present_id(pi, s));
 				if (r == VK_SUCCESS && sc->sock >= 0) {
 					struct qd_msg m = {QD_POSE};
 					m.index = idx;
@@ -1003,6 +1112,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL qd_QueuePresentKHR(VkQueue queue, const Vk
 			t_gpu = now_ns();
 			pthread_mutex_lock(&sc->mutex);
 			sc->app_owned[idx] = false;
+			qd_record_present_id(sc, sc->frame + 1, qd_present_id(pi, s));
 			if (sc->sock >= 0) {
 				struct qd_msg m = {QD_PRESENT};
 				m.index = idx;
@@ -1125,7 +1235,33 @@ static VKAPI_ATTR VkResult VKAPI_CALL qd_WaitForPresentKHR(VkDevice device, VkSw
                                                           uint64_t timeout)
 {
 	qd_trace("waitpresent");
-	return VK_SUCCESS;
+	// vrcompositor times its frames on these returns: they must come when the frame is latched for
+	// display (the driver's QD_DISPLAYED), at the real display's phase, not at once
+	struct qd_swapchain *sc = qd_swapchain_of(swapchain);
+	if (!sc || getenv("QUEST1_PRESENT_WAIT_NOW"))
+		return VK_SUCCESS;
+	struct timespec deadline;
+	clock_gettime(CLOCK_REALTIME, &deadline);
+	if (timeout != UINT64_MAX) {
+		uint64_t ns = deadline.tv_nsec + timeout % 1000000000ull;
+		deadline.tv_sec += timeout / 1000000000ull + ns / 1000000000ull;
+		deadline.tv_nsec = ns % 1000000000ull;
+	} else {
+		deadline.tv_sec += 1; // the driver may never latch it (receiver gone, session idle)
+	}
+	uint64_t t0 = now_ns();
+	VkResult r = VK_SUCCESS;
+	pthread_mutex_lock(&sc->mutex);
+	while (sc->displayed_id < id && sc->sock >= 0 && !sc->stopping) {
+		if (pthread_cond_timedwait(&sc->cond, &sc->mutex, &deadline) == ETIMEDOUT) {
+			r = timeout == UINT64_MAX ? VK_SUCCESS : VK_TIMEOUT;
+			break;
+		}
+	}
+	pthread_mutex_unlock(&sc->mutex);
+	qd_stats.present_wait += now_ns() - t0;
+	qd_stats.present_waits++;
+	return r;
 }
 
 // --- dispatch ----------------------------------------------------------------------------------------------
@@ -1175,5 +1311,7 @@ static PFN_vkVoidFunction qd_proc(const char *name)
 	S("vkGetDrmDisplayEXT", qd_unsupported)
 	S("vkRegisterDeviceEventEXT", qd_unsupported)
 #undef S
+	if (qs_enabled())
+		return qs_trace_proc(name);
 	return NULL;
 }

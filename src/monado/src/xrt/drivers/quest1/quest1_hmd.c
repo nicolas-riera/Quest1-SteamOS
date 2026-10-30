@@ -8,6 +8,11 @@
  * with libhybris (the process needs LD_PRELOAD=libbionictls.so). Records come
  * from a 32-entry ring at 1 kHz; layouts are in docs/syncboss-imu.md.
  *
+ * QUEST1_TRACKING=meta (or "meta" in /etc/quest1-tracking): 6DoF head pose from Meta's own
+ * tracking stack instead (trackingservice + sensors HAL, docs/tracking-6dof.md), read from the
+ * shared memory that q1trackd publishes (quest1_track_shm.h). In that mode the driver does not
+ * touch SyncBoss at all: Meta's sensors HAL owns it. No controllers yet in that mode.
+ *
  * @ingroup drv_quest1
  */
 
@@ -28,9 +33,13 @@
 #include "util/u_time.h"
 #include "util/u_var.h"
 
+#include "quest1_track_shm.h"
+
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <unistd.h>
 
 extern void *
@@ -43,6 +52,10 @@ DEBUG_GET_ONCE_LOG_OPTION(quest1_log, "QUEST1_LOG", U_LOGGING_INFO)
 // Calibrated on the device 2026-10-05: up = -x, look-down = +y, turn-left = -x, tilt-left = -z (IMU frame).
 DEBUG_GET_ONCE_OPTION(quest1_imu_axes, "QUEST1_IMU_AXES", "-y,-x,-z")
 DEBUG_GET_ONCE_BOOL_OPTION(quest1_controllers, "QUEST1_CONTROLLERS", true)
+// "imu" (SyncBoss IMU, 3DoF) or "meta" (Meta's tracking through q1trackd, 6DoF)
+DEBUG_GET_ONCE_OPTION(quest1_tracking, "QUEST1_TRACKING", NULL)
+// meta mode: use the angular/linear velocities q1trackd reports (prediction to display time)
+DEBUG_GET_ONCE_BOOL_OPTION(quest1_meta_velocity, "QUEST1_META_VELOCITY", true)
 
 #define Q1_TRACE(h, ...) U_LOG_XDEV_IFL_T(&h->base, h->log_level, __VA_ARGS__)
 #define Q1_DEBUG(h, ...) U_LOG_XDEV_IFL_D(&h->base, h->log_level, __VA_ARGS__)
@@ -201,6 +214,19 @@ struct quest1_hmd
 	struct m_relation_history *history;
 	enum u_logging_level log_level;
 
+	//! QUEST1_TRACKING=meta: poses from q1trackd's shared memory, no SyncBoss.
+	bool meta;
+	struct
+	{
+		struct os_thread_helper oth;
+		const struct q1track_shm *shm; //!< NULL until q1trackd publishes
+		uint64_t updates;              //!< Last update count read
+		int64_t last_ts;               //!< Last timestamp pushed to the history
+		uint64_t pushed, tracked;      //!< Statistics since the last log
+		int64_t last_log_ns;
+		bool use_velocity;
+	} mt;
+
 	//! Touch controllers: [0] left, [1] right. NULL when disabled.
 	struct quest1_controller *ctrl[2];
 	struct os_thread_helper input_thread;
@@ -358,6 +384,10 @@ handle_controller_input(struct quest1_hmd *h, const struct sb_ctrl_input *e)
 	s.stick_x = e->stick_x;
 	s.stick_y = e->stick_y;
 	quest1_controller_push_state(h->ctrl[i], os_monotonic_get_ns(), &s);
+	// 100 until the controller sent its first battery chunk; the enumeration has the real value
+	if (e->battery_percent < 100) {
+		quest1_controller_set_battery(h->ctrl[i], e->battery_percent / 100.0f);
+	}
 }
 
 //! Keep haptic pulses alive: the controller expects the amplitude re-sent every <= 50 ms.
@@ -425,6 +455,10 @@ input_thread(void *ptr)
 					Q1_INFO(h, "%s controller connected: fw %s (expects %s), battery %.0f%%",
 					        info[i].subtype == 1 ? "left" : "right", info[i].fw_version,
 					        info[i].fw_expected, info[i].battery_percent);
+					if (h->ctrl[info[i].subtype - 1] != NULL && info[i].battery_percent > 0) {
+						quest1_controller_set_battery(h->ctrl[info[i].subtype - 1],
+						                              (float)(info[i].battery_percent / 100.0));
+					}
 				}
 			}
 			os_mutex_lock(&h->ctrl_mutex);
@@ -485,6 +519,165 @@ imu_thread(void *ptr)
 	return NULL;
 }
 
+/*
+ *
+ * Meta's tracking (QUEST1_TRACKING=meta): q1trackd's shared memory.
+ *
+ */
+
+static void
+meta_map(struct quest1_hmd *h)
+{
+	int fd = open(Q1TRACK_SHM_PATH, O_RDONLY | O_CLOEXEC);
+	if (fd < 0) {
+		return;
+	}
+	void *m = mmap(NULL, sizeof(struct q1track_shm), PROT_READ, MAP_SHARED, fd, 0);
+	close(fd);
+	if (m == MAP_FAILED) {
+		return;
+	}
+	const struct q1track_shm *shm = m;
+	if (shm->magic != Q1TRACK_MAGIC || shm->version != Q1TRACK_VERSION) {
+		Q1_ERROR(h, "%s: wrong magic/version", Q1TRACK_SHM_PATH);
+		munmap(m, sizeof(struct q1track_shm));
+		return;
+	}
+	h->mt.shm = shm;
+	h->mt.updates = 0;
+	Q1_INFO(h, "Meta tracking: reading q1trackd (pid %u)", shm->writer_pid);
+}
+
+//! Seqlock read of the head pose; false while the writer is busy or nothing changed.
+static bool
+meta_read(struct quest1_hmd *h, struct q1track_pose *out, int64_t *out_update_ns)
+{
+	const struct q1track_shm *m = h->mt.shm;
+	for (int tries = 0; tries < 4; tries++) {
+		uint32_t s0 = __atomic_load_n(&m->seq, __ATOMIC_ACQUIRE);
+		if (s0 & 1) {
+			continue;
+		}
+		uint64_t updates = m->updates;
+		struct q1track_pose p = m->head;
+		int64_t update_ns = m->update_ns;
+		__atomic_thread_fence(__ATOMIC_ACQUIRE);
+		if (__atomic_load_n(&m->seq, __ATOMIC_RELAXED) != s0) {
+			continue;
+		}
+		if (updates == h->mt.updates) {
+			return false;
+		}
+		h->mt.updates = updates;
+		*out = p;
+		*out_update_ns = update_ns;
+		return true;
+	}
+	return false;
+}
+
+static void
+meta_push(struct quest1_hmd *h, const struct q1track_pose *p)
+{
+	int64_t ts = p->predicted_ns != 0 ? p->predicted_ns : p->sample_ns;
+	if (!p->valid || ts <= h->mt.last_ts) {
+		return;
+	}
+	struct xrt_space_relation rel = XRT_SPACE_RELATION_ZERO;
+	rel.pose.orientation = (struct xrt_quat){p->orientation[0], p->orientation[1], p->orientation[2],
+	                                         p->orientation[3]};
+	rel.pose.position = (struct xrt_vec3){p->position[0], p->position[1], p->position[2]};
+	math_quat_normalize(&rel.pose.orientation);
+	int flags = 0;
+	if (p->status & Q1TRACK_ORI_VALID) {
+		flags |= XRT_SPACE_RELATION_ORIENTATION_VALID_BIT;
+	}
+	if (p->status & Q1TRACK_ORI_TRACKED) {
+		flags |= XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT;
+	}
+	if (p->status & Q1TRACK_POS_VALID) {
+		flags |= XRT_SPACE_RELATION_POSITION_VALID_BIT;
+	}
+	if (p->status & Q1TRACK_POS_TRACKED) {
+		flags |= XRT_SPACE_RELATION_POSITION_TRACKED_BIT;
+	}
+	if (h->mt.use_velocity) {
+		rel.angular_velocity =
+		    (struct xrt_vec3){p->angular_velocity[0], p->angular_velocity[1], p->angular_velocity[2]};
+		rel.linear_velocity =
+		    (struct xrt_vec3){p->linear_velocity[0], p->linear_velocity[1], p->linear_velocity[2]};
+		if (flags & XRT_SPACE_RELATION_ORIENTATION_VALID_BIT) {
+			flags |= XRT_SPACE_RELATION_ANGULAR_VELOCITY_VALID_BIT;
+		}
+		if (flags & XRT_SPACE_RELATION_POSITION_VALID_BIT) {
+			flags |= XRT_SPACE_RELATION_LINEAR_VELOCITY_VALID_BIT;
+		}
+	}
+	rel.relation_flags = (enum xrt_space_relation_flags)flags;
+	m_relation_history_push(h->history, &rel, ts);
+	h->mt.last_ts = ts;
+	h->mt.pushed++;
+	h->mt.tracked += (p->status & Q1TRACK_POS_TRACKED) != 0;
+}
+
+static void *
+meta_thread(void *ptr)
+{
+	struct quest1_hmd *h = ptr;
+	os_thread_helper_name(&h->mt.oth, "Quest1 Meta trk");
+
+	int64_t next_map = 0;
+	os_thread_helper_lock(&h->mt.oth);
+	while (os_thread_helper_is_running_locked(&h->mt.oth)) {
+		os_thread_helper_unlock(&h->mt.oth);
+
+		int64_t now = os_monotonic_get_ns();
+		if (h->mt.shm == NULL) {
+			if (now >= next_map) {
+				meta_map(h);
+				next_map = now + U_TIME_1S_IN_NS;
+			}
+		} else {
+			struct q1track_pose p;
+			int64_t update_ns;
+			if (meta_read(h, &p, &update_ns)) {
+				meta_push(h, &p);
+			}
+		}
+		if (now - h->mt.last_log_ns > 10 * (int64_t)U_TIME_1S_IN_NS) {
+			Q1_INFO(h, "Meta tracking: %llu poses in 10 s, %llu with position tracked%s",
+			        (unsigned long long)h->mt.pushed, (unsigned long long)h->mt.tracked,
+			        h->mt.shm == NULL ? " (q1trackd not running)" : "");
+			h->mt.pushed = h->mt.tracked = 0;
+			h->mt.last_log_ns = now;
+		}
+		os_nanosleep(U_TIME_1MS_IN_NS);
+
+		os_thread_helper_lock(&h->mt.oth);
+	}
+	os_thread_helper_unlock(&h->mt.oth);
+	return NULL;
+}
+
+//! QUEST1_TRACKING, else the first word of /etc/quest1-tracking, else "imu".
+static bool
+want_meta_tracking(void)
+{
+	const char *env = debug_get_option_quest1_tracking();
+	char buf[16] = {0};
+	if (env == NULL) {
+		FILE *f = fopen("/etc/quest1-tracking", "r");
+		if (f != NULL) {
+			if (fscanf(f, "%15s", buf) != 1) {
+				buf[0] = 0;
+			}
+			fclose(f);
+		}
+		env = buf;
+	}
+	return strcmp(env, "meta") == 0;
+}
+
 static xrt_result_t
 hmd_get_tracked_pose(struct xrt_device *xdev,
                      enum xrt_input_name name,
@@ -527,6 +720,10 @@ hmd_destroy(struct xrt_device *xdev)
 		os_nanosleep(300 * U_TIME_1MS_IN_NS); // the stop goes out while the IMU thread still pumps
 	}
 	os_thread_helper_destroy(&h->oth);
+	os_thread_helper_destroy(&h->mt.oth);
+	if (h->mt.shm != NULL) {
+		munmap((void *)h->mt.shm, sizeof(struct q1track_shm));
+	}
 	if (h->sb_handle != NULL) {
 		if (h->sb.imu_disable != NULL) {
 			h->sb.imu_disable(h->sb_handle);
@@ -691,8 +888,27 @@ quest1_hmd_create(void)
 	m_relation_history_create(&h->history);
 	os_thread_helper_init(&h->oth);
 	os_thread_helper_init(&h->input_thread);
+	os_thread_helper_init(&h->mt.oth);
 	os_mutex_init(&h->ctrl_mutex);
 	setup_display(h);
+
+	if (want_meta_tracking()) {
+		// Meta's sensors HAL owns SyncBoss: no libsyncboss here (proximity still comes from
+		// /dev/syncboss_powerstate0 in the compositor target, a multi-reader node).
+		h->meta = true;
+		h->mt.use_velocity = debug_get_bool_option_quest1_meta_velocity();
+		h->base.supported.position_tracking = true;
+		snprintf(h->base.tracking_origin->name, XRT_TRACKING_NAME_LEN, "Quest 1 (Meta tracking)");
+		if (os_thread_helper_start(&h->mt.oth, meta_thread, h) != 0) {
+			Q1_ERROR(h, "cannot start the Meta tracking thread");
+			goto err;
+		}
+		u_var_add_root(h, "Quest 1 HMD", true);
+		u_var_add_log_level(h, &h->log_level, "log_level");
+		Q1_INFO(h, "Meta tracking mode: head pose from q1trackd (%s), no SyncBoss, no controllers",
+		        Q1TRACK_SHM_PATH);
+		return &h->base;
+	}
 
 	const char *axes = debug_get_option_quest1_imu_axes();
 	if (!parse_axes(h, axes)) {

@@ -14,6 +14,97 @@ Scratch scripts are in `%TEMP%\claude\...\scratchpad\t6\`; symbol dumps are in `
 
 ---
 
+## Update 2026-10-11: Path M bring-up on native Holo, up to the SyncBoss handover
+
+Live on the headset, with Monado, SteamVR and Steam left running. Nothing here opened
+`/dev/syncboss*`.
+
+**What runs (verified):** `device/holo-android-tracking.sh` (installed as
+`/usr/local/sbin/holo-android-tracking`) writes `android-*.service` units, none enabled at boot.
+`holo-android-tracking base` starts all the parts that do not need SyncBoss (about 18 MB RSS in
+total):
+
+| Unit | What | Result |
+|---|---|---|
+| `android-tracking-setup` | tmpfs copy of `/persist/calibration`, `/data/{misc/tracking,oculus/*,vendor/misc/sensors}`, `/vision`, `/dev/ashmem` 0666, private property area `/run/q1track/__properties__`, dummy `powerhint.json` | OK |
+| `android-ovrstub` | `src/ovrstub` (raw `/dev/binder` C, no libbinder): 16 stub services | `service list` shows all 16 with the right descriptors |
+| `android-ashmemd` | `IAshmemDeviceService` | registered |
+| `android-settingsserver` | `PreferencesService` | registered (needed the private property area, see below) |
+| `android-vrfocus` | `vrfocus` (root) | registered ("Connection success!") once `OculusWindowManager` codes 1/3/4 return true |
+| `android-iad` | `IIad/default` (HIDL) | registered |
+| `android-telemetry-hal` | `IDeviceTelemetry/default` (HIDL, local, no network) | registered |
+| `android-power-hal` | `IPower/default` + `IClocks/default` | registered, cannot write any frequency node |
+
+The SyncBoss part (`android-sensors-hal`, plus `android-cameramuxmode`, `android-calibration` and
+`android-trackingservice`, which `Requires=`/`PartOf=` it) has a guard: the HAL's
+`ExecStartPre` refuses to start while `monado.service` is active, and it has `Restart=no`.
+Verified: with Monado running, `systemctl start android-trackingservice` fails on that dependency
+and nothing opens SyncBoss.
+
+**trackingservice startup sequence observed** (each step was unblocked in turn):
+1. HIDL `vendor.oculus.hardware.telemetry@1.0::IDeviceTelemetry/default` (framework manifest,
+   waits forever). Fixed with `android-telemetry-hal`.
+2. Binder `cameramuxmodeservice`, retried forever. The real `cameramuxmodeservice` blocks in
+   HIDL `ICameraProvider/default`, which is served by the sensors HAL.
+3. As a probe, a stand-in `cameramuxmodeservice` was run (`ovrstub --only cameramuxmodeservice`,
+   kept optional via `--extra`). trackingservice then connected (`registerClient`, code 1),
+   vrfocusserver granted `READ_FOCUS_STATE` through the `permission` stub, and trackingservice
+   **itself** blocked in `getService(ICameraProvider/default)`.
+   **=> The next hard dependency is the sensors HAL, so SyncBoss.** `vrpowermanager`,
+   `settingsproxy`, `OVRRemoteService` and the other stubs have not been called yet.
+4. Client side: `holo-android-tracking cli getheadtrackingdata json` (root, private property
+   area) loads libossdk and prints `OsSdk: failed connecting to trackingservice`, as expected
+   while `tracking` is not registered.
+
+**Findings [V]:**
+* **VrPowerManager states:** `PowerState` = {0 SLEEP, 1 STANDBY, 2 RUNNING} (name table at
+  `.data.rel.ro` 0x299a0 in libsensorclientutils) and `StatusCallback::onStateChange(s)` maps
+  `PowerState = 3 - s`. So **`onStateChange(1)` = RUNNING**, 2 = STANDBY and 3 = SLEEP. This
+  corrects §1.2, which guessed 3. `BpVrPowerManagerClient::onStateChange` is oneway (flags 1).
+  ovrstub sends 1 when a client registers. SIGUSR1/SIGHUP/SIGUSR2 rebroadcast
+  RUNNING/STANDBY/SLEEP.
+* The Android 10 interface token is `int32 strict-mode policy`, `int32 work-source uid (-1)`,
+  then `String16` descriptor. servicemanager accepted it (addService works).
+* **Linker namespaces:** the global property area has no `ro.vndk.version`, so the bionic linker
+  falls back to the namespace-less default config. That is what gralloc, Vulkan and libhybris use
+  today, but it cannot reach the runtime APEX: settingsserver failed with `libandroidicu.so not
+  found`. The tracking units therefore get their own property area (bound over
+  `/dev/__properties__` in their mount namespace). It adds `vendor/default.prop`
+  (`ro.vndk.version=29`) and `product/build.prop`, which turns on `ld.config.29.txt`. The global
+  area is unchanged apart from `persist.ovr.skipctrlfwupdate=1`, and it is now written to a new
+  file and renamed, never rewritten in place.
+* **Power HAL (incident):** libperfmgr does *not* wait for `vendor.powerhal.init` before
+  applying `ResetOnInit`. The first unmasked start reset `/sys/class/kgsl/kgsl-3d0/devfreq/min_freq`
+  from 257 MHz to 180 MHz (all the other nodes were already at their default values). The unit
+  now reads a generated `powerhint.json` with one dummy file node, and all the real nodes are
+  `InaccessiblePaths`. Re-verified: no node changed and there are no write retries. **The GPU
+  min_freq was still 180000000 at the end of this session** (writing it back was refused to this
+  agent): restore it with `echo 257000000 > /sys/class/kgsl/kgsl-3d0/devfreq/min_freq` (or reboot).
+* **Display TE:** `te_timestamp` stays frozen while Monado has the panels blanked (headset not
+  worn: it read 5490.149 s at uptime 5647 s). The sensors HAL needs TE to timestamp the IMU, so a
+  Path M test needs the panels on (headset worn, or `QUEST1_IGNORE_PROX=1`, or fb0 unblanked
+  black while Monado is stopped).
+* **SyncBoss firmware safety:** the sensors HAL updates *controller* firmware only through
+  `syncboss_input_update_firmware`, from `/vendor/firmware/{lcon,jedi,ruby}_archive.bin`. Only
+  `lcon_archive.bin` and `lcon-downgrade.bin` exist; both are `InaccessiblePaths` for the HAL and
+  trackingservice, and `persist.ovr.skipctrlfwupdate=1` is set. The libsyncboss MCU firmware
+  check only compares versions; it does not flash anything.
+* trackingservice does not open `/dev/syncboss*` or the cameras itself; only the sensors HAL
+  does. `/dev/uinput` stays root 0600, so trackingservice's virtual keyboard cannot appear on the
+  Holo desktop.
+
+**Next step (needs SyncBoss):** with `monado.service` stopped (through the shared restart lock)
+and the panels producing TE, run `holo-android-tracking trial`. It starts the sensors HAL and
+trackingservice for `TRIAL_SECONDS` (60), polls `getheadtrackingdata` once per second, saves `ls`,
+the controllers, `service list`, TE and the journal to `/root/q1track-trial-*`, stops the SyncBoss
+units and checks that no process still holds `/dev/syncboss*`. After that, restart Monado.
+Long-term sharing: the sensors HAL owns SyncBoss, and Monado's quest1 driver takes the head pose,
+controllers and haptics from libossdk (a bionic root helper exporting poses over shared memory,
+or `android_dlopen` in the driver). Monado would keep reading only `/dev/syncboss_powerstate0`
+(a multi-reader miscfifo) and stop calling `syncboss_init`. Adding
+`Conflicts=android-sensors-hal.service` to `monado.service` would make the single-owner rule
+explicit.
+
 ## Update 2026-10-06 evening: Path O step 1 works on the device
 
 `src/qcam/qcam.c` grabs frames from **all four tracking cameras natively** (Holo, no Android, no
@@ -118,7 +209,7 @@ whose reply is `writeNoException()` followed by zeros. A zero reply is already r
 |---|---|---|---|---|
 | `permission` | `android.os.IPermissionController` (hand-written, libbinder) | `getPackagesForUid` (code 3), `checkPermission` (1) | yes for 3 (empty list → trackingservice falls back to `/proc/<pid>/cmdline` [V]) | `checkPermission` → 1 (only for anchor/eye APIs) |
 | `appops` | `com.android.internal.app.IAppOpsService` | `startOperation`/`finishOperation` | yes (`MODE_ALLOWED` = 0; the result is ignored anyway [V]) | — |
-| **`vrpowermanager`** | `oculus.internal.power.IVrPowerManager` | `registerClient(IVrPowerManagerClient)` = **code 1**, `unregisterClient` = 2, `notifyDevice{AlmostIdle,Idle,NotIdle}` = 3/4/5, `acquire/releaseMountWakeLock(IBinder)` = 6/7 [V, `BpVrPowerManager`] | no | On `registerClient`, call the client binder with **code 1 `onStateChange(int)`** (descriptor `oculus.internal.power.IVrPowerManagerClient`) and the value for RUNNING. libsensorclientutils maps `PowerState = 3 - state` for states 1..3 [V], so RUNNING is most likely **3** [I]. To simulate unmount, send the sleep value. |
+| **`vrpowermanager`** | `oculus.internal.power.IVrPowerManager` | `registerClient(IVrPowerManagerClient)` = **code 1**, `unregisterClient` = 2, `notifyDevice{AlmostIdle,Idle,NotIdle}` = 3/4/5, `acquire/releaseMountWakeLock(IBinder)` = 6/7 [V, `BpVrPowerManager`] | no | On `registerClient`, call the client binder with **code 1 `onStateChange(int)`** (descriptor `oculus.internal.power.IVrPowerManagerClient`) and the value for RUNNING. libsensorclientutils maps `PowerState = 3 - state` for states 1..3, with PowerState {0 SLEEP, 1 STANDBY, 2 RUNNING} [V], so RUNNING is **1** [V] (corrected 2026-10-11; first guessed 3). To simulate unmount, send 3 (SLEEP). |
 | `settingsproxy` | `oculus.internal.ISettingsProxy` | `getCurrentUserId` → 0, `registerUserSwitchListener` | yes | — |
 | `OVRRemoteService` | `oculus.internal.remote.IRemoteService` | status/powerstate callbacks, `setOtaFailed` | yes [I] | — |
 | `power` | `android.os.IPowerManager` | `acquireWakeLock`/`releaseWakeLock` | yes | — |

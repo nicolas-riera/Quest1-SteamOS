@@ -20,3 +20,4 @@ src/qcam/qcam
 .vscode/
 .claude/
 __pycache__/
+src/ovrstub/ovrstub

@@ -40,10 +40,30 @@
 #define EXPORT __attribute__((visibility("default")))
 
 static void logf_(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+// the log also goes to /tmp/quest1-compat-<program>.log: when Steam starts SteamVR, stderr is a socket
+static FILE *log_file;
+static void log_open(void)
+{
+	char path[128];
+	snprintf(path, sizeof(path), "/tmp/quest1-compat-%s.log", program_invocation_short_name);
+	log_file = fopen(path, "a");
+	if (log_file)
+		setvbuf(log_file, NULL, _IOLBF, 0);
+}
+
 static void logf_(const char *fmt, ...)
 {
+	static pthread_once_t once = PTHREAD_ONCE_INIT;
+	pthread_once(&once, log_open);
+	FILE *file = log_file;
 	va_list ap;
 	va_start(ap, fmt);
+	if (file) {
+		va_list ap2;
+		va_copy(ap2, ap);
+		vfprintf(file, fmt, ap2);
+		va_end(ap2);
+	}
 	fprintf(stderr, "[quest1_compat] ");
 	vfprintf(stderr, fmt, ap);
 	va_end(ap);
@@ -119,6 +139,7 @@ struct instance
 	PFN_vkEnumerateDeviceExtensionProperties EnumerateDeviceExtensionProperties;
 	PFN_vkGetPhysicalDeviceFeatures2 GetPhysicalDeviceFeatures2;
 	PFN_vkGetPhysicalDeviceProperties2 GetPhysicalDeviceProperties2;
+	PFN_vkGetPhysicalDeviceProperties GetPhysicalDeviceProperties;
 	PFN_vkGetPhysicalDeviceExternalSemaphoreProperties GetPhysicalDeviceExternalSemaphoreProperties;
 };
 
@@ -895,10 +916,29 @@ static VKAPI_ATTR void VKAPI_CALL GetPhysicalDeviceFeatures2(VkPhysicalDevice pd
 	fill_fake_features(f);
 }
 
+//! QUEST1_FAKE_CPU_DEVICE=1: report the GPU as a CPU device. Mesa runs zink on X servers without
+//! DRI3 (Xvfb) only through drisw, and there it only picks CPU devices (lavapipe); the rendering
+//! still happens on the Adreno.
+static void fake_device_type(VkPhysicalDeviceProperties *p)
+{
+	static int fake = -1;
+	if (fake < 0)
+		fake = getenv("QUEST1_FAKE_CPU_DEVICE") && atoi(getenv("QUEST1_FAKE_CPU_DEVICE")) == 1;
+	if (fake)
+		p->deviceType = VK_PHYSICAL_DEVICE_TYPE_CPU;
+}
+
+static VKAPI_ATTR void VKAPI_CALL GetPhysicalDeviceProperties(VkPhysicalDevice pd, VkPhysicalDeviceProperties *p)
+{
+	instance_of(pd)->GetPhysicalDeviceProperties(pd, p);
+	fake_device_type(p);
+}
+
 static VKAPI_ATTR void VKAPI_CALL GetPhysicalDeviceProperties2(VkPhysicalDevice pd, VkPhysicalDeviceProperties2 *p)
 {
 	struct instance *in = instance_of(pd);
 	WITH_UNLINKED(p, in->GetPhysicalDeviceProperties2(pd, p));
+	fake_device_type(&p->properties);
 	for (VkBaseOutStructure *s = (VkBaseOutStructure *)p->pNext; s; s = s->pNext)
 		if (s->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_PROPERTIES)
 			((VkPhysicalDeviceTimelineSemaphoreProperties *)s)->maxTimelineSemaphoreValueDifference = UINT64_MAX;
@@ -1194,7 +1234,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateGraphicsPipelines(VkDevice device, V
 			log_stages("graphics pipeline", ci[i].pStages, ci[i].stageCount);
 	VkResult r = device_of(device)->CreateGraphicsPipelines(device, cache, n, ci, alloc, out);
 	if (getenv("QUEST1_COMPAT_SPIRV"))
-		LOG("  -> %d\n", r);
+		LOG("  -> %d, pipeline %p\n", r, n ? (void *)out[0] : NULL);
 	return r;
 }
 
@@ -1232,14 +1272,23 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice pd, const Vk
 	PFN_vkCreateDevice next_create = (PFN_vkCreateDevice)gipa(in->handle, "vkCreateDevice");
 
 	// remove the advertised-only extensions and their feature structures
-	const char **exts = calloc(ci->enabledExtensionCount + 1, sizeof(char *));
+	const char **exts = calloc(ci->enabledExtensionCount + 3, sizeof(char *));
 	uint32_t ne = 0;
+	bool have_ahb = false, have_foreign = false;
 	for (uint32_t i = 0; i < ci->enabledExtensionCount; i++) {
-		if (is_fake(ci->ppEnabledExtensionNames[i]))
-			LOG("emulating %s\n", ci->ppEnabledExtensionNames[i]);
+		const char *e = ci->ppEnabledExtensionNames[i];
+		have_ahb |= strcmp(e, VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME) == 0;
+		have_foreign |= strcmp(e, VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME) == 0;
+		if (is_fake(e))
+			LOG("emulating %s\n", e);
 		else
-			exts[ne++] = ci->ppEnabledExtensionNames[i];
+			exts[ne++] = e;
 	}
+	// direct scanout imports gralloc buffers (quest1_scanout.c)
+	if (qs_enabled() && !have_ahb)
+		exts[ne++] = VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME;
+	if (qs_enabled() && !have_foreign)
+		exts[ne++] = VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME;
 	VkDeviceCreateInfo copy = *ci;
 	copy.enabledExtensionCount = ne;
 	copy.ppEnabledExtensionNames = exts;
@@ -1422,6 +1471,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateInstance(const VkInstanceCreateInfo 
 	if (!in->GetPhysicalDeviceFeatures2)
 		in->GetPhysicalDeviceFeatures2 =
 		    (PFN_vkGetPhysicalDeviceFeatures2)gipa(*out, "vkGetPhysicalDeviceFeatures2KHR");
+	in->GetPhysicalDeviceProperties = (PFN_vkGetPhysicalDeviceProperties)gipa(*out, "vkGetPhysicalDeviceProperties");
 	in->GetPhysicalDeviceProperties2 =
 	    (PFN_vkGetPhysicalDeviceProperties2)gipa(*out, "vkGetPhysicalDeviceProperties2");
 	if (!in->GetPhysicalDeviceProperties2)
@@ -1485,6 +1535,7 @@ static PFN_vkVoidFunction instance_intercept(const char *name)
 	I("vkEnumerateDeviceExtensionProperties", EnumerateDeviceExtensionProperties)
 	I("vkGetPhysicalDeviceFeatures2", GetPhysicalDeviceFeatures2)
 	I("vkGetPhysicalDeviceFeatures2KHR", GetPhysicalDeviceFeatures2)
+	I("vkGetPhysicalDeviceProperties", GetPhysicalDeviceProperties)
 	I("vkGetPhysicalDeviceProperties2", GetPhysicalDeviceProperties2)
 	I("vkGetPhysicalDeviceProperties2KHR", GetPhysicalDeviceProperties2)
 	I("vkGetPhysicalDeviceExternalSemaphoreProperties", GetPhysicalDeviceExternalSemaphoreProperties)

@@ -65,6 +65,9 @@ cat > /usr/local/bin/steam-webhelper-gpu <<'EOF'
 # quest1_vkshim (QUEST1_VKSHIM_WSI), ANGLE's dlopen of its bundled libvulkan redirected to the shim.
 # ANGLE features for the Adreno 512.555 blob: its vertex-binding-stride dynamic state draws nothing
 # (supportsExtendedDynamicState off), flipped vkCmdBlitImage is wrong (disableFlippingBlitWithCommand).
+# Stencil-based drawing is broken on it too: Skia's stencil-then-cover filled SVG icons over their
+# bounding box (most Steam UI icons of 32 px and more showed as squares/blobs); Chromium's
+# avoid_stencil_buffers workaround makes Skia draw them from coverage masks instead.
 # GPU memory: Chromium's default budget made this process map ~1.5 GB of KGSL memory, which the
 # 3.8 GB shared CPU/GPU RAM cannot afford next to SteamVR (swap storms, SSH timeouts): capped.
 # Extra GPU process args: QUEST1_STEAM_GPU_ARGS. See docs/steam-gpu.md.
@@ -73,7 +76,7 @@ export LD_LIBRARY_PATH=$V${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 export LD_PRELOAD=/opt/hybris/lib/libbionictls.so:$V/libquest1_vkredirect.so${LD_PRELOAD:+:$LD_PRELOAD}
 export QUEST1_VKSHIM_WSI=1 QUEST1_VKSHIM_LAYER=none QUEST1_VK_REDIRECT=$V/libvulkan.so.1
 exec "$@" --use-angle=vulkan --disable-angle-features=supportsExtendedDynamicState \
-	--enable-angle-features=disableFlippingBlitWithCommand \
+	--enable-angle-features=disableFlippingBlitWithCommand --avoid_stencil_buffers \
 	--force-gpu-mem-available-mb=192 --force-gpu-mem-discardable-limit-mb=64 $QUEST1_STEAM_GPU_ARGS
 EOF
 chmod 755 /usr/local/bin/steam-webhelper-gpu

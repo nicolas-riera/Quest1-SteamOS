@@ -33,9 +33,15 @@ mountpoint -q $H || mount -t overlay overlay -o lowerdir=$H,upperdir=/run/hwov/u
 ln -sf vulkan.msm8998.so $H/vulkan.default.so
 ln -sf gralloc.msm8998.so $H/gralloc.default.so
 
-# bionic system property area (single "pre-split" file)
-python3 /usr/local/lib/holo/mkproparea.py /dev/__properties__ \
+# bionic system property area (single "pre-split" file). Written to a new file and renamed:
+# running bionic processes keep their mapping of the old inode (rewriting it in place could
+# SIGBUS them). persist.ovr.skipctrlfwupdate=1: Meta's tracking stack must never start a
+# controller firmware update (docs/tracking-6dof.md).
+python3 /usr/local/lib/holo/mkproparea.py /dev/__properties__.new \
 	-s ro.hardware=monterey -s ro.boot.hardware=monterey -s ro.board.platform=msm8998 \
 	-s hwservicemanager.ready=true -s service.sf.present_timestamp=0 \
 	-s ro.boot.slot_suffix=_a \
+	-s persist.ovr.skipctrlfwupdate=1 \
 	/android/system/build.prop /android/system/vendor/build.prop /android/system/etc/prop.default /android/default.prop
+chmod 0644 /dev/__properties__.new
+mv -f /dev/__properties__.new /dev/__properties__

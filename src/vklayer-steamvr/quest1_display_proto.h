@@ -15,6 +15,9 @@ enum qd_msg_type
 	//! next frame now, answered by QD_POSED. Its QD_PRESENT follows once rendered, with
 	//! QD_PRESENT_POSED in flags. Lets vrcompositor work on the next frame while the GPU renders.
 	QD_POSE = 5,
+	//! driver -> layer: frame `frame` (and every earlier one) is latched for display; vblank_ns is
+	//! the frame thread's wake-up that took it, the "vsync" vkWaitForPresentKHR reports
+	QD_DISPLAYED = 6,
 };
 
 //! QD_PRESENT flags: the pose was already handled by a QD_POSE for this frame

@@ -33,6 +33,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -59,6 +60,8 @@ android_dlsym(void *handle, const char *symbol);
 #define MDP_H 1600
 #define MDP_HALF (MDP_W / 2)
 #define MDP_PERIOD_NS (U_TIME_1S_IN_NS / 72)
+//! Exists while the panels are (going) off: an external scanout must not commit then.
+#define MDP_PANELS_OFF "/tmp/quest1-panels-off"
 //! Time the compositor gets between waking up and the vsync that shows its frame.
 #define MDP_RENDER_BUDGET_NS (15 * U_TIME_1MS_IN_NS)
 #define PRIV_FLAGS_UBWC_ALIGNED 0x08000000
@@ -120,6 +123,9 @@ struct mdp_target
 	bool has_init_vulkan;
 	bool unblanked; //!< Protected by vsync_thread's mutex.
 	bool worn;      //!< Proximity sensor covered. Protected by vsync_thread's mutex.
+
+	bool external;               //!< Another process scans out (external_scanout_active).
+	int64_t external_checked_ns; //!< When MDP_EXTERNAL_SCANOUT was last read.
 };
 
 static inline struct mdp_target *
@@ -190,6 +196,16 @@ set_panels_locked(struct mdp_target *t, bool on)
 		}
 		close(gov);
 	}
+	// An external scanout (MDP_EXTERNAL_SCANOUT) must not commit while the panels power down: a
+	// commit queued then never completes and wedges mdss (every later FBIOBLANK times out). So
+	// MDP_PANELS_OFF tells it to stop first, and gives its last commit time to complete.
+	if (!on) {
+		int flag = open(MDP_PANELS_OFF, O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
+		if (flag >= 0) {
+			close(flag);
+		}
+		os_nanosleep(60 * U_TIME_1MS_IN_NS);
+	}
 	// Off with HSYNC_SUSPEND: mdss powers the panels off as for POWERDOWN, but the fan driver
 	// (drivers/platform/oculus/vs1-board.c) only stops the fan on POWERDOWN or VSYNC_SUSPEND,
 	// so it keeps cooling the SoC, which may still be busy, while the headset is off the head.
@@ -197,12 +213,15 @@ set_panels_locked(struct mdp_target *t, bool on)
 		U_LOG_E("mdp: FBIOBLANK %s: %s", on ? "unblank" : "powerdown", strerror(errno));
 	}
 	if (on) {
+		unlink(MDP_PANELS_OFF);
+	}
+	if (on) {
 		unsigned int vsync_on = 1;
 		ioctl(t->fb_fd, MSMFB_OVERLAY_VSYNC_CTRL, &vsync_on);
 		set_brightness();
 	}
 	t->unblanked = on;
-	U_LOG_I("mdp: panels %s", on ? "on" : "off");
+	U_LOG_W("mdp: panels %s", on ? "on" : "off");
 }
 
 /*!
@@ -225,7 +244,7 @@ read_prox_locked(struct mdp_target *t)
 			}
 			bool worn = m.data == SYNCBOSS_PROX_EVENT_PROX_ON;
 			if (worn != t->worn) {
-				U_LOG_I("mdp: headset %s", worn ? "worn" : "removed");
+				U_LOG_W("mdp: headset %s", worn ? "worn" : "removed");
 			}
 			t->worn = worn;
 			if (!worn) {
@@ -477,10 +496,50 @@ target_init_post_vulkan(struct comp_target *ct, uint32_t preferred_width, uint32
 	return true;
 }
 
+/*!
+ * SteamVR's vrcompositor scans its own, already distorted frames out on the panels (the Quest 1
+ * Vulkan layer, QUEST1_DIRECT_SCANOUT) while this file names a live process. The compositor then
+ * renders and commits nothing; it only keeps the panels on while the headset is worn.
+ */
+#define MDP_EXTERNAL_SCANOUT "/tmp/quest1-scanout"
+
+static bool
+external_scanout_active(struct mdp_target *t)
+{
+	int64_t now = os_monotonic_get_ns();
+	if (now - t->external_checked_ns < 100 * U_TIME_1MS_IN_NS) {
+		return t->external;
+	}
+	t->external_checked_ns = now;
+	bool active = false;
+	FILE *f = fopen(MDP_EXTERNAL_SCANOUT, "r");
+	if (f != NULL) {
+		int pid = 0;
+		active = fscanf(f, "%d", &pid) == 1 && pid > 0 && (kill(pid, 0) == 0 || errno == EPERM);
+		fclose(f);
+	}
+	if (active != t->external) {
+		U_LOG_W("mdp: external scanout %s", active ? "started: compositing paused" : "stopped");
+	}
+	t->external = active;
+	return active;
+}
+
 static bool
 target_check_ready(struct comp_target *ct)
 {
-	return true;
+	struct mdp_target *t = mdpt(ct);
+	if (!external_scanout_active(t)) {
+		return true;
+	}
+	// No frame of ours: keep the panels and the GPU clock as if we were presenting.
+	os_thread_helper_lock(&t->vsync_thread);
+	if (t->worn) {
+		t->last_present_ns = os_monotonic_get_ns();
+		set_panels_locked(t, true);
+	}
+	os_thread_helper_unlock(&t->vsync_thread);
+	return false;
 }
 
 static bool

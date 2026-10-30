@@ -21,7 +21,7 @@ steam.service -> steam-q1 (QUEST1_STEAM_GPU=1, default)
         LD_PRELOAD  libbionictls (hybris TLS) + libquest1_vkredirect (dlopen("…/libvulkan.so.1") -> shim)
         env         QUEST1_VKSHIM_WSI=1 QUEST1_VKSHIM_LAYER=none
         args        --use-angle=vulkan --disable-angle-features=supportsExtendedDynamicState
-                    --enable-angle-features=disableFlippingBlitWithCommand
+                    --enable-angle-features=disableFlippingBlitWithCommand --avoid_stencil_buffers
       steamwebhelper --type=gpu-process: ANGLE Vulkan -> quest1_vkshim (X11 WSI) -> hybris libvulkan -> Adreno blob
 ```
 
@@ -66,6 +66,14 @@ Chromium needs more than the WSI); ANGLE-Vulkan with GL compositing is enough.
   stay away from the other dynamic states of this old driver.
 - `disableFlippingBlitWithCommand` **on**: `glBlitFramebuffer` from the window surface came out wrong
   (`vkCmdBlitImage` path); ANGLE enables this for Qualcomm on Android only.
+- Chromium workaround `--avoid_stencil_buffers` (GPU process switch named after the workaround):
+  stencil-based drawing does not work on this stack. Skia's stencil-then-cover path renderer, used for
+  paths too big for its small-path atlas, filled SVG icons over their whole bounding box: most Steam
+  UI icons of ~32 px and more came out as solid squares/blobs (very visible in the VR dashboard, whose
+  panels are rendered at a high scale: Home/Downloads/Power menu icons, search, Stream button...).
+  With the workaround Skia draws such paths (and complex clips) from coverage masks. Reproduced and
+  verified with cefsimple on a page of Steam's own 36x36 icons at 16/24/32/48 px. The root cause in
+  ANGLE/the blob (stencil attachment or stencil state) was not investigated further.
 
 ## Steam's xcomposite workaround
 

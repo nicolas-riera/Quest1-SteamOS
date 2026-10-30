@@ -100,6 +100,7 @@ struct quest1_controller
 	int64_t state_ns;
 	int64_t menu_down_since_ns;
 	bool connected;
+	float battery; //!< 0..1, negative until the controller reports it
 
 	quest1_haptic_fn haptic_fn;
 	void *haptic_data;
@@ -247,6 +248,14 @@ quest1_controller_set_disconnected(struct quest1_controller *c)
 }
 
 void
+quest1_controller_set_battery(struct quest1_controller *c, float charge)
+{
+	os_mutex_lock(&c->mutex);
+	c->battery = CLAMP(charge, 0.0f, 1.0f);
+	os_mutex_unlock(&c->mutex);
+}
+
+void
 quest1_controller_set_haptic_fn(struct quest1_controller *c, quest1_haptic_fn fn, void *data)
 {
 	c->haptic_fn = fn;
@@ -360,6 +369,18 @@ controller_set_output(struct xrt_device *xdev, enum xrt_output_name name, const 
 	return XRT_SUCCESS;
 }
 
+static xrt_result_t
+controller_get_battery_status(struct xrt_device *xdev, bool *out_present, bool *out_charging, float *out_charge)
+{
+	struct quest1_controller *c = qc(xdev);
+	os_mutex_lock(&c->mutex);
+	*out_present = c->connected && c->battery >= 0.0f;
+	*out_charge = c->battery >= 0.0f ? c->battery : 0.0f;
+	os_mutex_unlock(&c->mutex);
+	*out_charging = false; // AA battery
+	return XRT_SUCCESS;
+}
+
 static void
 controller_destroy(struct xrt_device *xdev)
 {
@@ -392,10 +413,13 @@ quest1_controller_create(struct xrt_device *hmd, bool left)
 	u_device_populate_function_pointers(&c->base, controller_get_tracked_pose, controller_destroy);
 	c->base.update_inputs = controller_update_inputs;
 	c->base.set_output = controller_set_output;
+	c->base.get_battery_status = controller_get_battery_status;
+	c->battery = -1.0f;
 	c->base.name = XRT_DEVICE_TOUCH_CONTROLLER;
 	c->base.device_type = left ? XRT_DEVICE_TYPE_LEFT_HAND_CONTROLLER : XRT_DEVICE_TYPE_RIGHT_HAND_CONTROLLER;
 	c->base.supported.orientation_tracking = true;
 	c->base.supported.position_tracking = false; // arm model only
+	c->base.supported.battery_status = true;
 
 	snprintf(c->base.str, XRT_DEVICE_NAME_LEN, "Oculus Quest %s Touch Controller", left ? "Left" : "Right");
 	snprintf(c->base.serial, XRT_DEVICE_NAME_LEN, "Quest1 %s Controller", left ? "Left" : "Right");

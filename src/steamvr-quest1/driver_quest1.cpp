@@ -38,6 +38,7 @@
 #include <unistd.h>
 
 #include "../vklayer-steamvr/quest1_display_proto.h"
+#include "battery.h"
 #include "controllers.h"
 
 #include <atomic>
@@ -226,6 +227,9 @@ public:
 	uint32_t OutputHeight() const { return outputHeight ? outputHeight : eyeHeight; }
 	uint32_t outputWidth = 0, outputHeight = 0;
 	float displayHz = 72.0f;
+	//! QUEST1_DIRECT_SCANOUT=1: vrcompositor distorts for the lenses itself and the Vulkan layer puts
+	//! its 2880x1600 output straight on the panels (quest1_scanout.c); Monado only tracks.
+	bool directScanout = false;
 	// debug (QUEST1_POSE_TAG=1): frames are posed alternately straight ahead / looking down, and
 	// three rows of each displayed frame are read back, to see which pose a frame was rendered with
 	bool poseTag = false;
@@ -342,6 +346,8 @@ bool XrBackend::Init()
 	if (const char *s = getenv("QUEST1_DISPLAY_SIZE"))
 		if (sscanf(s, "%ux%u", &outputWidth, &outputHeight) != 2)
 			outputWidth = outputHeight = 0;
+	if (const char *ds = getenv("QUEST1_DIRECT_SCANOUT"))
+		directScanout = atoi(ds) == 1;
 	if (const char *v = getenv("QUEST1_VIRTUAL_DISPLAY"))
 		useVirtualDisplay = atoi(v) != 0;
 	if (const char *h = getenv("QUEST1_EYE_HEIGHT"))
@@ -1146,9 +1152,10 @@ void XrBackend::FrameThread()
 		XrFrameState fs{XR_TYPE_FRAME_STATE};
 		if (XR_FAILED(pxrWaitFrame(session, nullptr, &fs)))
 			break;
+		double wake = MonotonicSeconds();
 		{
 			std::lock_guard<std::mutex> lock(frameMutex);
-			lastVsync = MonotonicSeconds();
+			lastVsync = wake;
 			vsyncCount++;
 		}
 		pxrBeginFrame(session, nullptr);
@@ -1169,6 +1176,15 @@ void XrBackend::FrameThread()
 			displayFrame = presentedFrame;
 			presentedIndex = -1;
 			importDisplay = displayChanged;
+			// vrcompositor's vkWaitForPresentKHR returns now: its "vsync" is this wake-up, the
+			// moment its frames must be ready by
+			if (displayIndex >= 0 && clientFd >= 0) {
+				qd_msg d{};
+				d.type = QD_DISPLAYED;
+				d.frame = displayFrame;
+				d.vblank_ns = (uint64_t)(wake * 1e9);
+				send(clientFd, &d, sizeof(d), MSG_NOSIGNAL);
+			}
 		}
 		if (importDisplay)
 			ImportDisplay();
@@ -1322,6 +1338,7 @@ public:
 		VRProperties()->SetBoolProperty(c, Prop_IsOnDesktop_Bool, false);
 		VRProperties()->SetBoolProperty(c, Prop_DisplayDebugMode_Bool, false);
 		VRProperties()->SetBoolProperty(c, Prop_DeviceProvidesBatteryStatus_Bool, false);
+		Quest1BatteryAttach(Quest1Battery_Head, c); // battery.cpp: level and charging, polled
 
 		poseThreadRunning = true;
 		poseThread = std::thread([this] {
@@ -1389,6 +1406,7 @@ public:
 
 	void Deactivate() override
 	{
+		Quest1BatteryAttach(Quest1Battery_Head, k_ulInvalidPropertyContainer);
 		xr.onPresent = nullptr;
 		poseThreadRunning = false;
 		if (poseThread.joinable())
@@ -1435,7 +1453,8 @@ public:
 	}
 	void GetEyeOutputViewport(EVREye eye, uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h) override
 	{
-		*x = eye == Eye_Left ? 0 : xr.OutputWidth() / 2;
+		// direct scanout: the panels show the framebuffer turned by 180°, the left eye sees its right half
+		*x = (eye == Eye_Left) != xr.directScanout ? 0 : xr.OutputWidth() / 2;
 		*y = 0;
 		*w = xr.OutputWidth() / 2;
 		*h = xr.OutputHeight();
@@ -1449,15 +1468,82 @@ public:
 		const XrFovf &f = xr.fov[eye == Eye_Left ? 0 : 1];
 		*left = tanf(f.angleLeft);
 		*right = tanf(f.angleRight);
+		if (xr.directScanout && !(DirectFlip() & 4)) { // OpenVR's convention: y down
+			*top = -tanf(f.angleUp);
+			*bottom = -tanf(f.angleDown);
+			return;
+		}
 		*top = tanf(f.angleDown);
 		*bottom = tanf(f.angleUp);
 	}
-	DistortionCoordinates_t ComputeDistortion(EVREye, float u, float v) override
+	//! debug: QUEST1_DIRECT_FLIP bits 1 = output v, 2 = texture v, 4 = old projection, 8 = output and
+	//! texture u, to sort out
+	//! orientations on the device
+	static int DirectFlip()
+	{
+		static int f = getenv("QUEST1_DIRECT_FLIP") ? atoi(getenv("QUEST1_DIRECT_FLIP")) : 0;
+		return f;
+	}
+	DistortionCoordinates_t ComputeDistortion(EVREye eye, float u, float v) override
 	{
 		DistortionCoordinates_t d;
-		d.rfRed[0] = d.rfGreen[0] = d.rfBlue[0] = u;
-		d.rfRed[1] = d.rfGreen[1] = d.rfBlue[1] = v;
+		if (!xr.directScanout) {
+			d.rfRed[0] = d.rfGreen[0] = d.rfBlue[0] = u;
+			d.rfRed[1] = d.rfGreen[1] = d.rfBlue[1] = v;
+			return d;
+		}
+		// (u, v) in the eye's output viewport, framebuffer orientation; the viewer sees it turned by
+		// 180°. Then Meta's Quest 1 lens model (CatmullRom10, as Monado's quest1_hmd.c): panel point
+		// relative to the lens centre in tan units, radial scale, per-channel chromatic scale, and
+		// the tangents mapped to the eye texture (v down from the top of the projection).
+		if (DirectFlip() & 1)
+			v = 1.0f - v;
+		if (DirectFlip() & 8)
+			u = 1.0f - u;
+		int e = eye == Eye_Left ? 0 : 1;
+		float pu = 1.0f - u, pv = 1.0f - v;
+		float sx = e == 0 ? -1.0f : 1.0f;
+		float x = ((pu - 0.5f) * kPanelW + sx * kLensToScreenX) / kMetersPerTan;
+		float y = ((0.5f - pv) * kPanelH + kLensToScreenY) / kMetersPerTan;
+		float rsq = x * x + y * y;
+		float sc = CatmullRom10(rsq);
+		const XrFovf &f = xr.fov[e];
+		float tl = tanf(f.angleLeft), tr = tanf(f.angleRight), tu = tanf(f.angleUp), td = tanf(f.angleDown);
+		const float chroma[3] = {0.996f - 0.007f * rsq, 1.0f, 1.006f + 0.020f * rsq};
+		float *out[3] = {d.rfRed, d.rfGreen, d.rfBlue};
+		for (int c = 0; c < 3; c++) {
+			float tx = x * sc * chroma[c], ty = y * sc * chroma[c];
+			out[c][0] = (tx - tl) / (tr - tl);
+			out[c][1] = (tu - ty) / (tu - td);
+			if (DirectFlip() & 2)
+				out[c][1] = 1.0f - out[c][1];
+			if (DirectFlip() & 8)
+				out[c][0] = 1.0f - out[c][0];
+		}
 		return d;
+	}
+	// Quest 1 optics: Meta's runtime defaults (Oculus SDK LensConfig), docs/quest1-lens.md
+	static constexpr float kPanelW = 0.0594f, kPanelH = 0.0660f, kMetersPerTan = 0.0389f;
+	static constexpr float kLensToScreenX = 0.002986f, kLensToScreenY = -0.00272f;
+	static float CatmullRom10(float rsq)
+	{
+		static const float K[11] = {1.0f, 1.0374f, 1.0810f, 1.1330f, 1.1970f, 1.2754f,
+		                            1.3771f, 1.5133f, 1.7018f, 1.9732f, 2.3000f};
+		float fk = 10.0f * rsq;
+		int k = (int)floorf(fk);
+		k = k < 0 ? 0 : (k > 10 ? 10 : k);
+		float t = fk - (float)k, p0, m0, p1, m1;
+		if (k == 0) {
+			p0 = 1.0f, m0 = K[1] - K[0], p1 = K[1], m1 = 0.5f * (K[2] - K[0]);
+		} else if (k < 9) {
+			p0 = K[k], m0 = 0.5f * (K[k + 1] - K[k - 1]), p1 = K[k + 1], m1 = 0.5f * (K[k + 2] - K[k]);
+		} else if (k == 9) {
+			p0 = K[9], m0 = 0.5f * (K[10] - K[8]), p1 = K[10], m1 = K[10] - K[9];
+		} else {
+			p0 = K[10], m0 = K[10] - K[9], p1 = p0 + m0, m1 = m0;
+		}
+		float omt = 1.0f - t;
+		return (p0 * (1.0f + 2.0f * t) + m0 * t) * omt * omt + (p1 * (1.0f + 2.0f * omt) - m1 * omt) * t * t;
 	}
 	bool ComputeInverseDistortion(HmdVector2_t *result, EVREye, uint32_t, float u, float v) override
 	{
@@ -1506,6 +1592,7 @@ public:
 	}
 	void Cleanup() override
 	{
+		Quest1BatteryShutdown();
 		controllers.Shutdown();
 		xr.Shutdown();
 		delete hmd;
