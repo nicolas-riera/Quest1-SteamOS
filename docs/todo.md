@@ -32,6 +32,13 @@ Open items, roughly by priority. Done items move to the commit log.
   its audio stuttered, then the headset's SteamVR crashed. Logs saved on the headset in
   `/root/stream-crash-20261101/`.
 
+## Power
+- The power button only opens the dashboard: a short press must put the headset to sleep and
+  wake it like the stock behaviour, and a long press should open the power menu.
+- Sleep must work properly: panels off, tracking and SteamVR paused, then a clean wake-up.
+- Restart and Shut down from Steam do nothing (user, 2026-11-02): the headset can only be turned
+  off by a forced power-off. Both must work from Steam's power menu.
+
 ## Hardware
 - LEDs: the white front LED must be on while the cameras are active (stock behaviour), and the
   power LED must get its stock behaviour back (it stays solid yellow/orange).
