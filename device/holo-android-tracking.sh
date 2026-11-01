@@ -60,6 +60,11 @@ setup() {
 	chmod 0777 /data/misc/tracking
 	chown 1000:1000 /data/misc/tracking /data/oculus /data/oculus/settings /data/oculus/preferences \
 		/data/vendor/misc/sensors /data/vendor/misc/sensors/controllercal /vision /vision/tempMaps
+	# remote file system dirs the ADSP/SLPI/CDSP write through tftp_server (uid 2903): it cannot
+	# create them itself, and without them the ADSP services stall
+	for d in lpass slpi cdsp tn; do
+		mkdir -p /data/vendor/tombstones/rfs/$d; chown 2903:2903 /data/vendor/tombstones/rfs/$d; chmod 0770 /data/vendor/tombstones/rfs/$d
+	done
 	chmod 0750 /data/oculus /data/oculus/settings /data/oculus/preferences
 
 	# Property area for this stack only (bound over /dev/__properties__ in its units): the global
@@ -94,6 +99,9 @@ PY
 	# device nodes, as Android's ueventd.rc sets them (devtmpfs resets them each boot)
 	chmod 0666 /dev/ashmem
 	[ -e /dev/adsprpc-smd ] && { chown 1000:1000 /dev/adsprpc-smd; chmod 0664 /dev/adsprpc-smd; }
+	# libadsprpc tries the secure node first and the ADSP channel is "secure" here: without it
+	# GetInfo fails (EPERM) and trackingservice aborts in boltlib initDomains (error 59)
+	[ -e /dev/adsprpc-smd-secure ] && { chown 1000:1000 /dev/adsprpc-smd-secure; chmod 0660 /dev/adsprpc-smd-secure; }
 	true
 }
 
@@ -133,6 +141,8 @@ BindPaths=$R/calibration:/persist/calibration
 ExecStart=$5
 Restart=on-failure
 RestartSec=2
+# Android init gives services 32768+ fds (trackingservice needs >1024: EMFILE otherwise)
+LimitNOFILE=65536
 $4
 EOF
 	}
@@ -149,6 +159,9 @@ After=android-ovrstub.service"
 	# nobody is uid 9999: servicemanager refuses addService from app-range uids (>= 10000), which
 	# Holo's nobody (65534) is.
 	unit ashmemd "ashmem device service (ashmemd)" 9999 "Group=9999" /system/bin/ashmemd ""
+	# FastRPC listener of the ADSP root PD (Android: vendor.adsprpcd). trackingservice's Bolt library
+	# calls the Hexagon skel on the ADSP; without this daemon the first fastrpc invoke never returns.
+	unit adsprpcd "FastRPC listener for the ADSP (adsprpcd)" root 'Environment="ADSP_LIBRARY_PATH=/system/lib/rfsa/adsp;/vendor/lib/rfsa/adsp;/vendor/dsp;/dsp"' /system/vendor/bin/adsprpcd ""
 	# IDeviceTelemetry is in the framework VINTF manifest: trackingservice waits for it forever
 	unit telemetry-hal "device telemetry HAL (local, no network)" 1000 "Group=1000" \
 		/system/bin/hw/vendor.oculus.hardware.telemetry@1.0-service "$W"
@@ -189,7 +202,7 @@ $H"
 		/system/bin/calibrationserver "$W
 $H"
 	unit trackingservice "trackingservice (head/controller/hand tracking)" 1000 "Group=1000
-SupplementaryGroups=aid_inet
+SupplementaryGroups=aid_inet render
 AmbientCapabilities=CAP_SYS_NICE
 IOSchedulingClass=realtime
 IOSchedulingPriority=4
@@ -213,7 +226,7 @@ PartOf=android-sensors-hal.service"
 		"With SyncBoss (monado.service stopped): holo-android-tracking trial"
 }
 
-BASE="android-ovrstub android-ashmemd android-settingsserver android-vrfocus android-iad android-telemetry-hal android-power-hal"
+BASE="android-ovrstub android-ashmemd android-adsprpcd android-settingsserver android-vrfocus android-iad android-telemetry-hal android-power-hal"
 SB="android-q1trackd android-trackingservice android-calibration android-cameramuxmode android-sensors-hal"
 TE=/sys/bus/spi/devices/spi12.0/control/te_timestamp
 cli() { # trackinginterface_cli as root (vrfocus grants uid 0) with the stack's property area
@@ -284,8 +297,8 @@ trial() { # one bounded Path M run; Monado must already be stopped (SyncBoss has
 	snapshot "$D/snapshot.end.txt"
 	cli ls > "$D/ls.txt" 2>&1
 	cli getcontrollertrackingdata json > "$D/controllers.json" 2>&1
-	env $E /system/bin/service list > "$D/services.txt" 2>&1
-	env $E /system/bin/lshal > "$D/lshal.txt" 2>&1
+	timeout 10 env $E /system/bin/service list > "$D/services.txt" 2>&1
+	timeout 10 env $E /system/bin/lshal > "$D/lshal.txt" 2>&1
 	systemctl status --no-pager $BASE $SB > "$D/units.txt" 2>&1
 	systemctl stop $SB
 	[ -n "$B" ] && { kill $B; wait $B || true; }
