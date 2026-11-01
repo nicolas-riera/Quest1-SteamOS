@@ -840,6 +840,40 @@ warp_read_knobs(struct mdp_direct *D, int64_t now)
 	}
 }
 
+//! Inverse of the lens radial function m(r) = r * CR10(r^2) (screen radius -> tangent radius), tabulated once at
+//! even steps of m: the warp needs it for every mesh vertex of every frame, and Newton's method on the spline cost
+//! ~14 ms of CPU per frame.
+#define LENS_INV_N 4096
+#define LENS_INV_RMAX 2.0f
+static float lens_inv_tab[LENS_INV_N + 1];
+static float lens_inv_mmax;
+
+static void
+lens_inverse_init(void)
+{
+	if (lens_inv_mmax > 0) {
+		return;
+	}
+	lens_inv_mmax = LENS_INV_RMAX * q1_catmull_rom10(LENS_INV_RMAX * LENS_INV_RMAX);
+	// m(r) is monotonic: walk r finely and fill the table entries it passes
+	const int steps = 64 * LENS_INV_N;
+	float r_prev = 0, m_prev = 0;
+	int k = 0;
+	lens_inv_tab[k++] = 0;
+	for (int i = 1; i <= steps && k <= LENS_INV_N; i++) {
+		float r = LENS_INV_RMAX * (float)i / steps;
+		float m = r * q1_catmull_rom10(r * r);
+		while (k <= LENS_INV_N && (float)k / LENS_INV_N * lens_inv_mmax <= m) {
+			float target = (float)k / LENS_INV_N * lens_inv_mmax;
+			lens_inv_tab[k++] = m > m_prev ? r_prev + (r - r_prev) * (target - m_prev) / (m - m_prev) : r;
+		}
+		r_prev = r, m_prev = m;
+	}
+	while (k <= LENS_INV_N) {
+		lens_inv_tab[k++] = LENS_INV_RMAX;
+	}
+}
+
 //! Inverse of the lens: the screen point (x, y) whose tangent direction is (tx, ty).
 static void
 lens_inverse(float tx, float ty, float *x, float *y)
@@ -849,20 +883,10 @@ lens_inverse(float tx, float ty, float *x, float *y)
 		*x = *y = 0;
 		return;
 	}
-	float r = m / 1.2f;
-	for (int i = 0; i < 12; i++) {
-		const float h = 1e-3f;
-		float f = r * q1_catmull_rom10(r * r) - m;
-		float rp = r + h, rm = r > h ? r - h : 0;
-		float df = (rp * q1_catmull_rom10(rp * rp) - rm * q1_catmull_rom10(rm * rm)) / (rp - rm);
-		if (df < 0.1f) {
-			df = 0.1f;
-		}
-		r -= f / df;
-		if (r < 0) {
-			r = 0;
-		}
-	}
+	float f = m / lens_inv_mmax * LENS_INV_N;
+	int k = (int)f;
+	float r = k >= LENS_INV_N ? lens_inv_tab[LENS_INV_N] * f / LENS_INV_N
+	                          : lens_inv_tab[k] + (lens_inv_tab[k + 1] - lens_inv_tab[k]) * (f - (float)k);
 	*x = tx / m * r;
 	*y = ty / m * r;
 }
@@ -873,14 +897,29 @@ warp_build_mesh(int h, const float *delta, float *out)
 {
 	const int view = 1 - h; // half 0 (x = 0) is the right eye, view 1
 	const float sx = view == 0 ? -1.0f : 1.0f;
+	// each vertex's view direction through the lens does not change: computed once per half
+	static float dirs[2][(WARP_GRID + 1) * (WARP_GRID + 1)][2];
+	static bool have_dirs[2];
+	lens_inverse_init();
+	if (!have_dirs[h]) {
+		for (int j = 0; j <= WARP_GRID; j++) {
+			for (int i = 0; i <= WARP_GRID; i++) {
+				float u = 1.0f - (float)i / WARP_GRID, v = 1.0f - (float)j / WARP_GRID;
+				float x = ((u - 0.5f) * Q1_PANEL_W_M + sx * Q1_LENS_TO_SCREEN_X) / Q1_METERS_PER_TAN_ANGLE;
+				float y = ((0.5f - v) * Q1_PANEL_H_M + Q1_LENS_TO_SCREEN_Y) / Q1_METERS_PER_TAN_ANGLE;
+				float s = q1_catmull_rom10(x * x + y * y);
+				dirs[h][j * (WARP_GRID + 1) + i][0] = x * s;
+				dirs[h][j * (WARP_GRID + 1) + i][1] = y * s;
+			}
+		}
+		have_dirs[h] = true;
+	}
 	for (int j = 0; j <= WARP_GRID; j++) {
 		for (int i = 0; i <= WARP_GRID; i++) {
 			float fx = (float)i / WARP_GRID, fy = (float)j / WARP_GRID;
 			float u = 1.0f - fx, v = 1.0f - fy; // the view is the half turned by 180 degrees
-			float x = ((u - 0.5f) * Q1_PANEL_W_M + sx * Q1_LENS_TO_SCREEN_X) / Q1_METERS_PER_TAN_ANGLE;
-			float y = ((0.5f - v) * Q1_PANEL_H_M + Q1_LENS_TO_SCREEN_Y) / Q1_METERS_PER_TAN_ANGLE;
-			float s = q1_catmull_rom10(x * x + y * y);
-			float d[3] = {x * s, y * s, -1.0f}, r[3];
+			const float *dv = dirs[h][j * (WARP_GRID + 1) + i];
+			float d[3] = {dv[0], dv[1], -1.0f}, r[3];
 			quat_rotate(delta, d, r);
 			float su = u, sv = v;
 			if (r[2] < -0.05f) {
