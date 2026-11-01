@@ -86,6 +86,8 @@ static const char *default_fake[] = {
     // vrcompositor requires these; it never presents through a swapchain as a virtual display
     VK_KHR_PRESENT_ID_EXTENSION_NAME,
     VK_KHR_PRESENT_WAIT_EXTENSION_NAME,
+    // without it vrcompositor's vblank thread has no event source and busy-loops a whole core
+    VK_EXT_DISPLAY_CONTROL_EXTENSION_NAME,
 };
 static const uint32_t default_fake_spec[] = {
     VK_KHR_TIMELINE_SEMAPHORE_SPEC_VERSION,
@@ -93,6 +95,7 @@ static const uint32_t default_fake_spec[] = {
     VK_EXT_EXTENDED_DYNAMIC_STATE_3_SPEC_VERSION,
     VK_KHR_PRESENT_ID_SPEC_VERSION,
     VK_KHR_PRESENT_WAIT_SPEC_VERSION,
+    VK_EXT_DISPLAY_CONTROL_SPEC_VERSION,
 };
 static char fake_names[16][VK_MAX_EXTENSION_NAME_SIZE];
 static uint32_t fake_spec[16];

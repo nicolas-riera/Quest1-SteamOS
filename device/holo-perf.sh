@@ -65,3 +65,22 @@ systemctl enable quest1-zram.service
 systemctl start quest1-zram.service
 sysctl -q --system || true
 echo "holo-perf: zram swap on, sshd protected (restart sshd to apply: systemctl restart sshd)"
+
+# ssh sessions: pam_systemd creates a logind session + scope per connection and the scope is never
+# reaped here ("abandoned"), so every ssh command leaked a session (400+ after an hour of agent polling)
+# and slowed logind/systemd. sshd gets the system-login session stack without pam_systemd.
+[ -f /etc/pam.d/sshd.orig ] || cp /etc/pam.d/sshd /etc/pam.d/sshd.orig
+cat > /etc/pam.d/sshd <<'PAM'
+#%PAM-1.0
+auth      include   system-remote-login
+account   include   system-remote-login
+password  include   system-remote-login
+session   optional  pam_loginuid.so
+session   optional  pam_keyinit.so       force revoke
+session   include   system-auth
+session   optional  pam_lastlog2.so      silent
+session   optional  pam_motd.so
+session   optional  pam_mail.so          dir=/var/spool/mail standard quiet
+session   optional  pam_umask.so
+session   required  pam_env.so
+PAM
