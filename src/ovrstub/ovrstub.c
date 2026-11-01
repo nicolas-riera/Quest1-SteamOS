@@ -460,6 +460,8 @@ static struct rctl {
 	uint64_t id;
 	int type; /* 0 left, 1 right */
 	int announced;
+	int fd_given; /* trackingservice asked for its event fd (getDeviceEventFd): it has the controller */
+	int ticks;    /* seconds since the last onStatus */
 	int evfd[2];
 } rctl[2];
 static uint32_t remote_cb; /* IRemoteServiceStatusCallback handle, 0 = none */
@@ -511,8 +513,14 @@ static void remote_announce(void)
 	if (!remote_cb || power_state == 3)
 		return;
 	for (int i = 0; i < 2; i++) {
-		if (!rctl[i].used || rctl[i].announced)
+		if (!rctl[i].used)
 			continue;
+		/* trackingservice only takes a controller the sensors HAL already reports connected: when the
+		 * onStatus comes first (the HAL connects them a second later), it ignores it. Repeat it every
+		 * 3 s until trackingservice asks for the controller's event fd. */
+		if (rctl[i].announced && (rctl[i].fd_given || ++rctl[i].ticks < 3))
+			continue;
+		rctl[i].ticks = 0;
 		struct parcel p = {0};
 		p_token(&p, "oculus.internal.remote.IRemoteServiceStatusCallback");
 		p_i32(&p, rctl[i].type);
@@ -569,6 +577,7 @@ static void remote_txn(const struct binder_transaction_data *t, struct rd *r, st
 				k = i;
 		logf_("OVRRemoteService: getDeviceEventFd(%016llx) -> %s", (unsigned long long)id, k >= 0 ? "socket" : "none");
 		if (k >= 0 && rctl[k].evfd[1] >= 0) {
+			rctl[k].fd_given = 1;
 			p_i32(reply, 1); /* present */
 			p_i32(reply, 0); /* no comm channel */
 			p_fd(reply, rctl[k].evfd[1]);
