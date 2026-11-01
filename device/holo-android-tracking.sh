@@ -109,6 +109,9 @@ PY
 	# libadsprpc tries the secure node first and the ADSP channel is "secure" here: without it
 	# GetInfo fails (EPERM) and trackingservice aborts in boltlib initDomains (error 59)
 	[ -e /dev/adsprpc-smd-secure ] && { chown 1000:1000 /dev/adsprpc-smd-secure; chmod 0660 /dev/adsprpc-smd-secure; }
+	# trackingservice creates virtual HID devices for the controllers (libossdk "Error while initializing
+	# input device: -1" aborts it when /dev/uinput is not openable): root:600 by default
+	[ -e /dev/uinput ] && { chown 1000:1000 /dev/uinput; chmod 0600 /dev/uinput; }
 	true
 }
 

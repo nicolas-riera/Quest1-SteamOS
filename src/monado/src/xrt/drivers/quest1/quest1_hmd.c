@@ -589,12 +589,14 @@ meta_push(struct quest1_hmd *h, const struct q1track_pose *p)
 	rel.pose.position = (struct xrt_vec3){p->position[0], p->position[1], p->position[2]};
 	math_quat_normalize(&rel.pose.orientation);
 	int flags = 0;
-	if (p->status & Q1TRACK_ORI_VALID) {
-		flags |= XRT_SPACE_RELATION_ORIENTATION_VALID_BIT;
+	// libossdk returned a state: the orientation is usable even while its status bits are 0
+	// (SLAM still initialising, IMU-only). A zero quaternion is not.
+	float qn = p->orientation[0] * p->orientation[0] + p->orientation[1] * p->orientation[1] +
+	           p->orientation[2] * p->orientation[2] + p->orientation[3] * p->orientation[3];
+	if (qn < 0.5f) {
+		return;
 	}
-	if (p->status & Q1TRACK_ORI_TRACKED) {
-		flags |= XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT;
-	}
+	flags |= XRT_SPACE_RELATION_ORIENTATION_VALID_BIT | XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT;
 	if (p->status & Q1TRACK_POS_VALID) {
 		flags |= XRT_SPACE_RELATION_POSITION_VALID_BIT;
 	}
