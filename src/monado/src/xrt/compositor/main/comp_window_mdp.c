@@ -112,7 +112,7 @@ struct direct_buf
 };
 
 //! Re-project when /tmp/quest1-reproj does not say otherwise (it says "on" or "off", and tuning values, see warp_read_knobs)
-#define MDP_WARP_DEFAULT_ON 0
+#define MDP_WARP_DEFAULT_ON 1
 #define WARP_GRID 40
 #define WARP_OUT_SETS 4
 
