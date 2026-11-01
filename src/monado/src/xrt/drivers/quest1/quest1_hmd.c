@@ -695,17 +695,6 @@ hmd_get_tracked_pose(struct xrt_device *xdev,
 		rel.relation_flags = (enum xrt_space_relation_flags)(XRT_SPACE_RELATION_ORIENTATION_VALID_BIT |
 		                                                     XRT_SPACE_RELATION_POSITION_VALID_BIT);
 	}
-	if (!h->meta) {
-		// 3DoF: neck model, the eyes turn around a pivot 7.5 cm below and 8 cm behind them,
-		// so head rotations move them as in reality (without it the world swims)
-		const struct xrt_vec3 neck = {0.0f, 0.075f, -0.0805f};
-		struct xrt_vec3 eyes;
-		math_quat_rotate_vec3(&rel.pose.orientation, &neck, &eyes);
-		rel.pose.position.x = eyes.x - neck.x;
-		rel.pose.position.y = eyes.y - neck.y;
-		rel.pose.position.z = eyes.z - neck.z;
-		rel.relation_flags |= XRT_SPACE_RELATION_POSITION_VALID_BIT;
-	}
 	*out_relation = rel;
 	return XRT_SUCCESS;
 }

@@ -47,6 +47,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstdarg>
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -168,6 +169,47 @@ static bool LoadLibraries()
 			return false;                                                                                  \
 		}                                                                                                      \
 	} while (0)
+
+//! The IPD set with the Quest 1's slider, in mm, 0 if unknown. The slider moves each panel together
+//! with its lens, so it only changes the eye separation, not the distortion. The slider is a
+//! potentiometer on the PMIC's ADC; as Meta's IAD sensor HAL: voltage -> resistance (9.1 kOhm
+//! divider from 3.3 V), interpolated between the factory points /persist/IPD_{MIN,MAX} (mV) and
+//! /persist/IAD_{MIN,MAX} (mm), plus 54.6 mm. QUEST1_IPD_MM overrides it.
+static float SliderIpdMm()
+{
+	if (const char *env = getenv("QUEST1_IPD_MM"))
+		return (float)atof(env);
+	static float rMin = -1, rMax, iadMin, iadMax;
+	auto readf = [](const char *path, float *v) {
+		FILE *f = fopen(path, "r");
+		bool ok = f && fscanf(f, "%f", v) == 1;
+		if (f)
+			fclose(f);
+		return ok;
+	};
+	auto ohms = [](float volts) { return volts * 9.1f / (3.3f - volts); };
+	if (rMin < 0) {
+		float mvMin, mvMax;
+		if (!readf("/persist/IPD_MIN", &mvMin) || !readf("/persist/IPD_MAX", &mvMax) ||
+		    !readf("/persist/IAD_MIN", &iadMin) || !readf("/persist/IAD_MAX", &iadMax) || mvMax <= mvMin) {
+			rMin = 0, rMax = 0;
+			return 0;
+		}
+		rMin = ohms(mvMin / 1000), rMax = ohms(mvMax / 1000);
+	}
+	if (rMax <= rMin)
+		return 0;
+	FILE *f = fopen("/sys/devices/soc/800f000.qcom,spmi/spmi-0/spmi0-00/"
+	                "800f000.qcom,spmi:qcom,pm8998@0:vadc@3100/ipd_sensor", "r");
+	long uv = 0;
+	bool ok = f && fscanf(f, "Result:%ld", &uv) == 1;
+	if (f)
+		fclose(f);
+	if (!ok)
+		return 0;
+	float r = std::min(std::max(ohms(uv * 1e-6f), rMin), rMax);
+	return iadMin + (iadMax - iadMin) * (r - rMin) / (rMax - rMin) + 54.6f;
+}
 
 // p * (x, 0, 0): an eye position from the head pose and half the IPD
 static XrPosef EyeFromHead(const XrPosef &head, float x)
@@ -423,6 +465,8 @@ bool XrBackend::Init()
 	ipd = fabsf(views[1].pose.position.x - views[0].pose.position.x);
 	if (ipd < 0.05f || ipd > 0.08f)
 		ipd = 0.063f;
+	if (float mm = SliderIpdMm(); mm > 55.0f && mm < 75.0f) // the slider is set to the user's IPD
+		ipd = mm / 1000.0f;
 	Log("quest1: eye %ux%u, ipd %.1f mm, fov L %.1f/%.1f/%.1f/%.1f deg, backbuffer VkFormat %d\n", eyeWidth,
 	    eyeHeight, ipd * 1000, fov[0].angleLeft * 57.2958f, fov[0].angleRight * 57.2958f,
 	    fov[0].angleUp * 57.2958f, fov[0].angleDown * 57.2958f, (int)backbufferFormat);
@@ -1376,6 +1420,8 @@ public:
 				std::this_thread::sleep_for(std::chrono::milliseconds(4));
 				if (tick % 128 == 0)
 					ReadDebugMode();
+				if (tick % 128 == 64)
+					UpdateIpd();
 				if (MonotonicSeconds() - xr.lastPresent < 0.2)
 					continue;
 				XrPosef unused;
@@ -1388,6 +1434,17 @@ public:
 		return VRInitError_None;
 	}
 
+	//! the IPD slider moved: new eye separation for vrcompositor
+	void UpdateIpd()
+	{
+		float mm = SliderIpdMm();
+		if (mm < 55.0f || mm > 75.0f || fabsf(mm / 1000.0f - xr.ipd) < 0.0003f)
+			return;
+		xr.ipd = mm / 1000.0f;
+		VRProperties()->SetFloatProperty(VRProperties()->TrackedDeviceToPropertyContainer(id), Prop_UserIpdMeters_Float,
+		                                 xr.ipd);
+		Log("quest1: IPD slider: %.1f mm\n", mm);
+	}
 	//! debug: "<submit mode> <prediction ms> <neck model 0/1>" in /tmp/quest1-pose-mode, applied at once
 	void ReadDebugMode()
 	{
