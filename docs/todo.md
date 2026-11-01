@@ -10,6 +10,15 @@ Open items, roughly by priority. Done items move to the commit log.
 - SteamVR popups (volume bar, IPD) show up too low in the view; the IPD popup has very strong
   chromatic aberration. Re-check after the distortion fix: probably the same vertical error.
 - Apply the per-panel calibration from `/persist/calibration/display` (decenter, roll, mura).
+- Monado's re-projection in Meta tracking mode deforms the image (user, 2026-11-01): turning the head
+  left stretches the top of the view to the right, "soft". Sign is right (negating it is far worse).
+  Suspects: q1trackd's angular velocity frame used for extrapolation, or a frame mismatch between
+  the render pose and Monado's head pose. Live knobs in `/tmp/quest1-reproj` (`vel=0`, `delay=1`,
+  `rx/ry/rz=`), per-axis delta and o-jitter in Monado's `direct_tick` log.
+- Performance: vrcompositor ~26 fps while warping at 72 Hz, ~41 fps without (GPU contention). GPU:
+  vrcompositor ~46 %, SteamVR dashboard CEF (vrwebhelper) ~26 % even when hidden (both pages
+  visible, rAF ~100 Hz), warp ~23 % (~4 ms/pass, linear 1440x1600 buffers). Next: non-blocking
+  warp on a high-priority queue, throttle the hidden dashboard, Steam's steamwebhelper CPU.
 
 ## Tracking
 - 6DoF with Meta's trackingservice (docs/tracking-6dof.md): poses are valid for short periods;
