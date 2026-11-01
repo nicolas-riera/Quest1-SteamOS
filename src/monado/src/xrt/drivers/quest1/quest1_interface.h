@@ -90,6 +90,14 @@ quest1_controller_push_state(struct quest1_controller *c, int64_t when_ns, const
 void
 quest1_controller_set_disconnected(struct quest1_controller *c);
 
+//! Meta tracking mode: the pose is pushed with quest1_controller_push_meta_pose (tracking space of
+//! the HMD's tracking origin) instead of being derived from the controller IMU and the arm model.
+void
+quest1_controller_set_meta(struct quest1_controller *c);
+
+void
+quest1_controller_push_meta_pose(struct quest1_controller *c, int64_t when_ns, const struct xrt_space_relation *rel);
+
 //! Battery level reported by the controller, 0..1 (xrt_device::get_battery_status).
 void
 quest1_controller_set_battery(struct quest1_controller *c, float charge);

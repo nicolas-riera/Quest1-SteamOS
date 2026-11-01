@@ -417,6 +417,20 @@ Xform GripInRaw(bool left)
 	return {RotX(20.6), {left ? 0.007 : -0.007, -0.00182941, 0.1019482}};
 }
 
+//! Monado runs Meta's 6DoF tracking (holo-android-tracking meta-on), read once
+static bool MetaTracking()
+{
+	static int meta = -1;
+	if (meta < 0) {
+		char buf[16] = {0};
+		FILE *f = fopen("/etc/quest1-tracking", "r");
+		meta = f && fscanf(f, "%15s", buf) == 1 && !strcmp(buf, "meta");
+		if (f)
+			fclose(f);
+	}
+	return meta;
+}
+
 //! The rotation about +Y (heading) of q: its forward (-Z) flattened.
 Quat YawOf(const Quat &q)
 {
@@ -673,9 +687,49 @@ void State::UpdateHand(int h, double now, const XrPosef &headPose, bool headVali
 	if (valid) {
 		hd.lastValid = now;
 		Quat imu{loc.pose.orientation.w, loc.pose.orientation.x, loc.pose.orientation.y, loc.pose.orientation.z};
+		// debug: /tmp/quest1-ctl-fix (read every second, meta mode): bits 1/2/4 negate the orientation's x/y/z
+		// (turns that axis's rotation the other way), 8/16/32 turn the controller frame by 180 deg about
+		// x/y/z, 64 takes Meta's pose as the raw pose (identity; worse than the default, user 2026-11-01)
+		// After the mask: "<dx> <dy> <dz> <pitch>" (cm, deg), an offset of the raw pose in the aim frame
+		// (dx outwards, mirrored per hand; y up, -z forward) for lining the Touch models up with the real
+		// controllers.
+		static double fixRead;
+		static int fix = 64;
+		static float off[4] = {0.7f, 3.5f, -4.0f, 39.4f};
+		if (MetaTracking()) {
+			if (now - fixRead > 1.0) {
+				fixRead = now;
+				FILE *f = fopen("/tmp/quest1-ctl-fix", "r");
+				// defaults tuned by the user against the real controllers (2026-11-01): Meta's pose as the
+				// raw pose, pitched 39.4 deg, 0.7 cm out, 3.5 cm up, 4 cm forward
+				int v = 64;
+				float o[4] = {0.7f, 3.5f, -4.0f, 39.4f};
+				if (f && fscanf(f, "%d %f %f %f %f", &v, &o[0], &o[1], &o[2], &o[3]) >= 1 &&
+				    (v != fix || memcmp(o, off, sizeof(o))))
+					CLog("quest1: controller fix %d, offset %.1f %.1f %.1f cm, pitch %.1f deg\n", v, o[0], o[1], o[2],
+					     o[3]);
+				if (f)
+					fclose(f);
+				fix = v;
+				memcpy(off, o, sizeof(off));
+			}
+			if (fix & 1)
+				imu.x = -imu.x;
+			if (fix & 2)
+				imu.y = -imu.y;
+			if (fix & 4)
+				imu.z = -imu.z;
+			if (fix & 8)
+				imu = Mul(imu, Quat{0, 1, 0, 0});
+			if (fix & 16)
+				imu = Mul(imu, Quat{0, 0, 1, 0});
+			if (fix & 32)
+				imu = Mul(imu, Quat{0, 0, 0, 1});
+		}
 		hd.lastUp = Rotate(Conj(imu), {0, 1, 0});
 		hd.haveUp = true;
-		Quat imuToAim = ImuToAim(h);
+		// Meta's tracker reports the controller's aim pose itself, not the raw IMU frame
+		Quat imuToAim = MetaTracking() ? Quat{} : ImuToAim(h);
 		Quat head{headPose.orientation.w, headPose.orientation.x, headPose.orientation.y, headPose.orientation.z};
 
 		// heading: on the first pose, then each time the system button is held
@@ -686,7 +740,12 @@ void State::UpdateHand(int h, double now, const XrPosef &headPose, bool headVali
 			hd.systemDownSince = now;
 		}
 		bool hold = hd.systemDownSince > 0 && now - hd.systemDownSince > kRecenterHold && !hd.recenteredThisHold;
-		if (headValid && (!hd.aligned || hold)) {
+		// with Meta's 6DoF tracking (/etc/quest1-tracking = meta) the controller headings are already in the
+		// head's world: aligning them would rotate them about Y
+		if (MetaTracking()) {
+			hd.yaw = Quat{1, 0, 0, 0};
+			hd.aligned = true;
+		} else if (headValid && (!hd.aligned || hold)) {
 			Quat aimYaw = YawOf(Mul(imu, imuToAim));
 			hd.yaw = Mul(YawOf(head), Conj(aimYaw));
 			hd.aligned = true;
@@ -699,7 +758,10 @@ void State::UpdateHand(int h, double now, const XrPosef &headPose, bool headVali
 		// position: tracked by Monado if it can, else an arm model hung below the head: elbow
 		// beside and below it (turning with the head's heading), forearm along the aim
 		Vec pos{loc.pose.position.x, loc.pose.position.y, loc.pose.position.z};
-		if (!(loc.locationFlags & XR_SPACE_LOCATION_POSITION_TRACKED_BIT)) {
+		// Meta's tracker keeps predicting an occluded controller (IMU): its position stays valid
+		bool havePos = MetaTracking() ? (loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) != 0
+		                              : (loc.locationFlags & XR_SPACE_LOCATION_POSITION_TRACKED_BIT) != 0;
+		if (!havePos) {
 			Vec hp{headValid ? headPose.position.x : 0, headValid ? headPose.position.y : 0,
 			       headValid ? headPose.position.z : 0};
 			Vec elbow = Rotate(YawOf(head), {d->left ? -0.17 : 0.17, -0.45, -0.05});
@@ -711,7 +773,12 @@ void State::UpdateHand(int h, double now, const XrPosef &headPose, bool headVali
 		p.vecPosition[1] = pos.y;
 		p.vecPosition[2] = pos.z;
 		// the arm-model point is the grip: grip = ctrl * imuToAim * rotX(60) and raw = grip * inverse(openxr_grip)
-		Xform dfh = Compose({Mul(imuToAim, RotX(60.0)), {}}, Inverse(GripInRaw(d->left)));
+		// Meta's pose is used like the aim pose of the 3DoF path (rotation user-verified); identity as the
+		// raw pose (bit 64) looked worse
+		Xform dfh = MetaTracking() && (fix & 64) ? Xform{}
+		                                          : Compose({Mul(imuToAim, RotX(60.0)), {}}, Inverse(GripInRaw(d->left)));
+		if (MetaTracking())
+			dfh = Compose({RotX(off[3]), {(d->left ? -off[0] : off[0]) / 100.0, off[1] / 100.0, off[2] / 100.0}}, dfh);
 		p.qDriverFromHeadRotation = {dfh.r.w, dfh.r.x, dfh.r.y, dfh.r.z};
 		p.vecDriverFromHeadTranslation[0] = dfh.t.x;
 		p.vecDriverFromHeadTranslation[1] = dfh.t.y;
@@ -721,6 +788,11 @@ void State::UpdateHand(int h, double now, const XrPosef &headPose, bool headVali
 			p.vecAngularVelocity[0] = w.x;
 			p.vecAngularVelocity[1] = w.y;
 			p.vecAngularVelocity[2] = w.z;
+		}
+		if (velocities && MetaTracking() && havePos && (vel.velocityFlags & XR_SPACE_VELOCITY_LINEAR_VALID_BIT)) {
+			p.vecVelocity[0] = vel.linearVelocity.x;
+			p.vecVelocity[1] = vel.linearVelocity.y;
+			p.vecVelocity[2] = vel.linearVelocity.z;
 		}
 		p.poseIsValid = true;
 		p.result = TrackingResult_Running_OK;
@@ -741,7 +813,7 @@ void State::UpdateHand(int h, double now, const XrPosef &headPose, bool headVali
 		p.poseIsValid = false;
 		p.result = TrackingResult_Running_OutOfRange;
 	}
-	p.willDriftInYaw = true;
+	p.willDriftInYaw = !MetaTracking();
 	// asleep controllers stop reporting: show them as off after a second without a pose
 	p.deviceIsConnected = now - hd.lastValid < 1.0;
 	if (valid != hd.wasValid)

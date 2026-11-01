@@ -628,7 +628,8 @@ bool XrBackend::LocateAhead(DriverPose_t &pose, XrPosef *xrPose)
 		pose.result = TrackingResult_Running_OutOfRange;
 		return false;
 	}
-	if (neckModel) {
+	// no neck model when Monado tracks the head's position (Meta's 6DoF): it would move the eyes twice
+	if (neckModel && !(loc.locationFlags & XR_SPACE_LOCATION_POSITION_TRACKED_BIT)) {
 		// Oculus SDK defaults: eyes 7.5 cm above and 8.05 cm in front of the neck pivot.
 		// Level head = no offset, so headHeight stays the eye height.
 		const XrVector3f n = {0, 0.075f, -0.0805f};

@@ -58,6 +58,17 @@ struct head_state { /* Optional<RigidBodyTrackingData v5>, over-allocated */
 typedef struct head_state (*head_get_state_fn)(void *self, const int64_t *t);
 typedef uint64_t (*head_get_ipd_fn)(void *self);
 
+/* controllers (docs/tracking-ipc.md 2.4 and 3.3-3.4): InputHub v1, Controllers v6, ControllerInput v1, Haptics v1 */
+struct big_state { _Alignas(16) uint8_t b[0x100]; };
+struct dev_array { void *data; uint64_t count; uint8_t rest[48]; };
+typedef struct big_state (*ctrl_get_state_fn)(void *self, uint64_t id, int64_t t);
+typedef struct big_state (*cin_get_buttons_fn)(void *self, uint64_t id);
+typedef uint64_t (*cin_get_touchpad_fn)(void *self, uint64_t id);
+typedef uint64_t (*hub_changed_fn)(void *self, uint64_t *token);
+typedef struct dev_array (*hub_enum_fn)(void *self);
+typedef uint64_t (*haptic_simple_fn)(void *self, uint64_t id, float amp);
+static void *hub, *ctrls, *cinput, *haptics;
+
 static void *head; /* IHeadTracker v8 */
 static volatile sig_atomic_t stop;
 
@@ -96,6 +107,17 @@ static int load_ossdk(void)
 		fprintf(stderr, "q1trackd: createHeadTracker(8) failed\n");
 		return -1;
 	}
+	/* controllers are optional: head tracking keeps working without them */
+	void *(*create)(long);
+	if ((create = (void *(*)(long))dlsym(lib, "createInputHub")))
+		hub = create(1);
+	if ((create = (void *(*)(long))dlsym(lib, "createControllers")))
+		ctrls = create(6);
+	if ((create = (void *(*)(long))dlsym(lib, "createControllerInput")))
+		cinput = create(1);
+	if ((create = (void *(*)(long))dlsym(lib, "createHaptics")))
+		haptics = create(1);
+	fprintf(stderr, "q1trackd: hub %p controllers %p input %p haptics %p\n", hub, ctrls, cinput, haptics);
 	return 0;
 }
 
@@ -128,6 +150,141 @@ static float get_ipd(void)
 	uint32_t bits = (uint32_t)r;
 	memcpy(&ipd, &bits, 4);
 	return (r >> 32) & 0xff ? ipd : 0.0f;
+}
+
+
+/* ---- controllers ---- */
+#define MAXDEV 4
+static struct { uint64_t id; uint32_t type, hand; } devs[MAXDEV];
+static int ndevs;
+
+static void refresh_devices(int force)
+{
+	static uint64_t token;
+	if (!hub)
+		return;
+	void **vt = *(void ***)hub;
+	if (!((hub_changed_fn)vt[0])(hub, &token) && !force)
+		return;
+	struct dev_array a = ((hub_enum_fn)vt[1])(hub);
+	ndevs = 0;
+	for (uint64_t i = 0; a.data && i < a.count && ndevs < MAXDEV; i++) {
+		const uint8_t *e = (const uint8_t *)a.data + i * 0xB8;
+		memcpy(&devs[ndevs].id, e, 8);
+		memcpy(&devs[ndevs].type, e + 0x08, 4);
+		memcpy(&devs[ndevs].hand, e + 0x10, 4);
+		fprintf(stderr, "q1trackd: device %016llx type %u handedness %u\n", (unsigned long long)devs[ndevs].id,
+			devs[ndevs].type, devs[ndevs].hand);
+		ndevs++;
+	}
+}
+
+/* handedness enum value of the left / right controller (printed at device discovery) */
+static uint32_t HAND_LEFT = 1, HAND_RIGHT = 2;
+
+static void get_ctrl_pose(uint64_t id, int64_t t, struct q1track_pose *out)
+{
+	void **vt = *(void ***)ctrls;
+	struct big_state s;
+	memset(&s, 0, sizeof(s));
+	s = ((ctrl_get_state_fn)vt[0])(ctrls, id, t);
+	memset(out, 0, sizeof(*out));
+	if (!s.b[0x98] || !s.b[0x00])
+		return;
+	out->valid = 1;
+	memcpy(&out->status, s.b + 0x04, 4);
+	memcpy(out->orientation, s.b + 0x10, 16);
+	memcpy(out->position, s.b + 0x20, 12);
+	memcpy(out->angular_velocity, s.b + 0x2c, 12);
+	memcpy(out->linear_velocity, s.b + 0x38, 12);
+	memcpy(out->angular_acceleration, s.b + 0x44, 12);
+	memcpy(out->linear_acceleration, s.b + 0x50, 12);
+	memcpy(&out->sample_ns, s.b + 0x60, 8);
+	memcpy(&out->predicted_ns, s.b + 0x68, 8);
+}
+
+static void get_ctrl(uint64_t id, int64_t t, struct q1track_controller *c)
+{
+	memset(c, 0, sizeof(*c));
+	c->id = id;
+	c->battery = -1.0f;
+	get_ctrl_pose(id, t, &c->pose);
+	c->connected = c->pose.valid;
+	if (!cinput)
+		return;
+	void **vt = *(void ***)cinput;
+	struct big_state s;
+	memset(&s, 0, sizeof(s));
+	s = ((cin_get_buttons_fn)vt[1])(cinput, id);
+	if (!s.b[0x98])
+		return;
+	c->connected = 1;
+	for (int k = 0; k < 18; k++)
+		if (s.b[k * 8] & 1)
+			c->buttons |= 1u << k;
+	memcpy(&c->trigger, s.b + 0x90, 4);
+	memcpy(&c->grip, s.b + 0x94, 4);
+	uint64_t tp = ((cin_get_touchpad_fn)vt[2])(cinput, id);
+	if (((tp >> 48) & 0xff) != 0) { /* byte 6 = has_value */
+		uint16_t x = (uint16_t)(tp >> 16), y = (uint16_t)(tp >> 32);
+		static int maxx, maxy;
+		if (!maxx) {
+			struct big_state pr;
+			memset(&pr, 0, sizeof(pr));
+			pr = ((cin_get_buttons_fn)vt[0])(cinput, id);
+			if (pr.b[0x14]) {
+				memcpy(&maxx, pr.b, 4);
+				memcpy(&maxy, pr.b + 4, 4);
+			}
+		}
+		if ((tp & 0xff) && maxx > 0 && maxy > 0) { /* byte 0: stick touched; idle values are garbage */
+			c->stick_x = ((float)x / maxx - 0.5f) * 2.0f;
+			c->stick_y = ((float)y / maxy - 0.5f) * -2.0f;
+		}
+	}
+}
+
+static void send_haptics(struct q1track_shm *m, int64_t now)
+{
+	static uint32_t last_seq[2];
+	static int64_t last_sent[2];
+	if (!haptics)
+		return;
+	for (int i = 0; i < 2; i++) {
+		if (!m->controller[i].id)
+			continue;
+		int active = m->haptic_until_ns[i] > now && m->haptic_amplitude[i] > 0.0f;
+		if (m->haptic_seq[i] != last_seq[i] || (active && now - last_sent[i] > 40000000LL) ||
+		    (!active && last_sent[i] && now - last_sent[i] > 60000000LL)) {
+			float a = active ? m->haptic_amplitude[i] : 0.0f;
+			void **vt = *(void ***)haptics;
+			((haptic_simple_fn)vt[0])(haptics, m->controller[i].id, a);
+			last_seq[i] = m->haptic_seq[i];
+			last_sent[i] = active ? now : 0;
+		}
+	}
+}
+
+static int do_ctl(double seconds, double hz)
+{
+	int64_t t0 = now_ns(), next = t0;
+	refresh_devices(1);
+	while (!stop && now_ns() - t0 < (int64_t)(seconds * 1e9)) {
+		int64_t t = now_ns();
+		refresh_devices(0);
+		for (int i = 0; i < ndevs; i++) {
+			struct q1track_controller c;
+			get_ctrl(devs[i].id, t, &c);
+			printf("%.2f %016llx hand %u conn %d status %x pos [%.3f %.3f %.3f] btn %05x trig %.2f grip %.2f "
+			       "stick [%.2f %.2f]\n",
+			       (t - t0) / 1e9, (unsigned long long)c.id, devs[i].hand, c.connected, c.pose.status,
+			       c.pose.position[0], c.pose.position[1], c.pose.position[2], c.buttons, c.trigger, c.grip,
+			       c.stick_x, c.stick_y);
+		}
+		next += (int64_t)(1e9 / hz);
+		sleep_until(next);
+	}
+	return 0;
 }
 
 static int do_print(double seconds, double hz)
@@ -174,7 +331,7 @@ static int do_serve(double hz)
 	rename(Q1TRACK_SHM_PATH ".tmp", Q1TRACK_SHM_PATH);
 	fprintf(stderr, "q1trackd: publishing at %.0f Hz in %s\n", hz, Q1TRACK_SHM_PATH);
 
-	int64_t next = now_ns(), last_log = 0, last_ipd = 0;
+	int64_t next = now_ns(), last_log = 0, last_ipd = 0, last_dev = 0;
 	uint64_t valid = 0, n = 0;
 	float ipd = 0;
 	while (!stop) {
@@ -185,8 +342,22 @@ static int do_serve(double hz)
 			ipd = get_ipd();
 			last_ipd = t;
 		}
+		struct q1track_controller cs[2];
+		memset(cs, 0, sizeof(cs));
+		if (ctrls) {
+			if (t - last_dev > 500000000LL) {
+				refresh_devices(0);
+				last_dev = t;
+			}
+			for (int i = 0; i < ndevs; i++) {
+				int slot = devs[i].hand == HAND_LEFT ? 0 : devs[i].hand == HAND_RIGHT ? 1 : -1;
+				if (slot >= 0)
+					get_ctrl(devs[i].id, t, &cs[slot]);
+			}
+		}
 		m->seq++;
 		__atomic_thread_fence(__ATOMIC_RELEASE);
+		memcpy((void *)m->controller, cs, sizeof(cs));
 		m->head = p;
 		m->ipd = ipd;
 		m->update_ns = t;
@@ -203,6 +374,7 @@ static int do_serve(double hz)
 			last_log = t;
 			valid = n = 0;
 		}
+		send_haptics(m, t);
 		next += (int64_t)(1e9 / hz);
 		if (next < t)
 			next = t;
@@ -217,13 +389,15 @@ int main(int argc, char **argv)
 	setvbuf(stdout, NULL, _IOLBF, 0);
 	signal(SIGINT, on_signal);
 	signal(SIGTERM, on_signal);
-	if (argc < 2 || (strcmp(argv[1], "print") && strcmp(argv[1], "serve"))) {
-		fprintf(stderr, "usage: %s print [seconds] [hz] | serve [hz]\n", argv[0]);
+	if (argc < 2 || (strcmp(argv[1], "print") && strcmp(argv[1], "serve") && strcmp(argv[1], "ctl"))) {
+		fprintf(stderr, "usage: %s print [seconds] [hz] | ctl [seconds] [hz] | serve [hz]\n", argv[0]);
 		return 2;
 	}
 	if (load_ossdk() < 0)
 		return 1;
 	if (!strcmp(argv[1], "print"))
 		return do_print(argc > 2 ? atof(argv[2]) : 10, argc > 3 ? atof(argv[3]) : 10);
+	if (!strcmp(argv[1], "ctl"))
+		return do_ctl(argc > 2 ? atof(argv[2]) : 10, argc > 3 ? atof(argv[3]) : 10);
 	return do_serve(argc > 2 ? atof(argv[2]) : 500);
 }

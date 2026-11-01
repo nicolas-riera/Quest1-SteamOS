@@ -39,6 +39,7 @@
 #include <sched.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
 #include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
@@ -52,7 +53,7 @@
 #define SYSPROPS_TRANSACTION PACK('_', 'S', 'P', 'R')
 #define SVC_MGR_ADD_SERVICE 3
 
-enum kind { K_GENERIC, K_PERMISSION, K_VRPOWER, K_VRAPI };
+enum kind { K_GENERIC, K_PERMISSION, K_VRPOWER, K_VRAPI, K_REMOTE };
 
 struct svc {
 	const char *name, *desc;
@@ -67,7 +68,7 @@ static struct svc svcs[] = {
 	{"appops", "com.android.internal.app.IAppOpsService", K_GENERIC, 1},
 	{"vrpowermanager", "oculus.internal.power.IVrPowerManager", K_VRPOWER, 1},
 	{"settingsproxy", "oculus.internal.ISettingsProxy", K_GENERIC, 1},
-	{"OVRRemoteService", "oculus.internal.remote.IRemoteService", K_GENERIC, 1},
+	{"OVRRemoteService", "oculus.internal.remote.IRemoteService", K_REMOTE, 1},
 	{"power", "android.os.IPowerManager", K_GENERIC, 1},
 	{"GatekeeperService", "oculus.internal.IGatekeeperService", K_GENERIC, 1},
 	{"notificationProxy", "oculus.internal.INotificationProxy", K_GENERIC, 1},
@@ -109,6 +110,8 @@ static int no_sched; /* --no-sched: log setThreadPolicy, do not apply it */
 static int bfd = -1;
 static volatile sig_atomic_t sig_state; /* pending power state from a signal, 0 = none */
 static int then_state; /* --then N: one second after the first client registers, broadcast state N */
+static volatile sig_atomic_t then_pending, tick;
+static int remote_model = 2; /* RemoteStatus model field, --model N */
 static int power_state = 1;             /* 1 RUNNING, 2 STANDBY, 3 SLEEP */
 
 #define MAXCLIENTS 32
@@ -181,6 +184,18 @@ static void p_binder(struct parcel *p, uintptr_t ptr)
 	o.flags = 0x7f | FLAT_BINDER_FLAG_ACCEPTS_FDS;
 	o.binder = ptr;
 	o.cookie = ptr;
+	if (p->noffs < 8)
+		p->offs[p->noffs++] = p->len;
+	p_raw(p, &o, sizeof(o));
+}
+
+static void p_fd(struct parcel *p, int fd)
+{
+	struct flat_binder_object o;
+	memset(&o, 0, sizeof(o));
+	o.hdr.type = BINDER_TYPE_FD;
+	o.flags = 0x7f;
+	o.handle = (uint32_t)fd;
 	if (p->noffs < 8)
 		p->offs[p->noffs++] = p->len;
 	p_raw(p, &o, sizeof(o));
@@ -313,7 +328,7 @@ static void add_client(uint32_t handle)
 	bwrite(&w, sizeof(w));
 	logf_("vrpowermanager: client registered, handle %u (slot %d)", handle, freeslot);
 	if (then_state)
-		alarm(1);
+		then_pending = 1;
 }
 
 static void drop_client(int i, const char *why)
@@ -429,6 +444,158 @@ static void set_thread_policy(pid_t caller, struct rd *r)
 	      thread_name(caller, tid), caller, res);
 }
 
+
+/* ---- OVRRemoteService: the controller list for trackingservice (oculus.internal.remote.IRemoteService) ----
+ * Without it libossdk reports "None connected" although the sensors HAL sees both controllers.
+ * Transaction codes and the RemoteStatus layout are from libremoteservice.so (Bp proxies and
+ * RemoteStatus::writeToParcel). The controller ids come from /run/q1track/controllers, one
+ * "<16 hex id> <subtype 1 left | 2 right>" line per controller, written by holo-android-tracking's
+ * ctlwatch from the sensors HAL log (ids are never baked into the repo). The idea of answering
+ * these calls and announcing controllers through the status callback comes from the Quest 2 port
+ * (github.com/URFAVF3MBOY/quest2-steamos); this is an independent implementation. */
+#define CTL_FILE "/run/q1track/controllers"
+static struct rctl {
+	int used;
+	char sid[20];
+	uint64_t id;
+	int type; /* 0 left, 1 right */
+	int announced;
+	int evfd[2];
+} rctl[2];
+static uint32_t remote_cb; /* IRemoteServiceStatusCallback handle, 0 = none */
+
+static void p_status(struct parcel *p, const struct rctl *c)
+{
+	p_i32(p, 1); /* parcelable present */
+	p_str16(p, c->sid);  /* device id */
+	p_str16(p, "0.0.0"); /* firmware */
+	p_str16(p, "0x08");  /* hardware revision */
+	p_str16(p, "unknown"); /* serial */
+	p_raw(p, &(double){0.0}, 8);
+	p_i32(p, 100); /* battery % */
+	p_i32(p, 3);   /* state: connected, active */
+	p_i32(p, 0);   /* error list: empty */
+	p_i32(p, remote_model);
+	p_i32(p, 1);   /* tracking: none (the tracker reports its own) */
+	p_i32(p, 0);   /* brightness */
+}
+
+static void remote_reload(void)
+{
+	FILE *f = fopen(CTL_FILE, "r");
+	char line[128];
+	if (!f)
+		return;
+	while (fgets(line, sizeof(line), f)) {
+		char hex[32];
+		int sub;
+		if (sscanf(line, "%16s %d", hex, &sub) != 2 || strlen(hex) != 16 || (sub != 1 && sub != 2))
+			continue;
+		struct rctl *c = &rctl[sub - 1];
+		if (c->used && !strcmp(c->sid, hex))
+			continue;
+		memset(c, 0, sizeof(*c));
+		c->used = 1;
+		snprintf(c->sid, sizeof(c->sid), "%s", hex);
+		c->id = strtoull(hex, NULL, 16);
+		c->type = sub - 1;
+		c->evfd[0] = c->evfd[1] = -1;
+		socketpair(AF_UNIX, SOCK_SEQPACKET, 0, c->evfd);
+		logf_("OVRRemoteService: controller %s (%s)", hex, sub == 1 ? "left" : "right");
+	}
+	fclose(f);
+}
+
+static void remote_announce(void)
+{
+	if (!remote_cb || power_state == 3)
+		return;
+	for (int i = 0; i < 2; i++) {
+		if (!rctl[i].used || rctl[i].announced)
+			continue;
+		struct parcel p = {0};
+		p_token(&p, "oculus.internal.remote.IRemoteServiceStatusCallback");
+		p_i32(&p, rctl[i].type);
+		p_status(&p, &rctl[i]);
+		bc_txn(BC_TRANSACTION, remote_cb, 1, TF_ONE_WAY, &p);
+		rctl[i].announced = 1;
+		logf_("OVRRemoteService: onStatus(type %d) -> callback handle %u", rctl[i].type, remote_cb);
+	}
+}
+
+static void remote_drain(void)
+{
+	char buf[512];
+	for (int i = 0; i < 2; i++)
+		if (rctl[i].used && rctl[i].evfd[0] >= 0)
+			while (recv(rctl[i].evfd[0], buf, sizeof(buf), MSG_DONTWAIT) > 0)
+				;
+}
+
+static void remote_txn(const struct binder_transaction_data *t, struct rd *r, struct parcel *reply)
+{
+	switch (t->code) {
+	case 1: { /* getSupportedDeviceTypes -> vector<int> */
+		int n = 0;
+		for (int i = 0; i < 2; i++)
+			n += rctl[i].used;
+		p_i32(reply, n);
+		for (int i = 0; i < 2; i++)
+			if (rctl[i].used)
+				p_i32(reply, rctl[i].type);
+		logf_("OVRRemoteService: getSupportedDeviceTypes -> %d", n);
+		break;
+	}
+	case 2: { /* getDeviceTypeDescription(int) */
+		int ty = r_i32(r);
+		p_str16(reply, ty == 0 ? "Left" : ty == 1 ? "Right" : "Unknown");
+		break;
+	}
+	case 3: { /* getPairedDeviceStatus(int) -> RemoteStatus */
+		int ty = r_i32(r);
+		if (ty >= 0 && ty < 2 && rctl[ty].used)
+			p_status(reply, &rctl[ty]);
+		else
+			p_i32(reply, 0);
+		logf_("OVRRemoteService: getPairedDeviceStatus(%d) -> %s", ty, ty >= 0 && ty < 2 && rctl[ty].used ? "status" : "none");
+		break;
+	}
+	case 26: { /* getDeviceEventFd(long id) -> ParcelFileDescriptor */
+		uint32_t lo = (uint32_t)r_i32(r), hi = (uint32_t)r_i32(r);
+		uint64_t id = ((uint64_t)hi << 32) | lo;
+		int k = -1;
+		for (int i = 0; i < 2; i++)
+			if (rctl[i].used && rctl[i].id == id)
+				k = i;
+		logf_("OVRRemoteService: getDeviceEventFd(%016llx) -> %s", (unsigned long long)id, k >= 0 ? "socket" : "none");
+		if (k >= 0 && rctl[k].evfd[1] >= 0) {
+			p_i32(reply, 1); /* present */
+			p_i32(reply, 0); /* no comm channel */
+			p_fd(reply, rctl[k].evfd[1]);
+		} else {
+			p_i32(reply, 0);
+		}
+		break;
+	}
+	case 19: { /* registerStatusCallback */
+		int ok;
+		uint32_t h = first_handle(t, &ok);
+		if (ok) {
+			bc_handle(BC_INCREFS, h);
+			bc_handle(BC_ACQUIRE, h);
+			remote_cb = h;
+			logf_("OVRRemoteService: status callback registered, handle %u", h);
+		}
+		break;
+	}
+	case 20:
+		remote_cb = 0;
+		break;
+	default:
+		logf_("OVRRemoteService: call %u answered ok (ignored)", t->code);
+	}
+}
+
 static void handle_txn(const struct binder_transaction_data *t)
 {
 	int idx = (int)t->cookie - 1;
@@ -474,6 +641,8 @@ static void handle_txn(const struct binder_transaction_data *t)
 				add_client(h);
 			else
 				logf_("vrpowermanager: registerClient without a binder");
+		} else if (s && s->kind == K_REMOTE) {
+			remote_txn(t, &r, &reply);
 		} else if (s && s->kind == K_VRAPI && t->code == 1) {
 			set_thread_policy(t->sender_pid, &r);
 		} else if (s && s->kind == K_VRPOWER && t->code == 2) {
@@ -505,6 +674,13 @@ static int loop(int want_reply, int32_t *reply_status)
 		bwr.read_buffer = (uintptr_t)rbuf;
 		if (ioctl(bfd, BINDER_WRITE_READ, &bwr) < 0) {
 			if (errno == EINTR) {
+				if (tick && !want_reply) {
+					tick = 0;
+					remote_reload();
+					remote_drain();
+					if (!then_pending)
+						remote_announce();
+				}
 				if (sig_state && !want_reply) {
 					power_state = sig_state;
 					sig_state = 0;
@@ -604,7 +780,16 @@ static int loop(int want_reply, int32_t *reply_status)
 
 static void on_signal(int sig)
 {
-	sig_state = sig == SIGALRM ? then_state : sig == SIGUSR1 ? 1 : sig == SIGHUP ? 2 : 3;
+	if (sig == SIGALRM) {
+		tick = 1;
+		if (then_pending) {
+			then_pending = 0;
+			sig_state = then_state;
+		}
+		alarm(1);
+		return;
+	}
+	sig_state = sig == SIGUSR1 ? 1 : sig == SIGHUP ? 2 : 3;
 }
 
 static int in_list(const char *list, const char *name)
@@ -628,6 +813,8 @@ int main(int argc, char **argv)
 			verbose = 1;
 		else if (!strcmp(argv[i], "-s") && i + 1 < argc)
 			power_state = atoi(argv[++i]);
+		else if (!strcmp(argv[i], "--model") && i + 1 < argc)
+			remote_model = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--then") && i + 1 < argc)
 			then_state = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--skip") && i + 1 < argc)
@@ -670,6 +857,7 @@ int main(int argc, char **argv)
 	sigaction(SIGUSR2, &sa, NULL);
 	sigaction(SIGHUP, &sa, NULL);
 	sigaction(SIGALRM, &sa, NULL);
+	alarm(1);
 
 	uint32_t enter = BC_ENTER_LOOPER;
 	bwrite(&enter, 4);

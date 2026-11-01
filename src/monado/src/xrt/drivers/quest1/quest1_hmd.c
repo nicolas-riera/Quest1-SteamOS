@@ -220,6 +220,9 @@ struct quest1_hmd
 	{
 		struct os_thread_helper oth;
 		const struct q1track_shm *shm; //!< NULL until q1trackd publishes
+		struct q1track_shm *wshm;      //!< Same mapping, writable: only the haptic fields are written
+		int64_t last_change_ns;        //!< Last time q1trackd's update counter moved
+		int64_t ctl_last_ts[2];        //!< Last controller pose timestamps pushed
 		uint64_t updates;              //!< Last update count read
 		int64_t last_ts;               //!< Last timestamp pushed to the history
 		uint64_t pushed, tracked;      //!< Statistics since the last log
@@ -528,11 +531,11 @@ imu_thread(void *ptr)
 static void
 meta_map(struct quest1_hmd *h)
 {
-	int fd = open(Q1TRACK_SHM_PATH, O_RDONLY | O_CLOEXEC);
+	int fd = open(Q1TRACK_SHM_PATH, O_RDWR | O_CLOEXEC);
 	if (fd < 0) {
 		return;
 	}
-	void *m = mmap(NULL, sizeof(struct q1track_shm), PROT_READ, MAP_SHARED, fd, 0);
+	void *m = mmap(NULL, sizeof(struct q1track_shm), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
 	close(fd);
 	if (m == MAP_FAILED) {
 		return;
@@ -544,13 +547,15 @@ meta_map(struct quest1_hmd *h)
 		return;
 	}
 	h->mt.shm = shm;
+	h->mt.wshm = m;
+	h->mt.last_change_ns = os_monotonic_get_ns();
 	h->mt.updates = 0;
 	Q1_INFO(h, "Meta tracking: reading q1trackd (pid %u)", shm->writer_pid);
 }
 
 //! Seqlock read of the head pose; false while the writer is busy or nothing changed.
 static bool
-meta_read(struct quest1_hmd *h, struct q1track_pose *out, int64_t *out_update_ns)
+meta_read(struct quest1_hmd *h, struct q1track_pose *out, struct q1track_controller out_ctl[2], int64_t *out_update_ns)
 {
 	const struct q1track_shm *m = h->mt.shm;
 	for (int tries = 0; tries < 4; tries++) {
@@ -560,6 +565,8 @@ meta_read(struct quest1_hmd *h, struct q1track_pose *out, int64_t *out_update_ns
 		}
 		uint64_t updates = m->updates;
 		struct q1track_pose p = m->head;
+		struct q1track_controller ctl[2];
+		memcpy(ctl, (const void *)m->controller, sizeof(ctl));
 		int64_t update_ns = m->update_ns;
 		__atomic_thread_fence(__ATOMIC_ACQUIRE);
 		if (__atomic_load_n(&m->seq, __ATOMIC_RELAXED) != s0) {
@@ -570,6 +577,7 @@ meta_read(struct quest1_hmd *h, struct q1track_pose *out, int64_t *out_update_ns
 		}
 		h->mt.updates = updates;
 		*out = p;
+		memcpy(out_ctl, ctl, sizeof(ctl));
 		*out_update_ns = update_ns;
 		return true;
 	}
@@ -622,6 +630,75 @@ meta_push(struct quest1_hmd *h, const struct q1track_pose *p)
 	h->mt.tracked += (p->status & Q1TRACK_POS_TRACKED) != 0;
 }
 
+//! Buttons, touches and analog inputs from libossdk's OSSDK::Input::v1::Button bit numbers.
+static void
+meta_push_controller(struct quest1_hmd *h, int i, const struct q1track_controller *c)
+{
+	struct quest1_controller *qc = h->ctrl[i];
+	if (qc == NULL) {
+		return;
+	}
+	if (!c->connected) {
+		quest1_controller_set_disconnected(qc);
+		return;
+	}
+	const uint32_t b = c->buttons;
+	struct quest1_controller_state st = {0};
+	st.buttons = ((b >> 8) & 1 ? QUEST1_BUTTON_AX : 0) | ((b >> 10) & 1 ? QUEST1_BUTTON_BY : 0) |
+	             ((b >> (i == 0 ? 2 : 1)) & 1 ? QUEST1_BUTTON_MENU : 0) | ((b >> 3) & 1 ? QUEST1_BUTTON_STICK : 0);
+	st.touches = ((b >> 9) & 1 ? QUEST1_TOUCH_AX : 0) | ((b >> 11) & 1 ? QUEST1_TOUCH_BY : 0) |
+	             ((b >> 12) & 1 ? QUEST1_TOUCH_STICK : 0) | ((b >> 6) & 1 ? QUEST1_TOUCH_TRIGGER : 0) |
+	             ((b >> 16) & 1 ? QUEST1_TOUCH_THUMBREST : 0);
+	st.trigger = CLAMP(c->trigger, 0.0f, 1.0f);
+	st.grip = CLAMP(c->grip, 0.0f, 1.0f);
+	st.stick_x = CLAMP(c->stick_x, -1.0f, 1.0f);
+	st.stick_y = CLAMP(c->stick_y, -1.0f, 1.0f);
+	quest1_controller_push_state(qc, os_monotonic_get_ns(), &st);
+	if (c->battery >= 0.0f) {
+		quest1_controller_set_battery(qc, c->battery);
+	}
+
+	const struct q1track_pose *p = &c->pose;
+	int64_t ts = p->predicted_ns != 0 ? p->predicted_ns : p->sample_ns;
+	if (!p->valid || ts <= h->mt.ctl_last_ts[i]) {
+		return;
+	}
+	struct xrt_space_relation rel = XRT_SPACE_RELATION_ZERO;
+	rel.pose.orientation = (struct xrt_quat){p->orientation[0], p->orientation[1], p->orientation[2], p->orientation[3]};
+	rel.pose.position = (struct xrt_vec3){p->position[0], p->position[1], p->position[2]};
+	float qn = p->orientation[0] * p->orientation[0] + p->orientation[1] * p->orientation[1] +
+	           p->orientation[2] * p->orientation[2] + p->orientation[3] * p->orientation[3];
+	if (qn < 0.5f) {
+		return;
+	}
+	math_quat_normalize(&rel.pose.orientation);
+	int flags = XRT_SPACE_RELATION_ORIENTATION_VALID_BIT | XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT |
+	            XRT_SPACE_RELATION_POSITION_VALID_BIT;
+	if (p->status & Q1TRACK_POS_TRACKED) {
+		flags |= XRT_SPACE_RELATION_POSITION_TRACKED_BIT;
+	}
+	rel.relation_flags = (enum xrt_space_relation_flags)flags;
+	quest1_controller_push_meta_pose(qc, ts, &rel);
+	h->mt.ctl_last_ts[i] = ts;
+}
+
+//! Haptics in Meta mode: q1trackd sends them to libossdk (the shared memory carries the request).
+static void
+controller_haptic_meta(void *data, bool left, float amplitude, int64_t duration_ns)
+{
+	struct quest1_hmd *h = data;
+	struct q1track_shm *m = h->mt.wshm;
+	if (m == NULL) {
+		return;
+	}
+	int i = left ? 0 : 1;
+	int64_t now = os_monotonic_get_ns();
+	m->haptic_amplitude[i] = CLAMP(amplitude, 0.0f, 1.0f);
+	m->haptic_until_ns[i] = now + (duration_ns > 0 ? duration_ns : 20 * U_TIME_1MS_IN_NS);
+	__atomic_thread_fence(__ATOMIC_RELEASE);
+	m->haptic_seq[i]++;
+}
+
 static void *
 meta_thread(void *ptr)
 {
@@ -641,9 +718,19 @@ meta_thread(void *ptr)
 			}
 		} else {
 			struct q1track_pose p;
+			struct q1track_controller ctl[2];
 			int64_t update_ns;
-			if (meta_read(h, &p, &update_ns)) {
+			if (meta_read(h, &p, ctl, &update_ns)) {
 				meta_push(h, &p);
+				meta_push_controller(h, 0, &ctl[0]);
+				meta_push_controller(h, 1, &ctl[1]);
+				h->mt.last_change_ns = now;
+			} else if (now - h->mt.last_change_ns > 2 * (int64_t)U_TIME_1S_IN_NS) {
+				// q1trackd restarted (a new file): map it again
+				munmap((void *)h->mt.shm, sizeof(struct q1track_shm));
+				h->mt.shm = NULL;
+				h->mt.wshm = NULL;
+				next_map = now;
 			}
 		}
 		if (now - h->mt.last_log_ns > 10 * (int64_t)U_TIME_1S_IN_NS) {
@@ -901,13 +988,20 @@ quest1_hmd_create(void)
 		h->mt.use_velocity = debug_get_bool_option_quest1_meta_velocity();
 		h->base.supported.position_tracking = true;
 		snprintf(h->base.tracking_origin->name, XRT_TRACKING_NAME_LEN, "Quest 1 (Meta tracking)");
+		if (debug_get_bool_option_quest1_controllers()) {
+			for (int i = 0; i < 2; i++) {
+				h->ctrl[i] = quest1_controller_create(&h->base, i == 0);
+				quest1_controller_set_meta(h->ctrl[i]);
+				quest1_controller_set_haptic_fn(h->ctrl[i], controller_haptic_meta, h);
+			}
+		}
 		if (os_thread_helper_start(&h->mt.oth, meta_thread, h) != 0) {
 			Q1_ERROR(h, "cannot start the Meta tracking thread");
 			goto err;
 		}
 		u_var_add_root(h, "Quest 1 HMD", true);
 		u_var_add_log_level(h, &h->log_level, "log_level");
-		Q1_INFO(h, "Meta tracking mode: head pose from q1trackd (%s), no SyncBoss, no controllers",
+		Q1_INFO(h, "Meta tracking mode: head and controller poses from q1trackd (%s), no SyncBoss",
 		        Q1TRACK_SHM_PATH);
 		return &h->base;
 	}

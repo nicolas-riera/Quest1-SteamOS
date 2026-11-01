@@ -16,6 +16,7 @@
 #include "math/m_api.h"
 #include "math/m_imu_3dof.h"
 #include "math/m_mathinclude.h"
+#include "math/m_relation_history.h"
 #include "math/m_space.h"
 #include "os/os_threading.h"
 #include "os/os_time.h"
@@ -104,6 +105,10 @@ struct quest1_controller
 
 	quest1_haptic_fn haptic_fn;
 	void *haptic_data;
+
+	//! Meta tracking mode: the 6DoF pose comes from Meta's tracker (q1trackd), no arm model.
+	bool meta;
+	struct m_relation_history *history;
 
 	enum u_logging_level log_level;
 };
@@ -227,7 +232,9 @@ quest1_controller_push_state(struct quest1_controller *c, int64_t when_ns, const
 	c->state_ns = when_ns;
 	c->connected = true;
 	bool menu = (s->buttons & QUEST1_BUTTON_MENU) != 0;
-	if (!menu) {
+	if (c->meta) {
+		// no IMU fusion to recenter
+	} else if (!menu) {
 		c->menu_down_since_ns = 0;
 	} else if (c->menu_down_since_ns == 0) {
 		c->menu_down_since_ns = when_ns;
@@ -324,6 +331,17 @@ controller_get_tracked_pose(struct xrt_device *xdev,
 		return XRT_ERROR_INPUT_UNSUPPORTED;
 	}
 
+	if (c->meta) {
+		os_mutex_lock(&c->mutex);
+		bool conn = c->connected;
+		os_mutex_unlock(&c->mutex);
+		*out = (struct xrt_space_relation)XRT_SPACE_RELATION_ZERO;
+		if (conn) {
+			m_relation_history_get(c->history, at_ns, out);
+		}
+		return XRT_SUCCESS;
+	}
+
 	os_mutex_lock(&c->mutex);
 	bool ok = c->connected && c->fusion.state == M_IMU_3DOF_STATE_RUNNING;
 	struct xrt_quat rot;
@@ -386,6 +404,7 @@ controller_destroy(struct xrt_device *xdev)
 {
 	struct quest1_controller *c = qc(xdev);
 	u_var_remove_root(c);
+	m_relation_history_destroy(&c->history);
 	m_imu_3dof_close(&c->fusion);
 	os_mutex_destroy(&c->mutex);
 	u_device_free(&c->base);
@@ -447,6 +466,22 @@ quest1_controller_create(struct xrt_device *hmd, bool left)
 	u_var_add_root(c, c->base.str, true);
 	m_imu_3dof_add_vars(&c->fusion, c, "");
 	return c;
+}
+
+void
+quest1_controller_set_meta(struct quest1_controller *c)
+{
+	c->meta = true;
+	m_relation_history_create(&c->history);
+	c->base.supported.position_tracking = true;
+}
+
+void
+quest1_controller_push_meta_pose(struct quest1_controller *c, int64_t when_ns, const struct xrt_space_relation *rel)
+{
+	if (c->history != NULL) {
+		m_relation_history_push(c->history, rel, when_ns);
+	}
 }
 
 struct xrt_device *

@@ -232,14 +232,28 @@ TemporaryFileSystem=/data/local/tmp" \
 Wants=android-trackingservice.service
 After=android-trackingservice.service
 PartOf=android-sensors-hal.service"
+	# ctlwatch: controller ids (from the sensors HAL log) for ovrstub's OVRRemoteService stand-in
+	unit ctlwatch "controller id list for ovrstub (/run/q1track/controllers)" root "" 		"/usr/local/sbin/holo-android-tracking ctlwatch" "Wants=android-sensors-hal.service
+After=android-sensors-hal.service
+PartOf=android-sensors-hal.service"
 	systemctl daemon-reload
 	echo "units written, none enabled. Without SyncBoss: holo-android-tracking base." \
 		"With SyncBoss (monado.service stopped): holo-android-tracking trial"
 }
 
 BASE="android-ovrstub android-ashmemd android-adsprpcd android-settingsserver android-vrfocus android-iad android-telemetry-hal android-power-hal"
-SB="android-q1trackd android-trackingservice android-calibration android-cameramuxmode android-sensors-hal"
+SB="android-ctlwatch android-q1trackd android-trackingservice android-calibration android-cameramuxmode android-sensors-hal"
 TE=/sys/bus/spi/devices/spi12.0/control/te_timestamp
+ctlwatch() { # paired controller ids -> /run/q1track/controllers ("<id> <1 left|2 right>"), for ovrstub
+	since=$(systemctl show -p ActiveEnterTimestamp --value android-sensors-hal.service)
+	while :; do
+		journalctl -b --no-pager -o cat --since "$since" 2>/dev/null |
+			sed -n 's/.*Syncboss input \([0-9a-f]\{16\}\) hardware type [0-9]*, subtype \([12]\).*/\1 \2/p' |
+			sort -u > /run/q1track/controllers.tmp
+		[ -s /run/q1track/controllers.tmp ] && mv -f /run/q1track/controllers.tmp /run/q1track/controllers
+		sleep 2
+	done
+}
 cli() { # trackinginterface_cli as root (vrfocus grants uid 0) with the stack's property area
 	unshare -m sh -c 'mount --bind /run/q1track/__properties__ /dev/__properties__ && exec env '"$E"' /system/bin/trackinginterface_cli "$@"' cli "$@"
 }
@@ -339,7 +353,7 @@ meta_on() {
 	sleep 1
 	systemctl start $BASE
 	systemctl start android-sensors-hal
-	systemctl start android-cameramuxmode android-calibration android-trackingservice android-q1trackd
+	systemctl start android-cameramuxmode android-calibration android-trackingservice android-ctlwatch android-q1trackd
 	systemctl start monado.service
 	sleep 3
 	echo "monado: $(systemctl is-active monado.service)," \
@@ -362,6 +376,7 @@ setup) setup ;;
 install) install_units ;;
 base) systemctl start $BASE ;;
 trial) trial ;;
+ctlwatch) ctlwatch ;;
 monado-trial) shift; monado_trial "$@" ;;
 meta-on) meta_on ;;
 meta-off) meta_off ;;
