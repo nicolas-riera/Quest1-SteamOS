@@ -2,7 +2,7 @@
 # Steam session on the native Quest 1: the arm64 Steam client (Big Picture) on a virtual X server,
 # shown in the headset by xscreen (an OpenXR quad layer on Monado) and controllable from the PC over VNC.
 #   xvfb.service      Xvfb :1, 1280x800, framebuffer exported as an XWD file in /run/xvfb
-#   steam.service     steam-q1 -gamepadui as steamos (restarts itself after client self-updates)
+#   steam.service     steam-q1 -gamepadui -steamos3 -steamdeck -steamframe (Frame identity: ON_FRAME, Frame OOBE; docs/frame-mode.md) as steamos (restarts itself after client self-updates)
 #   x11vnc.service    VNC on port 5900, password in /etc/x11vnc/passwd
 #   steam-screen.service  shows the Steam screen in VR (xscreen); the Monado target keeps the
 #                     panels off while the proximity sensor says the headset is not worn
@@ -129,7 +129,7 @@ User=steamos
 # steamos needs gid 3003 (aid_inet) for IP sockets: the Android kernel has PARANOID_NETWORK
 Environment=DISPLAY=:1 HOME=/home/steamos USER=steamos XDG_RUNTIME_DIR=/run/user/1000
 ExecStartPre=+/usr/bin/install -d -o steamos -g steamos -m 700 /run/user/1000
-ExecStart=/usr/local/bin/steam-q1 -gamepadui
+ExecStart=/usr/local/bin/steam-q1 -gamepadui -steamos3 -steamdeck -steamframe
 Restart=on-failure
 RestartSec=5
 
