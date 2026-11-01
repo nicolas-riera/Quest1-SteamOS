@@ -207,6 +207,7 @@ public:
 	// therefore rendered with it, and the frame thread submits frame k+1 to Monado with that same
 	// pose. Monado's reprojection then only corrects the latency, not a render/submit mismatch.
 	bool LocateAhead(DriverPose_t &pose, XrPosef *xrPose);
+	int64_t lastWhenNs = 0; //!< CLOCK_MONOTONIC time of the last LocateAhead's prediction (same thread as its caller)
 	void RecordFramePose(uint64_t frame, const XrPosef &pose);
 	std::function<void(uint64_t presentedFrame)> onPresent;
 	std::atomic<double> lastPresent{0}; //!< MonotonicSeconds of the last display present
@@ -319,10 +320,12 @@ private:
 	{
 		uint64_t frame = 0;
 		XrPosef pose{};
+		int64_t whenNs = 0;
 	};
 	std::mutex poseRingMutex;
 	PoseSample poseRing[64];
-	bool PoseForFrame(uint64_t frame, XrPosef *pose);
+	bool PoseForFrame(uint64_t frame, XrPosef *pose, int64_t *whenNs = nullptr);
+	void FillPosed(qd_msg &ack);
 	// frame thread only
 	Backbuffer displayImages[QD_MAX_IMAGES];
 	uint32_t displayCount = 0, displayWidth = 0, displayHeight = 0;
@@ -570,6 +573,11 @@ bool XrBackend::LocateAhead(DriverPose_t &pose, XrPosef *xrPose)
 	pose.result = TrackingResult_Running_OK;
 
 	XrTime when = Now() + (XrTime)predictNs;
+	{
+		timespec mono;
+		clock_gettime(CLOCK_MONOTONIC, &mono);
+		lastWhenNs = (int64_t)mono.tv_sec * 1000000000ll + mono.tv_nsec + (int64_t)predictNs;
+	}
 	XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
 	if (XR_FAILED(pxrLocateSpace(view, local, when, &loc)) ||
 	    !(loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) {
@@ -879,16 +887,18 @@ void XrBackend::Present(SharedTextureHandle_t backbuffer)
 void XrBackend::RecordFramePose(uint64_t frame, const XrPosef &pose)
 {
 	std::lock_guard<std::mutex> lock(poseRingMutex);
-	poseRing[frame % 64] = {frame, pose};
+	poseRing[frame % 64] = {frame, pose, lastWhenNs};
 }
 
-bool XrBackend::PoseForFrame(uint64_t frame, XrPosef *pose)
+bool XrBackend::PoseForFrame(uint64_t frame, XrPosef *pose, int64_t *whenNs)
 {
 	std::lock_guard<std::mutex> lock(poseRingMutex);
 	const PoseSample &slot = poseRing[frame % 64];
 	if (frame == 0 || slot.frame != frame)
 		return false;
 	*pose = slot.pose;
+	if (whenNs)
+		*whenNs = slot.whenNs;
 	return true;
 }
 
@@ -974,6 +984,7 @@ void XrBackend::DisplayThread()
 				qd_msg ack{};
 				ack.type = QD_POSED;
 				ack.frame = m.frame;
+				FillPosed(ack);
 				send(fd, &ack, sizeof(ack), MSG_NOSIGNAL);
 			} else if (m.type == QD_POSE) {
 				// frame m.frame is submitted (still rendering): publish the next frame's pose now
@@ -984,6 +995,7 @@ void XrBackend::DisplayThread()
 				qd_msg ack{};
 				ack.type = QD_POSED;
 				ack.frame = m.frame;
+				FillPosed(ack);
 				send(fd, &ack, sizeof(ack), MSG_NOSIGNAL);
 			}
 		}
@@ -993,6 +1005,21 @@ void XrBackend::DisplayThread()
 		presentedIndex = -1;
 		Log("quest1: vrcompositor display disconnected\n");
 	}
+}
+
+//! The pose just published for frame ack.frame + 1, for the layer (and Monado's re-projection).
+void XrBackend::FillPosed(qd_msg &ack)
+{
+	XrPosef p;
+	int64_t when = 0;
+	if (!PoseForFrame(ack.frame + 1, &p, &when))
+		return;
+	ack.pose_valid = 1;
+	ack.pose[0] = p.orientation.x;
+	ack.pose[1] = p.orientation.y;
+	ack.pose[2] = p.orientation.z;
+	ack.pose[3] = p.orientation.w;
+	ack.pose_time_ns = when;
 }
 
 void XrBackend::ReleaseDisplayImage(int index)
@@ -1477,11 +1504,11 @@ public:
 		*bottom = tanf(f.angleUp);
 	}
 	//! debug: QUEST1_DIRECT_FLIP bits 1 = output v, 2 = texture v, 4 = old projection, 8 = output and
-	//! texture u, to sort out
-	//! orientations on the device
+	//! texture u, to sort out orientations on the device. 3 is right (user-confirmed): vrcompositor's
+	//! distortion v runs bottom-up on both sides.
 	static int DirectFlip()
 	{
-		static int f = getenv("QUEST1_DIRECT_FLIP") ? atoi(getenv("QUEST1_DIRECT_FLIP")) : 0;
+		static int f = getenv("QUEST1_DIRECT_FLIP") ? atoi(getenv("QUEST1_DIRECT_FLIP")) : 3;
 		return f;
 	}
 	DistortionCoordinates_t ComputeDistortion(EVREye eye, float u, float v) override

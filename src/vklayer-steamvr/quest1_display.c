@@ -464,19 +464,25 @@ struct qd_swapchain
 
 	// direct scanout (quest1_scanout.c, QUEST1_DIRECT_SCANOUT=1): gralloc images committed on /dev/fb0
 	bool direct;
-	AHardwareBuffer *ahb[QD_MAX_IMAGES];
-	int buffer_fd[QD_MAX_IMAGES]; //!< owned by the AHardwareBuffer
-	uint32_t stride_px[QD_MAX_IMAGES];
-	bool ubwc[QD_MAX_IMAGES];
+	// Monado's socket (quest1_direct_proto.h): when connected it commits the frames (and re-projects
+	// them), otherwise this layer commits them itself
+	int mon_sock;
+	uint64_t mon_retry_ns;
+	struct
+	{
+		uint64_t frame; //!< 0: empty
+		float q[4];
+		int64_t time_ns;
+	} pose[64]; //!< the render pose of each frame (from QD_POSED, which announces the next frame's)
 	int release_fence[QD_MAX_IMAGES]; //!< of the commit that showed the image; -1 when none
-	// the right half (the eye vrcompositor draws at x = 1440) is drawn into a buffer of its own,
-	// see qs_CmdBeginRenderPass; the right half of images[] stays unused
-	AHardwareBuffer *ahb2[QD_MAX_IMAGES];
-	VkImage image2[QD_MAX_IMAGES];
-	VkDeviceMemory memory2[QD_MAX_IMAGES];
-	int buffer_fd2[QD_MAX_IMAGES];
-	uint32_t stride2_px[QD_MAX_IMAGES];
-	bool ubwc2[QD_MAX_IMAGES];
+	// each half of the display image (one eye, one panel) is drawn into a gralloc buffer of its own,
+	// see qs_CmdBeginRenderPass; images[] are plain images that are never rendered to
+	AHardwareBuffer *half_ahb[2][QD_MAX_IMAGES];
+	VkImage half_image[2][QD_MAX_IMAGES];
+	VkDeviceMemory half_memory[2][QD_MAX_IMAGES];
+	int half_fd[2][QD_MAX_IMAGES]; //!< owned by the AHardwareBuffer
+	uint32_t half_stride_px[2][QD_MAX_IMAGES];
+	bool half_ubwc[2][QD_MAX_IMAGES];
 	struct
 	{
 		int fd;
@@ -543,6 +549,12 @@ static void *qd_reader(void *arg)
 		if (m.type == QD_POSED) {
 			pthread_mutex_lock(&sc->mutex);
 			sc->posed_frame = m.frame;
+			if (m.pose_valid) {
+				uint64_t next = m.frame + 1;
+				sc->pose[next % 64].frame = next;
+				memcpy(sc->pose[next % 64].q, m.pose, sizeof(m.pose));
+				sc->pose[next % 64].time_ns = m.pose_time_ns;
+			}
 			pthread_cond_broadcast(&sc->cond);
 			pthread_mutex_unlock(&sc->mutex);
 			continue;
@@ -687,6 +699,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL qd_CreateSwapchainKHR(VkDevice device, con
 	sc->d = d;
 	sc->device = device;
 	sc->sock = -1;
+	sc->mon_sock = -1;
 	sc->count = ci->minImageCount < 3 ? 3 : ci->minImageCount;
 	if (sc->count > QD_MAX_IMAGES)
 		sc->count = QD_MAX_IMAGES;
@@ -751,7 +764,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL qd_CreateSwapchainKHR(VkDevice device, con
 	int fds[QD_MAX_IMAGES];
 	VkResult r = VK_SUCCESS;
 	for (uint32_t i = 0; i < QD_MAX_IMAGES; i++)
-		fds[i] = sc->release_fence[i] = sc->buffer_fd[i] = -1;
+		fds[i] = sc->release_fence[i] = sc->half_fd[0][i] = sc->half_fd[1][i] = -1;
 	sc->wake_fd[0] = sc->wake_fd[1] = -1;
 	sc->direct = qs_enabled() && ci->imageExtent.width == 2 * QS_PANEL_W && qs_load();
 	if (qs_enabled() && !sc->direct)
@@ -893,12 +906,13 @@ static void qd_destroy(struct qd_swapchain *sc)
 			sc->FreeMemory(sc->device, sc->memory[i], NULL);
 	}
 	if (sc->direct) {
-		for (uint32_t i = 0; i < sc->count; i++) {
-			if (sc->image2[i])
-				sc->DestroyImage(sc->device, sc->image2[i], NULL);
-			if (sc->memory2[i])
-				sc->FreeMemory(sc->device, sc->memory2[i], NULL);
-		}
+		for (uint32_t i = 0; i < sc->count; i++)
+			for (int h = 0; h < 2; h++) {
+				if (sc->half_image[h][i])
+					sc->DestroyImage(sc->device, sc->half_image[h][i], NULL);
+				if (sc->half_memory[h][i])
+					sc->FreeMemory(sc->device, sc->half_memory[h][i], NULL);
+			}
 		qs_destroy(sc);
 	}
 	free(sc);

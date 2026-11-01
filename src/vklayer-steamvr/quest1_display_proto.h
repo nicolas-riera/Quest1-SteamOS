@@ -39,4 +39,9 @@ struct qd_msg
 	//! QD_PRESENT: the vblank (CLOCK_MONOTONIC ns, on the shared grid: multiples of the display
 	//! period) that started this frame; the driver submits the frame with the pose it published then
 	uint64_t vblank_ns;
+	//! QD_POSED: the pose published for frame `frame` + 1 (what vrcompositor renders it with): head
+	//! orientation x, y, z, w in Monado's LOCAL space, and the CLOCK_MONOTONIC time it was predicted for
+	uint32_t pose_valid;
+	float pose[4];
+	int64_t pose_time_ns;
 };

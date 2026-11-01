@@ -17,6 +17,8 @@
 #include <sys/mman.h>
 #include <vulkan/vulkan_android.h>
 
+#include "quest1_direct_proto.h"
+
 #define __user
 #define GC msm_mdp_GC
 #include <linux/msm_mdp_ext.h>
@@ -49,6 +51,7 @@ static struct
 	void (*describe)(const AHardwareBuffer *, qs_ahb_desc *);
 	void (*release)(AHardwareBuffer *);
 	const qs_native_handle *(*native_handle)(const AHardwareBuffer *);
+	int (*send_handle)(const AHardwareBuffer *, int);
 } qs_ahb;
 static int qs_fb = -1, qs_blank = -1;
 static bool qs_flag_written;
@@ -89,6 +92,7 @@ static bool qs_load(void)
 	*(void **)&qs_ahb.describe = adlsym(nw, "AHardwareBuffer_describe");
 	*(void **)&qs_ahb.release = adlsym(nw, "AHardwareBuffer_release");
 	*(void **)&qs_ahb.native_handle = adlsym(nw, "AHardwareBuffer_getNativeHandle");
+	*(void **)&qs_ahb.send_handle = adlsym(nw, "AHardwareBuffer_sendHandleToUnixSocket");
 	if (!qs_ahb.allocate || !qs_ahb.describe || !qs_ahb.release || !qs_ahb.native_handle) {
 		LOG("direct scanout: AHardwareBuffer functions missing\n");
 		qs_ahb.allocate = NULL;
@@ -163,17 +167,43 @@ static VkResult qs_import(struct qd_swapchain *sc, const VkImageCreateInfo *ici,
 	return r;
 }
 
-// --- the right half in a buffer of its own --------------------------------------------------------
+//! An image from ici in plain device-local memory.
+static VkResult qs_plain_image(struct qd_swapchain *sc, const VkImageCreateInfo *ici, VkImage *image,
+                               VkDeviceMemory *memory)
+{
+	struct device *d = sc->d;
+	VkDevice device = sc->device;
+	PFN_vkCreateImage create_image = (PFN_vkCreateImage)d->gdpa(device, "vkCreateImage");
+	PFN_vkGetImageMemoryRequirements reqs =
+	    (PFN_vkGetImageMemoryRequirements)d->gdpa(device, "vkGetImageMemoryRequirements");
+	PFN_vkAllocateMemory allocate = (PFN_vkAllocateMemory)d->gdpa(device, "vkAllocateMemory");
+	PFN_vkBindImageMemory bind = (PFN_vkBindImageMemory)d->gdpa(device, "vkBindImageMemory");
+	VkResult r = create_image(device, ici, NULL, image);
+	if (r != VK_SUCCESS)
+		return r;
+	VkMemoryRequirements mr;
+	reqs(device, *image, &mr);
+	VkMemoryAllocateInfo mai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+	mai.allocationSize = mr.size;
+	mai.memoryTypeIndex = (uint32_t)__builtin_ctz(mr.memoryTypeBits);
+	r = allocate(device, &mai, NULL, memory);
+	if (r == VK_SUCCESS)
+		r = bind(device, *image, *memory, 0);
+	return r;
+}
+
+// --- each half in a buffer of its own -------------------------------------------------------------
 // vrcompositor draws each eye in its own render pass over its half of the display image. On the
 // Adreno 540 blob, a render area at x = 1440 of a linear gralloc image comes out as copies of its
-// first 320-px bin column, and is slow. So the pass of the right half renders into a 1440-wide
-// image of its own at x = 0 instead (twin image view and framebuffer, viewports and scissors moved
-// left), which the second display pipe scans out.
+// first 320-px bin column, and rendering into the 2880-wide linear image is slow for either half.
+// So each eye's pass renders into a 1440-wide image of its own at x = 0 instead (twin image views
+// and framebuffers; the right half's viewports and scissors move left), one per display pipe. The
+// app's own 2880-wide images only serve as handles.
 
 struct qs_twin
 {
-	uint64_t handle, twin; //!< app's image view / framebuffer -> ours on image2
-	VkImage image;         //!< the app object's image (views) / unused (framebuffers)
+	uint64_t handle;  //!< app's image view / framebuffer
+	uint64_t twin[2]; //!< ours on half_image[0] / half_image[1]
 };
 static struct qs_twin qs_views[64], qs_fbs[64];
 static unsigned qs_nviews, qs_nfbs;
@@ -200,22 +230,26 @@ static void qs_twins_forget(struct qd_swapchain *sc)
 	pthread_mutex_unlock(&qs_twin_lock);
 }
 
-//! Call with qs_twin_lock held: image2 of the direct swapchain image `image`, if it is one.
-static VkImage qs_image2_of(VkImage image)
+//! Call with qs_twin_lock held: the half images of the direct swapchain image `image`, if it is one.
+static bool qs_halves_of(VkImage image, VkImage halves[2])
 {
 	for (unsigned s = 0; s < 4; s++)
 		for (uint32_t i = 0; qs_direct_scs[s] && i < qs_direct_scs[s]->count; i++)
-			if (qs_direct_scs[s]->images[i] == image)
-				return qs_direct_scs[s]->image2[i];
-	return VK_NULL_HANDLE;
+			if (qs_direct_scs[s]->images[i] == image) {
+				halves[0] = qs_direct_scs[s]->half_image[0][i];
+				halves[1] = qs_direct_scs[s]->half_image[1][i];
+				return true;
+			}
+	return false;
 }
 
-static uint64_t qs_twin_find(struct qs_twin *t, unsigned n, uint64_t handle)
+//! Call with qs_twin_lock held.
+static const struct qs_twin *qs_twin_find(const struct qs_twin *t, unsigned n, uint64_t handle)
 {
 	for (unsigned i = 0; i < n; i++)
 		if (t[i].handle == handle)
-			return t[i].twin;
-	return 0;
+			return &t[i];
+	return NULL;
 }
 
 static VKAPI_ATTR VkResult VKAPI_CALL qs_CreateImageView(VkDevice device, const VkImageViewCreateInfo *ci,
@@ -223,17 +257,27 @@ static VKAPI_ATTR VkResult VKAPI_CALL qs_CreateImageView(VkDevice device, const 
 {
 	struct device *d = device_of(device);
 	PFN_vkCreateImageView next = (PFN_vkCreateImageView)d->gdpa(device, "vkCreateImageView");
+	PFN_vkDestroyImageView destroy = (PFN_vkDestroyImageView)d->gdpa(device, "vkDestroyImageView");
 	VkResult r = next(device, ci, alloc, out);
 	if (r != VK_SUCCESS)
 		return r;
 	pthread_mutex_lock(&qs_twin_lock);
-	VkImage image2 = qs_image2_of(ci->image);
-	if (image2 && qs_nviews < sizeof(qs_views) / sizeof(qs_views[0])) {
-		VkImageViewCreateInfo c = *ci;
-		c.image = image2;
-		VkImageView twin;
-		if (next(device, &c, alloc, &twin) == VK_SUCCESS)
-			qs_views[qs_nviews++] = (struct qs_twin){(uint64_t)*out, (uint64_t)twin, ci->image};
+	VkImage halves[2];
+	if (qs_halves_of(ci->image, halves) && qs_nviews < sizeof(qs_views) / sizeof(qs_views[0])) {
+		struct qs_twin t = {(uint64_t)*out, {0, 0}};
+		for (int h = 0; h < 2; h++) {
+			VkImageViewCreateInfo c = *ci;
+			c.image = halves[h];
+			VkImageView v = VK_NULL_HANDLE;
+			if (next(device, &c, alloc, &v) == VK_SUCCESS)
+				t.twin[h] = (uint64_t)v;
+		}
+		if (t.twin[0] && t.twin[1])
+			qs_views[qs_nviews++] = t;
+		else
+			for (int h = 0; h < 2; h++)
+				if (t.twin[h])
+					destroy(device, (VkImageView)t.twin[h], alloc);
 	}
 	pthread_mutex_unlock(&qs_twin_lock);
 	return r;
@@ -246,7 +290,8 @@ static VKAPI_ATTR void VKAPI_CALL qs_DestroyImageView(VkDevice device, VkImageVi
 	pthread_mutex_lock(&qs_twin_lock);
 	for (unsigned i = 0; i < qs_nviews; i++)
 		if (qs_views[i].handle == (uint64_t)view) {
-			next(device, (VkImageView)qs_views[i].twin, alloc);
+			for (int h = 0; h < 2; h++)
+				next(device, (VkImageView)qs_views[i].twin[h], alloc);
 			qs_views[i] = qs_views[--qs_nviews];
 			break;
 		}
@@ -259,19 +304,29 @@ static VKAPI_ATTR VkResult VKAPI_CALL qs_CreateFramebuffer(VkDevice device, cons
 {
 	struct device *d = device_of(device);
 	PFN_vkCreateFramebuffer next = (PFN_vkCreateFramebuffer)d->gdpa(device, "vkCreateFramebuffer");
+	PFN_vkDestroyFramebuffer destroy = (PFN_vkDestroyFramebuffer)d->gdpa(device, "vkDestroyFramebuffer");
 	VkResult r = next(device, ci, alloc, out);
-	if (r != VK_SUCCESS || ci->attachmentCount != 1 || ci->width != 2 * QS_PANEL_W)
+	if (r != VK_SUCCESS || ci->attachmentCount != 1 || (ci->width != 2 * QS_PANEL_W && ci->width != QS_PANEL_W))
 		return r;
 	pthread_mutex_lock(&qs_twin_lock);
-	uint64_t view2 = qs_twin_find(qs_views, qs_nviews, (uint64_t)ci->pAttachments[0]);
-	if (view2 && qs_nfbs < sizeof(qs_fbs) / sizeof(qs_fbs[0])) {
-		VkFramebufferCreateInfo c = *ci;
-		VkImageView a = (VkImageView)view2;
-		c.pAttachments = &a;
-		c.width = QS_PANEL_W;
-		VkFramebuffer twin;
-		if (next(device, &c, alloc, &twin) == VK_SUCCESS)
-			qs_fbs[qs_nfbs++] = (struct qs_twin){(uint64_t)*out, (uint64_t)twin, VK_NULL_HANDLE};
+	const struct qs_twin *v = qs_twin_find(qs_views, qs_nviews, (uint64_t)ci->pAttachments[0]);
+	if (v && qs_nfbs < sizeof(qs_fbs) / sizeof(qs_fbs[0])) {
+		struct qs_twin t = {(uint64_t)*out, {0, 0}};
+		for (int h = 0; h < 2; h++) {
+			VkFramebufferCreateInfo c = *ci;
+			VkImageView a = (VkImageView)v->twin[h];
+			c.pAttachments = &a;
+			c.width = QS_PANEL_W;
+			VkFramebuffer fb = VK_NULL_HANDLE;
+			if (next(device, &c, alloc, &fb) == VK_SUCCESS)
+				t.twin[h] = (uint64_t)fb;
+		}
+		if (t.twin[0] && t.twin[1])
+			qs_fbs[qs_nfbs++] = t;
+		else
+			for (int h = 0; h < 2; h++)
+				if (t.twin[h])
+					destroy(device, (VkFramebuffer)t.twin[h], alloc);
 	}
 	pthread_mutex_unlock(&qs_twin_lock);
 	return r;
@@ -284,7 +339,8 @@ static VKAPI_ATTR void VKAPI_CALL qs_DestroyFramebuffer(VkDevice device, VkFrame
 	pthread_mutex_lock(&qs_twin_lock);
 	for (unsigned i = 0; i < qs_nfbs; i++)
 		if (qs_fbs[i].handle == (uint64_t)fb) {
-			next(device, (VkFramebuffer)qs_fbs[i].twin, alloc);
+			for (int h = 0; h < 2; h++)
+				next(device, (VkFramebuffer)qs_fbs[i].twin[h], alloc);
 			qs_fbs[i] = qs_fbs[--qs_nfbs];
 			break;
 		}
@@ -349,25 +405,27 @@ static VkResult qs_create_images(struct qd_swapchain *sc, const VkSwapchainCreat
 	ici.format = VK_FORMAT_R8G8B8A8_UNORM;
 	sc->ici.flags = ici.flags; // the views vrcompositor makes use the swapchain format (sRGB)
 
-	VkImageCreateInfo ici2 = ici;
-	ici2.extent.width = QS_PANEL_W;
+	// the app's images: plain device memory, never rendered to (see qs_CmdBeginRenderPass)
+	VkImageCreateInfo plain = ici;
+	plain.pNext = &fl;
+	VkImageCreateInfo half = ici;
+	half.extent.width = QS_PANEL_W;
 	for (uint32_t i = 0; i < sc->count; i++) {
 		sc->release_fence[i] = -1;
-		sc->buffer_fd2[i] = -1;
-		VkResult r = qs_import(sc, &ici, &sc->ahb[i], &sc->images[i], &sc->memory[i], &sc->buffer_fd[i],
-		                       &sc->stride_px[i], &sc->ubwc[i]);
-		if (r == VK_SUCCESS)
-			r = qs_import(sc, &ici2, &sc->ahb2[i], &sc->image2[i], &sc->memory2[i], &sc->buffer_fd2[i],
-			              &sc->stride2_px[i], &sc->ubwc2[i]);
+		VkResult r = qs_plain_image(sc, &plain, &sc->images[i], &sc->memory[i]);
+		for (int h = 0; h < 2 && r == VK_SUCCESS; h++) {
+			sc->half_fd[h][i] = -1;
+			r = qs_import(sc, &half, &sc->half_ahb[h][i], &sc->half_image[h][i], &sc->half_memory[h][i],
+			              &sc->half_fd[h][i], &sc->half_stride_px[h][i], &sc->half_ubwc[h][i]);
+		}
 		if (r != VK_SUCCESS) {
 			LOG("direct scanout: image %u: %d\n", i, r);
 			return r;
 		}
 	}
 	qs_twins_register(sc);
-	LOG("direct scanout: %u gralloc buffers %ux%u + %ux%u for the right half (stride %u px, %s)\n", sc->count,
-	    ci->imageExtent.width, ci->imageExtent.height, QS_PANEL_W, ci->imageExtent.height, sc->stride_px[0],
-	    sc->ubwc[0] ? "UBWC" : "linear");
+	LOG("direct scanout: %u x 2 gralloc buffers %ux%u, one per panel (stride %u px, %s)\n", sc->count, QS_PANEL_W,
+	    ci->imageExtent.height, sc->half_stride_px[0][0], sc->half_ubwc[0][0] ? "UBWC" : "linear");
 	return VK_SUCCESS;
 }
 
@@ -376,24 +434,23 @@ static void qs_snapshot(struct qd_swapchain *sc, uint32_t idx)
 {
 	if (unlink("/tmp/quest1-snap") != 0) // a trigger we cannot remove (root's, in sticky /tmp) is ignored
 		return;
-	uint32_t w = sc->ici.extent.width, h = sc->ici.extent.height, stride = sc->stride_px[idx] * 4;
-	uint32_t stride2 = sc->stride2_px[idx] * 4;
-	if (sc->ubwc[idx] || (sc->ahb2[idx] && sc->ubwc2[idx])) {
-		LOG("direct scanout: snapshot of a UBWC buffer not supported\n");
+	uint32_t w = 2 * QS_PANEL_W, h = sc->ici.extent.height;
+	if (sc->half_ubwc[0][idx] || sc->half_ubwc[1][idx]) {
+		LOG("direct scanout: snapshot of a UBWC buffer not supported%c", 10);
 		return;
 	}
-	// the right half from image2 when there is one (what the panels show)
-	uint8_t *p = mmap(NULL, (size_t)stride * h, PROT_READ, MAP_SHARED, sc->buffer_fd[idx], 0);
-	uint8_t *p2 = sc->ahb2[idx] ? mmap(NULL, (size_t)stride2 * h, PROT_READ, MAP_SHARED, sc->buffer_fd2[idx], 0) : MAP_FAILED;
-	FILE *f = p != MAP_FAILED ? fopen("/tmp/quest1-snap.ppm.tmp", "wb") : NULL;
+	uint32_t stride[2] = {sc->half_stride_px[0][idx] * 4, sc->half_stride_px[1][idx] * 4};
+	uint8_t *p[2];
+	for (int k = 0; k < 2; k++)
+		p[k] = mmap(NULL, (size_t)stride[k] * h, PROT_READ, MAP_SHARED, sc->half_fd[k][idx], 0);
+	FILE *f = p[0] != MAP_FAILED && p[1] != MAP_FAILED ? fopen("/tmp/quest1-snap.ppm.tmp", "wb") : NULL;
 	if (f) {
-		fprintf(f, "P6\n%u %u\n255\n", w, h);
+		fprintf(f, "P6%c%u %u%c255%c", 10, w, h, 10, 10);
 		uint8_t *row = malloc(w * 3);
 		for (uint32_t y = 0; y < h; y++) {
 			for (uint32_t x = 0; x < w; x++) {
-				const uint8_t *src = p2 != MAP_FAILED && x >= QS_PANEL_W ? p2 + (size_t)y * stride2 + (x - QS_PANEL_W) * 4
-				                                                       : p + (size_t)y * stride + x * 4;
-				memcpy(row + x * 3, src, 3);
+				int k = x >= QS_PANEL_W;
+				memcpy(row + x * 3, p[k] + (size_t)y * stride[k] + (x - k * QS_PANEL_W) * 4, 3);
 			}
 			fwrite(row, 1, w * 3, f);
 		}
@@ -401,10 +458,9 @@ static void qs_snapshot(struct qd_swapchain *sc, uint32_t idx)
 		fclose(f);
 		rename("/tmp/quest1-snap.ppm.tmp", "/tmp/quest1-snap.ppm");
 	}
-	if (p != MAP_FAILED)
-		munmap(p, (size_t)stride * h);
-	if (p2 != MAP_FAILED)
-		munmap(p2, (size_t)stride2 * h);
+	for (int k = 0; k < 2; k++)
+		if (p[k] != MAP_FAILED)
+			munmap(p[k], (size_t)stride[k] * h);
 }
 
 // debug: `touch /tmp/quest1-rptrace` logs the render passes, viewports, scissors and dispatches
@@ -656,18 +712,17 @@ static VKAPI_ATTR void VKAPI_CALL qs_CmdBeginRenderPass(VkCommandBuffer cb, cons
 	bool eye_pass = a.extent.width == QS_PANEL_W && a.extent.height == QS_PANEL_H && a.offset.y == 0 &&
 	                (a.offset.x == 0 || a.offset.x == QS_PANEL_W);
 	pthread_mutex_lock(&qs_twin_lock);
-	VkFramebuffer twin = eye_pass ? (VkFramebuffer)qs_twin_find(qs_fbs, qs_nfbs, (uint64_t)bi->framebuffer) : VK_NULL_HANDLE;
+	const struct qs_twin *t = eye_pass ? qs_twin_find(qs_fbs, qs_nfbs, (uint64_t)bi->framebuffer) : NULL;
+	int h = a.offset.x == QS_PANEL_W;
+	VkFramebuffer twin = t ? (VkFramebuffer)t->twin[h] : VK_NULL_HANDLE;
 	pthread_mutex_unlock(&qs_twin_lock);
-	if (twin) { // the left half renders fine where it is, the right half goes to image2
-		if (a.offset.x == 0) {
-			next(cb, bi, contents);
-			return;
-		}
+	if (twin) { // the eye's own buffer (half_image[h]) at x = 0
 		VkRenderPassBeginInfo b = *bi;
 		b.framebuffer = twin;
 		b.renderArea.offset.x = 0;
 		next(cb, &b, contents);
-		qs_set_shifted(cb, true);
+		if (h)
+			qs_set_shifted(cb, true);
 		return;
 	}
 	// fallback without a twin: run the pass over the whole image
@@ -894,12 +949,138 @@ static void qs_displayed_locked(struct qd_swapchain *sc, uint64_t frame)
 }
 
 //! The byte order vrcompositor wrote (see qs_create_images), as an MDP format.
-static uint32_t qs_mdp_format(const struct qd_swapchain *sc, uint32_t idx)
+static uint32_t qs_mdp_format(const struct qd_swapchain *sc, uint32_t idx, int half)
 {
 	bool bgra = sc->ici.format == VK_FORMAT_B8G8R8A8_UNORM || sc->ici.format == VK_FORMAT_B8G8R8A8_SRGB;
-	if (sc->ubwc[idx])
+	if (sc->half_ubwc[half][idx])
 		return MDP_RGBA_8888_UBWC; // no BGRA UBWC format: never happens with linear gralloc buffers
 	return bgra ? MDP_BGRA_8888 : MDP_RGBA_8888;
+}
+
+// --- Monado commits the frames ---------------------------------------------------------------------------
+// When Monado's MDP target listens on Q1D_SOCKET, the layer hands it the half buffers once and then
+// only announces each finished frame; Monado puts it on the panels (and re-projects it to the head pose
+// of the display time), tells when the frame is displayed and when it no longer reads an image. Without
+// Monado (or when it goes away) the layer commits the frames itself.
+
+//! Connect to Monado and hand it the buffers. Returns true when sc->mon_sock is set.
+static bool qs_mon_connect(struct qd_swapchain *sc)
+{
+	if (getenv("QUEST1_DIRECT_NO_MONADO") || !qs_ahb.send_handle)
+		return false;
+	int fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+	struct sockaddr_un a = {AF_UNIX};
+	snprintf(a.sun_path, sizeof(a.sun_path), "%s", Q1D_SOCKET);
+	if (fd < 0 || connect(fd, (struct sockaddr *)&a, sizeof(a)) != 0) {
+		if (fd >= 0)
+			close(fd);
+		return false;
+	}
+	bool ok = true;
+	for (uint32_t i = 0; i < sc->count && ok; i++)
+		for (int h = 0; h < 2 && ok; h++) {
+			struct q1d_msg m;
+			memset(&m, 0, sizeof(m));
+			m.type = Q1D_BUFFER;
+			m.index = i;
+			m.half = (uint32_t)h;
+			m.count = sc->count;
+			m.width = QS_PANEL_W;
+			m.height = sc->ici.extent.height;
+			m.stride_px = sc->half_stride_px[h][i];
+			m.bgra = qs_mdp_format(sc, i, h) == MDP_BGRA_8888;
+			m.ubwc = sc->half_ubwc[h][i];
+			ok = send(fd, &m, sizeof(m), MSG_NOSIGNAL) == (ssize_t)sizeof(m) &&
+			     qs_ahb.send_handle(sc->half_ahb[h][i], fd) == 0;
+		}
+	if (!ok) {
+		LOG("direct scanout: handing the buffers to Monado failed: %s\n", strerror(errno));
+		close(fd);
+		return false;
+	}
+	pthread_mutex_lock(&sc->mutex);
+	sc->mon_sock = fd;
+	pthread_mutex_unlock(&sc->mutex);
+	qs_wake(sc);
+	LOG("direct scanout: Monado commits and re-projects the frames (%s)\n", Q1D_SOCKET);
+	return true;
+}
+
+static void qs_write_flag(void)
+{
+	if (qs_flag_written)
+		return;
+	FILE *f = fopen(QS_FLAG_FILE, "w");
+	if (f) {
+		fprintf(f, "%d\n", (int)getpid());
+		fclose(f);
+		qs_flag_written = true;
+		LOG("direct scanout: on the panels (Monado pauses its compositing)\n");
+	}
+}
+
+//! Announce frame `frame` (image idx, finished) to Monado. False when it is not connected (any more).
+static bool qs_mon_present(struct qd_swapchain *sc, uint32_t idx, uint64_t frame)
+{
+	struct q1d_msg m;
+	memset(&m, 0, sizeof(m));
+	m.type = Q1D_FRAME;
+	m.index = idx;
+	m.frame = frame;
+	pthread_mutex_lock(&sc->mutex);
+	if (sc->mon_sock < 0) {
+		pthread_mutex_unlock(&sc->mutex);
+		return false;
+	}
+	if (sc->pose[frame % 64].frame == frame) {
+		m.pose_valid = 1;
+		memcpy(m.pose, sc->pose[frame % 64].q, sizeof(m.pose));
+		m.time_ns = sc->pose[frame % 64].time_ns;
+	}
+	sc->app_owned[idx] = false;
+	sc->driver_owned[idx] = true; // until Monado's Q1D_RELEASE
+	bool ok = send(sc->mon_sock, &m, sizeof(m), MSG_NOSIGNAL | MSG_DONTWAIT) == (ssize_t)sizeof(m);
+	if (!ok) {
+		LOG("direct scanout: Monado is gone (%s): committing ourselves\n", strerror(errno));
+		close(sc->mon_sock);
+		sc->mon_sock = -1;
+		for (uint32_t i = 0; i < sc->count; i++)
+			if (sc->release_fence[i] < 0)
+				sc->driver_owned[i] = false;
+		sc->app_owned[idx] = true; // qs_commit hands it over
+	}
+	pthread_cond_broadcast(&sc->cond);
+	pthread_mutex_unlock(&sc->mutex);
+	if (ok)
+		qs_write_flag();
+	return ok;
+}
+
+//! Fence thread, sc->mutex held: Monado's socket is readable.
+static void qs_mon_read(struct qd_swapchain *sc)
+{
+	struct q1d_msg m;
+	for (;;) {
+		ssize_t n = recv(sc->mon_sock, &m, sizeof(m), MSG_DONTWAIT);
+		if (n == (ssize_t)sizeof(m)) {
+			if (m.type == Q1D_RELEASE && m.index < sc->count)
+				sc->driver_owned[m.index] = false;
+			else if (m.type == Q1D_DISPLAYED)
+				qs_displayed_locked(sc, m.frame);
+			continue;
+		}
+		if (n < 0 && (errno == EAGAIN || errno == EINTR))
+			return;
+		break;
+	}
+	LOG("direct scanout: Monado disconnected, committing ourselves again\n");
+	close(sc->mon_sock);
+	sc->mon_sock = -1;
+	for (uint32_t i = 0; i < sc->count; i++)
+		if (sc->release_fence[i] < 0)
+			sc->driver_owned[i] = false;
+	qs_displayed_locked(sc, sc->frame);
+	pthread_cond_broadcast(&sc->cond);
 }
 
 // Completer thread, image `idx` rendered: put it on the panels. sc->mutex not held.
@@ -908,6 +1089,24 @@ static void qs_commit(struct qd_swapchain *sc, uint32_t idx, uint64_t frame)
 	qs_snapshot(sc, idx);
 	qs_trace_arm();
 	qs_ts_frame();
+	// debug: /tmp/quest1-nomonado makes the layer commit the frames itself (A/B of Monado's presentation)
+	bool nomonado = access("/tmp/quest1-nomonado", F_OK) == 0;
+	if (nomonado && sc->mon_sock >= 0) {
+		pthread_mutex_lock(&sc->mutex);
+		close(sc->mon_sock);
+		sc->mon_sock = -1;
+		for (uint32_t i = 0; i < sc->count; i++)
+			if (sc->release_fence[i] < 0 && i != idx)
+				sc->driver_owned[i] = false;
+		pthread_mutex_unlock(&sc->mutex);
+		usleep(50000); // Monado must have dropped the panels before we commit
+	}
+	if (!nomonado && sc->mon_sock < 0 && now_ns() > sc->mon_retry_ns) {
+		sc->mon_retry_ns = now_ns() + 2000000000ull;
+		qs_mon_connect(sc);
+	}
+	if (sc->mon_sock >= 0 && qs_mon_present(sc, idx, frame))
+		return;
 	int release = -1, retire = -1;
 	bool committed = false;
 	if (qs_panels_on()) {
@@ -920,14 +1119,13 @@ static void qs_commit(struct qd_swapchain *sc, uint32_t idx, uint64_t frame)
 			l->alpha = 0xff;
 			l->blend_op = BLEND_OP_OPAQUE;
 			l->color_space = MDP_CSC_ITU_R_709;
-			// the right half comes from image2 (qs_CmdBeginRenderPass)
-			bool own = hh == 1 && sc->ahb2[idx];
-			l->src_rect = (struct mdp_rect){own ? 0 : hh * QS_PANEL_W, 0, QS_PANEL_W, sc->ici.extent.height};
+			// each half from its own buffer (qs_CmdBeginRenderPass)
+			l->src_rect = (struct mdp_rect){0, 0, QS_PANEL_W, sc->ici.extent.height};
 			l->dst_rect = (struct mdp_rect){hh * QS_PANEL_W, 0, QS_PANEL_W, sc->ici.extent.height};
-			l->buffer.width = own ? sc->stride2_px[idx] : sc->stride_px[idx];
+			l->buffer.width = sc->half_stride_px[hh][idx];
 			l->buffer.height = sc->ici.extent.height;
-			l->buffer.format = qs_mdp_format(sc, idx);
-			l->buffer.planes[0].fd = own ? sc->buffer_fd2[idx] : sc->buffer_fd[idx];
+			l->buffer.format = qs_mdp_format(sc, idx, hh);
+			l->buffer.planes[0].fd = sc->half_fd[hh][idx];
 			l->buffer.planes[0].stride = l->buffer.width * 4;
 			l->buffer.plane_count = 1;
 			l->buffer.fence = -1;
@@ -943,15 +1141,7 @@ static void qs_commit(struct qd_swapchain *sc, uint32_t idx, uint64_t frame)
 			committed = true;
 			release = c.commit_v1.release_fence;
 			retire = c.commit_v1.retire_fence;
-			if (!qs_flag_written) {
-				FILE *f = fopen(QS_FLAG_FILE, "w");
-				if (f) {
-					fprintf(f, "%d\n", (int)getpid());
-					fclose(f);
-					qs_flag_written = true;
-					LOG("direct scanout: on the panels (Monado pauses its compositing)\n");
-				}
-			}
+			qs_write_flag();
 		} else {
 			static unsigned errors;
 			if (errors++ < 5)
@@ -991,11 +1181,15 @@ static void *qs_fence_thread(void *arg)
 	uint32_t slots = sizeof(sc->retire) / sizeof(sc->retire[0]);
 	pthread_mutex_lock(&sc->mutex);
 	while (!sc->stopping) {
-		struct pollfd p[1 + 8 + QD_MAX_IMAGES];
-		int kind[1 + 8 + QD_MAX_IMAGES]; // -1 wake, 0..7 retire slot, 100+i release of image i
+		struct pollfd p[2 + 8 + QD_MAX_IMAGES];
+		int kind[2 + 8 + QD_MAX_IMAGES]; // -2 Monado, -1 wake, 0..7 retire slot, 100+i release of image i
 		int n = 0;
 		p[n] = (struct pollfd){sc->wake_fd[0], POLLIN, 0};
 		kind[n++] = -1;
+		if (sc->mon_sock >= 0) {
+			p[n] = (struct pollfd){sc->mon_sock, POLLIN, 0};
+			kind[n++] = -2;
+		}
 		for (uint32_t k = sc->retire_head; k != sc->retire_tail; k++) {
 			if (sc->retire[k % slots].fd < 0)
 				continue;
@@ -1015,7 +1209,10 @@ static void *qs_fence_thread(void *arg)
 		for (int j = 0; j < n; j++) {
 			if (!p[j].revents)
 				continue;
-			if (kind[j] < 0) {
+			if (kind[j] == -2) {
+				if (sc->mon_sock >= 0)
+					qs_mon_read(sc);
+			} else if (kind[j] < 0) {
 				char buf[16];
 				if (read(sc->wake_fd[0], buf, sizeof(buf)) < 0) {
 				}
@@ -1055,12 +1252,13 @@ static void qs_destroy(struct qd_swapchain *sc)
 	for (uint32_t i = 0; i < QD_MAX_IMAGES; i++) {
 		if (sc->release_fence[i] >= 0)
 			close(sc->release_fence[i]);
-		if (sc->ahb[i])
-			qs_ahb.release(sc->ahb[i]);
-		if (sc->ahb2[i])
-			qs_ahb.release(sc->ahb2[i]);
+		for (int h = 0; h < 2; h++)
+			if (sc->half_ahb[h][i])
+				qs_ahb.release(sc->half_ahb[h][i]);
 	}
 	qs_twins_forget(sc);
+	if (sc->mon_sock >= 0)
+		close(sc->mon_sock);
 	if (sc->wake_fd[0] >= 0) {
 		close(sc->wake_fd[0]);
 		close(sc->wake_fd[1]);
