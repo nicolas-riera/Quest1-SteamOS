@@ -130,7 +130,8 @@ User=steamos
 Environment=DISPLAY=:1 HOME=/home/steamos USER=steamos XDG_RUNTIME_DIR=/run/user/1000
 ExecStartPre=+/usr/bin/install -d -o steamos -g steamos -m 700 /run/user/1000
 ExecStart=/usr/local/bin/steam-q1 -gamepadui -steamos3 -steamdeck -steamframe
-Restart=on-failure
+# Steam exits with status 0 on its own (e.g. when SteamVR restarts); like a console session it must come back
+Restart=always
 RestartSec=5
 
 [Install]
