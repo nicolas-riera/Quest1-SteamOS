@@ -98,6 +98,13 @@ PY
 
 	# device nodes, as Android's ueventd.rc sets them (devtmpfs resets them each boot)
 	chmod 0666 /dev/ashmem
+	# Android cpuset groups: libosutils moveToCpuSet() writes thread ids to /dev/cpuset/<group>/tasks and
+	# aborts trackingservice when the file is missing. Plain RAM files (no pinning; the units set CPUAffinity).
+	# Same idea as the Quest 2 port (github.com/URFAVF3MBOY/quest2-steamos, tracking-kit), own implementation.
+	for g in tracking object_tracking mrsystem foreground background top-app system-background restricted camera-daemon; do
+		mkdir -p $R/cpuset/$g; : > $R/cpuset/$g/tasks; chmod 0666 $R/cpuset/$g/tasks
+	done
+	chmod 0777 $R/cpuset $R/cpuset/*
 	[ -e /dev/adsprpc-smd ] && { chown 1000:1000 /dev/adsprpc-smd; chmod 0664 /dev/adsprpc-smd; }
 	# libadsprpc tries the secure node first and the ADSP channel is "secure" here: without it
 	# GetInfo fails (EPERM) and trackingservice aborts in boltlib initDomains (error 59)
@@ -138,6 +145,7 @@ Environment=$E
 User=$3
 BindReadOnlyPaths=/persist $R/__properties__:/dev/__properties__
 BindPaths=$R/calibration:/persist/calibration
+BindPaths=$R/cpuset:/dev/cpuset
 ExecStart=$5
 Restart=on-failure
 RestartSec=2
@@ -149,7 +157,7 @@ EOF
 	W="Wants=android-ovrstub.service
 After=android-ovrstub.service"
 	unit ovrstub "binder stubs for the system_server services (src/ovrstub)" root "" \
-		"/usr/local/bin/ovrstub" ""
+		"/usr/local/bin/ovrstub --then 2" ""
 	unit settingsserver "Oculus preferences store (settingsserver)" 1000 "Group=1000" \
 		/system/bin/settingsserver "$W"
 	unit vrfocus "VR focus arbitration (vrfocusserver)" root "SupplementaryGroups=1000" \

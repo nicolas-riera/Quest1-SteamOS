@@ -80,6 +80,10 @@ static struct svc svcs[] = {
 	{"MrSystemService", "oculus.internal.IMrSystemService", K_GENERIC, 1},
 	{"TelemetryService", "oculus.internal.telemetry.ITelemetryService", K_GENERIC, 1},
 	{"VrApi", "oculus.internal.IVrApiService", K_VRAPI, 1},
+	/* trackingservice's inside-out engine connects to it while waking up; when it is missing the
+	 * cleanup code in libossdk (RuntimeIpcManagerImpl dtor) dereferences a null broker and the
+	 * service dies with SIGSEGV (seen live). Same finding as the Quest 2 port. */
+	{"RuntimeIpcBroker", "oculus.internal.IRuntimeIpcBroker", K_GENERIC, 1},
 	/* Optional (--extra): stand-ins for real daemons, only to probe trackingservice's startup
 	 * while the real one cannot run (cameramuxmodeservice waits for the sensors HAL). */
 	{"cameramuxmodeservice", "oculus.internal.ICameraMuxModeService", K_GENERIC, 0},
@@ -104,6 +108,7 @@ static int verbose;
 static int no_sched; /* --no-sched: log setThreadPolicy, do not apply it */
 static int bfd = -1;
 static volatile sig_atomic_t sig_state; /* pending power state from a signal, 0 = none */
+static int then_state; /* --then N: one second after the first client registers, broadcast state N */
 static int power_state = 1;             /* 1 RUNNING, 2 STANDBY, 3 SLEEP */
 
 #define MAXCLIENTS 32
@@ -307,6 +312,8 @@ static void add_client(uint32_t handle)
 	} w = {BC_REQUEST_DEATH_NOTIFICATION, handle, (binder_uintptr_t)(freeslot + 1)};
 	bwrite(&w, sizeof(w));
 	logf_("vrpowermanager: client registered, handle %u (slot %d)", handle, freeslot);
+	if (then_state)
+		alarm(1);
 }
 
 static void drop_client(int i, const char *why)
@@ -597,7 +604,7 @@ static int loop(int want_reply, int32_t *reply_status)
 
 static void on_signal(int sig)
 {
-	sig_state = sig == SIGUSR1 ? 1 : sig == SIGHUP ? 2 : 3;
+	sig_state = sig == SIGALRM ? then_state : sig == SIGUSR1 ? 1 : sig == SIGHUP ? 2 : 3;
 }
 
 static int in_list(const char *list, const char *name)
@@ -621,6 +628,8 @@ int main(int argc, char **argv)
 			verbose = 1;
 		else if (!strcmp(argv[i], "-s") && i + 1 < argc)
 			power_state = atoi(argv[++i]);
+		else if (!strcmp(argv[i], "--then") && i + 1 < argc)
+			then_state = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--skip") && i + 1 < argc)
 			skip = argv[++i];
 		else if (!strcmp(argv[i], "--only") && i + 1 < argc)
@@ -660,6 +669,7 @@ int main(int argc, char **argv)
 	sigaction(SIGUSR1, &sa, NULL);
 	sigaction(SIGUSR2, &sa, NULL);
 	sigaction(SIGHUP, &sa, NULL);
+	sigaction(SIGALRM, &sa, NULL);
 
 	uint32_t enter = BC_ENTER_LOOPER;
 	bwrite(&enter, 4);
