@@ -690,7 +690,8 @@ direct_commit(struct mdp_target *t, const struct direct_buf *b2, int idx, int ou
 #define Q1_PANEL_H_M 0.0660f
 #define Q1_METERS_PER_TAN_ANGLE 0.0389f
 #define Q1_LENS_TO_SCREEN_X 0.002986f
-#define Q1_LENS_TO_SCREEN_Y -0.00272f
+// mirrored like driver_quest1 QUEST1_DIRECT_FLIP bit 16 (user-judged better): lens centre above the panel centre
+#define Q1_LENS_TO_SCREEN_Y 0.00272f
 
 static const float q1_k[11] = {1.0f,    1.0374f, 1.0810f, 1.1330f, 1.1970f, 1.2754f,
                                1.3771f, 1.5133f, 1.7018f, 1.9732f, 2.3000f};
