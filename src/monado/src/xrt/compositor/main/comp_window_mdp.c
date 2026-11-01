@@ -115,6 +115,8 @@ struct direct_buf
 #define MDP_WARP_DEFAULT_ON 1
 #define WARP_GRID 40
 #define WARP_OUT_SETS 4
+//! A stale frame is not warped again while its delta moved less than this since the last warp (0.4 px)
+#define WARP_SKIP_DEG 0.03f
 
 //! Objects of the warp pass (see warp_init).
 struct direct_vk
@@ -139,8 +141,12 @@ struct direct_vk
 struct mdp_direct_stats
 {
 	int64_t since_ns;
-	uint32_t warp_commits, fresh_warped, raw_commits, no_set, angle_n;
+	uint32_t warp_commits, fresh_warped, raw_commits, no_set, angle_n, skipped;
 	double gpu_ms_sum, gpu_ms_max, cpu_ms_sum, angle_sum, angle_max;
+	double mesh_ms_sum, wait_ms_sum, commit_ms_sum;
+	double ax_sum, ay_sum, az_sum; //!< |delta| about the head's x / y / z axes (deg)
+	double oe_sum, oe_max;         //!< how far each new o estimate is from the running o (deg)
+	uint32_t oe_n;
 };
 
 #define DIRECT_COMMITS 4
@@ -193,9 +199,16 @@ struct mdp_direct
 	{
 		bool off;
 		float yaw_deg, thr_deg, delay_ms;
+		float rx_deg, ry_deg, rz_deg; //!< constant frame rotation R: delta' = conj(R) * delta * R
 		uint32_t sign;
 		int64_t read_ns;
 	} knobs;
+	//! The warp on the panels: of frame `held_frame` by `held_delta`; a stale frame whose delta moved less than
+	//! SKIP_DEG since is not warped again (the panels keep the commit). held_frame 0 when the panels show
+	//! something else.
+	uint64_t held_frame;
+	float held_delta[4];
+	uint32_t skipped;
 	float o[4]; //!< device space = o * LOCAL, estimated from the render poses
 	bool o_valid;
 	uint64_t calibrated_frame;
@@ -775,8 +788,8 @@ quat_rotate(const float *q, const float *v, float *o)
 static float
 quat_angle_deg(const float *q)
 {
-	float w = fabsf(q[3]);
-	return 2.0f * acosf(w > 1.0f ? 1.0f : w) * (180.0f / (float)M_PI);
+	// atan2 of the vector part: acos(w) has no precision left for the tiny angles of a still head
+	return 2.0f * atan2f(sqrtf(q[0] * q[0] + q[1] * q[1] + q[2] * q[2]), fabsf(q[3])) * (180.0f / (float)M_PI);
 }
 
 //! Head orientation at `at_ns` (Monado's device space), false when the tracker has none.
@@ -799,7 +812,10 @@ head_orientation(struct mdp_target *t, int64_t at_ns, float *q)
 //! Test and tuning knobs, from the file /tmp/quest1-reproj (read twice a second): "off" shows the layer's frames
 //! as they are, "yaw=<deg>" adds a fixed yaw to the re-projection, "thr=<deg>" is the angle under which a fresh
 //! frame is shown as it is (default 0.2), "delay=<ms>" the time from the vsync that commits a frame to the
-//! pose it is warped to (default 1.5 periods), "sign=<mask>" negates the delta's x/y/z axes (1/2/4).
+//! pose it is warped to (default 1.5 periods), "sign=<mask>" negates the delta's x/y/z axes (1/2/4),
+//! "rx=/ry=/rz=<deg>" a constant rotation R of the head frame against the eye frame (delta' = conj(R) delta R,
+//! applied in that order x, y, z), "vel=0" (read by the head tracker, quest1_hmd.c) stops extrapolating Meta's
+//! poses with their angular velocity.
 static void
 warp_read_knobs(struct mdp_direct *D, int64_t now)
 {
@@ -812,6 +828,7 @@ warp_read_knobs(struct mdp_direct *D, int64_t now)
 	D->knobs.thr_deg = 0.2f;
 	D->knobs.delay_ms = 0;
 	D->knobs.sign = 0;
+	D->knobs.rx_deg = D->knobs.ry_deg = D->knobs.rz_deg = 0;
 	FILE *f = fopen("/tmp/quest1-reproj", "r");
 	if (f == NULL) {
 		return;
@@ -837,6 +854,15 @@ warp_read_knobs(struct mdp_direct *D, int64_t now)
 	}
 	if ((p = strstr(buf, "sign=")) != NULL) {
 		D->knobs.sign = (uint32_t)atoi(p + 5);
+	}
+	if ((p = strstr(buf, "rx=")) != NULL) {
+		D->knobs.rx_deg = (float)atof(p + 3);
+	}
+	if ((p = strstr(buf, "ry=")) != NULL) {
+		D->knobs.ry_deg = (float)atof(p + 3);
+	}
+	if ((p = strstr(buf, "rz=")) != NULL) {
+		D->knobs.rz_deg = (float)atof(p + 3);
 	}
 }
 
@@ -1359,9 +1385,11 @@ warp_render(struct mdp_target *t, int o, const float *delta, double *gpu_ms)
 			return false;
 		}
 	}
+	int64_t tm0 = os_monotonic_get_ns();
 	for (int h = 0; h < 2; h++) {
 		warp_build_mesh(h, delta, V->vptr + h * 4 * (WARP_GRID + 1) * (WARP_GRID + 1));
 	}
+	D->stats.mesh_ms_sum += (double)(os_monotonic_get_ns() - tm0) / 1e6;
 
 	vk->vkResetCommandPool(vk->device, V->cpool, 0);
 	VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -1405,6 +1433,7 @@ warp_render(struct mdp_target *t, int o, const float *delta, double *gpu_ms)
 	vk->vkEndCommandBuffer(cmd);
 
 	VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cmd};
+	int64_t tw0 = os_monotonic_get_ns();
 	vk_queue_lock(vk->main_queue);
 	VkResult r = vk->vkQueueSubmit(vk->main_queue->queue, 1, &si, V->fence);
 	vk_queue_unlock(vk->main_queue);
@@ -1414,6 +1443,7 @@ warp_render(struct mdp_target *t, int o, const float *delta, double *gpu_ms)
 	}
 	r = vk->vkWaitForFences(vk->device, 1, &V->fence, VK_TRUE, 50 * U_TIME_1MS_IN_NS);
 	vk->vkResetFences(vk->device, 1, &V->fence);
+	D->stats.wait_ms_sum += (double)(os_monotonic_get_ns() - tw0) / 1e6;
 	if (r != VK_SUCCESS) {
 		U_LOG_E("mdp: warp: the GPU did not finish in 50 ms (%d)", r);
 		return false;
@@ -1579,6 +1609,16 @@ direct_tick(struct mdp_target *t, int64_t vsync)
 						D->o_valid = true;
 					} else {
 						float dot = D->o[0] * oe[0] + D->o[1] * oe[1] + D->o[2] * oe[2] + D->o[3] * oe[3];
+						{
+							float co2[4], rl[4];
+							quat_conj(D->o, co2);
+							quat_mul(co2, oe, rl);
+							float a = quat_angle_deg(rl);
+							a = a > 180.0f ? 360.0f - a : a;
+							D->stats.oe_sum += a;
+							D->stats.oe_max = a > D->stats.oe_max ? a : D->stats.oe_max;
+							D->stats.oe_n++;
+						}
 						for (int i = 0; i < 4; i++) {
 							D->o[i] += 0.05f * ((dot < 0 ? -oe[i] : oe[i]) - D->o[i]);
 						}
@@ -1602,11 +1642,35 @@ direct_tick(struct mdp_target *t, int64_t vsync)
 				if (D->knobs.sign & 2) delta[1] = -delta[1];
 				if (D->knobs.sign & 4) delta[2] = -delta[2];
 				quat_normalize(delta);
+				if (D->knobs.rx_deg != 0 || D->knobs.ry_deg != 0 || D->knobs.rz_deg != 0) {
+					float hx = D->knobs.rx_deg * (float)M_PI / 360.0f, hy = D->knobs.ry_deg * (float)M_PI / 360.0f,
+					      hz = D->knobs.rz_deg * (float)M_PI / 360.0f;
+					float qx[4] = {sinf(hx), 0, 0, cosf(hx)}, qy[4] = {0, sinf(hy), 0, cosf(hy)},
+					      qz[4] = {0, 0, sinf(hz), cosf(hz)}, rq[4], rt[4], rc[4], t1[4], t2[4];
+					quat_mul(qx, qy, rt);
+					quat_mul(rt, qz, rq);
+					quat_conj(rq, rc);
+					quat_mul(rc, delta, t1);
+					quat_mul(t1, rq, t2);
+					memcpy(delta, t2, sizeof(t2));
+					quat_normalize(delta);
+				}
+				D->stats.ax_sum += fabsf(delta[0]) * 2 * (180.0f / (float)M_PI);
+				D->stats.ay_sum += fabsf(delta[1]) * 2 * (180.0f / (float)M_PI);
+				D->stats.az_sum += fabsf(delta[2]) * 2 * (180.0f / (float)M_PI);
 				float angle = quat_angle_deg(delta);
 				D->stats.angle_sum += angle;
 				D->stats.angle_max = angle > D->stats.angle_max ? angle : D->stats.angle_max;
 				D->stats.angle_n++;
-				if (D->fresh && angle < D->knobs.thr_deg && D->knobs.yaw_deg == 0) {
+				float rel[4], hc[4];
+				quat_conj(D->held_delta, hc);
+				quat_mul(hc, delta, rel);
+				if (!D->fresh && !D->need_refresh && D->held_frame == D->latest_frame.frame &&
+				    quat_angle_deg(rel) < WARP_SKIP_DEG) {
+					// the panels show this frame warped to a pose within a fraction of a pixel of this one
+					D->stats.skipped++;
+					commit_raw = false;
+				} else if (D->fresh && angle < D->knobs.thr_deg && D->knobs.yaw_deg == 0) {
 					commit_raw = true; // close enough: no GPU work
 				} else if (warp_init(t)) {
 					int o = warp_free_set(D);
@@ -1614,8 +1678,13 @@ direct_tick(struct mdp_target *t, int64_t vsync)
 					int64_t t0 = os_monotonic_get_ns();
 					if (o >= 0 && warp_render(t, o, delta, &gpu_ms)) {
 						warp_snapshot(D, o);
-						if (direct_commit(t, D->out[o], -1, o, D->fresh ? D->latest_frame.frame : 0)) {
+						int64_t tc0 = os_monotonic_get_ns();
+						bool committed = direct_commit(t, D->out[o], -1, o, D->fresh ? D->latest_frame.frame : 0);
+						D->stats.commit_ms_sum += (double)(os_monotonic_get_ns() - tc0) / 1e6;
+						if (committed) {
 							warped = true;
+							D->held_frame = D->latest_frame.frame;
+							memcpy(D->held_delta, delta, sizeof(delta[0]) * 4);
 							D->stats.warp_commits++;
 							D->stats.gpu_ms_sum += gpu_ms;
 							D->stats.gpu_ms_max = gpu_ms > D->stats.gpu_ms_max ? gpu_ms : D->stats.gpu_ms_max;
@@ -1635,6 +1704,7 @@ direct_tick(struct mdp_target *t, int64_t vsync)
 			D->need_refresh = false;
 		} else if (commit_raw && direct_commit(t, D->buf[D->latest], D->latest, -1, D->fresh ? D->latest_frame.frame : 0)) {
 			D->stats.raw_commits++;
+			D->held_frame = 0;
 			D->fresh = false;
 			D->need_refresh = false;
 		}
@@ -1645,12 +1715,19 @@ direct_tick(struct mdp_target *t, int64_t vsync)
 	} else if (now - D->stats.since_ns > 2 * U_TIME_1S_IN_NS) {
 		double el = (double)(now - D->stats.since_ns) / 1e9;
 		struct mdp_direct_stats *s = &D->stats;
-		U_LOG_W("mdp: direct: %.1f/s warped (%.1f/s of them fresh), %.1f/s raw; warp gpu %.2f ms avg (max %.2f), "
-		        "cpu %.2f ms; delta %.2f deg avg (max %.2f); no free set %u",
-		        s->warp_commits / el, s->fresh_warped / el, s->raw_commits / el,
+		U_LOG_W("mdp: direct: %.1f/s warped (%.1f/s of them fresh), %.1f/s raw, %.1f/s kept; warp gpu %.2f ms avg (max %.2f), "
+		        "cpu %.2f ms (mesh %.2f, gpu wait %.2f, commit %.2f); delta %.2f deg avg (max %.2f), "
+		        "per axis x %.2f y %.2f z %.2f; o jitter %.2f deg avg (max %.2f); no free set %u",
+		        s->warp_commits / el, s->fresh_warped / el, s->raw_commits / el, s->skipped / el,
 		        s->warp_commits ? s->gpu_ms_sum / s->warp_commits : 0.0, s->gpu_ms_max,
-		        s->warp_commits ? s->cpu_ms_sum / s->warp_commits : 0.0, s->angle_n ? s->angle_sum / s->angle_n : 0.0,
-		        s->angle_max, s->no_set);
+		        s->warp_commits ? s->cpu_ms_sum / s->warp_commits : 0.0,
+		        s->warp_commits ? s->mesh_ms_sum / s->warp_commits : 0.0,
+		        s->warp_commits ? s->wait_ms_sum / s->warp_commits : 0.0,
+		        s->warp_commits ? s->commit_ms_sum / s->warp_commits : 0.0, s->angle_n ? s->angle_sum / s->angle_n : 0.0,
+		        s->angle_max,
+		        s->angle_n ? s->ax_sum / s->angle_n : 0.0, s->angle_n ? s->ay_sum / s->angle_n : 0.0,
+		        s->angle_n ? s->az_sum / s->angle_n : 0.0, s->oe_n ? s->oe_sum / s->oe_n : 0.0, s->oe_max,
+		        s->no_set);
 		*s = (struct mdp_direct_stats){.since_ns = now};
 	}
 	pthread_mutex_unlock(&D->lock);

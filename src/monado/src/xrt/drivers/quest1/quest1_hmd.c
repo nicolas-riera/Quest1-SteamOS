@@ -584,6 +584,29 @@ meta_read(struct quest1_hmd *h, struct q1track_pose *out, struct q1track_control
 	return false;
 }
 
+//! Test knob: "vel=0" in /tmp/quest1-reproj (read twice a second) stops extrapolating Meta's head poses with the
+//! angular/linear velocities of q1trackd.
+static bool
+meta_velocity_off(void)
+{
+	static int64_t read_ns;
+	static bool off;
+	int64_t now = os_monotonic_get_ns();
+	if (now - read_ns > 500 * U_TIME_1MS_IN_NS) {
+		read_ns = now;
+		off = false;
+		FILE *f = fopen("/tmp/quest1-reproj", "r");
+		if (f != NULL) {
+			char buf[160] = {0};
+			size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+			fclose(f);
+			buf[n] = 0;
+			off = strstr(buf, "vel=0") != NULL;
+		}
+	}
+	return off;
+}
+
 static void
 meta_push(struct quest1_hmd *h, const struct q1track_pose *p)
 {
@@ -611,7 +634,7 @@ meta_push(struct quest1_hmd *h, const struct q1track_pose *p)
 	if (p->status & Q1TRACK_POS_TRACKED) {
 		flags |= XRT_SPACE_RELATION_POSITION_TRACKED_BIT;
 	}
-	if (h->mt.use_velocity) {
+	if (h->mt.use_velocity && !meta_velocity_off()) {
 		rel.angular_velocity =
 		    (struct xrt_vec3){p->angular_velocity[0], p->angular_velocity[1], p->angular_velocity[2]};
 		rel.linear_velocity =

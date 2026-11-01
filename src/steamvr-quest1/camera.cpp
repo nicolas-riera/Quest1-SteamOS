@@ -413,6 +413,7 @@ public:
 
 	bool Acquire(const std::vector<int> &ids, std::vector<SrcImage> &out, int64_t &captureNs, int timeoutMs) override
 	{
+		Heartbeat();
 		if (!hdr && !Map()) {
 			usleep(std::min(timeoutMs, 500) * 1000);
 			return false;
@@ -459,6 +460,21 @@ public:
 	}
 
 private:
+	//! libq1camtap (the producer inside Meta's trackingservice) copies frames only while this file's
+	//! mtime is less than 3 s old: touch it once a second while we are reading
+	void Heartbeat()
+	{
+		int64_t now = MonoNs();
+		if (now - lastBeat < 1000000000LL)
+			return;
+		lastBeat = now;
+		std::string p = path + ".want";
+		int fd = open(p.c_str(), O_WRONLY | O_CREAT | O_CLOEXEC, 0666);
+		if (fd >= 0) {
+			futimens(fd, nullptr);
+			close(fd);
+		}
+	}
 	bool Map()
 	{
 		int64_t now = MonoNs();
@@ -510,7 +526,7 @@ private:
 	const q1cam_ring_header *hdr = nullptr;
 	size_t mapSize = 0;
 	uint32_t lastCount = 0, slotIndex = 0, seq0 = 0;
-	int64_t lastTry = 0, lastChange = 0;
+	int64_t lastTry = 0, lastChange = 0, lastBeat = 0;
 };
 
 //! Synthetic frames (30 Hz): a moving gradient with a per-camera bar pattern, to test the plumbing
@@ -684,6 +700,7 @@ public:
 	}
 	bool GetCameraFrameBufferingRequirements(int *queue, uint32_t *size) override
 	{
+		CLog("quest1 camera: GetCameraFrameBufferingRequirements\n");
 		if (queue)
 			*queue = queueSize;
 		if (size)
@@ -718,6 +735,7 @@ public:
 	ECameraVideoStreamFormat GetCameraVideoStreamFormat() override { return format; }
 	bool StartVideoStream() override
 	{
+		CLog("quest1 camera: StartVideoStream\n");
 		{
 			std::lock_guard<std::mutex> lock(mutex);
 			if (buffers.empty()) {

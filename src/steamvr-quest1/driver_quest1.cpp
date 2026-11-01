@@ -39,6 +39,7 @@
 
 #include "../vklayer-steamvr/quest1_display_proto.h"
 #include "battery.h"
+#include "camera.h"
 #include "controllers.h"
 
 #include <atomic>
@@ -1407,10 +1408,15 @@ public:
 		// shown half a period later.
 		VRProperties()->SetFloatProperty(c, Prop_SecondsFromVsyncToPhotons_Float, 0.022f);
 		VRProperties()->SetUint64Property(c, Prop_CurrentUniverseId_Uint64, 2);
+		// Prop_SupportsInHMDRoomSetup_Bool (11003, not in the public headers): selects the Steam Frame's
+		// shipping in-HMD playspace setup (vrcompositor draws it, the dashboard starts it) instead of
+		// looking for the legacy "openvr.tool.steamvr_room_setup" app
+		VRProperties()->SetBoolProperty(c, (ETrackedDeviceProperty)11003, true);
 		VRProperties()->SetBoolProperty(c, Prop_IsOnDesktop_Bool, false);
 		VRProperties()->SetBoolProperty(c, Prop_DisplayDebugMode_Bool, false);
 		VRProperties()->SetBoolProperty(c, Prop_DeviceProvidesBatteryStatus_Bool, false);
 		Quest1BatteryAttach(Quest1Battery_Head, c); // battery.cpp: level and charging, polled
+		Quest1CameraAttach(c, [this] { return GetPose(); }); // camera.cpp: tracking cameras (off unless enabled)
 
 		poseThreadRunning = true;
 		poseThread = std::thread([this] {
@@ -1492,6 +1498,7 @@ public:
 	void Deactivate() override
 	{
 		Quest1BatteryAttach(Quest1Battery_Head, k_ulInvalidPropertyContainer);
+		Quest1CameraDetach();
 		xr.onPresent = nullptr;
 		poseThreadRunning = false;
 		if (poseThread.joinable())
@@ -1507,6 +1514,8 @@ public:
 			return static_cast<IVRDisplayComponent *>(this);
 		if (!strcmp(name, IVRVirtualDisplay_Version) && xr.useVirtualDisplay)
 			return static_cast<IVRVirtualDisplay *>(this);
+		if (!strcmp(name, IVRCameraComponent_Version))
+			return Quest1CameraComponent();
 		return nullptr;
 	}
 
