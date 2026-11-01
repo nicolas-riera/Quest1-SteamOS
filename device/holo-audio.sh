@@ -78,7 +78,26 @@ start() {
 	for g in 25 25 25 24 22 21 18 17 13 14 20 24 24 22 25 26 27 28 28; do
 		a "EQ Band $b" $g; b=$((b + 1))
 	done
+	# routing: WirePlumber does not drive the card (install_pipewire_nodes), so the UCM verb and
+	# devices are applied here; the mixer keeps them after alsaucm exits
+	output speaker
 	echo "holo-audio: card $c ready"
+	# the user's PipeWire may have started before the card existed: restart it to pick it up
+	systemctl --user -M steamos@ try-restart pipewire.service pipewire-pulse.service wireplumber.service 2>/dev/null ||
+		systemctl --user -M steamos@ start pipewire.socket pipewire-pulse.socket 2>/dev/null || true
+}
+
+# output speaker|headphones: route MultiMedia1 to the speakers or the 3.5 mm jack (mic always on)
+output() {
+	c=$(card_index)
+	[ -n "$c" ] || { echo "holo-audio: no sound card"; exit 1; }
+	case "$1" in
+	speaker) on=Speaker off=Headphones ;;
+	headphones) on=Headphones off=Speaker ;;
+	*) echo "usage: holo-audio output speaker|headphones"; exit 1 ;;
+	esac
+	alsaucm -c "hw:$c" set _verb HiFi set _disdev "$off" set _enadev "$on" set _enadev Mic ||
+		echo "holo-audio: alsaucm failed"
 }
 
 status() {
@@ -295,6 +314,79 @@ EOF
 	systemctl enable --now quest1-volkeys.service
 }
 
+# WirePlumber's ALSA monitor (ACP) builds a "Pro Audio" profile for every card by opening each of
+# its PCMs: on this card VoIP, SLIMBUS hostless, AFE proxy and other DSP front ends, which the ADSP
+# refuses; the first boot ended in an oops in msm_afe_hw_params. PipeWire 1.4 has no switch to skip
+# that probe, so WirePlumber ignores the card and PipeWire gets fixed nodes on the only PCM the
+# hardware path uses (MultiMedia1, hw:0,0, routed by the UCM HiFi verb that `start` applies).
+# No automatic speaker/headphone switching this way (`holo-audio output speaker|headphones`).
+install_pipewire_nodes() {
+	mkdir -p /etc/wireplumber/wireplumber.conf.d /etc/pipewire/pipewire.conf.d
+	cat > /etc/wireplumber/wireplumber.conf.d/50-quest1-audio.conf <<'EOF'
+# Quest 1 (holo-audio.sh): the msm8998 card is not probed (see /etc/pipewire/pipewire.conf.d/
+# 50-quest1-audio.conf for its nodes)
+monitor.alsa.rules = [
+  {
+    matches = [ { device.name = "~alsa_card.*" } ]
+    actions = { update-props = { device.disabled = true } }
+  }
+]
+EOF
+	cat > /etc/pipewire/pipewire.conf.d/50-quest1-audio.conf <<'EOF'
+# Quest 1 (holo-audio.sh): speaker/headphone output and microphone on MultiMedia1 (hw:0,0)
+context.objects = [
+  { factory = adapter
+    flags = [ nofail ]
+    args = {
+      factory.name = api.alsa.pcm.sink
+      node.name = "quest1-output"
+      node.description = "Quest 1"
+      media.class = "Audio/Sink"
+      api.alsa.path = "hw:0,0"
+      # the msm PCM only moves its pointer at period boundaries: PipeWire's timer-based
+      # scheduling then underruns all the time (audible stutter), so use period interrupts
+      api.alsa.disable-tsched = true
+      api.alsa.period-size = 1024
+      api.alsa.period-num = 4
+      audio.format = "S16LE"
+      audio.rate = 48000
+      audio.channels = 2
+      audio.position = [ FL FR ]
+      priority.session = 2000
+      priority.driver = 2000
+    }
+  }
+  { factory = adapter
+    flags = [ nofail ]
+    args = {
+      factory.name = api.alsa.pcm.source
+      node.name = "quest1-mic"
+      node.description = "Quest 1 microphone"
+      media.class = "Audio/Source"
+      api.alsa.path = "hw:0,0"
+      api.alsa.disable-tsched = true
+      api.alsa.period-size = 1024
+      api.alsa.period-num = 4
+      audio.format = "S16LE"
+      audio.rate = 48000
+      audio.channels = 1
+      audio.position = [ MONO ]
+      priority.session = 2000
+    }
+  }
+]
+EOF
+	# no rtkit on Holo: let the user's PipeWire raise its own data threads to real time
+	# (module-rt), or vrcompositor's CPU load makes it underrun. Applies from the next login.
+	mkdir -p /etc/systemd/system/user@.service.d
+	cat > /etc/systemd/system/user@.service.d/50-quest1-rt.conf <<'EOF'
+[Service]
+LimitRTPRIO=95
+LimitNICE=-11
+EOF
+	systemctl daemon-reload
+}
+
 enable_boot() {
 	systemctl enable holo-audio.service
 	echo "holo-audio: the ADSP now boots at every boot (holo-audio.service)"
@@ -305,6 +397,7 @@ do_install() {
 	cp -f "$0" /usr/local/sbin/holo-audio
 	chmod 755 /usr/local/sbin/holo-audio
 	install_ucm
+	install_pipewire_nodes
 	# Not enabled here: booting the ADSP is enabled with `holo-audio enable` once a manual
 	# `holo-audio start` worked. WirePlumber picks the card up whenever it appears (udev).
 	cat > /etc/systemd/system/holo-audio.service <<'EOF'
@@ -331,8 +424,9 @@ EOF
 case "$1" in
 start | status) "$1" ;;
 enable) enable_boot ;;
+output) output "$2" ;;
 install) do_install ;;
-ucm) install_ucm ;;
+ucm) install_ucm; install_pipewire_nodes ;;
 volkeys) install_volkeys ;;
-*) echo "usage: $0 install | start | enable | status | ucm | volkeys"; exit 1 ;;
+*) echo "usage: $0 install | start | enable | status | output speaker|headphones | ucm | volkeys"; exit 1 ;;
 esac

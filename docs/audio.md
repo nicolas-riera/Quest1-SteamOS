@@ -231,3 +231,37 @@ exactly 5 % per press, held keys repeat, capped at 100 %.
 
 Not yet done (waiting for the go-ahead to boot the ADSP): card registration, CM710X.bin download,
 speaker/headphone playback, mic levels, SteamVR/Steam on the real sink, the physical buttons.
+
+Attempted 2026-11-01 (ADSP booted by the main session, `holo-audio start`): ADSP ONLINE (crashes 0), card 0
+`msm8998-cm710x_pvt_revB-snd_card` registered, `Headphone Jack` input present, UCM verb `HiFi` found
+(`alsaucm -c hw:0 list _verbs`), WirePlumber started its UCM profile (`_ucm0001.hw:msm8998cm710xpv`).
+**But audio does not work yet and `holo-audio enable` was NOT run:**
+
+- Within seconds of the card appearing, WirePlumber opened/probed dozens of the card's front-end PCMs
+  (VoIP, ULL, SLIMBUS_0 Hostless, AFE proxy, ...). The kernel log fills with `q6asm_audio_client_buf_alloc_contiguous:
+  buffer already allocated`, `__q6asm_cmd: DSP returned error[ADSP_EFAILED] opcode 68557`, then
+  `afe_cmd_memory_map: config cmd failed [ADSP_ENEEDMORE]`, `fail to map memory to DSP`, `msm-pcm-afe hw params failed: -61`,
+  and a kernel oops in `msm_afe_hw_params` (`__memset` on an unmapped address, `snd_pcm_hw_params` ioctl) that killed
+  wireplumber (zombie, pid 1441). No ADSP crash/SSR; the kernel did not panic. pipewire/pipewire-pulse keep running
+  but have no session manager (`wpctl` hangs).
+- After that, a direct `aplay -D hw:0,0` (440 Hz, -28 dBFS) fails: `afe_set_lpass_clock_v2: afe_set_lpass_clk_cfg_v2 failed -61`
+  -> `msm_mi2s_set_sclk ... PRI_MI2S_RX startup failed -61` -> `aplay: audio open error: No data available`.
+  The AFE is either wedged by the probe flood or needs more than the default ADSP state (no ACDB / AFE calibration).
+  To tell the two apart the ADSP needs a clean boot (reboot of the headset) and a first test with only
+  `aplay -D hw:0,0` **before** WirePlumber ever touches the card.
+- Next steps: (1) reboot, `holo-audio start`, stop wireplumber first (or mask it) and try `aplay`; if that plays,
+  the problem is WirePlumber's probing: restrict it to PCM 0 (WirePlumber rule disabling the ACP/pro-audio probing, or a
+  fixed `api.alsa.pcm.sink` adapter on `hw:0,0` in a pipewire.conf.d drop-in, with the card's `device.disabled = true`);
+  (2) if `aplay` still fails with -61 on the lpass clock, the AFE needs what Android's HAL sends first (ACDB load,
+  AFE port config / `AFE_PARAM_ID_LPASS_CLK_CONFIG`, possibly `q6afe` init through `libacdbloader`).
+- State left: Speaker/Headphone/Mic switches off, ADSP running, `holo-audio.service` not enabled.
+
+### 2026-11-01: WirePlumber no longer drives the card
+
+PipeWire 1.4.9's ACP has no option to skip the Pro Audio probe that oopsed the AFE driver, so
+`holo-audio install|ucm` now writes `/etc/wireplumber/wireplumber.conf.d/50-quest1-audio.conf`
+(`device.disabled = true` for the ALSA card) and `/etc/pipewire/pipewire.conf.d/50-quest1-audio.conf`
+(fixed nodes `quest1-output` and `quest1-mic` on hw:0,0, 48 kHz S16LE). `holo-audio start` applies the
+UCM routing itself (`holo-audio output speaker|headphones`). Not yet tested: next boot,
+`holo-audio start`, then restart pipewire/wireplumber for steamos, play a short low-level tone, and
+only then `holo-audio enable`.
