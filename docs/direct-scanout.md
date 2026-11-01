@@ -11,9 +11,11 @@ renders below 72 fps.
 - **driver_quest1** (vrserver) declares the real Quest 1 lens distortion (`ComputeDistortion`, Meta's
   CatmullRom10 model, per-channel chroma) and a 2880x1600 display. The left eye is drawn in the
   right half of the display image and the right eye in the left half, because the panels show the
-  framebuffer turned by 180°. `QUEST1_DIRECT_FLIP` (from `/etc/quest1-direct-flip`, 3) holds the
+  framebuffer turned by 180°. `QUEST1_DIRECT_FLIP` (from `/etc/quest1-direct-flip`, 19) holds the
   orientation fixes found on the device: bits 1+2 (vrcompositor's distortion v runs bottom-up, on
-  the output and on the texture side). User-confirmed 2026-11-01: distortion correct with 3. Bit 8
+  the output and on the texture side), and 16, which mirrors the lens model's vertical asymmetry
+  (lens centre 2.72 mm, 47 deg up / 53 deg down) without turning the image: 19 is now the default,
+  user-judged better than 3 for distortion and chromatic aberration at the top and bottom. Bit 8
   (mirror u) is wrong: it puts each lens centre on the temple side and the eyes look far too
   far apart.
 - **The compat layer** (`src/vklayer-steamvr/quest1_scanout.c`, inside vrcompositor) gives

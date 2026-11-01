@@ -1549,7 +1549,7 @@ public:
 		// top = -tan(up), the horizon was measured ~130 rows (0.23 tan) too low on the 47° up /
 		// 53° down Quest optics, which warps the world as the head turns. So top gets the lower
 		// tangent (negative) and bottom the upper one, as in OpenXR.
-		const XrFovf &f = xr.fov[eye == Eye_Left ? 0 : 1];
+		const XrFovf f = VFov(xr.fov[eye == Eye_Left ? 0 : 1]);
 		*left = tanf(f.angleLeft);
 		*right = tanf(f.angleRight);
 		if (xr.directScanout && !(DirectFlip() & 4)) { // OpenVR's convention: y down
@@ -1561,11 +1561,22 @@ public:
 		*bottom = tanf(f.angleUp);
 	}
 	//! debug: QUEST1_DIRECT_FLIP bits 1 = output v, 2 = texture v, 4 = old projection, 8 = output and
-	//! texture u, to sort out orientations on the device. 3 is right (user-confirmed): vrcompositor's
-	//! distortion v runs bottom-up on both sides.
+	//! texture u, to sort out orientations on the device. 3 orients the image (vrcompositor's
+	//! distortion v runs bottom-up on both sides); 16 mirrors the lens model's vertical asymmetry
+	//! (lens centre height, 47 deg up / 53 deg down) without turning the image. 19 is the best so far
+	//! (user, 2026-11-01: distortion and chromatic aberration better than 3).
+	static XrFovf VFov(XrFovf f)
+	{
+		if (DirectFlip() & 16) {
+			float up = f.angleUp;
+			f.angleUp = -f.angleDown;
+			f.angleDown = -up;
+		}
+		return f;
+	}
 	static int DirectFlip()
 	{
-		static int f = getenv("QUEST1_DIRECT_FLIP") ? atoi(getenv("QUEST1_DIRECT_FLIP")) : 3;
+		static int f = getenv("QUEST1_DIRECT_FLIP") ? atoi(getenv("QUEST1_DIRECT_FLIP")) : 19;
 		return f;
 	}
 	DistortionCoordinates_t ComputeDistortion(EVREye eye, float u, float v) override
@@ -1588,10 +1599,10 @@ public:
 		float pu = 1.0f - u, pv = 1.0f - v;
 		float sx = e == 0 ? -1.0f : 1.0f;
 		float x = ((pu - 0.5f) * kPanelW + sx * kLensToScreenX) / kMetersPerTan;
-		float y = ((0.5f - pv) * kPanelH + kLensToScreenY) / kMetersPerTan;
+		float y = ((0.5f - pv) * kPanelH + (DirectFlip() & 16 ? -kLensToScreenY : kLensToScreenY)) / kMetersPerTan;
 		float rsq = x * x + y * y;
 		float sc = CatmullRom10(rsq);
-		const XrFovf &f = xr.fov[e];
+		const XrFovf f = VFov(xr.fov[e]);
 		float tl = tanf(f.angleLeft), tr = tanf(f.angleRight), tu = tanf(f.angleUp), td = tanf(f.angleDown);
 		const float chroma[3] = {0.996f - 0.007f * rsq, 1.0f, 1.006f + 0.020f * rsq};
 		float *out[3] = {d.rfRed, d.rfGreen, d.rfBlue};
