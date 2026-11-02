@@ -43,11 +43,11 @@ Open items, roughly by priority. Done items move to the commit log.
   github.com/TheCez/quest1-90hz-orangefox.
 
 ## Passthrough
-- Head-locked camera overlay (`q1-passthrough on|off|toggle`, docs/passthrough.md): test in the headset
-  (orientation, brightness, latency, good enough to draw the boundary?). Then a start-up unit for
-  `q1-camoverlay` and a controller or quick-menu toggle.
-- SteamVR's own camera view: the compositor's gate is open (Acquire OK) but nothing sends
-  `TrackedCamera_Enable`, so no frames; then eye-aligned, depth-corrected re-projection like Meta's.
+- SteamVR's own camera view (roomview), fed by `ptprovider` (docs/passthrough.md): it starts (driver
+  "props" mode + camera.roomView toggle) and takes our frames, but draws nothing until the driver
+  publishes a depth mesh on the roomview3d block queues (key/value write API of vrserver's block
+  queue manager to read). Then camera frames from the camtap ring instead of the test pattern.
+  The head-locked overlay (`q1-camoverlay`) is shelved: the user wants SteamVR's integration.
 
 ## Boundary
 - Test in the headset (after passthrough, needed to draw the boundary): the playspace buttons
@@ -74,9 +74,6 @@ Open items, roughly by priority. Done items move to the commit log.
 ## Steam and desktop
 - The Steam Frame's desktop mode (KDE Plasma) from the "+" menu. It works in the Quest 2 port
   (github.com/URFAVF3MBOY/quest2-steamos), whose author allows us to use its code: base it on that.
-- The "+" menu shows 5 apps that should not be there (Xfce-related, it seems): remove them. Launching
-  one shows nothing in the headset; once a PC connects for Remote Play, the app shows up there as a
-  black window instead of the VR view (user, 2026-11-02).
 
 ## System
 - SteamOS and SteamVR updates must keep working without undoing our changes (after the
@@ -94,7 +91,7 @@ Open items, roughly by priority. Done items move to the commit log.
   it, so the headset stays black. The stream's `streaming_client` (GL) can't share images with the
   compositor: libhybris GL lacks GL_EXT_memory_object(_fd) and GL_EXT_semaphore(_fd) (ASSERTs in
   sharedresource_linux.cpp), so the stream shows black. Logs in `/root/stream-crash-20261102/`.
-  Also: restart SteamVR when it quits while Steam runs.
+  SteamVR now restarts by itself when it quits.
 
 ## Hardware
 - Power LED: it must get its stock behaviour back (it stays solid yellow/orange). The front LED
