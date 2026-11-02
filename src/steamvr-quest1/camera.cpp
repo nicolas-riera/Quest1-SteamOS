@@ -1377,6 +1377,12 @@ void Quest1CameraAttach(PropertyContainerHandle_t container, std::function<Drive
 			p->SetBoolProperty(container, Prop_HasCamera_Bool, true);
 			p->SetBoolProperty(container, Prop_AllowCameraToggle_Bool, true);
 			p->SetInt32Property(container, Prop_NumCameras_Int32, 2);
+			// Prop_Hmd_ForceRoomViewOutsideChaperone_Bool (2500): vrcompositor forces roomview on when the head is outside
+			// the chaperone: this is what makes it draw without a toggle (QUEST1_CAMERA_FORCE=0 to leave it off)
+			if (atoi(Env("QUEST1_CAMERA_FORCE", "1")))
+				p->SetBoolProperty(container, (ETrackedDeviceProperty)2500, true);
+			// Prop_SupportsRoomViewDepthProjection_Bool (2079): the 3D roomview (camera.roomView = 2) that uses the depth mesh
+			p->SetBoolProperty(container, (ETrackedDeviceProperty)2079, true);
 			CLog("quest1 camera: HMD camera properties set (props mode, no camera component)\n");
 			g_gate.Start(false); // the empty depth-mesh block queues vrcompositor's roomview connects to
 		}

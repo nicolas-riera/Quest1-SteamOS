@@ -4,12 +4,17 @@ Open items, roughly by priority. Done items move to the commit log.
 
 ## Performance
 - vrcompositor, head still, panels on (2026-11-02): 22-28 fps in the morning, 36 with Monado's "early"
-  ack, 45 with the layer's present waits returning at once. The GPU is only ~44 % busy at 45 fps, yet
-  a frame takes ~17 ms from present to rendered: find what the GPU waits on (vrcompositor's
-  RenderThread sleep-polls). Head moving (warp at 72 Hz) is still ~20 fps: warp ~4 ms GPU per pass,
-  linear 1440x1600 buffers. Steam's client (steamwebhelper + its GPU process) takes up to ~300 % CPU
-  after each Steam restart. Tried without effect: SteamVR's realtime priority (CAP_SYS_NICE), GPU
-  bus floors, Steam on the little cores (+5 %, and games would inherit it).
+  ack, 45 with the layer's present waits returning at once. The limit is GPU time: the kgsl trace
+  (adreno_cmdbatch_retired start/retire ticks) shows vrcompositor's one batch per frame running
+  ~17.8 ms (gpu_busy_percentage under-reports, ~40 %). The layer's profiler (`touch
+  /tmp/quest1-gputime`) splits it per eye: 12 scene passes at 1500x1664 (~5.6 ms, the controller
+  models ~1.5 ms of it) and the distortion pass at 1440x1600 (~3.2 ms). Tried without useful gain:
+  merging the scene passes (same time merged), dropping the distortion draws (-3 to -4 ms only),
+  GpuSpeed.gpuSpeedRenderTargetScale (the scene stays 1500x1664), live vrcmd settings
+  (enableSimplifiedShaders, overlay quality, skydome, supersampleScale: < 1 ms), SteamVR's realtime
+  priority, GPU bus floors, Steam on the little cores. Left: fewer scene pixels forced in the layer,
+  lighter controller models, Facet, or ~45 fps with a clean 72 Hz re-projection. Tracking on all 8
+  cores (it is pinned to the busy little cores) seemed to make the shaking worse: back to 0-3.
 - SteamVR's Facet renderer (tip from a user, 2026-11-02) runs and draws correctly behind
   `/etc/quest1-facet` (off by default, `src/vklayer-steamvr/quest1_facet.c`): ~29-32 fps, eye passes
   6-7 ms each. Needs a fair A/B against the old renderer in one quiet window

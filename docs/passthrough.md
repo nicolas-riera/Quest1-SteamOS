@@ -137,3 +137,16 @@ compositor connection and every allocation fails):
   with vertices (a plane or dome in head space) and indices, then set the header properties (IVRProperties on the block's header
   container). Block data layout and property types to confirm live.
 - Forcing it in a gdb session (`$x27 = 1` at vrcompositor 0x9ee6c) is no longer needed.
+
+## Roomview 3D mode and the mesh reads (2026-11-02, night)
+- vrcompositor draws the roomview geometry only in the 3D mode: `camera.roomView = 2` AND HMD prop 2079
+  (`Prop_SupportsRoomViewDepthProjection_Bool`); the driver's `props` mode now sets 2079 and 2500
+  (`Prop_Hmd_ForceRoomViewOutsideChaperone_Bool`, `QUEST1_CAMERA_FORCE=0` to skip; it did not trigger roomview by itself without a
+  playspace). A client toggles it with `trackedcam_test` `PT_ROOMVIEW=2` (SetInt32 0 then 2). Result with `ptprovider` running:
+  "Depth mesh block queues connection successful", "Late initialization successful", records consumed.
+- The mesh reads (vrcompositor 0x15fe98 and 0x160130) go through the block-queue interface object (vtable slot 0, queue handle in x1)
+  with a std::string key per property ("/meshLayout/layoutId" ...): the header "properties" are block-queue header fields, not
+  device properties. The key/value encoding still has to be read from vrserver's implementation (CVRBlockQueue_004 thunks at
+  vrserver 0x77ec8.., manager vtable at 0x25d208..) to know what the driver must write.
+- Without a mesh the roomview draws nothing. Next: read the manager's header-property write API, publish layout + data blocks
+  (flat quad), verify with a synthetic pattern.

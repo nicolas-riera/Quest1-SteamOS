@@ -30,9 +30,10 @@ int main(int argc, char **argv)
 	}
 	if (getenv("PT_ROOMVIEW")) { // toggle camera.roomView (the compositor's passthrough view)
 		EVRSettingsError se;
-		VRSettings()->SetBool("camera", "roomView", false, &se);
+		int mode = atoi(getenv("PT_ROOMVIEW")); // 1 = 2D, 2 = 3D (depth mesh)
+		VRSettings()->SetInt32("camera", "roomView", 0, &se);
 		usleep(500000);
-		VRSettings()->SetBool("camera", "roomView", true, &se);
+		VRSettings()->SetInt32("camera", "roomView", mode > 0 ? mode : 1, &se);
 		printf("toggled camera.roomView (err %d)\n", (int)se);
 		usleep(1000000);
 	}
