@@ -45,6 +45,7 @@ Open items, roughly by priority. Done items move to the commit log.
   removed) stays shown in SteamVR instead of turning disconnected; and right after the tracking
   service starts, controllers it has not seen yet show up inside the headset instead of staying
   "searching" until their first tracked pose.
+- Controller battery levels no longer show in Steam's battery panel (user, 2026-11-02); they did before.
 
 ## Power
 - Power button and sleep work (2026-11-02: short press = Steam's sleep, panels off and Meta's

@@ -202,7 +202,7 @@ struct mdp_direct
 		bool off;
 		float yaw_deg, thr_deg, delay_ms;
 		float rx_deg, ry_deg, rz_deg; //!< constant frame rotation R: delta' = conj(R) * delta * R
-		bool early_ack;               //!< perf: /tmp/quest1-perf "early": report a frame displayed when committed
+		int ack_mode;                 //!< perf: when a frame is reported displayed: 0 retire, 1 commit (default), 2 next vsync
 		uint32_t sign;
 		int64_t read_ns;
 	} knobs;
@@ -210,6 +210,7 @@ struct mdp_direct
 	//! SKIP_DEG since is not warped again (the panels keep the commit). held_frame 0 when the panels show
 	//! something else.
 	uint64_t held_frame;
+	uint64_t ack_pending; //!< ack mode vsync: frame committed, reported displayed at the next vsync
 	float held_delta[4];
 	uint32_t skipped;
 	float o[4]; //!< device space = o * LOCAL, estimated from the render poses
@@ -855,14 +856,21 @@ warp_read_knobs(struct mdp_direct *D, int64_t now)
 	D->knobs.rx_deg = D->knobs.ry_deg = D->knobs.rz_deg = 0;
 	// perf knobs (not the re-projection ones): "early" answers the layer's present wait as soon as the frame is
 	// committed instead of when it is on the panels, so vrcompositor starts its next frame one vsync sooner
-	D->knobs.early_ack = false;
+	// (2026-11-02, head still, panels on: 28 -> 36 fps, present-wait errors 740 -> 40 per 25 s; the default)
+	D->knobs.ack_mode = 1;
 	FILE *pf = fopen("/tmp/quest1-perf", "r");
 	if (pf != NULL) {
 		char pb[64] = {0};
 		size_t pn = fread(pb, 1, sizeof(pb) - 1, pf);
 		fclose(pf);
 		pb[pn] = 0;
-		D->knobs.early_ack = strstr(pb, "early") != NULL;
+		if (strstr(pb, "retire") != NULL) {
+			D->knobs.ack_mode = 0;
+		} else if (strstr(pb, "early") != NULL) {
+			D->knobs.ack_mode = 1;
+		} else if (strstr(pb, "vsync") != NULL) {
+			D->knobs.ack_mode = 2;
+		}
 	}
 	FILE *f = fopen("/tmp/quest1-reproj", "r");
 	if (f == NULL) {
@@ -1586,19 +1594,29 @@ direct_handle_fences(struct mdp_target *t, const struct pollfd *p, int n)
 	pthread_mutex_unlock(&D->lock);
 }
 
-//! The frame a commit reports as displayed when it retires (0 none). With the "early" perf knob a fresh frame is
-//! reported right away (`direct_ack_early`) and the retire fence reports nothing.
+//! The frame a commit reports as displayed when it retires (0 none). Only the "retire" ack mode uses the retire
+//! fence; the others report the frame themselves (`direct_ack_early`: at the commit, or at the next vsync, which
+//! is when the commit is latched). Reusing a buffer never depends on this ack: the layer gets a buffer back
+//! with Q1D_RELEASE, sent when the commit's release fence has signaled (direct_release_unused).
 static uint64_t
 direct_ack_frame(struct mdp_direct *D)
 {
-	return D->fresh && !D->knobs.early_ack ? D->latest_frame.frame : 0;
+	return D->fresh && D->knobs.ack_mode == 0 ? D->latest_frame.frame : 0;
 }
 
 static void
 direct_ack_early(struct mdp_direct *D)
 {
-	if (D->fresh && D->knobs.early_ack) {
+	if (!D->fresh || D->knobs.ack_mode == 0) {
+		return;
+	}
+	if (D->knobs.ack_mode == 1) {
 		direct_displayed(D, D->latest_frame.frame);
+	} else {
+		if (D->ack_pending != 0) {
+			direct_displayed(D, D->ack_pending); // a newer frame replaced it before its vsync
+		}
+		D->ack_pending = D->latest_frame.frame;
 	}
 }
 
@@ -1635,6 +1653,10 @@ direct_tick(struct mdp_target *t, int64_t vsync)
 	bool on = t->unblanked && worn;
 	os_thread_helper_unlock(&t->vsync_thread);
 	warp_read_knobs(D, now);
+	if (D->ack_pending != 0 && (vsync > 0 || !on)) {
+		direct_displayed(D, D->ack_pending);
+		D->ack_pending = 0;
+	}
 
 	if (!on) {
 		// panels off: nothing is displayed, nothing to wait for
