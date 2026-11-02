@@ -12,8 +12,8 @@ Open items, roughly by priority. Done items move to the commit log.
   merging the scene passes (same time merged), dropping the distortion draws (-3 to -4 ms only),
   GpuSpeed.gpuSpeedRenderTargetScale (the scene stays 1500x1664), live vrcmd settings
   (enableSimplifiedShaders, overlay quality, skydome, supersampleScale: < 1 ms), SteamVR's realtime
-  priority, GPU bus floors, Steam on the little cores. Left: fewer scene pixels forced in the layer,
-  lighter controller models, Facet, or ~45 fps with a clean 72 Hz re-projection. Tracking on all 8
+  priority, GPU bus floors, Steam on the little cores. Left: lighter controller models, Facet, or
+  ~45 fps with a clean 72 Hz re-projection. Never lower the resolution (user: it is already low). Tracking on all 8
   cores (it is pinned to the busy little cores) seemed to make the shaking worse: back to 0-3.
 - SteamVR's Facet renderer (tip from a user, 2026-11-02) runs and draws correctly behind
   `/etc/quest1-facet` (off by default, `src/vklayer-steamvr/quest1_facet.c`): ~29-32 fps, eye passes
