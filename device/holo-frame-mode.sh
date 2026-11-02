@@ -115,6 +115,8 @@ Description=SteamVR (Frame mode: vrserver + vrcompositor with driver_quest1)
 Requires=monado.service
 Wants=steam.service quest1-vrsession.service quest1-frame-dashboard.service
 After=monado.service xvfb.service steam.service
+StartLimitIntervalSec=120
+StartLimitBurst=5
 
 [Service]
 User=steamos
@@ -127,7 +129,10 @@ ExecStart=/usr/local/bin/steamvr-q1 vrserver --keepalive
 # vrcompositor, vrwebhelpers etc. are vrserver's children: stopping the unit stops all of SteamVR
 KillMode=control-group
 TimeoutStopSec=15
-Restart=no
+# vrserver also quits (exit 0) when Steam shuts down or crashes; Steam comes back by itself, SteamVR
+# must too or the headset stays black (2026-11-02, a stream that crashed Steam)
+Restart=always
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target

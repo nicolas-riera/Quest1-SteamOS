@@ -176,6 +176,15 @@ RestartSec=3
 WantedBy=multi-user.target
 EOF
 
+# Steam lists the system's desktop entries in its "+" menu: hide the desktop tools that come with
+# the image or our x11vnc build (Avahi browsers, CMake, IBus preferences, X11VNC Server) and show
+# nothing in the headset. Entries in /usr/local/share/applications take precedence over /usr/share
+# ones; Hidden=true removes them.
+mkdir -p /usr/local/share/applications
+for a in avahi-discover bssh bvnc cmake-gui org.freedesktop.IBus.Setup x11vnc; do
+	printf '[Desktop Entry]\nType=Application\nName=%s\nHidden=true\n' "$a" > /usr/local/share/applications/$a.desktop
+done
+
 mkdir -p /etc/x11vnc
 [ -f /etc/x11vnc/passwd ] || /usr/local/bin/x11vnc -storepasswd quest1 /etc/x11vnc/passwd
 chmod 600 /etc/x11vnc/passwd
