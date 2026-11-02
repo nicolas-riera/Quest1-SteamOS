@@ -202,6 +202,7 @@ struct mdp_direct
 		bool off;
 		float yaw_deg, thr_deg, delay_ms;
 		float rx_deg, ry_deg, rz_deg; //!< constant frame rotation R: delta' = conj(R) * delta * R
+		bool early_ack;               //!< perf: /tmp/quest1-perf "early": report a frame displayed when committed
 		uint32_t sign;
 		int64_t read_ns;
 	} knobs;
@@ -852,6 +853,17 @@ warp_read_knobs(struct mdp_direct *D, int64_t now)
 	D->knobs.delay_ms = 0;
 	D->knobs.sign = 0;
 	D->knobs.rx_deg = D->knobs.ry_deg = D->knobs.rz_deg = 0;
+	// perf knobs (not the re-projection ones): "early" answers the layer's present wait as soon as the frame is
+	// committed instead of when it is on the panels, so vrcompositor starts its next frame one vsync sooner
+	D->knobs.early_ack = false;
+	FILE *pf = fopen("/tmp/quest1-perf", "r");
+	if (pf != NULL) {
+		char pb[64] = {0};
+		size_t pn = fread(pb, 1, sizeof(pb) - 1, pf);
+		fclose(pf);
+		pb[pn] = 0;
+		D->knobs.early_ack = strstr(pb, "early") != NULL;
+	}
 	FILE *f = fopen("/tmp/quest1-reproj", "r");
 	if (f == NULL) {
 		return;
@@ -1574,6 +1586,22 @@ direct_handle_fences(struct mdp_target *t, const struct pollfd *p, int n)
 	pthread_mutex_unlock(&D->lock);
 }
 
+//! The frame a commit reports as displayed when it retires (0 none). With the "early" perf knob a fresh frame is
+//! reported right away (`direct_ack_early`) and the retire fence reports nothing.
+static uint64_t
+direct_ack_frame(struct mdp_direct *D)
+{
+	return D->fresh && !D->knobs.early_ack ? D->latest_frame.frame : 0;
+}
+
+static void
+direct_ack_early(struct mdp_direct *D)
+{
+	if (D->fresh && D->knobs.early_ack) {
+		direct_displayed(D, D->latest_frame.frame);
+	}
+}
+
 /*!
  * Vsync thread, every wake-up (`vsync` when a vsync event came, else 0): puts the frames on the panels.
  * Called without the vsync thread's mutex.
@@ -1708,7 +1736,7 @@ direct_tick(struct mdp_target *t, int64_t vsync)
 					if (o >= 0 && warp_render(t, o, delta, &gpu_ms)) {
 						warp_snapshot(D, o);
 						int64_t tc0 = os_monotonic_get_ns();
-						bool committed = direct_commit(t, D->out[o], -1, o, D->fresh ? D->latest_frame.frame : 0);
+						bool committed = direct_commit(t, D->out[o], -1, o, direct_ack_frame(D));
 						D->stats.commit_ms_sum += (double)(os_monotonic_get_ns() - tc0) / 1e6;
 						if (committed) {
 							warped = true;
@@ -1729,11 +1757,17 @@ direct_tick(struct mdp_target *t, int64_t vsync)
 			}
 		}
 		if (warped) {
+			direct_ack_early(D);
 			D->fresh = false;
 			D->need_refresh = false;
-		} else if (commit_raw && direct_commit(t, D->buf[D->latest], D->latest, -1, D->fresh ? D->latest_frame.frame : 0)) {
+		} else if (commit_raw && direct_commit(t, D->buf[D->latest], D->latest, -1, direct_ack_frame(D))) {
 			D->stats.raw_commits++;
-			D->held_frame = 0;
+			// the panels show this frame as rendered, i.e. warped by the identity: a head that stays still
+			// (delta < WARP_SKIP_DEG) needs no warp pass for it (it used to re-warp every raw frame once)
+			D->held_frame = D->latest_frame.frame;
+			D->held_delta[0] = D->held_delta[1] = D->held_delta[2] = 0;
+			D->held_delta[3] = 1;
+			direct_ack_early(D);
 			D->fresh = false;
 			D->need_refresh = false;
 		}
