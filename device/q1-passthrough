@@ -1,0 +1,6 @@
+#!/bin/sh
+# q1-passthrough [on|off|toggle]: show/hide the head-locked camera view (q1-camoverlay service)
+f=/tmp/quest1-passthrough
+systemctl is-active -q q1-camoverlay || systemd-run --unit=q1-camoverlay --collect --uid=steamos -E XDG_RUNTIME_DIR=/run/user/1000 -E HOME=/home/steamos /usr/local/bin/q1-camoverlay >/dev/null 2>&1
+case "$1" in on) touch $f;; off) rm -f $f;; *) if [ -e $f ]; then rm -f $f; else runuser -u steamos -- touch $f; fi;; esac
+[ -e $f ] && echo on || echo off
