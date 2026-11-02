@@ -1102,6 +1102,12 @@ warp_import(struct mdp_target *t, struct direct_buf *b, bool output)
 	    .format = VK_FORMAT_R8G8B8A8_UNORM,
 	    .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
 	};
+	// mdss scans MDP_RGBA_8888_UBWC out with red and blue swapped (blue shows orange): with UBWC
+	// outputs, the warp samples its (linear) inputs swapped back
+	if (!output && D->out[0][0].ubwc) {
+		vci.components = (VkComponentMapping){VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_G,
+		                                      VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_A};
+	}
 	if (vk->vkCreateImageView(vk->device, &vci, NULL, &b->view) != VK_SUCCESS) {
 		warp_free_buf_vk(vk, b);
 		return false;
@@ -1329,12 +1335,11 @@ warp_init(struct mdp_target *t)
 			    .usage = AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT | AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE |
 			             AHARDWAREBUFFER_USAGE_COMPOSER_OVERLAY,
 			};
-			// perf experiment: QUEST1_WARP_USAGE=<hex> adds gralloc usage bits (e.g. the vendor UBWC flag)
-			// to the warp outputs, to see whether the blob then makes them UBWC (logged at "warp ready")
+			// UBWC outputs (gralloc's vendor usage bit, AHARDWAREBUFFER_USAGE_VENDOR_0): the warp pass costs
+			// ~2.6 ms of GPU instead of ~3.9 ms into linear buffers (2026-11-02). QUEST1_WARP_USAGE=<hex>
+			// replaces the extra usage bits (0: linear outputs).
 			const char *ue = getenv("QUEST1_WARP_USAGE");
-			if (ue != NULL) {
-				desc.usage |= strtoull(ue, NULL, 16);
-			}
+			desc.usage |= ue != NULL ? strtoull(ue, NULL, 16) : 0x10000000u;
 			if (AHardwareBuffer_allocate(&desc, &b->ahb) != 0) {
 				U_LOG_E("mdp: warp: AHardwareBuffer_allocate failed");
 				return false;
