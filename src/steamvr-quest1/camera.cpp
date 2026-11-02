@@ -1204,7 +1204,8 @@ private:
 //     frame_hmd driver sets it, nothing in vrserver does for other HMDs (see docs/passthrough.md), and
 //  2. it connects to the block queues /xrservice/roomview3d/meshData and /meshLayout (the Frame's depth
 //     mesh producer): created here (IVRBlockQueue, server-only) and left empty.
-// Both are set up from the HMD's Activate while the camera is enabled (QUEST1_CAMERA).
+// Both are set up from the HMD's Activate when QUEST1_CAMERA_GATE=1 (default OFF: with the gate on, vrcompositor starts
+// roomview and its watchdog aborted it repeatedly, 2026-11-02).
 
 //! IVRBlockQueue_004 (vrserver has no _005 class and asserts on unknown versions): virtual slots in capi order
 //! (Create, Connect, Destroy), called through the vtable by hand (a pure abstract class here would get its calls
@@ -1353,7 +1354,7 @@ void Quest1CameraAttach(PropertyContainerHandle_t container, std::function<Drive
 {
 	if (Quest1Camera *c = Get()) {
 		c->Attach(container, std::move(headPose));
-		if (container != k_ulInvalidPropertyContainer && atoi(Env("QUEST1_CAMERA_GATE", "1")))
+		if (container != k_ulInvalidPropertyContainer && atoi(Env("QUEST1_CAMERA_GATE", "0")))
 			g_gate.Start();
 	}
 }
