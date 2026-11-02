@@ -73,8 +73,9 @@ Open items, roughly by priority. Done items move to the commit log.
 - Boot animation: its sound plays but nothing shows in the headset. On the Steam Frame it shows full
   screen, drawn straight on the panels (no tracking). It must also be the Steam Frame's animation,
   not SteamOS's.
-- Restart and Shut down from Steam: retest with the PR #1 kernel (build-6 and later). If they work,
-  drop the sshd `pam_systemd` workaround in `device/holo-perf.sh`.
+- Shut down from Steam works but takes long before the headset turns off (user, 2026-11-03): find
+  which units hold the shutdown (TimeoutStopSec, Meta's services, SteamVR's 15 s). Restart from
+  Steam: retest. If both work, drop the sshd `pam_systemd` workaround in `device/holo-perf.sh`.
 
 ## Steam and desktop
 - The Steam Frame's desktop mode (the Frame's KDE Plasma) from the "+" menu. It works in the Quest 2
