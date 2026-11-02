@@ -9,7 +9,9 @@ set -e
 
 cat > /usr/local/sbin/quest1-zram <<'EOF'
 #!/bin/sh
-# quest1-zram start|stop: 1.5 GB zram swap (lz4), used before the swap file
+# quest1-zram start|stop: 3 GB zram swap (lz4), used before the swap file. SteamVR + Steam fill 1.5 GB
+# (2026-11-02: full, then the slow swap file on the loop device, and vrcompositor's pages swapped out);
+# its pages compress ~5:1, so 3 GB of zram costs ~600 MB of RAM at most
 Z=/sys/block/zram0
 case "$1" in
 start)
@@ -17,7 +19,7 @@ start)
 	echo 1 > $Z/reset 2>/dev/null || true
 	echo lz4 > $Z/comp_algorithm
 	echo 4 > $Z/max_comp_streams 2>/dev/null || true
-	echo 1536M > $Z/disksize
+	echo 3072M > $Z/disksize
 	mkswap /dev/zram0 >/dev/null
 	swapon -p 100 /dev/zram0
 	;;
@@ -51,6 +53,12 @@ cat > /etc/sysctl.d/90-quest1-vm.conf <<'EOF'
 vm.swappiness=60
 vm.page-cluster=0
 EOF
+
+# reclaim the Steam client's memory before the compositors' and the tracking's (cgroup v2 memory.low)
+for u in quest1-steamvr:700M monado:150M android-trackingservice:150M; do
+	mkdir -p /etc/systemd/system/${u%%:*}.service.d
+	printf '[Service]\nMemoryLow=%s\n' "${u#*:}" >/etc/systemd/system/${u%%:*}.service.d/quest1-memory.conf
+done
 
 mkdir -p /etc/systemd/system/sshd.service.d
 cat > /etc/systemd/system/sshd.service.d/quest1-priority.conf <<'EOF'
