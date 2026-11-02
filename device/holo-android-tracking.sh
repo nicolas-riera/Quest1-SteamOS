@@ -236,8 +236,27 @@ PartOf=android-sensors-hal.service"
 	unit ctlwatch "controller id list for ovrstub (/run/q1track/controllers)" root "" 		"/usr/local/sbin/holo-android-tracking ctlwatch" "Wants=android-sensors-hal.service
 After=android-sensors-hal.service
 PartOf=android-sensors-hal.service"
+	# Meta mode survives reboots: when /etc/quest1-tracking says "meta", start Meta's stack at boot,
+	# before Monado (which then leaves SyncBoss to the sensors HAL)
+	cat > $U/android-tracking-boot.service <<'EOF'
+[Unit]
+Description=Quest 1 tracking: Meta's stack at boot when /etc/quest1-tracking is "meta"
+After=holo-android-blobs.service android-hwservicemanager.service android-modem.service
+Before=monado.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=120
+ExecStart=/usr/local/sbin/holo-android-tracking boot
+
+[Install]
+WantedBy=multi-user.target
+EOF
 	systemctl daemon-reload
-	echo "units written, none enabled. Without SyncBoss: holo-android-tracking base." \
+	systemctl enable android-tracking-boot.service
+	echo "units written; only android-tracking-boot is enabled (Meta's stack at boot in meta mode)." \
+		"Without SyncBoss: holo-android-tracking base." \
 		"With SyncBoss (monado.service stopped): holo-android-tracking trial"
 }
 
@@ -346,14 +365,17 @@ monado_trial() {
 	echo "monado: $(systemctl is-active monado.service), vrserver: $(pgrep -x vrserver || echo none)"
 }
 
+meta_start() { # Meta's stack, in order (the sensors HAL first: it takes SyncBoss)
+	systemctl start $BASE
+	systemctl start android-sensors-hal
+	systemctl start android-cameramuxmode android-calibration android-trackingservice android-ctlwatch android-q1trackd
+}
 # meta-on: Monado without SyncBoss + Meta's stack. Restarts Monado: through /root/q1restart.sh.
 meta_on() {
 	echo meta > /etc/quest1-tracking
 	systemctl stop monado.service
 	sleep 1
-	systemctl start $BASE
-	systemctl start android-sensors-hal
-	systemctl start android-cameramuxmode android-calibration android-trackingservice android-ctlwatch android-q1trackd
+	meta_start
 	systemctl start monado.service
 	sleep 3
 	echo "monado: $(systemctl is-active monado.service)," \
@@ -380,8 +402,9 @@ ctlwatch) ctlwatch ;;
 monado-trial) shift; monado_trial "$@" ;;
 meta-on) meta_on ;;
 meta-off) meta_off ;;
+boot) [ "$(cat /etc/quest1-tracking 2>/dev/null)" = meta ] && meta_start || true ;;
 sb-free) sb_free ;;
 stop) systemctl stop $SB $BASE ;;
 cli) shift; cli "$@" ;;
-*) echo "usage: $0 setup|install|base|trial|monado-trial|meta-on|meta-off|sb-free|stop|cli <trackinginterface_cli args>" >&2; exit 2 ;;
+*) echo "usage: $0 setup|install|base|trial|monado-trial|meta-on|meta-off|boot|sb-free|stop|cli <trackinginterface_cli args>" >&2; exit 2 ;;
 esac

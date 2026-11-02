@@ -71,6 +71,8 @@ android_dlsym(void *handle, const char *symbol);
 #define MDP_PERIOD_NS (U_TIME_1S_IN_NS / 72)
 //! Exists while the panels are (going) off: an external scanout must not commit then.
 #define MDP_PANELS_OFF "/tmp/quest1-panels-off"
+//! Exists while the headset sleeps (quest1-standby): panels off as if the headset was removed.
+#define MDP_STANDBY "/run/quest1-standby"
 //! Time the compositor gets between waking up and the vsync that shows its frame.
 #define MDP_RENDER_BUDGET_NS (15 * U_TIME_1MS_IN_NS)
 #define PRIV_FLAGS_UBWC_ALIGNED 0x08000000
@@ -256,7 +258,9 @@ struct mdp_target
 	} stats;
 	bool has_init_vulkan;
 	bool unblanked; //!< Protected by vsync_thread's mutex.
-	bool worn;      //!< Proximity sensor covered. Protected by vsync_thread's mutex.
+	bool worn;      //!< Proximity sensor covered and not in standby. Protected by vsync_thread's mutex.
+	bool prox_worn; //!< Proximity sensor covered. Protected by vsync_thread's mutex.
+	bool standby;   //!< MDP_STANDBY exists. Protected by vsync_thread's mutex.
 
 	bool external;               //!< Another process scans out (external_scanout_active).
 	int64_t external_checked_ns; //!< When MDP_EXTERNAL_SCANOUT was last read.
@@ -358,6 +362,9 @@ set_panels_locked(struct mdp_target *t, bool on)
 	U_LOG_W("mdp: panels %s", on ? "on" : "off");
 }
 
+static void
+update_worn_locked(struct mdp_target *t);
+
 /*!
  * Read the pending powerstate messages and track whether the headset is worn.
  * Call with vsync_thread's mutex held.
@@ -377,14 +384,30 @@ read_prox_locked(struct mdp_target *t)
 				continue;
 			}
 			bool worn = m.data == SYNCBOSS_PROX_EVENT_PROX_ON;
-			if (worn != t->worn) {
+			if (worn != t->prox_worn) {
 				U_LOG_W("mdp: headset %s", worn ? "worn" : "removed");
 			}
-			t->worn = worn;
-			if (!worn) {
-				set_panels_locked(t, false);
-			}
+			t->prox_worn = worn;
 		}
+	}
+	update_worn_locked(t);
+}
+
+/*!
+ * worn = proximity covered and not in standby; panels off when it turns false.
+ * Call with vsync_thread's mutex held.
+ */
+static void
+update_worn_locked(struct mdp_target *t)
+{
+	bool standby = access(MDP_STANDBY, F_OK) == 0;
+	if (standby != t->standby) {
+		U_LOG_W("mdp: standby %s", standby ? "on" : "off");
+		t->standby = standby;
+	}
+	t->worn = t->prox_worn && !standby;
+	if (!t->worn) {
+		set_panels_locked(t, false);
 	}
 }
 
@@ -1286,6 +1309,12 @@ warp_init(struct mdp_target *t)
 			    .usage = AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT | AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE |
 			             AHARDWAREBUFFER_USAGE_COMPOSER_OVERLAY,
 			};
+			// perf experiment: QUEST1_WARP_USAGE=<hex> adds gralloc usage bits (e.g. the vendor UBWC flag)
+			// to the warp outputs, to see whether the blob then makes them UBWC (logged at "warp ready")
+			const char *ue = getenv("QUEST1_WARP_USAGE");
+			if (ue != NULL) {
+				desc.usage |= strtoull(ue, NULL, 16);
+			}
 			if (AHardwareBuffer_allocate(&desc, &b->ahb) != 0) {
 				U_LOG_E("mdp: warp: AHardwareBuffer_allocate failed");
 				return false;
@@ -1764,6 +1793,8 @@ vsync_thread_func(void *ptr)
 		}
 		if (t->prox_fd >= 0 && (p[1].revents & POLLIN)) {
 			read_prox_locked(t);
+		} else {
+			update_worn_locked(t);
 		}
 		if (t->unblanked && os_monotonic_get_ns() - t->last_present_ns > U_TIME_1S_IN_NS) {
 			set_panels_locked(t, false);
@@ -2290,6 +2321,7 @@ factory_create_target(const struct comp_target_factory *ctf, struct comp_composi
 
 	// Shown until the sensor says otherwise: its first state comes right after opening.
 	t->worn = true;
+	t->prox_worn = true;
 	t->prox_fd = -1;
 	const char *ignore = getenv("QUEST1_IGNORE_PROX");
 	if (ignore == NULL || strcmp(ignore, "1") != 0) {

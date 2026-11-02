@@ -8,8 +8,8 @@
 #                              then opens the dashboard (Steam's VR UI is the main panel)
 #   power: logind lets steamos power off / reboot / "suspend" (polkit); suspend is replaced by
 #   quest1-standby (no kernel suspend: SteamVR gets PrepareForSleep, /run/quest1-standby is set,
-#   a power button press wakes); a short power button press = Sleep, a long press = power off
-#   (logind's default for the Quest's qpnp_pon power key was an immediate power off).
+#   a power button press wakes); quest1-powerbutton.service hands the power button to Steam like
+#   SteamOS does (short press = Sleep, 1 s press = Steam's power menu); logind ignores it.
 # Steam itself (steam.service, steam-q1 -gamepadui) already serves its VR UI as SteamVR overlays
 # (valve.steam.gamepadui.main/.bar/.frame.menu), the same non-gamescope path as the Frame's
 # BServeVRGamepadUIOverlay; nothing to change there.
@@ -19,7 +19,7 @@
 #             all of it (steamvr.vrsettings keeps the dashboard keys, its pre-frame backup is in
 #             ~steamos/.local/share/Steam/config/steamvr.vrsettings.pre-frame)
 set -e
-UNITS="quest1-steamvr.service quest1-vrsession.service quest1-frame-dashboard.service"
+UNITS="quest1-steamvr.service quest1-vrsession.service quest1-frame-dashboard.service quest1-powerbutton.service"
 
 case "${1:-install}" in
 enable)  systemctl enable $UNITS; exit 0 ;;
@@ -27,12 +27,13 @@ disable) systemctl disable $UNITS; exit 0 ;;
 uninstall)
 	systemctl disable --now $UNITS 2>/dev/null || true
 	rm -f /etc/systemd/system/quest1-steamvr.service /etc/systemd/system/quest1-vrsession.service \
-		/etc/systemd/system/quest1-frame-dashboard.service \
+		/etc/systemd/system/quest1-frame-dashboard.service /etc/systemd/system/quest1-powerbutton.service \
 		/etc/systemd/system/systemd-suspend.service.d/quest1-standby.conf \
 		/etc/systemd/system/reboot.target.d/quest1-timeout.conf \
 		/etc/systemd/system/poweroff.target.d/quest1-timeout.conf \
 		/etc/systemd/logind.conf.d/quest1-power.conf /etc/polkit-1/rules.d/50-quest1-power.rules \
-		/usr/local/sbin/quest1-frame-settings /usr/local/sbin/quest1-standby /usr/local/sbin/quest1-frame
+		/usr/local/sbin/quest1-frame-settings /usr/local/sbin/quest1-standby /usr/local/sbin/quest1-frame \
+		/usr/local/sbin/quest1-powerbutton
 	systemctl daemon-reload
 	echo "logind keeps its power key settings until restarted: systemctl restart systemd-logind"
 	exit 0 ;;
@@ -192,9 +193,11 @@ cat > /usr/local/sbin/quest1-standby <<'EOF'
 # Android 4.4 kernel without Android is untested. Instead, while this runs:
 #  - logind has sent PrepareForSleep(true) (SteamVR's vrserver listens for it) and will send
 #    PrepareForSleep(false) when we exit; logind ignores other power actions meanwhile
-#  - /run/quest1-standby exists (for the display side: panels off until wake)
+#  - /run/quest1-standby exists (Monado turns the panels off until wake)
+#  - Meta's tracking sleeps (cameras and their LED off): ovrstub's vrpowermanager tells
+#    trackingservice SLEEP, then RUNNING on wake
 # A power button press (qpnp_pon KEY_POWER) wakes. QUEST1_STANDBY_MAX (seconds) bounds it.
-import os, select, struct, sys, time
+import os, select, struct, subprocess, sys, time
 
 KEY_POWER, EV_KEY = 116, 1
 EVENT = struct.Struct("llHHi")
@@ -211,11 +214,17 @@ def devices():
             pass
     return out
 
+def tracking(sig):
+    # ovrstub: SIGUSR2 = SLEEP, SIGUSR1 = RUNNING (only when Meta's tracking runs)
+    subprocess.run(["systemctl", "kill", "--kill-whom=main", "-s", sig, "android-ovrstub.service"],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
 def main():
     t0 = time.monotonic()
     limit = float(os.environ.get("QUEST1_STANDBY_MAX", "0") or 0)
     with open(FLAG, "w") as f:
         f.write(f"{int(time.time())}\n")
+    tracking("SIGUSR2")
     print("quest1-standby: sleeping until the power button is pressed", flush=True)
     fds = [os.open(p, os.O_RDONLY | os.O_NONBLOCK) for p in devices()]
     try:
@@ -240,6 +249,7 @@ def main():
                 print("quest1-standby: power button, waking up", flush=True)
                 break
     finally:
+        tracking("SIGUSR1")
         try:
             os.unlink(FLAG)
         except OSError:
@@ -268,11 +278,95 @@ done
 
 mkdir -p /etc/systemd/logind.conf.d
 cat > /etc/systemd/logind.conf.d/quest1-power.conf <<'EOF'
-# Frame mode: short press of the power button = Sleep (quest1-standby), long press = power off.
+# Frame mode: the power button goes to Steam (quest1-powerbutton), as on SteamOS devices.
 # (logind's default was an immediate power off on any press of the Quest's power key.)
 [Login]
-HandlePowerKey=suspend
-HandlePowerKeyLongPress=poweroff
+HandlePowerKey=ignore
+HandlePowerKeyLongPress=ignore
+EOF
+
+cat > /usr/local/sbin/quest1-powerbutton <<'EOF'
+#!/usr/bin/python3
+# The power button for Steam, like SteamOS's power button daemon: a short press sends
+# steam://shortpowerpress (Steam goes to sleep), holding it for 1 s sends steam://longpowerpress
+# (Steam's power menu). The press that wakes the headset from quest1-standby is not forwarded.
+import os, select, struct, subprocess, sys, time
+
+KEY_POWER, EV_KEY = 116, 1
+EVENT = struct.Struct("llHHi")
+STANDBY = "/run/quest1-standby"
+LONG = 1.0
+
+def devices():
+    out = []
+    for ev in sorted(os.listdir("/sys/class/input")):
+        try:
+            with open(f"/sys/class/input/{ev}/device/name") as f:
+                if f.read().strip() == "qpnp_pon" and ev.startswith("event"):
+                    out.append(f"/dev/input/{ev}")
+        except OSError:
+            pass
+    return out
+
+def steam(url):
+    print(f"quest1-powerbutton: {url}", flush=True)
+    subprocess.Popen(["/usr/bin/steam", "-ifrunning", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+def main():
+    fds = [os.open(p, os.O_RDONLY | os.O_NONBLOCK) for p in devices()]
+    if not fds:
+        print("quest1-powerbutton: no qpnp_pon input device", flush=True)
+        return 1
+    down = None        # monotonic time of the current press, None when released
+    skip = False       # the current press woke the headset, or already sent its long press
+    standby_seen = 0.0 # last time the standby flag was seen
+    while True:
+        now = time.monotonic()
+        if os.path.exists(STANDBY):
+            standby_seen = now
+        if down is not None and not skip and now - down >= LONG:
+            steam("steam://longpowerpress")
+            skip = True
+        ready, _, _ = select.select(fds, [], [], 0.1)
+        for fd in ready:
+            try:
+                data = os.read(fd, EVENT.size * 64)
+            except BlockingIOError:
+                continue
+            for off in range(0, len(data) - EVENT.size + 1, EVENT.size):
+                _, _, t, code, value = EVENT.unpack_from(data, off)
+                if t != EV_KEY or code != KEY_POWER:
+                    continue
+                now = time.monotonic()
+                if value == 1:
+                    down = now
+                    skip = os.path.exists(STANDBY) or now - standby_seen < 1.0
+                elif value == 0 and down is not None:
+                    if not skip and now - down < LONG:
+                        steam("steam://shortpowerpress")
+                    down = None
+
+if __name__ == "__main__":
+    sys.exit(main())
+EOF
+chmod 755 /usr/local/sbin/quest1-powerbutton
+
+cat > /etc/systemd/system/quest1-powerbutton.service <<'EOF'
+[Unit]
+Description=Quest 1 power button -> Steam (short press: sleep, long press: power menu)
+Wants=steam.service
+After=steam.service
+
+[Service]
+User=steamos
+SupplementaryGroups=input
+Environment=HOME=/home/steamos
+ExecStart=/usr/local/sbin/quest1-powerbutton
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
 EOF
 
 # --- control script --------------------------------------------------------------------------------

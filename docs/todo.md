@@ -36,19 +36,18 @@ Open items, roughly by priority. Done items move to the commit log.
   right buttons, but they do nothing yet.
 
 ## Tracking
-- Meta tracking mode and its units must persist across reboots (enabled at boot).
+- Floor height and boundary must persist across reboots (today the floor depends on where tracking
+  started), with a settings entry that clears all the mapping.
 - Pairing Quest controllers from the headset (Steam's UI). Pairing goes through SyncBoss
   (`syncboss_input_pair`): never call it without the user's explicit go.
 - RuntimeIpcBroker `connect` still fails (-74); harmless so far.
 
 ## Power
-- The power button only opens the dashboard: a short press must put the headset to sleep and
-  wake it like the stock behaviour, and a long press should open the power menu
-  (`device/holo-frame-mode.sh` already sets logind for this: find what intercepts the key).
-- Sleep must work properly: panels off, tracking and SteamVR paused, then a clean wake-up.
-- Restart and Shut down from Steam do nothing (user, 2026-11-02): the headset can only be turned
-  off by a forced power-off. Likely fixed by `kernel/cgroup-events-frozen.patch` (PR #1): to test.
-  If so, drop the sshd `pam_systemd` workaround in `device/holo-perf.sh`.
+- Power button and sleep work (2026-11-02: short press = Steam's sleep, panels off and Meta's
+  tracking asleep with its cameras; 1 s press = Steam's power menu). A few details are left (user):
+  to list at the next test. Sleep is still a standby, not a kernel suspend.
+- Restart and Shut down from Steam: retest with the PR #1 kernel (build-6 and later). If they work,
+  drop the sshd `pam_systemd` workaround in `device/holo-perf.sh`.
 
 ## Steam and desktop
 - The Steam Frame's desktop mode (KDE Plasma) from the "+" menu. It works in the Quest 2 port
