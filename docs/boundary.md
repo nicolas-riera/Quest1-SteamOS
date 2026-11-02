@@ -45,3 +45,24 @@ Not possible without a Meta map: a boundary fixed in the real room that survives
 `touch /tmp/quest1-webdebug` (as steamos) before the dashboard starts makes `vrwebhelper.sh` enable CEF
 remote debugging on 127.0.0.1:9333; `/root/cdp.py 'js'` evaluates JS in the systemui page
 (`ConstructStore.roomSetupStep`, `VRHTML.VRChaperoneSetup.*`).
+
+## Why Meta's map cannot be persisted (investigated 2026-11-02)
+
+Stock Quest remembers rooms through trackingservice's `ITrackingEnvironment` (binder service
+`TrackingEnvironment`; transaction codes: 4 getCurrentMapUUID, 5 keepMap, 6 removeAllMaps, 7 loadMap,
+8 listMaps, 9 stopMapExpansion, 10 placeAnchor, 11 registerAnchor, 13 persistAnchor, 14 locateAnchor,
+16 getAnchorUuid, 20 setOrientationOnlyMode; callable with `/root/svc.sh call TrackingEnvironment <code>`
+inside the stack's property area). On this headset's tracker ("SuperVega"/VIPER):
+
+- `getCurrentMapUUID` works (a live in-memory map exists), but `keepMap` returns false and `listMaps` is empty:
+  trackingservice logs "InsideOutTrackingEngine API keepMap is not supported" / "listMaps is not supported".
+  So the map is never written to `/vision/insideout/mapdb` and `loadMap` has nothing to load. This engine has
+  no persistent whole-map API.
+- The only persistence left is spatial anchors (Guardian uses them: `SpatialPersistence capability v1`,
+  `persistAnchor`, `registerAnchor`, `locateAnchor`, `exportMapDataForAnchor`/`importMapDataForAnchor`). Their
+  runtime is `SlamAnchorRuntimeIpcServer`, which rides on RuntimeIpcBroker and fails at start-up here
+  ("initServer failed", the known RuntimeIpcBroker `connect` -74 failure), and the Parcelable layouts are
+  not documented (`placeAnchor` returned handle -1). Making it work means fixing ovrstub's RuntimeIpcBroker
+  first, then reverse-engineering the anchor parcelables, with no guarantee the engine relocalizes.
+
+Hence the raw-space anchoring above stays the mechanism.
