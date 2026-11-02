@@ -16,6 +16,13 @@ Open items, roughly by priority. Done items move to the commit log.
   (`/root/facet-iter2.sh 0|1 <dir>`), with the dashboard shown (dropped stencil dynamic states).
   Leave it off unless it wins.
 
+- User, 2026-11-02 (after the present-wait, UBWC warp and memory changes): "no more shaking, much
+  better perf", but controllers are still not smooth (vrcompositor's frame rate), and the dashboard
+  and Steam's UI lag.
+
+## Audio
+- Audio randomly turns crackly for a while, then recovers by itself (user, 2026-11-02).
+
 ## Display
 - Monado's re-projection in Meta tracking mode deforms the image (user, 2026-11-01): turning the head
   left stretches the top of the view to the right, "soft". Sign is right (negating it is far worse).
