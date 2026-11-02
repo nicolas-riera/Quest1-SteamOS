@@ -32,7 +32,8 @@ Open items, roughly by priority. Done items move to the commit log.
 
 ## Tracking
 - Meta tracking mode and its units must persist across reboots (enabled at boot).
-- Controller battery levels in SteamVR.
+- Pairing Quest controllers from the headset (Steam's UI). Pairing goes through SyncBoss
+  (`syncboss_input_pair`): never call it without the user's explicit go.
 - RuntimeIpcBroker `connect` still fails (-74); harmless so far.
 
 ## Power
@@ -49,6 +50,12 @@ Open items, roughly by priority. Done items move to the commit log.
   (github.com/URFAVF3MBOY/quest2-steamos), whose author allows us to use its code: base it on that.
 - The "+" menu shows 4 apps that should not be there (Xfce-related, it seems).
 
+## System
+- SteamOS and SteamVR updates must keep working without undoing our changes (after the
+  system and performance items above).
+- Wi-Fi from Steam's menu and the Steam Frame's first-run setup: untested.
+- Steam's VR keyboard: untested (SteamVR notifications already work).
+
 ## Streaming
 - Steam Link streaming from a PC fails (2026-11-01): VR streaming leaves the PC's SteamVR waiting
   for the connection and the stream app on the headset closes; a 2D game started in cinema mode,
@@ -56,8 +63,8 @@ Open items, roughly by priority. Done items move to the commit log.
   `/root/stream-crash-20261101/`.
 
 ## Hardware
-- LEDs: the white front LED must be on while the cameras are active (stock behaviour), and the
-  power LED must get its stock behaviour back (it stays solid yellow/orange).
+- Power LED: it must get its stock behaviour back (it stays solid yellow/orange). The front LED
+  already lights while the cameras run.
 - Bluetooth.
 
 ## Later
