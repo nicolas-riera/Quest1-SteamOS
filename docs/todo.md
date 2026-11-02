@@ -66,20 +66,27 @@ Open items, roughly by priority. Done items move to the commit log.
 
 ## Power
 - Power button and sleep work (2026-11-02: short press = Steam's sleep, panels off and Meta's
-  tracking asleep with its cameras; 1 s press = Steam's power menu). A few details are left (user):
-  to list at the next test. Sleep is still a standby, not a kernel suspend.
+  tracking asleep with its cameras; 1 s press = Steam's power menu). Left (user, 2026-11-03):
+  - the sleep animation shows inside the dashboard panel instead of full screen;
+  - sleep must be a real sleep: everything suspended, the headset in its lowest power state (today
+    only a standby: panels and tracking off, SteamVR, Steam and the CPU/GPU still running).
+- Boot animation: its sound plays but nothing shows in the headset. On the Steam Frame it shows full
+  screen, drawn straight on the panels (no tracking). It must also be the Steam Frame's animation,
+  not SteamOS's.
 - Restart and Shut down from Steam: retest with the PR #1 kernel (build-6 and later). If they work,
   drop the sshd `pam_systemd` workaround in `device/holo-perf.sh`.
 
 ## Steam and desktop
-- The Steam Frame's desktop mode (KDE Plasma) from the "+" menu. It works in the Quest 2 port
-  (github.com/URFAVF3MBOY/quest2-steamos), whose author allows us to use its code: base it on that.
+- The Steam Frame's desktop mode (the Frame's KDE Plasma) from the "+" menu. It works in the Quest 2
+  port (github.com/URFAVF3MBOY/quest2-steamos), whose author allows us to use its code: base it on
+  how that port does it.
+- Steam's VR keyboard works (types, fully usable) but lags (user, 2026-11-03).
 
 ## System
 - SteamOS and SteamVR updates must keep working without undoing our changes (after the
   system and performance items above).
-- Wi-Fi from Steam's menu and the Steam Frame's first-run setup: untested.
-- Steam's VR keyboard: untested (SteamVR notifications already work).
+- Wi-Fi from Steam's menu does not find other networks (user, 2026-11-03): fix the scan.
+- The Steam Frame's first-run setup: untested.
 
 ## Streaming
 - Steam Link streaming from a PC fails (2026-11-01): VR streaming leaves the PC's SteamVR waiting
