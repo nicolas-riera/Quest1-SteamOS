@@ -40,6 +40,7 @@
 #include "../vklayer-steamvr/quest1_display_proto.h"
 #include "battery.h"
 #include "camera.h"
+#include "chaperone_frame.h"
 #include "controllers.h"
 
 #include <atomic>
@@ -404,6 +405,7 @@ bool XrBackend::Init()
 		neckModel = atoi(n) != 0;
 	if (const char *ms = getenv("QUEST1_POSE_PREDICT_MS"))
 		predictNs = (uint64_t)(atof(ms) * 1e6);
+	Quest1FrameInit(headHeight);
 	if (!LoadLibraries())
 		return false;
 
@@ -612,7 +614,7 @@ bool XrBackend::LocateAhead(DriverPose_t &pose, XrPosef *xrPose)
 {
 	pose = {};
 	pose.qWorldFromDriverRotation.w = pose.qDriverFromHeadRotation.w = 1;
-	pose.vecWorldFromDriverTranslation[1] = headHeight;
+	Quest1FrameApply(pose); // raw space: floor and anchor (chaperone_frame.h)
 	pose.qRotation.w = 1;
 	pose.deviceIsConnected = true;
 	pose.result = TrackingResult_Running_OK;
@@ -643,6 +645,8 @@ bool XrBackend::LocateAhead(DriverPose_t &pose, XrPosef *xrPose)
 		loc.pose.position.z += r.z - n.z;
 	}
 	*xrPose = loc.pose;
+	Quest1FrameUpdate(loc.pose, (loc.locationFlags & XR_SPACE_LOCATION_POSITION_TRACKED_BIT) != 0);
+	Quest1FrameApply(pose);
 	pose.qRotation = {loc.pose.orientation.w, loc.pose.orientation.x, loc.pose.orientation.y,
 	                  loc.pose.orientation.z};
 	pose.vecPosition[0] = loc.pose.position.x;
@@ -1412,6 +1416,10 @@ public:
 		// shipping in-HMD playspace setup (vrcompositor draws it, the dashboard starts it) instead of
 		// looking for the legacy "openvr.tool.steamvr_room_setup" app
 		VRProperties()->SetBoolProperty(c, (ETrackedDeviceProperty)11003, true);
+		// Prop_VRLinkClientHMDSupportsRoomSetupRequests_Bool (11004): the dashboard's room setup
+		// buttons (Playspace menu, Floor/Boundary) run ConstructStore.setRoomSetupStep(), which ignores
+		// every step except 0/1 ("HMD doesnt support setRoomSetupStep") unless this is true
+		VRProperties()->SetBoolProperty(c, (ETrackedDeviceProperty)11004, true);
 		VRProperties()->SetBoolProperty(c, Prop_IsOnDesktop_Bool, false);
 		VRProperties()->SetBoolProperty(c, Prop_DisplayDebugMode_Bool, false);
 		VRProperties()->SetBoolProperty(c, Prop_DeviceProvidesBatteryStatus_Bool, false);

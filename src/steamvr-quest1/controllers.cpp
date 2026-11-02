@@ -23,6 +23,7 @@
 
 #include "controllers.h"
 #include "battery.h"
+#include "chaperone_frame.h"
 
 #include <pthread.h>
 #include <sys/stat.h>
@@ -676,7 +677,7 @@ void State::UpdateHand(int h, double now, const XrPosef &headPose, bool headVali
 	// pose
 	DriverPose_t p{};
 	p.qWorldFromDriverRotation.w = 1;
-	p.vecWorldFromDriverTranslation[1] = xr.headHeight;
+	Quest1FrameApply(p);
 	p.qRotation.w = 1;
 	p.qDriverFromHeadRotation.w = 1;
 	XrSpaceVelocity vel{XR_TYPE_SPACE_VELOCITY};
