@@ -2,9 +2,10 @@
 // Reads the camera ring (/dev/shm/quest1-cameras, see ../steamvr-quest1/quest1_camera_ring.h), puts the two
 // bottom tracking cameras (ids 0 and 2) side by side, upright, brightened, and draws them in a quad that follows
 // the HMD. Shown only while /tmp/quest1-passthrough exists (touch it to show, rm to hide).
-// Usage: camoverlay   (as the steamos user, with SteamVR running). Env: PT_DIST (m, 1.0), PT_WIDTH (m, 1.6)
+// Usage: camoverlay (as steamos, SteamVR running; retried by systemd). Env: PT_DIST (m, 1.0), PT_WIDTH (m, 1.6), PT_HZ (8), PT_RAW=1 (SetOverlayRaw: leaks memory blocks on this stack, frozen after ~200 frames), PT_DEBUG
 #include <openvr.h>
 
+#include <dirent.h>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -37,8 +38,31 @@ static void Heartbeat()
 
 int main()
 {
+	// VRApplication_Overlay would make vrclient start vrserver and the dashboard inside this service's cgroup:
+	// wait until SteamVR runs, and connect as a Background app (which starts nothing)
+	for (;;) {
+		bool server = false, comp = false;
+		if (DIR *d = opendir("/proc")) {
+			while (dirent *de = readdir(d)) {
+				char path[64], name[32] = "";
+				snprintf(path, sizeof(path), "/proc/%s/comm", de->d_name);
+				if (FILE *f = fopen(path, "r")) {
+					if (fscanf(f, "%31s", name) == 1) {
+						server |= !strcmp(name, "vrserver");
+						comp |= !strcmp(name, "vrcompositor");
+					}
+					fclose(f);
+				}
+			}
+			closedir(d);
+		}
+		if (server && comp)
+			break;
+		sleep(3);
+	}
+	sleep(10);
 	EVRInitError err = VRInitError_None;
-	VR_Init(&err, VRApplication_Overlay);
+	VR_Init(&err, VRApplication_Background);
 	if (err != VRInitError_None) {
 		fprintf(stderr, "VR_Init: %s\n", VR_GetVRInitErrorAsEnglishDescription(err));
 		return 1;
@@ -53,6 +77,7 @@ int main()
 	VROverlay()->SetOverlaySortOrder(ov, 100);
 	VROverlay()->SetOverlayAlpha(ov, 1.0f);
 
+	const int64_t pushNs = 1000000000LL / (getenv("PT_HZ") ? atoi(getenv("PT_HZ")) : 8);
 	const q1cam_ring_header *hdr = nullptr;
 	size_t mapSize = 0;
 	uint32_t last = 0;
@@ -129,6 +154,45 @@ int main()
 			}
 		if (__atomic_load_n(&s.seq, __ATOMIC_ACQUIRE) != seq0)
 			continue;
-		VROverlay()->SetOverlayRaw(ov, out.data(), OW, H, 4);
+		static int64_t lastPush = 0;
+		timespec ts;
+		clock_gettime(CLOCK_MONOTONIC, &ts);
+		int64_t now = ts.tv_sec * 1000000000LL + ts.tv_nsec;
+		if (now - lastPush < pushNs)
+			continue;
+		lastPush = now;
+		if (!getenv("PT_RAW")) { // 32-bit uncompressed TGA (bottom-up BGRA) through SetOverlayFromFile
+			static std::vector<uint8_t> tga;
+			if (tga.empty()) {
+				tga.assign(18 + (size_t)OW * H * 4, 0);
+				tga[2] = 2;
+				tga[12] = OW & 255, tga[13] = OW >> 8, tga[14] = H & 255, tga[15] = H >> 8;
+				tga[16] = 32, tga[17] = 8; // 8 alpha bits, bottom-left origin
+			}
+			for (int y = 0; y < H; y++)
+				for (int x = 0; x < OW; x++) {
+					const uint8_t *sp = &out[((size_t)y * OW + x) * 4];
+					uint8_t *dp = &tga[18 + ((size_t)(H - 1 - y) * OW + x) * 4];
+					dp[0] = sp[2], dp[1] = sp[1], dp[2] = sp[0], dp[3] = 255;
+				}
+			static const char *tmp = "/dev/shm/q1-passthrough.tga.tmp", *dst = "/dev/shm/q1-passthrough.tga";
+			if (FILE *f = fopen(tmp, "wb")) {
+				fwrite(tga.data(), 1, tga.size(), f);
+				fclose(f);
+				rename(tmp, dst);
+			}
+			VROverlay()->SetOverlayFromFile(ov, dst);
+		} else
+			VROverlay()->SetOverlayRaw(ov, out.data(), OW, H, 4);
+		static int pushes = 0;
+		if (getenv("PT_DEBUG") && ++pushes % 10 == 0) {
+			int fds = 0;
+			if (DIR *d = opendir("/proc/self/fd")) {
+				while (readdir(d))
+					fds++;
+				closedir(d);
+			}
+			fprintf(stderr, "pushes %d fds %d\n", pushes, fds);
+		}
 	}
 }

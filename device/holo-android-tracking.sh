@@ -118,14 +118,6 @@ PY
 install_units() {
 	install -m 755 "$0" /usr/local/sbin/holo-android-tracking
 	[ -f "$(dirname "$0")/q1anchord.py" ] && install -m 755 "$(dirname "$0")/q1anchord.py" /usr/local/sbin/q1anchord
-	[ -f "$(dirname "$0")/q1-passthrough" ] && install -m 755 "$(dirname "$0")/q1-passthrough" /usr/local/bin/q1-passthrough
-	# camtap (src/camtap): copies the tracking cameras into /dev/shm/quest1-cameras for the passthrough, only while a
-	# reader asks for them; head and controller tracking are unaffected (docs/passthrough.md)
-	if [ -f /data/local/tmp/libq1camtap.so ]; then
-		mkdir -p /etc/systemd/system/android-trackingservice.service.d
-		printf '[Service]\nEnvironment=LD_PRELOAD=/data/local/tmp/libq1camtap.so\n' \
-			> /etc/systemd/system/android-trackingservice.service.d/camtap.conf
-	fi
 	# Android's AID_NOBODY, for ashmemd (systemd needs the uid in the user database)
 	mkdir -p /etc/sysusers.d
 	echo 'u aid_nobody 9999 "Android nobody (ashmemd)" / -' > /etc/sysusers.d/android-tracking.conf

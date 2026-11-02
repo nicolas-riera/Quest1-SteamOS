@@ -10,10 +10,16 @@
 - The driver (`camera.cpp`) offers an `IVRCameraComponent` (cameras 0 and 2, stacked, rotated upright, 480x1280 RGBX).
 
 ## Route (b), works now: head-locked overlay
-`src/camtap/camoverlay.cpp` (build: `build_overlay.sh`, installed as `/usr/local/bin/q1-camoverlay`, script
-`/usr/local/bin/q1-passthrough on|off|toggle`): a SteamVR overlay that follows the HMD, 1.6 m wide at 1 m, with cameras 0 and 2
-side by side (not eye-aligned, no depth correction). Shown while `/tmp/quest1-passthrough` exists. Verified: overlay visible
-in `vrcmd --overlays` at 960x640 and the ring delivers 30 Hz; the image itself was not looked at yet.
+`src/camtap/camoverlay.cpp` (build: `build_overlay.sh` -> `/usr/local/bin/q1-camoverlay`; installed with
+`device/holo-passthrough.sh install`, which also writes the persistent camtap drop-in, `q1-camoverlay.service` wanted by
+`quest1-steamvr.service`, and `/usr/local/bin/q1-passthrough on|off|toggle`). A SteamVR overlay that follows the HMD, 1.6 m
+wide at 1 m, cameras 0 and 2 side by side (not eye-aligned, no depth correction), shown while `/tmp/quest1-passthrough` exists.
+- Frame upload: `SetOverlayRaw` does not work here (vrclient's memory blocks are never released: "201 blocks already
+  outstanding", frozen after ~200 frames, fd leak). The overlay writes a TGA to `/dev/shm` and calls `SetOverlayFromFile`
+  (8 Hz default, `PT_HZ`; fds stable, no timeouts at 6 Hz; 15 Hz made the compositor time out). A Vulkan `SetOverlayTexture` was
+  not tried (needs external-memory fd export on the Adreno blob).
+- The overlay connects as a Background app after vrserver and vrcompositor run: an Overlay-type connection starts vrserver and
+  the dashboard inside the service's cgroup (stopping the unit would kill them).
 
 ## Route (a), SteamVR's own camera path: findings
 - `AcquireVideoStreamingService` is answered by **vrcompositor** (CTrackedCamera), not vrserver. It needs
