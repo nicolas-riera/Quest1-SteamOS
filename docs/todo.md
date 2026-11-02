@@ -29,9 +29,11 @@ Open items, roughly by priority. Done items move to the commit log.
   github.com/TheCez/quest1-90hz-orangefox.
 
 ## Passthrough
-- Camera frames reach `/dev/shm/quest1-cameras` through `src/camtap` (30 Hz, 4 cameras), but
-  SteamVR's `AcquireVideoStreamingService` fails, so nothing is shown. Either open that gate or
-  draw the cameras ourselves (overlay), then depth-correct re-projection like Meta's.
+- Head-locked camera overlay (`q1-passthrough on|off|toggle`, docs/passthrough.md): test in the headset
+  (orientation, brightness, latency, good enough to draw the boundary?). Then a start-up unit for
+  `q1-camoverlay` and a controller or quick-menu toggle.
+- SteamVR's own camera view: the compositor's gate is open (Acquire OK) but nothing sends
+  `TrackedCamera_Enable`, so no frames; then eye-aligned, depth-corrected re-projection like Meta's.
 
 ## Boundary
 - Test in the headset (after passthrough, needed to draw the boundary): the playspace buttons
