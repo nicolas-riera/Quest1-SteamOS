@@ -32,15 +32,15 @@ Open items, roughly by priority. Done items move to the commit log.
   draw the cameras ourselves (overlay), then depth-correct re-projection like Meta's.
 
 ## Boundary
-- The Steam Frame's playspace setup now appears (`Prop_SupportsInHMDRoomSetup_Bool`), with the
-  right buttons, but they do nothing yet.
-
-## Tracking
-- Floor height and boundary must persist across reboots (today the floor depends on where tracking
-  started), with a settings entry that clears all the mapping.
+- Test in the headset (after passthrough, needed to draw the boundary): the playspace buttons
+  (fixed with Prop 11004), and relocalization after a reboot in the persisted map (`q1anchord`,
+  docs/boundary.md), then Clear playspace.
 - Pairing Quest controllers from the headset (Steam's UI). Pairing goes through SyncBoss
   (`syncboss_input_pair`): never call it without the user's explicit go.
-- RuntimeIpcBroker `connect` still fails (-74); harmless so far.
+- Controller connection state (user, 2026-11-02, low priority): a controller that loses power (battery
+  removed) stays shown in SteamVR instead of turning disconnected; and right after the tracking
+  service starts, controllers it has not seen yet show up inside the headset instead of staying
+  "searching" until their first tracked pose.
 
 ## Power
 - Power button and sleep work (2026-11-02: short press = Steam's sleep, panels off and Meta's
