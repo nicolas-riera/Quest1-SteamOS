@@ -28,6 +28,14 @@ int main(int argc, char **argv)
 		printf("toggled camera.enableCamera (err %d)\n", (int)se);
 		usleep(1000000);
 	}
+	if (getenv("PT_ROOMVIEW")) { // toggle camera.roomView (the compositor's passthrough view)
+		EVRSettingsError se;
+		VRSettings()->SetBool("camera", "roomView", false, &se);
+		usleep(500000);
+		VRSettings()->SetBool("camera", "roomView", true, &se);
+		printf("toggled camera.roomView (err %d)\n", (int)se);
+		usleep(1000000);
+	}
 	IVRTrackedCamera *tc = VRTrackedCamera();
 	bool has = false;
 	EVRTrackedCameraError e = tc->HasCamera(k_unTrackedDeviceIndex_Hmd, &has);

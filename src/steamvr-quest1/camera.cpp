@@ -43,6 +43,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <dirent.h>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -1194,6 +1195,123 @@ private:
 	uint32_t frameSequence = 0;
 };
 
+// --- vrcompositor's camera gate ---------------------------------------------------------------------------
+//
+// vrcompositor answers IVRTrackedCamera::AcquireVideoStreamingService itself (CTrackedCamera, "Failed to
+// start RoomView since there's no camera enabled") and refuses unless
+//  1. the "camera enabled" byte of the shared state VR_CameraPassthroughState (a 25088-byte /dev/shm file
+//     made by vrserver, byte 24 = first byte after the 20-byte header + 4) is set: on the Steam Frame the
+//     frame_hmd driver sets it, nothing in vrserver does for other HMDs (see docs/passthrough.md), and
+//  2. it connects to the block queues /xrservice/roomview3d/meshData and /meshLayout (the Frame's depth
+//     mesh producer): created here (IVRBlockQueue, server-only) and left empty.
+// Both are set up from the HMD's Activate while the camera is enabled (QUEST1_CAMERA).
+
+//! IVRBlockQueue_004 (vrserver has no _005 class and asserts on unknown versions): virtual slots in capi order
+//! (Create, Connect, Destroy), called through the vtable by hand (a pure abstract class here would get its calls
+//! "devirtualized" to __cxa_pure_virtual by the compiler). Create has no flags argument in _004 (the extra one is
+//! ignored).
+struct BlockQueueIface
+{
+	void **vtbl;
+	int Create(uint64_t *handle, char *path, uint32_t dataSize, uint32_t headerSize, uint32_t blockCount, uint32_t flags)
+	{
+		return ((int (*)(void *, uint64_t *, char *, uint32_t, uint32_t, uint32_t, uint32_t))vtbl[0])(this, handle, path, dataSize,
+		                                                                                                headerSize, blockCount, flags);
+	}
+	int Destroy(uint64_t handle) { return ((int (*)(void *, uint64_t))vtbl[2])(this, handle); }
+};
+
+class CompositorGate
+{
+public:
+	void Start()
+	{
+		if (running.exchange(true))
+			return;
+		CreateQueues();
+		thread = std::thread([this] { Run(); });
+	}
+	void Stop()
+	{
+		if (!running.exchange(false))
+			return;
+		if (thread.joinable())
+			thread.join();
+		if (table)
+			for (uint64_t h : queues)
+				table->Destroy(h);
+		queues.clear();
+	}
+
+private:
+	void CreateQueues()
+	{
+		EVRInitError err = VRInitError_None;
+		CLog("quest1 camera: getting IVRBlockQueue\n");
+		table = (BlockQueueIface *)VRDriverContext()->GetGenericInterface("IVRBlockQueue_004", &err);
+		if (!table) {
+			CLog("quest1 camera: no IVRBlockQueue (%d), the compositor will not open the camera\n", (int)err);
+			return;
+		}
+		CLog("quest1 camera: IVRBlockQueue %p\n", (void *)table);
+		const uint32_t dataSize = (uint32_t)atoi(Env("QUEST1_CAMERA_MESH_BYTES", "1048576"));
+		for (const char *name : {"/xrservice/roomview3d/meshData", "/xrservice/roomview3d/meshLayout"}) {
+			char path[64];
+			snprintf(path, sizeof(path), "%s", name);
+			uint64_t h = 0;
+			int e = table->Create(&h, path, dataSize, 64, 3, 0);
+			CLog("quest1 camera: block queue %s: error %d\n", name, e);
+			if (!e)
+				queues.push_back(h);
+		}
+	}
+
+	//! maps the 25088-byte VR_CameraPassthroughState file and keeps its "camera enabled" byte set
+	void Run()
+	{
+		uint8_t *state = nullptr;
+		size_t size = 25088;
+		while (running) {
+			if (!state) {
+				if (DIR *d = opendir("/dev/shm")) {
+					while (dirent *de = readdir(d)) {
+						if (strncmp(de->d_name, "u", 1) || !strstr(de->d_name, "-Shm_"))
+							continue;
+						std::string path = std::string("/dev/shm/") + de->d_name;
+						struct stat st;
+						if (stat(path.c_str(), &st) || (size_t)st.st_size != size)
+							continue;
+						int fd = open(path.c_str(), O_RDWR | O_CLOEXEC);
+						if (fd < 0)
+							continue;
+						void *m = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+						close(fd);
+						if (m != MAP_FAILED) {
+							state = (uint8_t *)m;
+							CLog("quest1 camera: camera passthrough state %s\n", path.c_str());
+							break;
+						}
+					}
+					closedir(d);
+				}
+			}
+			if (state)
+				state[24] = 1;
+			for (int i = 0; i < 10 && running; i++)
+				usleep(100000);
+		}
+		if (state)
+			munmap(state, size);
+	}
+
+	std::atomic<bool> running{false};
+	std::thread thread;
+	BlockQueueIface *table = nullptr;
+	std::vector<uint64_t> queues;
+};
+
+CompositorGate g_gate;
+
 Quest1Camera *g_camera = nullptr;
 std::once_flag g_once;
 
@@ -1233,8 +1351,11 @@ Quest1Camera *Get()
 
 void Quest1CameraAttach(PropertyContainerHandle_t container, std::function<DriverPose_t()> headPose)
 {
-	if (Quest1Camera *c = Get())
+	if (Quest1Camera *c = Get()) {
 		c->Attach(container, std::move(headPose));
+		if (container != k_ulInvalidPropertyContainer && atoi(Env("QUEST1_CAMERA_GATE", "1")))
+			g_gate.Start();
+	}
 }
 
 IVRCameraComponent *Quest1CameraComponent()
@@ -1244,6 +1365,7 @@ IVRCameraComponent *Quest1CameraComponent()
 
 void Quest1CameraDetach()
 {
+	g_gate.Stop();
 	if (g_camera)
 		g_camera->Detach();
 }
