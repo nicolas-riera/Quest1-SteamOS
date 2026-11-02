@@ -13,67 +13,37 @@ Wi-Fi are driven natively.
 The system starts with `fastboot boot`. The boot image is loaded in RAM, so Meta's system
 stays installed and untouched. Rebooting the headset brings it back.
 
-> **Status: experimental, for developers.** A Quest 1 boots into SteamOS and runs SteamVR
-> with the Aurora environment, 3DoF head tracking and the Touch controllers. There is no
-> 6DoF yet, and SteamVR runs at about 40 fps.
+> **Status: experimental, for developers.** There is no way to install it yet: an installer
+> that builds the system image on your PC from Valve's servers and your own headset is planned
+> once everything works. Until then this repository is a development log, not a product.
 
 ## What works
 
 | Part | State |
 | --- | --- |
 | Boot | Linux 4.4 (Meta's kernel with backports for systemd 258), then SteamOS Holo with systemd as PID 1. No Android |
-| Access | USB network (`ssh root@192.168.77.1`), a serial console over USB, native Wi-Fi |
-| Display | Both panels at 72 Hz with the lens distortion, through [Monado](https://monado.freedesktop.org/) (OpenXR) with a zero-copy path to the display controller |
-| Head tracking | 3DoF from the headset IMU, read natively through Meta's SyncBoss library |
+| Steam Frame mode | Steam and SteamVR start in the Steam Frame's mode: Steam recognises the headset as a Steam Frame and its VR UI is the main panel |
+| Display | Both panels at 72 Hz with Meta's lens distortion model and chromatic correction, a zero-copy path to the display controller, and a 72 Hz rotational re-projection in [Monado](https://monado.freedesktop.org/) |
+| Head tracking | 6DoF with Meta's own tracking service, run natively from the headset's partitions |
+| Controllers | Touch controllers with Meta's tracking (6DoF, with Meta's prediction), buttons, triggers, grips, sticks and vibration |
+| IPD | The physical IPD slider is read live and sets SteamVR's eye separation |
+| Audio | Speakers and microphone through PipeWire, with the volume buttons |
 | Sensors | The proximity sensor turns the panels off when the headset is removed. The fan keeps running |
 | GPU | The Adreno 540 Vulkan driver runs natively through libhybris |
-| Steam | The arm64 Steam client (Big Picture) on a virtual screen in VR, also reachable over VNC |
-| SteamVR | Valve's arm64 SteamVR 2.17 with the Aurora environment, through our own driver (`src/steamvr-quest1`). About 40 fps for now |
-| Controllers | Touch controllers natively: buttons, triggers, grips, sticks, vibration. 3DoF with an arm model |
+| Access | USB network (`ssh root@192.168.77.1`), a serial console over USB, native Wi-Fi |
 
-## What does not work yet
+## Work in progress
 
-- **6DoF**, for the headset and the controllers. The four tracking cameras can already be
-  read natively (`src/qcam`); SLAM is next.
-- **SteamVR performance.** It runs at about 40 fps; the goal is 72.
-- **The SteamVR dashboard.** It opens, but Steam's own panel stays empty.
-- **Audio.**
-- **x86 games** (FEX, Proton, Lepton) and **Steam Link** PC VR streaming.
-- **An installer for the SteamOS system image**: see the warning in the next section.
-
-## Trying it
-
-> **Important.** The automatic releases only contain the **boot image**: the kernel and
-> its small startup system. SteamOS itself is a disk image (`/data/steamos/holo.img`)
-> stored on the headset. For now it is assembled by hand on the development headset, and
-> it is not published: some pieces of it, such as Valve's arm64 Steam and SteamVR builds,
-> cannot be redistributed. Without it, the headset stops in a rescue shell. A
-> reproducible way to build that image is the next big step.
-
-### Requirements
-
-| Side | What |
-| --- | --- |
-| Headset | An Oculus Quest 1 whose **bootloader is already unlocked** (`fastboot getvar unlocked` says `yes`). This project does not cover unlocking |
-| Cable | A USB-C cable that carries data |
-| PC | Windows, Linux or macOS. On Windows, the headset needs a fastboot driver, such as the Oculus ADB Drivers |
-
-### Booting
-
-1. Open the [Releases](https://github.com/nicolas-riera/Quest1-SteamOS/releases) page. Each
-   push to `main` publishes a **prerelease**. Download the latest
-   `Quest1-SteamOS-build-…zip` and unzip it.
-2. Plug in the headset. It can be running Horizon OS with USB debugging allowed, or already
-   in its boot menu (headset off, then hold **Volume −** and press **Power**).
-3. Run `boot-quest1.bat` (Windows) or `boot-quest1.sh` (Linux, macOS).
-
-The script checks that the device is a Quest 1 with an unlocked bootloader, restarts it into
-its bootloader if needed, and runs `fastboot boot` on the image. It never runs
-`fastboot flash`, `erase` or `oem`. If `adb` and `fastboot` are not installed, it offers to
-download Google's platform-tools next to itself.
-
-After about a minute, the headset is reachable over USB at `192.168.77.1`. To go back to
-the normal system, reboot the headset: hold **Power** for about 10 seconds.
+- **Performance.** SteamVR renders at about 26 to 40 fps; the goal is to get as close to 72 as
+  possible.
+- **Re-projection with Meta's tracking.** It works, but deforms the image when the head turns.
+- **Passthrough.** The tracking cameras' images can be read while Meta's tracking runs;
+  showing them in SteamVR is next.
+- **Boundary.** The Steam Frame's playspace setup appears, but does not work yet.
+- **Power.** Sleep through the power button, and shutting down or restarting from Steam.
+- **Streaming** from a PC (Steam Link), **x86 games** (FEX, Proton), the LEDs, and the
+  remaining distortion and chromatic aberration.
+- **An installer** (see above).
 
 ## How it works
 
@@ -82,9 +52,10 @@ fastboot boot ─► Quest kernel 4.4 + initramfs (initrd/init)
                    └─► mounts userdata, loop-mounts /data/steamos/holo.img, switch_root
 SteamOS Holo (systemd) ─► the headset's own Android partitions, read-only:
                           firmware, GPU and SyncBoss libraries (run through libhybris)
-  Monado (OpenXR) ─► display controller (both panels), IMU, controllers, proximity
-    ├─ xscreen: the Steam client (Xvfb) on a virtual screen
-    └─ SteamVR: vrcompositor ─► Vulkan layer ─► driver_quest1 ─► OpenXR ─► Monado
+  Meta's tracking service (cameras, IMU, controllers) ─► q1trackd ─► Monado
+  Monado (OpenXR) ─► display controller (both panels), re-projection, proximity
+  Steam client (arm64, Steam Frame mode) ─► its VR UI as SteamVR overlays
+  SteamVR: vrcompositor ─► Vulkan layer ─► driver_quest1 ─► OpenXR ─► Monado
 ```
 
 Meta's firmware and libraries are never copied into this repository or into a release. On
@@ -98,11 +69,15 @@ the headset they are used from its own partitions, mounted read-only.
 | `initrd/` | The initramfs: `init`, a display test, a reboot helper |
 | `device/` | Install scripts run on the headset: Android blobs, HALs, Wi-Fi, Monado, Steam session, memory tuning |
 | `src/monado/` | The Monado patch: the Quest 1 driver and the display controller target |
-| `src/steamvr-quest1/` | The SteamVR driver: virtual display, controllers, dashboard tool |
+| `src/steamvr-quest1/` | The SteamVR driver: display, lens model, IPD, controllers, camera, dashboard tool |
+| `src/q1track/` | q1trackd: Meta's head and controller tracking into shared memory for Monado |
+| `src/ovrstub/` | Stand-ins for the Android system services Meta's tracking service talks to |
+| `src/camtap/` | Camera frames from Meta's tracking service, for passthrough (work in progress) |
+| `src/q1grid/` | A full-screen calibration grid for the lens distortion |
 | `src/vklayer-steamvr/` | Vulkan layer and shim that make SteamVR run on the Adreno 540 driver |
 | `src/xscreen/`, `src/qcam/`, `src/sbimu/`, `src/sbinput/` | Steam screen in VR, camera capture, IMU and controller tests |
 | `tools/` | Build scripts (kernel, boot image, system image), helpers on the PC side |
-| `release/` | The boot scripts shipped in the releases |
+| `release/` | Boot scripts for development (`fastboot boot` only) |
 | `docs/` | Research notes, see below |
 | `recon/` | The stock headset's configuration (kernel config, properties, partitions) |
 
@@ -117,8 +92,12 @@ the headset they are used from its own partitions, mounted read-only.
 | [Headset IMU](docs/syncboss-imu.md) | Reading the IMU through SyncBoss, without Android |
 | [Controllers](docs/controllers-native.md) | The Touch controllers through SyncBoss |
 | [Lens](docs/quest1-lens.md) | Lens distortion, field of view and geometry |
-| [6DoF study](docs/tracking-6dof.md) | Paths to inside-out tracking |
+| [Display path](docs/direct-scanout.md) | From SteamVR's frames to the panels, and the 72 Hz re-projection |
+| [Steam Frame mode](docs/frame-mode.md) | Booting into Steam's VR shell like the Steam Frame |
+| [Audio](docs/audio.md) | Speakers, microphone and volume buttons without Android |
+| [6DoF](docs/tracking-6dof.md) | Running Meta's tracking service natively |
 | [Tracking IPC](docs/tracking-ipc.md) | Talking to Meta's tracking service |
+| [To do](docs/todo.md) | Open items |
 | [SteamOS image](docs/rootfs-build.md) | What the system image holds, and the plan to build and install it reproducibly |
 | [Phase 0](docs/phase0-recon.md) | First survey of the headset (in French) |
 
