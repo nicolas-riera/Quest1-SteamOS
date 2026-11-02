@@ -77,6 +77,8 @@ static uint64_t now_ns(void)
 	return (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
 }
 
+static bool fx_enabled(void); // quest1_facet.c
+
 // --- advertised extensions ------------------------------------------------------------------------
 
 static const char *default_fake[] = {
@@ -109,6 +111,12 @@ static void init_fake(void)
 		for (unsigned i = 0; i < sizeof(default_fake) / sizeof(default_fake[0]); i++) {
 			snprintf(fake_names[fake_count], VK_MAX_EXTENSION_NAME_SIZE, "%s", default_fake[i]);
 			fake_spec[fake_count++] = default_fake_spec[i];
+		}
+		if (fx_enabled()) { // SteamVR's Facet renderer (quest1_facet.c)
+			snprintf(fake_names[fake_count], VK_MAX_EXTENSION_NAME_SIZE, "%s", VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
+			fake_spec[fake_count++] = VK_KHR_DYNAMIC_RENDERING_SPEC_VERSION;
+			snprintf(fake_names[fake_count], VK_MAX_EXTENSION_NAME_SIZE, "%s", VK_EXT_HOST_QUERY_RESET_EXTENSION_NAME);
+			fake_spec[fake_count++] = VK_EXT_HOST_QUERY_RESET_SPEC_VERSION;
 		}
 		return;
 	}
@@ -168,6 +176,9 @@ struct device
 	PFN_vkResetFences ResetFences;
 	PFN_vkGetSemaphoreFdKHR GetSemaphoreFdKHR;
 	PFN_vkImportSemaphoreFdKHR ImportSemaphoreFdKHR;
+	void *fx;              //!< Facet emulation state (quest1_facet.c)
+	bool has_q0;           //!< first queue family of vkCreateDevice, for one-shot submissions
+	uint32_t q0_family;
 
 	// submission worker (all queues of the device, in call order)
 	pthread_mutex_t mutex;
@@ -855,6 +866,18 @@ static void fill_fake_features(VkPhysicalDeviceFeatures2 *f)
 	for (VkBaseOutStructure *s = (VkBaseOutStructure *)f->pNext; s; s = s->pNext) {
 		if (s->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES)
 			((VkPhysicalDeviceTimelineSemaphoreFeatures *)s)->timelineSemaphore = VK_TRUE;
+		else if (s->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES) {
+			VkPhysicalDeviceVulkan12Features *v = (void *)s;
+			v->timelineSemaphore = VK_TRUE;
+			v->hostQueryReset = fx_enabled();
+		} else if (s->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES)
+			((VkPhysicalDeviceVulkan13Features *)s)->dynamicRendering = fx_enabled();
+		else if (s->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES)
+			((VkPhysicalDeviceHostQueryResetFeatures *)s)->hostQueryReset = fx_enabled();
+		else if (s->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES)
+			((VkPhysicalDeviceDynamicRenderingFeatures *)s)->dynamicRendering = fx_enabled();
+		else if (s->sType == 1000201000)
+			memset((char *)s + sizeof(VkBaseOutStructure), 0, sizeof(VkBool32) * 2);
 		else if (s->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR)
 			((VkPhysicalDevicePresentIdFeaturesKHR *)s)->presentId = VK_TRUE;
 		else if (s->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR)
@@ -882,6 +905,13 @@ static bool is_unknown_struct(VkStructureType t)
 	case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT:
 	case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_PROPERTIES_EXT:
 	case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR:
+	case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES:
+	case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES:
+	case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES:
+	case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_PROPERTIES:
+	case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES:
+	case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES:
+	case 1000201000: // PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_NV
 	case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR: return true;
 	default: return false;
 	}
@@ -945,6 +975,8 @@ static VKAPI_ATTR void VKAPI_CALL GetPhysicalDeviceProperties2(VkPhysicalDevice 
 	for (VkBaseOutStructure *s = (VkBaseOutStructure *)p->pNext; s; s = s->pNext)
 		if (s->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_PROPERTIES)
 			((VkPhysicalDeviceTimelineSemaphoreProperties *)s)->maxTimelineSemaphoreValueDifference = UINT64_MAX;
+		else if (s->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES)
+			((VkPhysicalDeviceVulkan12Properties *)s)->maxTimelineSemaphoreValueDifference = UINT64_MAX;
 }
 
 static VKAPI_ATTR void VKAPI_CALL GetPhysicalDeviceExternalSemaphoreProperties(
@@ -994,6 +1026,7 @@ static PFN_vkVoidFunction debug_utils_stub(const char *name)
 // --- simulated direct-mode display for vrcompositor ----------------------------------------------------
 
 #include "quest1_display.c"
+#include "quest1_facet.c"
 
 
 // --- fences ----------------------------------------------------------------------------------------------
@@ -1327,6 +1360,10 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice pd, const Vk
 	d->key = key_of(*out);
 	d->handle = *out;
 	d->gdpa = gdpa;
+	if (ci->queueCreateInfoCount) {
+		d->has_q0 = true;
+		d->q0_family = ci->pQueueCreateInfos[0].queueFamilyIndex;
+	}
 #define GET(fn) d->fn = (PFN_vk##fn)gdpa(*out, "vk" #fn)
 	GET(DestroyDevice);
 	GET(CreateSemaphore);
@@ -1364,6 +1401,7 @@ static VKAPI_ATTR void VKAPI_CALL DestroyDevice(VkDevice device, const VkAllocat
 {
 	struct device *d = device_of(device);
 	drain(d);
+	fx_destroy(d);
 	pthread_mutex_lock(&d->mutex);
 	d->stop = true;
 	pthread_cond_broadcast(&d->cond);
@@ -1384,6 +1422,8 @@ static VKAPI_ATTR void VKAPI_CALL DestroyDevice(VkDevice device, const VkAllocat
 
 static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL GetDeviceProcAddr(VkDevice device, const char *name)
 {
+	if (fx_level() >= 2 && (strstr(name, "Render") || strstr(name, "BeginQuery")))
+		LOG("GetDeviceProcAddr %s\n", name);
 	PFN_vkVoidFunction f = device_intercept(name);
 	if (!f)
 		f = debug_utils_stub(name);
@@ -1402,6 +1442,9 @@ static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL GetDeviceProcAddr(VkDevice devic
 
 static PFN_vkVoidFunction device_intercept(const char *name)
 {
+	PFN_vkVoidFunction fxf = fx_proc(name);
+	if (fxf)
+		return fxf;
 #define I(n, fn)                                                                                                       \
 	if (strcmp(name, n) == 0)                                                                                      \
 		return (PFN_vkVoidFunction)fn;
@@ -1528,6 +1571,9 @@ static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL GetInstanceProcAddr(VkInstance i
 
 static PFN_vkVoidFunction instance_intercept(const char *name)
 {
+	PFN_vkVoidFunction fxi = fx_iproc(name);
+	if (fxi)
+		return fxi;
 #define I(n, fn)                                                                                                       \
 	if (strcmp(name, n) == 0)                                                                                      \
 		return (PFN_vkVoidFunction)fn;

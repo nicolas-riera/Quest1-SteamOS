@@ -8,9 +8,11 @@ Open items, roughly by priority. Done items move to the commit log.
   dashboard CEF (vrwebhelper) ~26 % even when hidden (both pages visible, rAF ~100 Hz), warp ~23 %
   (~4 ms/pass, linear 1440x1600 buffers). Next: throttle the hidden dashboard, non-blocking warp on
   a high-priority queue, vrcompositor's passes, Steam's steamwebhelper CPU, trackingservice CPU.
-- Try SteamVR's "facet" (tip from a user, 2026-11-02): the Pico 3 port reports better performance
-  with it enabled. The driver has to support it; the Quest 2 port's author made a custom one and
-  backported it, so start from theirs.
+- SteamVR's Facet renderer (tip from a user, 2026-11-02) runs and draws correctly behind
+  `/etc/quest1-facet` (off by default, `src/vklayer-steamvr/quest1_facet.c`): ~29-32 fps, eye passes
+  6-7 ms each. Needs a fair A/B against the old renderer in one quiet window
+  (`/root/facet-iter2.sh 0|1 <dir>`), with the dashboard shown (dropped stencil dynamic states).
+  Leave it off unless it wins.
 
 ## Display
 - Monado's re-projection in Meta tracking mode deforms the image (user, 2026-11-01): turning the head
