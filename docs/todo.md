@@ -8,6 +8,9 @@ Open items, roughly by priority. Done items move to the commit log.
   dashboard CEF (vrwebhelper) ~26 % even when hidden (both pages visible, rAF ~100 Hz), warp ~23 %
   (~4 ms/pass, linear 1440x1600 buffers). Next: throttle the hidden dashboard, non-blocking warp on
   a high-priority queue, vrcompositor's passes, Steam's steamwebhelper CPU, trackingservice CPU.
+- Try SteamVR's "facet" (tip from a user, 2026-11-02): the Pico 3 port reports better performance
+  with it enabled. The driver has to support it; the Quest 2 port's author made a custom one and
+  backported it, so start from theirs.
 
 ## Display
 - Monado's re-projection in Meta tracking mode deforms the image (user, 2026-11-01): turning the head
@@ -20,6 +23,8 @@ Open items, roughly by priority. Done items move to the commit log.
 - SteamVR popups (volume bar, IPD) show up too low in the view; the IPD popup has very strong
   chromatic aberration. Probably the same vertical error.
 - Apply the per-panel calibration from `/persist/calibration/display` (decenter, roll, mura).
+- 90 Hz mode, selectable from SteamVR's refresh rate setting (low priority). Base:
+  github.com/TheCez/quest1-90hz-orangefox.
 
 ## Passthrough
 - Camera frames reach `/dev/shm/quest1-cameras` through `src/camtap` (30 Hz, 4 cameras), but
@@ -64,13 +69,20 @@ Open items, roughly by priority. Done items move to the commit log.
 
 ## Hardware
 - Power LED: it must get its stock behaviour back (it stays solid yellow/orange). The front LED
-  already lights while the cameras run.
+  already lights while the cameras run. Later (low priority): let the user control it, e.g. from
+  the quick menu; it turns off when the headset sleeps, except while charging.
 - Bluetooth.
+- USB OTG (low priority): keyboards, storage and other USB devices on the headset's port.
 
 ## Later
 - Hand tracking.
 - x86 games (FEX, Proton).
-- Windows Mixed Reality controllers support (for fun, much later).
+- Other controllers (low priority, together):
+  - Windows Mixed Reality controllers (for fun);
+  - Quest 2 controllers, based on github.com/Juspertinry/q2ctrl-module (only a left one to test;
+    assume the right one works the same);
+  - Quest 3 controllers, based on github.com/mlsplays/Touch3-on-Quest-2;
+  - Quest Pro controllers: from scratch, maybe impossible.
 - Windows installer that downloads SteamOS from Valve, reads the tracking software from the
   user's own headset, builds the image and flashes it (slot B), once everything works. Much later:
   dual boot with a boot selector shown in the headset at start-up (very low priority).
