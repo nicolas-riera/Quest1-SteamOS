@@ -46,23 +46,31 @@ Not possible without a Meta map: a boundary fixed in the real room that survives
 remote debugging on 127.0.0.1:9333; `/root/cdp.py 'js'` evaluates JS in the systemui page
 (`ConstructStore.roomSetupStep`, `VRHTML.VRChaperoneSetup.*`).
 
-## Why Meta's map cannot be persisted (investigated 2026-11-02)
+## Meta's tracking map persistence (q1anchord)
 
-Stock Quest remembers rooms through trackingservice's `ITrackingEnvironment` (binder service
-`TrackingEnvironment`; transaction codes: 4 getCurrentMapUUID, 5 keepMap, 6 removeAllMaps, 7 loadMap,
-8 listMaps, 9 stopMapExpansion, 10 placeAnchor, 11 registerAnchor, 13 persistAnchor, 14 locateAnchor,
-16 getAnchorUuid, 20 setOrientationOnlyMode; callable with `/root/svc.sh call TrackingEnvironment <code>`
-inside the stack's property area). On this headset's tracker ("SuperVega"/VIPER):
+The tracker ("SuperVega") has no whole-map API (`keepMap`/`listMaps`: "API ... is not supported"), but it
+persists maps through spatial anchors, like Guardian does. Binder service `TrackingEnvironment`
+(`oculus.internal.ITrackingEnvironment`), transaction codes (call with `/root/svc.sh call TrackingEnvironment <code> ...`
+inside the stack's property area): 1 getSharedMemory, 4 getCurrentMapUUID, 5 keepMap, 6 removeAllMaps, 7 loadMap,
+8 listMaps, 9 stopMapExpansion, 10 placeAnchor, 11 registerAnchor, 13 persistAnchor, 14 locateAnchor (no-op),
+16 getAnchorUuid, 20 setOrientationOnlyMode. Wire formats found by probing: AnchorHandle = int32 version + int32 index;
+AnchorUuid = 16 bytes in text order; Parcelables are preceded by an int32 non-null flag (1).
 
-- `getCurrentMapUUID` works (a live in-memory map exists), but `keepMap` returns false and `listMaps` is empty:
-  trackingservice logs "InsideOutTrackingEngine API keepMap is not supported" / "listMaps is not supported".
-  So the map is never written to `/vision/insideout/mapdb` and `loadMap` has nothing to load. This engine has
-  no persistent whole-map API.
-- The only persistence left is spatial anchors (Guardian uses them: `SpatialPersistence capability v1`,
-  `persistAnchor`, `registerAnchor`, `locateAnchor`, `exportMapDataForAnchor`/`importMapDataForAnchor`). Their
-  runtime is `SlamAnchorRuntimeIpcServer`, which rides on RuntimeIpcBroker and fails at start-up here
-  ("initServer failed", the known RuntimeIpcBroker `connect` -74 failure), and the Parcelable layouts are
-  not documented (`placeAnchor` returned handle -1). Making it work means fixing ovrstub's RuntimeIpcBroker
-  first, then reverse-engineering the anchor parcelables, with no guarantee the engine relocalizes.
+- Needs Meta's real `RuntimeIpcBroker` (unit `android-runtimeipcbroker`, ovrstub started with `--skip RuntimeIpcBroker`):
+  with ovrstub's stand-in the anchor server could not start.
+- `placeAnchor` (code 10) returns the world-origin anchor handle (0,0) once "Gained map tracking" is logged;
+  `persistAnchor` with that handle promotes the current map context to persistent ("transient -> persistent") and the
+  engine writes it to `/vision/insideout/mapdb` (camera-derived data: never commit it, never copy it around).
+- After a restart of the stack the engine loads that map by itself and relocalizes: the current map uuid is the saved
+  one and the head pose comes back in the same world frame (measured: before/after restart, headset lying still,
+  head position (-0.041, 0.032, 0.067) vs (-0.039, 0.032, 0.070), same orientation).
+- `device/q1anchord.py` (unit `android-q1anchord`): after the headset has been worn 45 s with no saved map it persists the
+  anchor and saves the map uuid in `/data/misc/tracking/world-map.uuid`; it writes `/run/q1track/frame-state`:
+  `static` (the current map is the saved one, or none is saved yet) or `anchor` (a map is saved but the current one is
+  another: relocalization failed). `touch /tmp/quest1-clear-map`, or clearing the playspace (the chaperone file loses its
+  universe), calls `removeAllMaps` and forgets the uuids.
+- `chaperone_frame.cpp` uses Meta's frame as is in `static` state (raw y = world y + eye height; floor and boundary
+  in `chaperone_info.vrchap` stay valid because the frame is persistent) and falls back to the head anchoring above
+  in `anchor` state or when `frame-state` is missing.
 
-Hence the raw-space anchoring above stays the mechanism.
+Not yet verified: relocalization after a real reboot with the headset worn and moved around the room.

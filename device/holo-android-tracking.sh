@@ -117,6 +117,7 @@ PY
 
 install_units() {
 	install -m 755 "$0" /usr/local/sbin/holo-android-tracking
+	[ -f "$(dirname "$0")/q1anchord.py" ] && install -m 755 "$(dirname "$0")/q1anchord.py" /usr/local/sbin/q1anchord
 	# Android's AID_NOBODY, for ashmemd (systemd needs the uid in the user database)
 	mkdir -p /etc/sysusers.d
 	echo 'u aid_nobody 9999 "Android nobody (ashmemd)" / -' > /etc/sysusers.d/android-tracking.conf
@@ -160,7 +161,15 @@ EOF
 	W="Wants=android-ovrstub.service
 After=android-ovrstub.service"
 	unit ovrstub "binder stubs for the system_server services (src/ovrstub)" root "" \
-		"/usr/local/bin/ovrstub --then 2" ""
+		"/usr/local/bin/ovrstub --then 2 --skip RuntimeIpcBroker" ""
+	# Meta's real RuntimeIpcBroker (ovrstub's stand-in is skipped): trackingservice's anchor server
+	# (SlamAnchorRuntimeIpcServer: spatial anchors, map persistence) connects to it; with the stub
+	# it fails ("initServer failed"). It needs ovrstub's permission and package_native services.
+	unit runtimeipcbroker "Meta RuntimeIpcBroker (anchor server of trackingservice connects to it)" root \
+		'ExecStartPre=/bin/sh -c "n=0; while [ $$n -lt 60 ]; do /system/bin/service check permission | grep -q found && /system/bin/service check package_native | grep -q found && exit 0; n=$$((n+1)); sleep 1; done; exit 1"' \
+		/system/bin/runtimeipcbroker "$W
+PartOf=android-ovrstub.service
+Before=android-trackingservice.service"
 	unit settingsserver "Oculus preferences store (settingsserver)" 1000 "Group=1000" \
 		/system/bin/settingsserver "$W"
 	unit vrfocus "VR focus arbitration (vrfocusserver)" root "SupplementaryGroups=1000" \
@@ -222,6 +231,8 @@ InaccessiblePaths=-/system/vendor/firmware/lcon_archive.bin -/system/vendor/firm
 		/system/bin/trackingservice "$W android-settingsserver.service android-vrfocus.service android-iad.service android-telemetry-hal.service android-power-hal.service android-ashmemd.service
 Wants=android-settingsserver.service android-vrfocus.service android-iad.service android-telemetry-hal.service android-power-hal.service android-ashmemd.service
 Wants=android-cameramuxmode.service android-calibration.service
+Wants=android-runtimeipcbroker.service
+After=android-runtimeipcbroker.service
 $H"
 	# q1trackd: libossdk client (root: vrfocusserver grants uid 0 background tracking focus),
 	# started from /data/local/tmp for the linker's [unrestricted] namespace section
@@ -229,6 +240,11 @@ $H"
 		"BindReadOnlyPaths=/usr/local/lib/q1track/q1trackd:/data/local/tmp/q1trackd
 TemporaryFileSystem=/data/local/tmp" \
 		"/data/local/tmp/q1trackd serve 500" "$W
+Wants=android-trackingservice.service
+After=android-trackingservice.service
+PartOf=android-sensors-hal.service"
+	# q1anchord: persists Meta's map (spatial anchor) and tells driver_quest1 whether its frame is the persisted one
+	unit q1anchord "q1anchord (persisted tracking map, /run/q1track/frame-state)" root "" /usr/local/sbin/q1anchord "$W
 Wants=android-trackingservice.service
 After=android-trackingservice.service
 PartOf=android-sensors-hal.service"
@@ -261,7 +277,7 @@ EOF
 }
 
 BASE="android-ovrstub android-ashmemd android-adsprpcd android-settingsserver android-vrfocus android-iad android-telemetry-hal android-power-hal"
-SB="android-ctlwatch android-q1trackd android-trackingservice android-calibration android-cameramuxmode android-sensors-hal"
+SB="android-ctlwatch android-q1anchord android-q1trackd android-trackingservice android-runtimeipcbroker android-calibration android-cameramuxmode android-sensors-hal"
 TE=/sys/bus/spi/devices/spi12.0/control/te_timestamp
 ctlwatch() { # paired controller ids -> /run/q1track/controllers ("<id> <1 left|2 right>"), for ovrstub
 	since=$(systemctl show -p ActiveEnterTimestamp --value android-sensors-hal.service)
@@ -368,7 +384,7 @@ monado_trial() {
 meta_start() { # Meta's stack, in order (the sensors HAL first: it takes SyncBoss)
 	systemctl start $BASE
 	systemctl start android-sensors-hal
-	systemctl start android-cameramuxmode android-calibration android-trackingservice android-ctlwatch android-q1trackd
+	systemctl start android-cameramuxmode android-calibration android-trackingservice android-ctlwatch android-q1trackd android-q1anchord
 }
 # meta-on: Monado without SyncBoss + Meta's stack. Restarts Monado: through /root/q1restart.sh.
 meta_on() {

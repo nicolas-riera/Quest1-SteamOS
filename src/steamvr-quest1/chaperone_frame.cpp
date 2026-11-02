@@ -2,6 +2,8 @@
 #include "chaperone_frame.h"
 
 #include <math.h>
+#include <stdio.h>
+#include <string.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -18,6 +20,8 @@ double offSinceS = 0;    //!< when it was taken off (0 = worn)
 double yaw = 0;          //!< raw yaw correction: raw = Ry(yaw) * local + t
 double t[3] = {0, 0, 0};
 bool sixDof = false;
+bool useStatic = false;  //!< /run/q1track/frame-state says "static": Meta's world frame is the persisted map's
+double stateCheckS = 0;
 
 constexpr double kReanchorOffS = 20.0;
 
@@ -26,6 +30,27 @@ double Now()
 	timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	return ts.tv_sec + ts.tv_nsec * 1e-9;
+}
+
+//! q1anchord (device/q1anchord.py) writes "static" while the world frame is the persisted map's (or no map is
+//! saved yet), "anchor" when a map is saved but the current session could not relocalize in it.
+void CheckState(double now)
+{
+	if (now - stateCheckS < 1.0)
+		return;
+	stateCheckS = now;
+	char buf[16] = {};
+	FILE *f = fopen("/run/q1track/frame-state", "r");
+	if (f) {
+		size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+		(void)n;
+		fclose(f);
+	}
+	bool st = strncmp(buf, "static", 6) == 0;
+	if (st != useStatic) {
+		useStatic = st;
+		anchored = false; // leaving the static frame: anchor again at the next valid worn pose
+	}
 }
 
 //! Panels off = headset not worn (Monado creates the file before blanking, removes it at unblank).
@@ -53,6 +78,7 @@ void Quest1FrameUpdate(const XrPosef &head, bool positionTracked)
 	std::lock_guard<std::mutex> l(mtx);
 	sixDof = positionTracked;
 	double now = Now();
+	CheckState(now);
 	bool worn = Worn();
 	if (worn) {
 		if (!wasWorn && offSinceS != 0 && now - offSinceS > kReanchorOffS)
@@ -63,7 +89,7 @@ void Quest1FrameUpdate(const XrPosef &head, bool positionTracked)
 		offSinceS = now;
 	}
 	wasWorn = worn;
-	if (anchored || !positionTracked || !worn || access("/tmp/quest1-no-anchor", F_OK) == 0)
+	if (anchored || useStatic || !positionTracked || !worn || access("/tmp/quest1-no-anchor", F_OK) == 0)
 		return;
 
 	// forward direction on the floor plane, also when looking up or down (then the up vector
@@ -89,12 +115,13 @@ void Quest1FrameUpdate(const XrPosef &head, bool positionTracked)
 void Quest1FrameApply(vr::DriverPose_t &pose)
 {
 	std::lock_guard<std::mutex> l(mtx);
-	double a = sixDof && anchored ? yaw : 0;
+	bool anch = sixDof && anchored && !useStatic;
+	double a = anch ? yaw : 0;
 	pose.qWorldFromDriverRotation.w = cos(a / 2);
 	pose.qWorldFromDriverRotation.x = 0;
 	pose.qWorldFromDriverRotation.y = sin(a / 2);
 	pose.qWorldFromDriverRotation.z = 0;
-	if (sixDof && anchored) {
+	if (anch) {
 		for (int i = 0; i < 3; i++)
 			pose.vecWorldFromDriverTranslation[i] = t[i];
 	} else {

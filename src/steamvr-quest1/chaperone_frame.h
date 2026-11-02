@@ -6,7 +6,9 @@
 // after at least 20 s off, or at start-up), the raw origin is the head's position on the floor
 // (x and z of the head, y = QUEST1_EYE_HEIGHT above the floor) and raw -z is where the head looks.
 // Putting the headset on at the centre of the play area, facing the front, gives the same raw space as
-// when the room was set up. In 3DoF mode (position not tracked) nothing is anchored: y = eye height.
+// when the room was set up. When Meta's persisted map is active (q1anchord, device/q1anchord.py, writes
+// /run/q1track/frame-state "static") Meta's world frame is already stable: the raw space is that frame, y offset by
+// the eye height, and nothing is anchored. In 3DoF mode (position not tracked) nothing is anchored: y = eye height.
 #pragma once
 
 #include <openvr_driver.h>
