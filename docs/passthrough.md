@@ -103,3 +103,37 @@ path allocates them). The driver writes the pixels with the CPU (mmap) and impor
 Static map is about 70 % done. Remaining: descriptor/spline details (0.5 day, live gdb), driver provider + ION/gralloc dma-buf
 (1 day), layer dma-buf import (1 to 2 days, the risk). About 3 days, with a real chance that vrcompositor's import path needs a
 different approach (e.g. a shared AHB image via NewSharedVulkanImage + mappable).
+
+## Route (a): feasibility results and the provider (2026-11-02, evening)
+Tested live with `src/camtap/ptres_test.cpp` (read-only client, `build_probe.sh`; needs `PT_OVERLAY=1`: a Background client has no
+compositor connection and every allocation fails):
+- `IVRCameraPassthroughInternal_001` and `IVRIPCResourceManagerClient_003` are obtainable by a plain Overlay-type client: the provider
+  does not have to be driver code.
+- `GetDmabufFormats` returns false (no `VK_EXT_external_memory_dma_buf` on the blob): dma-buf import is dead, as expected.
+- `NewSharedVulkanImage` (non-mappable, with or without renderable) and `NewSharedVulkanBuffer` work. `RefResource` +
+  `ReceiveSharedFd` returns an fd whose target is `anon_inode:dmabuf`, and `mmap(RW)` of w*h*4 bytes works: the blob's opaque fd is a
+  real dma-buf, so a provider can write pixels with the CPU. `mappable = true` returns true but a null handle (do not use).
+  Still unknown: the memory layout (optimal tiling on the A540). If tiled, upload through a small Vulkan copy instead.
+- Layout completed (vrcompositor 0x15f048): per block, spline handles at b+0x20c4 + 8*camera, frame handles at record+0xfc (record
+  = {u32 state, desc[248], u64 handle}), 16 records per camera, 2 cameras per block, block 1 is used while roomview runs.
+- `src/camtap/ptprovider.cpp` (built by `build_probe.sh`): the provider. Allocates N shared images per camera, publishes the pool,
+  writes frames from the camtap ring (or `PT_PATTERN=1` synthetic gradient), fills a guessed descriptor, flips record states, enables
+  the block byte only while frames flow and clears it on exit/stall. Not run yet (user was testing): first live run must use
+  `PT_PATTERN=1 PT_DUMP=1` and watch `vrcompositor.txt` for "Failed to import the shared camera frame texture".
+- Unknowns to settle live: image layout/format the compositor expects, the descriptor fields, the spline texture format, whether the
+  state mutex must be taken, and which of the two blocks roomview reads.
+
+## Roomview trigger and mesh (2026-11-02, late)
+- Trigger: vrcompositor arms roomview only when the HMD reports `Prop_HasCamera_Bool` (the driver's `/etc/quest1-camera` = `props`
+  sets HasCamera/AllowCameraToggle/NumCameras and creates the empty mesh queues; no camera component) and `camera.enableCamera` +
+  `camera.roomView` are set; changing `camera.roomView` from a client (false then true, see `trackedcam_test` `PT_ROOMVIEW=1`) starts
+  it. With `ptprovider` running the compositor then logs "Depth mesh block queues connection successful" and "Late initialization
+  successful", takes and frees the provider's records (no import error), but draws nothing yet.
+- Why nothing is drawn: the compositor builds the roomview geometry from the depth mesh and waits for it. It reads, through
+  property containers on the block-queue headers, `/meshLayout/layoutId`, `/meshLayout/vertexCount`, `/meshLayout/indexCount`
+  (queue `/xrservice/roomview3d/meshLayout`) and `/meshData/meshId`, `/meshData/layoutId`, `/meshData/meshIsUpToDate`
+  (queue `.../meshData`), then calls its geometry builder (vrcompositor 0x15e300: vertex count x float3, index count x u32).
+  So the driver (the only place that may write the server-only block queues) must publish a mesh: layout block once, data block
+  with vertices (a plane or dome in head space) and indices, then set the header properties (IVRProperties on the block's header
+  container). Block data layout and property types to confirm live.
+- Forcing it in a gdb session (`$x27 = 1` at vrcompositor 0x9ee6c) is no longer needed.

@@ -1225,12 +1225,14 @@ struct BlockQueueIface
 class CompositorGate
 {
 public:
-	void Start()
+	//! poke = also set the "camera enabled" byte of the shared state (the hack); without it only the queues are made
+	void Start(bool poke = true)
 	{
 		if (running.exchange(true))
 			return;
 		CreateQueues();
-		thread = std::thread([this] { Run(); });
+		if (poke)
+			thread = std::thread([this] { Run(); });
 	}
 	void Stop()
 	{
@@ -1333,6 +1335,23 @@ const char *Mode()
 	return !strcmp(m, "1") ? "ring" : m;
 }
 
+//! "props": only the HMD camera properties (HasCamera...), no IVRCameraComponent and no gate. vrcompositor's roomview
+//! (camera.enableCamera + camera.roomView) is only armed when the HMD says it has a camera; the frames then come from
+//! src/camtap/ptprovider (VR_CameraPassthroughState), not from this driver.
+bool PropsOnly()
+{
+	const char *m = Env("QUEST1_CAMERA");
+	char buf[16];
+	if (!m) {
+		if (FILE *f = fopen("/etc/quest1-camera", "r")) {
+			if (fscanf(f, "%15s", buf) == 1)
+				m = buf;
+			fclose(f);
+		}
+	}
+	return m && !strcmp(m, "props");
+}
+
 Quest1Camera *Get()
 {
 	std::call_once(g_once, [] {
@@ -1352,6 +1371,17 @@ Quest1Camera *Get()
 
 void Quest1CameraAttach(PropertyContainerHandle_t container, std::function<DriverPose_t()> headPose)
 {
+	if (PropsOnly()) {
+		if (container != k_ulInvalidPropertyContainer) {
+			CVRPropertyHelpers *p = VRProperties();
+			p->SetBoolProperty(container, Prop_HasCamera_Bool, true);
+			p->SetBoolProperty(container, Prop_AllowCameraToggle_Bool, true);
+			p->SetInt32Property(container, Prop_NumCameras_Int32, 2);
+			CLog("quest1 camera: HMD camera properties set (props mode, no camera component)\n");
+			g_gate.Start(false); // the empty depth-mesh block queues vrcompositor's roomview connects to
+		}
+		return;
+	}
 	if (Quest1Camera *c = Get()) {
 		c->Attach(container, std::move(headPose));
 		if (container != k_ulInvalidPropertyContainer && atoi(Env("QUEST1_CAMERA_GATE", "0")))
