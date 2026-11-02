@@ -36,6 +36,7 @@ static struct
 	uint64_t since, last_return, n;
 	uint64_t app, acquire, gpu, posed; //!< summed ns
 	_Atomic uint64_t present_wait, present_waits; //!< vkWaitForPresentKHR (another thread)
+	_Atomic uint64_t wait_depth; //!< summed: latest presented id minus the id waited for
 } qd_stats;
 
 //! async present: time from vkQueuePresentKHR to the image being rendered (summed, completer thread)
@@ -57,11 +58,13 @@ static void qd_stats_present(uint64_t entry, uint64_t gpu_done, uint64_t posed_d
 		double n = (double)qd_stats.n;
 		uint64_t waits = atomic_exchange(&qd_stats.present_waits, 0);
 		uint64_t wait_ns = atomic_exchange(&qd_stats.present_wait, 0);
+		uint64_t depth = atomic_exchange(&qd_stats.wait_depth, 0);
 		LOG("display: %.1f fps; per frame: vrcompositor %.2f ms (of which acquire %.2f), gpu wait %.2f, "
-		    "pose wait %.2f, present-to-rendered %.2f, present wait %.2f\n",
+		    "pose wait %.2f, present-to-rendered %.2f, present wait %.2f (%.2f frames behind)\n",
 		    n * 1e9 / (posed_done - qd_stats.since), qd_stats.app / n / 1e6, qd_stats.acquire / n / 1e6,
 		    qd_stats.gpu / n / 1e6, qd_stats.posed / n / 1e6,
-		    atomic_exchange(&qd_stats_gpu_latency, 0) / n / 1e6, waits ? wait_ns / (double)waits / 1e6 : 0.0);
+		    atomic_exchange(&qd_stats_gpu_latency, 0) / n / 1e6, waits ? wait_ns / (double)waits / 1e6 : 0.0,
+		    waits ? depth / (double)waits : 0.0);
 		uint64_t keep = qd_stats.last_return;
 		qd_stats.since = qd_stats.last_return = keep;
 		qd_stats.n = qd_stats.app = qd_stats.acquire = qd_stats.gpu = qd_stats.posed = 0;
@@ -1245,6 +1248,29 @@ static VKAPI_ATTR VkResult VKAPI_CALL qd_GetSwapchainCounterEXT(VkDevice device,
 	return VK_SUCCESS;
 }
 
+//! Present waits return at once: vrcompositor waits for the frame it has just presented (0 frames behind),
+//! so waiting for it to be latched serializes its CPU, the GPU and the vsync (2026-11-02, A/B in the headset:
+//! head still 19 -> 34 fps, head moving 18 -> 21 fps, "failed to wait for present" 250 -> 0 per 22 s). It is
+//! still paced by its vblank fences and by the swapchain images the driver gives back. "pwwait" in
+//! /tmp/quest1-layer (read once a second) restores the old wait.
+static bool qd_present_wait_now(void)
+{
+	static _Atomic uint64_t checked;
+	static _Atomic bool now = true;
+	uint64_t t = now_ns();
+	if (t - checked > 1000000000ull) {
+		checked = t;
+		char b[64] = {0};
+		FILE *f = fopen("/tmp/quest1-layer", "r");
+		if (f) {
+			b[fread(b, 1, sizeof(b) - 1, f)] = 0;
+			fclose(f);
+		}
+		now = strstr(b, "pwwait") == NULL;
+	}
+	return now;
+}
+
 static VKAPI_ATTR VkResult VKAPI_CALL qd_WaitForPresentKHR(VkDevice device, VkSwapchainKHR swapchain, uint64_t id,
                                                           uint64_t timeout)
 {
@@ -1252,7 +1278,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL qd_WaitForPresentKHR(VkDevice device, VkSw
 	// vrcompositor times its frames on these returns: they must come when the frame is latched for
 	// display (the driver's QD_DISPLAYED), at the real display's phase, not at once
 	struct qd_swapchain *sc = qd_swapchain_of(swapchain);
-	if (!sc || getenv("QUEST1_PRESENT_WAIT_NOW"))
+	if (!sc || getenv("QUEST1_PRESENT_WAIT_NOW") || qd_present_wait_now())
 		return VK_SUCCESS;
 	struct timespec deadline;
 	clock_gettime(CLOCK_REALTIME, &deadline);
@@ -1266,6 +1292,8 @@ static VKAPI_ATTR VkResult VKAPI_CALL qd_WaitForPresentKHR(VkDevice device, VkSw
 	uint64_t t0 = now_ns();
 	VkResult r = VK_SUCCESS;
 	pthread_mutex_lock(&sc->mutex);
+	uint64_t latest = sc->present_ids[sc->frame % 64].id;
+	qd_stats.wait_depth += latest > id ? latest - id : 0;
 	while (sc->displayed_id < id && sc->sock >= 0 && !sc->stopping) {
 		if (pthread_cond_timedwait(&sc->cond, &sc->mutex, &deadline) == ETIMEDOUT) {
 			r = timeout == UINT64_MAX ? VK_SUCCESS : VK_TIMEOUT;

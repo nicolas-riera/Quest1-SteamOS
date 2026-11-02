@@ -3,11 +3,13 @@
 Open items, roughly by priority. Done items move to the commit log.
 
 ## Performance
-- vrcompositor ~26 fps while warping at 72 Hz, ~41 fps without (GPU contention); the goal is to get
-  as close to 72 as possible without visible quality loss. GPU: vrcompositor ~46 %, SteamVR
-  dashboard CEF (vrwebhelper) ~26 % even when hidden (both pages visible, rAF ~100 Hz), warp ~23 %
-  (~4 ms/pass, linear 1440x1600 buffers). Next: throttle the hidden dashboard, non-blocking warp on
-  a high-priority queue, vrcompositor's passes, Steam's steamwebhelper CPU, trackingservice CPU.
+- vrcompositor, head still, panels on (2026-11-02): 22-28 fps in the morning, 36 with Monado's "early"
+  ack, 45 with the layer's present waits returning at once. The GPU is only ~44 % busy at 45 fps, yet
+  a frame takes ~17 ms from present to rendered: find what the GPU waits on (vrcompositor's
+  RenderThread sleep-polls). Head moving (warp at 72 Hz) is still ~20 fps: warp ~4 ms GPU per pass,
+  linear 1440x1600 buffers. Steam's client (steamwebhelper + its GPU process) takes up to ~300 % CPU
+  after each Steam restart. Tried without effect: SteamVR's realtime priority (CAP_SYS_NICE), GPU
+  bus floors, Steam on the little cores (+5 %, and games would inherit it).
 - SteamVR's Facet renderer (tip from a user, 2026-11-02) runs and draws correctly behind
   `/etc/quest1-facet` (off by default, `src/vklayer-steamvr/quest1_facet.c`): ~29-32 fps, eye passes
   6-7 ms each. Needs a fair A/B against the old renderer in one quiet window
@@ -57,7 +59,9 @@ Open items, roughly by priority. Done items move to the commit log.
 ## Steam and desktop
 - The Steam Frame's desktop mode (KDE Plasma) from the "+" menu. It works in the Quest 2 port
   (github.com/URFAVF3MBOY/quest2-steamos), whose author allows us to use its code: base it on that.
-- The "+" menu shows 4 apps that should not be there (Xfce-related, it seems).
+- The "+" menu shows 5 apps that should not be there (Xfce-related, it seems): remove them. Launching
+  one shows nothing in the headset; once a PC connects for Remote Play, the app shows up there as a
+  black window instead of the VR view (user, 2026-11-02).
 
 ## System
 - SteamOS and SteamVR updates must keep working without undoing our changes (after the
@@ -70,6 +74,12 @@ Open items, roughly by priority. Done items move to the commit log.
   for the connection and the stream app on the headset closes; a 2D game started in cinema mode,
   its audio stuttered, then the headset's SteamVR crashed. Logs saved on the headset in
   `/root/stream-crash-20261101/`.
+- Again 2026-11-02 20:29 (user): a SteamVR-tree process crashed (`/tmp/dumps/crash_20261102202929_2.dmp`,
+  libllvm-qgl mapped), Steam shut down and restarted, vrserver quit with it and nothing restarts
+  it, so the headset stays black. The stream's `streaming_client` (GL) can't share images with the
+  compositor: libhybris GL lacks GL_EXT_memory_object(_fd) and GL_EXT_semaphore(_fd) (ASSERTs in
+  sharedresource_linux.cpp), so the stream shows black. Logs in `/root/stream-crash-20261102/`.
+  Also: restart SteamVR when it quits while Steam runs.
 
 ## Hardware
 - Power LED: it must get its stock behaviour back (it stays solid yellow/orange). The front LED
