@@ -1,0 +1,18 @@
+diff --git a/kernel/cgroup.c b/kernel/cgroup.c
+--- a/kernel/cgroup.c
++++ b/kernel/cgroup.c
+@@ -3219,6 +3219,14 @@
+ {
+ 	seq_printf(seq, "populated %d\n",
+ 		   cgroup_is_populated(seq_css(seq)->cgroup));
++	/*
++	 * systemd (258 here) reads "populated" and "frozen" from cgroup.events and
++	 * discards the whole file if a key is missing, so it never notices a
++	 * cgroup becoming empty (scopes and services then wait for their full
++	 * stop timeout). There is no cgroup v2 freezer before 5.2: nothing here
++	 * is ever frozen.
++	 */
++	seq_puts(seq, "frozen 0\n");
+ 	return 0;
+ }
+ 

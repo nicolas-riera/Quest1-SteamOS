@@ -1,6 +1,7 @@
 #!/bin/bash
 # Build the native boot image (kernel + initramfs) from public sources only:
 #   - Meta's GPL Quest kernel (facebookincubator/oculus-linux-kernel) + kernel/quest1-kernel.patch
+#     + kernel/loop-no-discard-on-ext4.patch + kernel/cgroup-events-frozen.patch
 #     + kernel/lse_emul.c, config = recon/kernel.config + kernel/steamos.config;
 #   - Android's gcc 4.9 prebuilt toolchains (the ones Meta's tree builds with);
 #   - Debian's static busybox, initrd/ from this repo.
@@ -32,6 +33,10 @@ kernel() {
 	fi
 	git -C kernel reset -q --hard $KCOMMIT && git -C kernel clean -qfdx
 	git -C kernel apply "$P/kernel/quest1-kernel.patch"
+	# holo.img sits on ext4, where Meta disabled punch hole: no failing discards on loop0
+	git -C kernel apply "$P/kernel/loop-no-discard-on-ext4.patch"
+	# systemd needs a "frozen" key in cgroup.events to notice that a cgroup became empty
+	git -C kernel apply "$P/kernel/cgroup-events-frozen.patch"
 	cp "$P/kernel/lse_emul.c" kernel/arch/arm64/kernel/lse_emul.c
 	# Kconfig sources Meta's unpublished internal/ drivers: empty stand-ins (ignored by git)
 	mkdir -p kernel/drivers/staging/oculus/internal

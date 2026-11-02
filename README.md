@@ -94,7 +94,7 @@ the headset they are used from its own partitions, mounted read-only.
 
 | Path | Contents |
 | --- | --- |
-| `kernel/` | The kernel patch (`quest1-kernel.patch`) on top of Meta's published source, the config additions and the LSE atomics emulation |
+| `kernel/` | The kernel patches (`quest1-kernel.patch`, `loop-no-discard-on-ext4.patch`, `cgroup-events-frozen.patch`) on top of Meta's published source, the config additions and the LSE atomics emulation |
 | `initrd/` | The initramfs: `init`, a display test, a reboot helper |
 | `device/` | Install scripts run on the headset: Android blobs, HALs, Wi-Fi, Monado, Steam session, memory tuning |
 | `src/monado/` | The Monado patch: the Quest 1 driver and the display controller target |

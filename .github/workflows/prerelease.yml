@@ -33,7 +33,7 @@ jobs:
         id: kernel
         with:
           path: kernel-out
-          key: kernel-${{ hashFiles('kernel/quest1-kernel.patch', 'kernel/lse_emul.c', 'kernel/steamos.config', 'recon/kernel.config', 'tools/build-boot.sh') }}
+          key: kernel-${{ hashFiles('kernel/quest1-kernel.patch', 'kernel/loop-no-discard-on-ext4.patch', 'kernel/cgroup-events-frozen.patch', 'kernel/lse_emul.c', 'kernel/steamos.config', 'recon/kernel.config', 'tools/build-boot.sh') }}
 
       - name: Build the kernel
         if: steps.kernel.outputs.cache-hit != 'true'

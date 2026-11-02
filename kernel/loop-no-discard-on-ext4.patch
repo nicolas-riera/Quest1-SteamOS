@@ -1,0 +1,30 @@
+diff --git a/drivers/block/loop.c b/drivers/block/loop.c
+index aa7895f2c..588647b6b 100644
+--- a/drivers/block/loop.c
++++ b/drivers/block/loop.c
+@@ -75,6 +75,7 @@
+ #include <linux/sysfs.h>
+ #include <linux/miscdevice.h>
+ #include <linux/falloc.h>
++#include <linux/magic.h>
+ #include <linux/uio.h>
+ #include "loop.h"
+ 
+@@ -859,9 +860,16 @@ static void loop_config_discard(struct loop_device *lo)
+ 	 * image a.k.a. discard. However we do not support discard if
+ 	 * encryption is enabled, because it may give an attacker
+ 	 * useful information.
++	 *
++	 * Meta's kernel disables punch hole on ext4 (ext4_punch_hole() returns
++	 * -EOPNOTSUPP, b/28760453), so a discard on a loop device backed by an
++	 * ext4 file always fails and is logged as an I/O error. ext4 inside the
++	 * loop device uses discard for zeroing (discard_zeroes_data) and only
++	 * then falls back to writing zeros: don't advertise discard at all.
+ 	 */
+ 	if ((!file->f_op->fallocate) ||
+-	    lo->lo_encrypt_key_size) {
++	    lo->lo_encrypt_key_size ||
++	    inode->i_sb->s_magic == EXT4_SUPER_MAGIC) {
+ 		q->limits.discard_granularity = 0;
+ 		q->limits.discard_alignment = 0;
+ 		blk_queue_max_discard_sectors(q, 0);
