@@ -2,29 +2,52 @@
 
 Open items, roughly by priority. Done items move to the commit log.
 
+## Performance
+- vrcompositor ~26 fps while warping at 72 Hz, ~41 fps without (GPU contention); the goal is to get
+  as close to 72 as possible without visible quality loss. GPU: vrcompositor ~46 %, SteamVR
+  dashboard CEF (vrwebhelper) ~26 % even when hidden (both pages visible, rAF ~100 Hz), warp ~23 %
+  (~4 ms/pass, linear 1440x1600 buffers). Next: throttle the hidden dashboard, non-blocking warp on
+  a high-priority queue, vrcompositor's passes, Steam's steamwebhelper CPU, trackingservice CPU.
+
 ## Display
-- Lens distortion and chromatic aberration are still off, most at the top and bottom of the
-  view, also left and right (user, 2026-11-01). Plan: a full-screen calibration grid drawn with the
-  lens model (`q1grid`), tuned live against the user's eyes or phone photos through the lens, then
-  the result goes into driver_quest1 `ComputeDistortion` and Monado's warp.
-- SteamVR popups (volume bar, IPD) show up too low in the view; the IPD popup has very strong
-  chromatic aberration. Re-check after the distortion fix: probably the same vertical error.
-- Apply the per-panel calibration from `/persist/calibration/display` (decenter, roll, mura).
 - Monado's re-projection in Meta tracking mode deforms the image (user, 2026-11-01): turning the head
   left stretches the top of the view to the right, "soft". Sign is right (negating it is far worse).
   Suspects: q1trackd's angular velocity frame used for extrapolation, or a frame mismatch between
   the render pose and Monado's head pose. Live knobs in `/tmp/quest1-reproj` (`vel=0`, `delay=1`,
   `rx/ry/rz=`), per-axis delta and o-jitter in Monado's `direct_tick` log.
-- Performance: vrcompositor ~26 fps while warping at 72 Hz, ~41 fps without (GPU contention). GPU:
-  vrcompositor ~46 %, SteamVR dashboard CEF (vrwebhelper) ~26 % even when hidden (both pages
-  visible, rAF ~100 Hz), warp ~23 % (~4 ms/pass, linear 1440x1600 buffers). Next: non-blocking
-  warp on a high-priority queue, throttle the hidden dashboard, Steam's steamwebhelper CPU.
+- Lens distortion and chromatic aberration are better but still off at the edges (user,
+  2026-11-01). `q1grid` findings to port into driver_quest1 `ComputeDistortion` and Monado's warp.
+- SteamVR popups (volume bar, IPD) show up too low in the view; the IPD popup has very strong
+  chromatic aberration. Probably the same vertical error.
+- Apply the per-panel calibration from `/persist/calibration/display` (decenter, roll, mura).
+
+## Passthrough
+- Camera frames reach `/dev/shm/quest1-cameras` through `src/camtap` (30 Hz, 4 cameras), but
+  SteamVR's `AcquireVideoStreamingService` fails, so nothing is shown. Either open that gate or
+  draw the cameras ourselves (overlay), then depth-correct re-projection like Meta's.
+
+## Boundary
+- The Steam Frame's playspace setup now appears (`Prop_SupportsInHMDRoomSetup_Bool`), with the
+  right buttons, but they do nothing yet.
 
 ## Tracking
-- 6DoF with Meta's trackingservice (docs/tracking-6dof.md): poses are valid for short periods;
-  RuntimeIpcBroker `connect` still fails, the `/dev/cpuset` fix is untested, then q1trackd →
-  Monado meta mode end to end.
-- Controllers: input and tracking while Meta's stack owns SyncBoss.
+- Meta tracking mode and its units must persist across reboots (enabled at boot).
+- Controller battery levels in SteamVR.
+- RuntimeIpcBroker `connect` still fails (-74); harmless so far.
+
+## Power
+- The power button only opens the dashboard: a short press must put the headset to sleep and
+  wake it like the stock behaviour, and a long press should open the power menu
+  (`device/holo-frame-mode.sh` already sets logind for this: find what intercepts the key).
+- Sleep must work properly: panels off, tracking and SteamVR paused, then a clean wake-up.
+- Restart and Shut down from Steam do nothing (user, 2026-11-02): the headset can only be turned
+  off by a forced power-off. Likely fixed by `kernel/cgroup-events-frozen.patch` (PR #1): to test.
+  If so, drop the sshd `pam_systemd` workaround in `device/holo-perf.sh`.
+
+## Steam and desktop
+- The Steam Frame's desktop mode (KDE Plasma) from the "+" menu. It works in the Quest 2 port
+  (github.com/URFAVF3MBOY/quest2-steamos), whose author allows us to use its code: base it on that.
+- The "+" menu shows 4 apps that should not be there (Xfce-related, it seems).
 
 ## Streaming
 - Steam Link streaming from a PC fails (2026-11-01): VR streaming leaves the PC's SteamVR waiting
@@ -32,17 +55,15 @@ Open items, roughly by priority. Done items move to the commit log.
   its audio stuttered, then the headset's SteamVR crashed. Logs saved on the headset in
   `/root/stream-crash-20261101/`.
 
-## Power
-- The power button only opens the dashboard: a short press must put the headset to sleep and
-  wake it like the stock behaviour, and a long press should open the power menu.
-- Sleep must work properly: panels off, tracking and SteamVR paused, then a clean wake-up.
-- Restart and Shut down from Steam do nothing (user, 2026-11-02): the headset can only be turned
-  off by a forced power-off. Both must work from Steam's power menu.
-
 ## Hardware
 - LEDs: the white front LED must be on while the cameras are active (stock behaviour), and the
   power LED must get its stock behaviour back (it stays solid yellow/orange).
+- Bluetooth.
 
 ## Later
+- Hand tracking.
+- x86 games (FEX, Proton).
+- Windows Mixed Reality controllers support (for fun, much later).
 - Windows installer that downloads SteamOS from Valve, reads the tracking software from the
-  user's own headset, builds the image and flashes it (slot B), once everything works.
+  user's own headset, builds the image and flashes it (slot B), once everything works. Much later:
+  dual boot with a boot selector shown in the headset at start-up (very low priority).
