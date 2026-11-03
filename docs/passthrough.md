@@ -203,3 +203,17 @@ Reversed from vrcompositor 0x15fcc0 (per-frame roomview update), 0x15e300 (geome
 - `camera.enableConstructRoomView` stays saved: until the pipeline works it crash-loops vrcompositor at every start. Undo the
   test settings with `/root/pt-undo.sh` (stops SteamVR, removes `/etc/quest1-camera`, drops enableConstructRoomView and
   forceSceneAlphaBlending, roomView 0, starts SteamVR).
+
+## The roomview pipeline on the Adreno 540 (2026-11-03, night)
+- vrcompositor's roomview vertex shader samples image 11 + sampler 27 (a screen-space warp, `_m12 == 1`) and image 10 + sampler 26
+  (the spline distortion, `_m7 == 2`), but its pipeline layout has no 11/27 and gives 25/26 to the fragment stage only. The blob
+  refuses the pipeline (-13), vrcompositor binds VK_NULL_HANDLE and crashes in vkCmdBindPipeline (vrcompositor 0x2bdcb4).
+- The compat layer now records set and pipeline layouts and module code; a refused graphics pipeline is logged in detail and retried
+  with its modules rewritten: image/sampler variables the layout lacks for that stage are removed and their sample/fetch/query
+  results become OpConstantNull (`null_missing_descriptors`). Checked offline with `src/vklayer-steamvr/pipetest`
+  (`PT_VRC_LAYOUT=1` reproduces vrcompositor's layout; `QUEST1_VKSHIM_LAYER` picks a test build of the layer).
+- Live: 4 roomview pipelines retried and built, no crash, and the roomview replaces SteamVR's environment (green: the shader reads
+  the camera image as YUV, G = Y, B = Cb, R = Cr, minus 0.5019 on chroma; black outside the camera's bounds).
+- Next: frames as YUV (gray -> R = B = 128), real camera frames, then the record descriptor fields the vertex shader's uniforms
+  come from (`_m3` world-to-camera, `_m4` focal/centre, `_m5` fisheye coefficients with `_m7` = 1, `_m15/_m16` bounds), and
+  whether the 2D mode (roomView 1) draws without the depth mesh.
