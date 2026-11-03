@@ -169,6 +169,7 @@ struct device
 	PFN_vkCreateShaderModule CreateShaderModule;
 	PFN_vkDestroyShaderModule DestroyShaderModule;
 	PFN_vkCreateImage CreateImage;
+	PFN_vkAllocateMemory AllocateMemory;
 	PFN_vkGetImageSubresourceLayout GetImageSubresourceLayout;
 	PFN_vkCreateGraphicsPipelines CreateGraphicsPipelines;
 	PFN_vkCreateDescriptorSetLayout CreateDescriptorSetLayout;
@@ -1202,10 +1203,37 @@ static uint32_t *rewrite_layer_builtins(const uint32_t *w, uint32_t words, uint3
 // mark and get linear tiling (no compression), and their row pitch is logged.
 #define Q1_CPU_IMAGE_USAGE VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT
 
+// Failed image creations and allocations are logged (the first 40): vrcompositor only says "CreateTexture - Unable to
+// allocate memory".
+static unsigned fail_logs;
+
+static VKAPI_ATTR VkResult VKAPI_CALL AllocateMemory(VkDevice device, const VkMemoryAllocateInfo *ai,
+                                                     const VkAllocationCallbacks *alloc, VkDeviceMemory *out)
+{
+	struct device *d = device_of(device);
+	VkResult r = d->AllocateMemory(device, ai, alloc, out);
+	if (r != VK_SUCCESS && fail_logs < 40) {
+		fail_logs++;
+		LOG("vkAllocateMemory %llu bytes, memory type %u: %d\n", (unsigned long long)ai->allocationSize, ai->memoryTypeIndex, r);
+	}
+	return r;
+}
+
 static VKAPI_ATTR VkResult VKAPI_CALL CreateImage(VkDevice device, const VkImageCreateInfo *ci,
                                                   const VkAllocationCallbacks *alloc, VkImage *out)
 {
 	struct device *d = device_of(device);
+	if (!(ci->usage & Q1_CPU_IMAGE_USAGE) || ci->format != VK_FORMAT_R8G8B8A8_UNORM || ci->tiling != VK_IMAGE_TILING_OPTIMAL ||
+	    ci->mipLevels != 1 || ci->arrayLayers != 1 || ci->imageType != VK_IMAGE_TYPE_2D) {
+		VkResult r = d->CreateImage(device, ci, alloc, out);
+		if ((r != VK_SUCCESS || !ci->extent.width || !ci->extent.height) && fail_logs < 40) {
+			fail_logs++;
+			LOG("vkCreateImage %ux%ux%u format %d mips %u layers %u samples %d usage 0x%x flags 0x%x tiling %d: %d\n",
+			    ci->extent.width, ci->extent.height, ci->extent.depth, ci->format, ci->mipLevels, ci->arrayLayers,
+			    ci->samples, ci->usage, ci->flags, ci->tiling, r);
+		}
+		return r;
+	}
 	if (!(ci->usage & Q1_CPU_IMAGE_USAGE) || ci->format != VK_FORMAT_R8G8B8A8_UNORM || ci->tiling != VK_IMAGE_TILING_OPTIMAL ||
 	    ci->mipLevels != 1 || ci->arrayLayers != 1 || ci->imageType != VK_IMAGE_TYPE_2D)
 		return d->CreateImage(device, ci, alloc, out);
@@ -1862,6 +1890,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice pd, const Vk
 	GET(CreateShaderModule);
 	GET(DestroyShaderModule);
 	GET(CreateImage);
+	GET(AllocateMemory);
 	GET(GetImageSubresourceLayout);
 	GET(CreateGraphicsPipelines);
 	GET(CreateDescriptorSetLayout);
@@ -1960,6 +1989,7 @@ static PFN_vkVoidFunction device_intercept(const char *name)
 	I("vkCreateShaderModule", CreateShaderModule)
 	I("vkDestroyShaderModule", DestroyShaderModule)
 	I("vkCreateImage", CreateImage)
+	I("vkAllocateMemory", AllocateMemory)
 	I("vkWaitForFences", WaitForFences)
 	I("vkCreateGraphicsPipelines", CreateGraphicsPipelines)
 	I("vkCreateDescriptorSetLayout", CreateDescriptorSetLayout)

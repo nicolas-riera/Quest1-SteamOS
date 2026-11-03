@@ -42,7 +42,7 @@ Not possible without a Meta map: a boundary fixed in the real room that survives
 
 ## Debugging the dashboard UI
 
-`touch /tmp/quest1-webdebug` (as steamos) before the dashboard starts makes `vrwebhelper.sh` enable CEF
+`touch /tmp/q1-webdebug` (as steamos) before the dashboard starts makes `vrwebhelper.sh` enable CEF
 remote debugging on 127.0.0.1:9333; `/root/cdp.py 'js'` evaluates JS in the systemui page
 (`ConstructStore.roomSetupStep`, `VRHTML.VRChaperoneSetup.*`).
 

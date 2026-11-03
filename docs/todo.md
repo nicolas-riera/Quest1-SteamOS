@@ -72,6 +72,9 @@ Open items, roughly by priority. Done items move to the commit log.
   Capture 2026-11-03 18:07 in `/root/audioring-180736/` (crackle during and after a SteamVR crash
   loop: load 10-13, kswapd ~46 %, 0.7 GB available; `extra-state.txt` has vmstat and top). Fix later.
 
+- 2026-11-03 22:30: the user recorded the Steam click sound crackling (phone recording, kept on the PC in
+  Downloads/Mobile Devices, not in the repo): bursts of short high-frequency spikes on the clicks.
+
 ## Display
 - Apply the per-panel calibration from `/persist/calibration/display` (decenter, roll, mura).
 - 90 Hz mode, selectable from the headset refresh rate setting (the Frame's quick menu / SteamVR's
@@ -93,14 +96,20 @@ Open items, roughly by priority. Done items move to the commit log.
   button, the room setup (with no playspace it follows `camera.enableConstructRoomView`, set by
   `set_camera_roomview_enabled`). Test scripts in `src/camtap/roomview-test/` (`pt-undo.sh`
   restores the defaults; `pt-flow.sh`-style tests need no `trackedcam_test`).
-- To check in the headset (user): the eye button and Room View On/Off from the dashboard, brightness,
-  stereo comfort, alignment (a fixed 3 m sphere: near objects are off, as expected), the ×0.7 dim
-  (vrcompositor's own, probably while the dashboard is open).
-- Then: a depth mesh in tracking space (floor plane + far sphere, then stereo depth like Meta) for
-  alignment of near objects and 6DoF; passthrough while drawing the boundary; the chaperone's
-  passthrough. The head-locked overlay (`q1-camoverlay`) is shelved.
+- 2026-11-03 late, user feedback and fixes: eye button OK (Prop 2105); scale OK; shaking reduced (capture
+  poses from Monado, frames without one dropped) - to recheck; left eye lower: fixed by the fisheye fit
+  (to recheck); double click Menu/Oculus = toggle room view (vrcompositor bindings); Edge styles hidden and
+  tint slider shown (props 2122 and 1062) - to check that the slider changes the colour.
+- Later: depth from the bottom stereo pair (a per-frame depth mesh, like Meta's libmrengine) so near
+  objects sit at their true depth (the fixed 3 m sphere and the 11 cm camera baseline make them wrong).
 
 ## Boundary
+- Frame room setup (step 7) runs at ~3 fps: every frame vrcompositor creates a 0x0 R8_UNORM linear image
+  (usage transfer src/dst), its 0-byte vkAllocateMemory fails (-3, logged by the compat layer) and
+  "CVulkanVRRenderer::CreateTexture - Unable to allocate memory" repeats. Find what sizes it (probably
+  data the Frame's xrservice provides: floor/surface detection) and give it a size or the data. Also no
+  floor / boundary drawing tools shown. Debug with `touch /tmp/q1-webdebug` + `/root/cdp.py`
+  (`ConstructStore.setRoomSetupStep(7)` starts it).
 - Test in the headset (after passthrough, needed to draw the boundary): the playspace buttons
   (fixed with Prop 11004), and relocalization after a reboot in the persisted map (`q1anchord`,
   docs/boundary.md), then Clear playspace.
