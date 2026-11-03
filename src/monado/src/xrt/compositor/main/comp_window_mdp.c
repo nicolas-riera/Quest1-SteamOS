@@ -116,6 +116,12 @@ struct direct_buf
 //! Re-project when /tmp/quest1-reproj does not say otherwise (it says "on" or "off", and tuning values, see warp_read_knobs)
 #define MDP_WARP_DEFAULT_ON 1
 #define WARP_GRID 40
+//! Floats per warp vertex: position, then a texture coordinate per colour channel (red, green, blue)
+#define WARP_VTX_FLOATS 8
+//! With this file ("1"), SteamVR hands over its eye images undistorted (driver_quest1's ComputeDistortion is
+//! the identity) and the warp does the lens distortion, the chromatic aberration and the re-projection in one
+//! pass, like Meta's TimeWarp: no inverse lens model, so nothing to mismatch. Read at start.
+#define WARP_LENS_FILE "/etc/quest1-warp-lens"
 #define WARP_OUT_SETS 4
 //! A stale frame is not warped again while its delta moved less than this since the last warp (0.4 px)
 #define WARP_SKIP_DEG 0.03f
@@ -215,6 +221,10 @@ struct mdp_direct
 	uint32_t skipped;
 	float o[4]; //!< device space = o * LOCAL, estimated from the render poses
 	bool o_valid;
+	//! The layer's images are undistorted eye renders (WARP_LENS_FILE): the warp does the lens distortion
+	bool lens, lens_read;
+	//! Their extent in tangents of each half's view (h: half 0 is view 1), as driver_quest1 projects them
+	float tan_l[2], tan_r[2], tan_u[2], tan_d[2];
 	uint64_t calibrated_frame;
 	int64_t left_ns; //!< when the layer went away
 
@@ -728,8 +738,10 @@ direct_commit(struct mdp_target *t, const struct direct_buf *b2, int idx, int ou
 #define Q1_PANEL_H_M 0.0660f
 #define Q1_METERS_PER_TAN_ANGLE 0.0389f
 #define Q1_LENS_TO_SCREEN_X 0.002986f
-// mirrored like driver_quest1 QUEST1_DIRECT_FLIP bit 16 (user-judged better): lens centre above the panel centre
-#define Q1_LENS_TO_SCREEN_Y 0.00272f
+// Meta's value: the lens centre 2.72 mm above the panel centre. It was mirrored here once, after driver_quest1's
+// QUEST1_DIRECT_FLIP bit 16; but the driver's tangents run downwards, so its bit 16 is Meta's geometry. The mirrored
+// lens centre (132 px off) made every re-projection shear (2026-11-03, measured against the driver's output).
+#define Q1_LENS_TO_SCREEN_Y -0.00272f
 
 static const float q1_k[11] = {1.0f,    1.0374f, 1.0810f, 1.1330f, 1.1970f, 1.2754f,
                                1.3771f, 1.5133f, 1.7018f, 1.9732f, 2.3000f};
@@ -960,14 +972,27 @@ lens_inverse(float tx, float ty, float *x, float *y)
 	*y = ty / m * r;
 }
 
-//! The mesh of one half buffer (h) of the output: 4 floats per vertex, x y (NDC) u v (texture coordinates).
+//! Meta's chromatic aberration (docs/quest1-lens.md): red and blue tangents scaled against green's
 static void
-warp_build_mesh(int h, const float *delta, float *out)
+q1_chroma(float rsq, float out[3])
+{
+	out[0] = 0.996f - 0.007f * rsq;
+	out[1] = 1.0f;
+	out[2] = 1.006f + 0.020f * rsq;
+}
+
+//! The mesh of one half buffer (h) of the output: WARP_VTX_FLOATS per vertex, x y (NDC) then u v (texture
+//! coordinates) for red, green and blue.
+//! D->lens: each vertex's view direction per channel through the lens model, turned by `delta`, projected into
+//! the undistorted eye image (its tangent extent). Else the layer's image is already lens-corrected: the
+//! direction goes back through the inverse lens model (green only, the same coordinates for the 3 channels).
+static void
+warp_build_mesh(const struct mdp_direct *D, int h, const float *delta, float *out)
 {
 	const int view = 1 - h; // half 0 (x = 0) is the right eye, view 1
 	const float sx = view == 0 ? -1.0f : 1.0f;
 	// each vertex's view direction through the lens does not change: computed once per half
-	static float dirs[2][(WARP_GRID + 1) * (WARP_GRID + 1)][2];
+	static float dirs[2][(WARP_GRID + 1) * (WARP_GRID + 1)][3][2];
 	static bool have_dirs[2];
 	lens_inverse_init();
 	if (!have_dirs[h]) {
@@ -976,34 +1001,54 @@ warp_build_mesh(int h, const float *delta, float *out)
 				float u = 1.0f - (float)i / WARP_GRID, v = 1.0f - (float)j / WARP_GRID;
 				float x = ((u - 0.5f) * Q1_PANEL_W_M + sx * Q1_LENS_TO_SCREEN_X) / Q1_METERS_PER_TAN_ANGLE;
 				float y = ((0.5f - v) * Q1_PANEL_H_M + Q1_LENS_TO_SCREEN_Y) / Q1_METERS_PER_TAN_ANGLE;
-				float s = q1_catmull_rom10(x * x + y * y);
-				dirs[h][j * (WARP_GRID + 1) + i][0] = x * s;
-				dirs[h][j * (WARP_GRID + 1) + i][1] = y * s;
+				float rsq = x * x + y * y, s = q1_catmull_rom10(rsq), c[3];
+				q1_chroma(rsq, c);
+				for (int k = 0; k < 3; k++) {
+					dirs[h][j * (WARP_GRID + 1) + i][k][0] = x * s * c[k];
+					dirs[h][j * (WARP_GRID + 1) + i][k][1] = y * s * c[k];
+				}
 			}
 		}
 		have_dirs[h] = true;
 	}
+	const float tl = D->tan_l[h], tr = D->tan_r[h], tu = D->tan_u[h], td = D->tan_d[h];
 	for (int j = 0; j <= WARP_GRID; j++) {
 		for (int i = 0; i <= WARP_GRID; i++) {
 			float fx = (float)i / WARP_GRID, fy = (float)j / WARP_GRID;
-			float u = 1.0f - fx, v = 1.0f - fy; // the view is the half turned by 180 degrees
-			const float *dv = dirs[h][j * (WARP_GRID + 1) + i];
-			float d[3] = {dv[0], dv[1], -1.0f}, r[3];
-			quat_rotate(delta, d, r);
-			float su = u, sv = v;
-			if (r[2] < -0.05f) {
-				float x2, y2;
-				lens_inverse(r[0] / -r[2], r[1] / -r[2], &x2, &y2);
-				su = (x2 * Q1_METERS_PER_TAN_ANGLE - sx * Q1_LENS_TO_SCREEN_X) / Q1_PANEL_W_M + 0.5f;
-				sv = 0.5f - (y2 * Q1_METERS_PER_TAN_ANGLE - Q1_LENS_TO_SCREEN_Y) / Q1_PANEL_H_M;
-			} else {
-				su = sv = -10.0f; // behind the eye: black
-			}
-			float *vtx = out + 4 * (j * (WARP_GRID + 1) + i);
+			float *vtx = out + WARP_VTX_FLOATS * (j * (WARP_GRID + 1) + i);
 			vtx[0] = 2.0f * fx - 1.0f;
 			vtx[1] = 2.0f * fy - 1.0f;
-			vtx[2] = 1.0f - su;
-			vtx[3] = 1.0f - sv;
+			for (int k = 0; k < 3; k++) {
+				if (!D->lens && k != 1) {
+					continue;
+				}
+				const float *dv = dirs[h][j * (WARP_GRID + 1) + i][k];
+				float d[3] = {dv[0], dv[1], -1.0f}, r[3];
+				quat_rotate(delta, d, r);
+				float tu_out = -10.0f, tv_out = -10.0f; // behind the eye: black
+				if (r[2] < -0.05f) {
+					float tx = r[0] / -r[2], ty = r[1] / -r[2];
+					if (D->lens) {
+						// the undistorted image as vrcompositor leaves it in the half: upright, x along
+						// the buffer's x, the top of the view (tu) in the first row
+						tu_out = (tx - tl) / (tr - tl);
+						tv_out = (tu - ty) / (tu - td);
+					} else {
+						float x2, y2;
+						lens_inverse(tx, ty, &x2, &y2);
+						float su = (x2 * Q1_METERS_PER_TAN_ANGLE - sx * Q1_LENS_TO_SCREEN_X) / Q1_PANEL_W_M + 0.5f;
+						float sv = 0.5f - (y2 * Q1_METERS_PER_TAN_ANGLE - Q1_LENS_TO_SCREEN_Y) / Q1_PANEL_H_M;
+						tu_out = 1.0f - su;
+						tv_out = 1.0f - sv;
+					}
+				}
+				vtx[2 + 2 * k] = tu_out;
+				vtx[3 + 2 * k] = tv_out;
+			}
+			if (!D->lens) {
+				vtx[2] = vtx[6] = vtx[4];
+				vtx[3] = vtx[7] = vtx[5];
+			}
 		}
 	}
 }
@@ -1151,6 +1196,9 @@ warp_import(struct mdp_target *t, struct direct_buf *b, bool output)
 }
 
 //! Call with D->lock held: the Vulkan objects of the warp pass and the output buffers. False (once) on failure.
+static void
+warp_lens_setup(struct mdp_target *t);
+
 static bool
 warp_init(struct mdp_target *t)
 {
@@ -1207,8 +1255,11 @@ warp_init(struct mdp_target *t)
 	                                   .pSetLayouts = &V->dsl};
 	VkShaderModuleCreateInfo vsci = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
 	                                 .codeSize = sizeof(q1_warp_vert_spv), .pCode = q1_warp_vert_spv};
+	// three samples (one per channel) only when the warp does the lens' chromatic aberration
+	warp_lens_setup(t);
 	VkShaderModuleCreateInfo fsci = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-	                                 .codeSize = sizeof(q1_warp_frag_spv), .pCode = q1_warp_frag_spv};
+	                                 .codeSize = D->lens ? sizeof(q1_warp_frag_spv) : sizeof(q1_warp_frag1_spv),
+	                                 .pCode = D->lens ? q1_warp_frag_spv : q1_warp_frag1_spv};
 	VkShaderModule vs = VK_NULL_HANDLE, fs = VK_NULL_HANDLE;
 	if (vk->vkCreatePipelineLayout(vk->device, &plci, NULL, &V->pl) != VK_SUCCESS ||
 	    vk->vkCreateShaderModule(vk->device, &vsci, NULL, &vs) != VK_SUCCESS ||
@@ -1220,12 +1271,14 @@ warp_init(struct mdp_target *t)
 	    {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_VERTEX_BIT, vs, "main", NULL},
 	    {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_FRAGMENT_BIT, fs, "main", NULL},
 	};
-	VkVertexInputBindingDescription vb = {0, 4 * sizeof(float), VK_VERTEX_INPUT_RATE_VERTEX};
-	VkVertexInputAttributeDescription va[2] = {{0, 0, VK_FORMAT_R32G32_SFLOAT, 0},
-	                                           {1, 0, VK_FORMAT_R32G32_SFLOAT, 2 * sizeof(float)}};
+	VkVertexInputBindingDescription vb = {0, WARP_VTX_FLOATS * sizeof(float), VK_VERTEX_INPUT_RATE_VERTEX};
+	VkVertexInputAttributeDescription va[4] = {{0, 0, VK_FORMAT_R32G32_SFLOAT, 0},
+	                                           {1, 0, VK_FORMAT_R32G32_SFLOAT, 2 * sizeof(float)},
+	                                           {2, 0, VK_FORMAT_R32G32_SFLOAT, 4 * sizeof(float)},
+	                                           {3, 0, VK_FORMAT_R32G32_SFLOAT, 6 * sizeof(float)}};
 	VkPipelineVertexInputStateCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
 	                                           .vertexBindingDescriptionCount = 1, .pVertexBindingDescriptions = &vb,
-	                                           .vertexAttributeDescriptionCount = 2, .pVertexAttributeDescriptions = va};
+	                                           .vertexAttributeDescriptionCount = 4, .pVertexAttributeDescriptions = va};
 	VkPipelineInputAssemblyStateCreateInfo ia = {.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
 	                                             .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST};
 	VkPipelineViewportStateCreateInfo vp = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
@@ -1266,7 +1319,7 @@ warp_init(struct mdp_target *t)
 	// vertices (host visible, rewritten for every warp) and indices
 	const uint32_t nverts = 2 * (WARP_GRID + 1) * (WARP_GRID + 1);
 	V->nidx = WARP_GRID * WARP_GRID * 6;
-	VkBufferCreateInfo bci = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = nverts * 4 * sizeof(float),
+	VkBufferCreateInfo bci = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = nverts * WARP_VTX_FLOATS * sizeof(float),
 	                          .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
 	VkBufferCreateInfo ici = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = V->nidx * sizeof(uint16_t),
 	                          .usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
@@ -1425,6 +1478,41 @@ warp_free_set(struct mdp_direct *D)
 	return -1;
 }
 
+//! Reads WARP_LENS_FILE and the views' tangent extents once (D->lens).
+static void
+warp_lens_setup(struct mdp_target *t)
+{
+	struct mdp_direct *D = &t->direct;
+	if (D->lens_read) {
+		return;
+	}
+	D->lens_read = true;
+	FILE *lf = fopen(WARP_LENS_FILE, "r");
+	D->lens = lf != NULL && fgetc(lf) == '1';
+	if (lf != NULL) {
+		fclose(lf);
+	}
+	struct xrt_device *xdev = t->base.c->xdev;
+	if (D->lens && (xdev == NULL || xdev->hmd == NULL)) {
+		U_LOG_E("mdp: warp: no HMD views, the lens distortion stays with SteamVR");
+		D->lens = false;
+	}
+	if (!D->lens) {
+		return;
+	}
+	for (int h = 0; h < 2; h++) {
+		// driver_quest1 projects the view's angles (its QUEST1_DIRECT_FLIP 16 swaps up and down in its
+		// downward-running tangents: the same extent)
+		const struct xrt_fov *f = &xdev->hmd->distortion.fov[1 - h];
+		D->tan_l[h] = tanf(f->angle_left);
+		D->tan_r[h] = tanf(f->angle_right);
+		D->tan_u[h] = tanf(f->angle_up);
+		D->tan_d[h] = tanf(f->angle_down);
+	}
+	U_LOG_W("mdp: warp: lens distortion here (%s): view 0 tangents l %.3f r %.3f u %.3f d %.3f", WARP_LENS_FILE,
+	        D->tan_l[1], D->tan_r[1], D->tan_u[1], D->tan_d[1]);
+}
+
 //! Call with D->lock held: draw the latest frame warped by `delta` into output set `o`. GPU time in ms.
 static bool
 warp_render(struct mdp_target *t, int o, const float *delta, double *gpu_ms)
@@ -1441,7 +1529,7 @@ warp_render(struct mdp_target *t, int o, const float *delta, double *gpu_ms)
 	}
 	int64_t tm0 = os_monotonic_get_ns();
 	for (int h = 0; h < 2; h++) {
-		warp_build_mesh(h, delta, V->vptr + h * 4 * (WARP_GRID + 1) * (WARP_GRID + 1));
+		warp_build_mesh(D, h, delta, V->vptr + h * WARP_VTX_FLOATS * (WARP_GRID + 1) * (WARP_GRID + 1));
 	}
 	D->stats.mesh_ms_sum += (double)(os_monotonic_get_ns() - tm0) / 1e6;
 
@@ -1477,7 +1565,7 @@ warp_render(struct mdp_target *t, int o, const float *delta, double *gpu_ms)
 		vk->vkCmdSetScissor(cmd, 0, 1, &sc);
 		vk->vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, V->pipe);
 		vk->vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, V->pl, 0, 1, &src[h].set, 0, NULL);
-		VkDeviceSize off = (VkDeviceSize)h * 4 * sizeof(float) * (WARP_GRID + 1) * (WARP_GRID + 1);
+		VkDeviceSize off = (VkDeviceSize)h * WARP_VTX_FLOATS * sizeof(float) * (WARP_GRID + 1) * (WARP_GRID + 1);
 		vk->vkCmdBindVertexBuffers(cmd, 0, 1, &V->vbuf, &off);
 		vk->vkCmdBindIndexBuffer(cmd, V->ibuf, 0, VK_INDEX_TYPE_UINT16);
 		vk->vkCmdDrawIndexed(cmd, V->nidx, 1, 0, 0, 0);
@@ -1672,10 +1760,26 @@ direct_tick(struct mdp_target *t, int64_t vsync)
 		}
 		D->need_refresh = true;
 	} else if (vsync > 0 && D->latest >= 0) {
+		warp_lens_setup(t);
 		bool commit_raw = D->fresh || D->need_refresh;
 		bool warped = false;
-		bool want_warp = !D->knobs.off && D->latest_frame.pose_valid && D->buf[D->latest][1].ahb != NULL;
-		if (want_warp) {
+		bool want_warp = (D->lens || !D->knobs.off) && D->buf[D->latest][1].ahb != NULL;
+		if (want_warp && D->lens && (D->knobs.off || !D->latest_frame.pose_valid)) {
+			// undistorted images are never shown as they are: warp by the identity
+			static const float identity[4] = {0, 0, 0, 1};
+			commit_raw = false;
+			if ((D->fresh || D->need_refresh) && warp_init(t)) {
+				int o = warp_free_set(D);
+				double gpu_ms = 0;
+				if (o >= 0 && warp_render(t, o, identity, &gpu_ms) &&
+				    direct_commit(t, D->out[o], -1, o, direct_ack_frame(D))) {
+					warped = true;
+					D->held_frame = D->latest_frame.frame;
+					memcpy(D->held_delta, identity, sizeof(identity));
+					D->stats.warp_commits++;
+				}
+			}
+		} else if (want_warp) {
 			// the pose the frame is shown for: the commit is latched at the next vsync, scanned out from then on
 			int64_t display_ns = vsync + (int64_t)((D->knobs.delay_ms > 0 ? D->knobs.delay_ms * 1e6 : 1.5 * MDP_PERIOD_NS));
 			float qd[4], qr[4];
@@ -1754,7 +1858,7 @@ direct_tick(struct mdp_target *t, int64_t vsync)
 					// the panels show this frame warped to a pose within a fraction of a pixel of this one
 					D->stats.skipped++;
 					commit_raw = false;
-				} else if (D->fresh && angle < D->knobs.thr_deg && D->knobs.yaw_deg == 0) {
+				} else if (!D->lens && D->fresh && angle < D->knobs.thr_deg && D->knobs.yaw_deg == 0) {
 					commit_raw = true; // close enough: no GPU work
 				} else if (warp_init(t)) {
 					int o = warp_free_set(D);

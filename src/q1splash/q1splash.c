@@ -52,9 +52,10 @@ typedef struct {
 #define PANEL_H 1600
 
 // Each lens axis in its half of the buffer, as Monado's warp has it (comp_window_mdp.c: lens centre
-// 2.986 mm towards the nose and 2.72 mm up from the panel centre, 41.25 um pixels): the image sits
+// 2.986 mm towards the nose and 2.72 mm up from the panel centre, 41.25 um pixels, the buffer seen turned
+// by 180 degrees): the image sits
 // at infinity, centered in both eyes.
-static const int lens_x[2] = {PANEL_W / 2 + 72, PANEL_W / 2 - 72}, lens_y = PANEL_H / 2 - 66;
+static const int lens_x[2] = {PANEL_W / 2 + 72, PANEL_W / 2 - 72}, lens_y = PANEL_H / 2 + 66;
 
 static volatile sig_atomic_t stop;
 static void on_signal(int s) { stop = 1; }

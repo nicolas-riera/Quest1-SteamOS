@@ -1600,7 +1600,16 @@ public:
 	DistortionCoordinates_t ComputeDistortion(EVREye eye, float u, float v) override
 	{
 		DistortionCoordinates_t d;
-		if (!xr.directScanout) {
+		// /etc/quest1-warp-lens "1": Monado's warp does the lens distortion and the chromatic aberration with
+		// the re-projection in one pass (like Meta's TimeWarp), vrcompositor hands over the undistorted eyes
+		static const bool monadoLens = [] {
+			FILE *f = fopen("/etc/quest1-warp-lens", "r");
+			bool on = f && fgetc(f) == '1';
+			if (f)
+				fclose(f);
+			return on;
+		}();
+		if (!xr.directScanout || monadoLens) {
 			d.rfRed[0] = d.rfGreen[0] = d.rfBlue[0] = u;
 			d.rfRed[1] = d.rfGreen[1] = d.rfBlue[1] = v;
 			return d;

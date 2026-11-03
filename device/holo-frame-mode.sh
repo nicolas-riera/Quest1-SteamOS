@@ -88,6 +88,14 @@ def main():
     d = json.load(open(P)) if os.path.exists(P) else {}
     for sec, kv in FRAME.items():
         d.setdefault(sec, {}).update(kv)
+    # with Monado's warp doing the lens distortion and its chromatic aberration (/etc/quest1-warp-lens),
+    # vrcompositor's distortion pass is a copy: one sample per pixel instead of three
+    try:
+        with open("/etc/quest1-warp-lens") as f:
+            monado_lens = f.read(1) == "1"
+    except OSError:
+        monado_lens = False
+    d["steamvr"]["enableAchromaticDistortion"] = monado_lens
     # safe mode after a crash (same as /root/vrunsafe.py)
     s = d.setdefault("steamvr", {})
     s["enableSafeMode"] = False
