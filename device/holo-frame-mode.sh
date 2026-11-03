@@ -76,6 +76,9 @@ FRAME = {
         "omitDesktopWebhelpers": True,
         "showDashboardSettings": True,
         "laserMouseAutoHideTimeout": 7.0,
+        # vrcompositor otherwise ignores the driver's per-channel distortion: no chromatic
+        # aberration correction at all (red/cyan fringes towards the edges; 2026-11-03)
+        "enableAchromaticDistortion": False,
     },
 }
 
