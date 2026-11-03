@@ -1105,9 +1105,9 @@ public:
 	{
 		if (running.exchange(true))
 			return;
+		this->poke = poke;
 		CreateQueues();
-		if (poke)
-			thread = std::thread([this] { Run(); });
+		thread = std::thread([this] { Run(); });
 	}
 	void Stop()
 	{
@@ -1143,7 +1143,7 @@ private:
 				queues.push_back(h);
 		}
 		if (queues.size() == 2)
-			PublishMesh();
+			BuildMesh();
 	}
 
 	bool WriteProp(uint64_t root, const char *key, uint32_t tag, void *value, uint32_t size)
@@ -1163,7 +1163,7 @@ private:
 	//! The depth mesh vrcompositor's 3D roomview draws (see docs/passthrough.md): a layout block (index buffer, vertex and
 	//! index counts), a data block (float3 vertices, pose of the mesh in tracking space) and the queue-wide meshIsUpToDate.
 	//! For now a static sphere around the playspace centre, 3 m radius, seen from inside.
-	void PublishMesh()
+	void BuildMesh()
 	{
 		EVRInitError err = VRInitError_None;
 		paths = (PathsIface *)VRDriverContext()->GetGenericInterface("IVRPaths_001", &err);
@@ -1173,8 +1173,6 @@ private:
 		}
 		const int rings = 24, segs = 48;
 		const float radius = (float)atof(Env("QUEST1_CAMERA_MESH_RADIUS", "3")), cy = 0.0f; // around the head: vrcompositor draws the mesh in head space (its _m0 stays identity)
-		std::vector<float> verts;
-		std::vector<uint32_t> idx;
 		for (int r = 0; r <= rings; r++) {
 			float th = (float)M_PI * r / rings;
 			for (int sgm = 0; sgm <= segs; sgm++) {
@@ -1190,15 +1188,25 @@ private:
 				uint32_t t[6] = {a, b, a + 1, a + 1, b, b + 1};
 				idx.insert(idx.end(), t, t + 6);
 			}
-		int32_t vertexCount = (int32_t)(verts.size() / 3), indexCount = (int32_t)idx.size();
-		uint64_t layoutId = 1, meshId = 1;
+		CLog("quest1 camera: depth mesh %zu vertices, %zu indices\n", verts.size() / 3, idx.size());
+	}
 
+	//! Publishes the mesh: the layout block, then a data block with a new meshId. vrcompositor drops a data block whose
+	//! layoutId does not match the layout it has read so far, so both are published again every second (it rebuilds its
+	//! buffers only when layoutId changes, and re-reads the vertices when meshId changes).
+	void PublishMesh(uint64_t meshId)
+	{
+		if (!paths || queues.size() != 2 || verts.empty())
+			return;
+		int32_t vertexCount = (int32_t)(verts.size() / 3), indexCount = (int32_t)idx.size();
+		uint64_t layoutId = 1;
 		uint64_t block = 0;
 		void *buf = nullptr;
 		int e = table->AcquireWriteOnlyBlock(queues[1], &block, &buf);
-		CLog("quest1 camera: layout block: error %d\n", e);
-		if (e)
+		if (e) {
+			CLog("quest1 camera: layout block: error %d\n", e);
 			return;
+		}
 		memcpy(buf, idx.data(), idx.size() * 4);
 		WriteProp(block, "/meshLayout/layoutId", 3, &layoutId, 8);
 		WriteProp(block, "/meshLayout/vertexCount", 2, &vertexCount, 4);
@@ -1206,9 +1214,10 @@ private:
 		table->ReleaseWriteOnlyBlock(queues[1], block);
 
 		e = table->AcquireWriteOnlyBlock(queues[0], &block, &buf);
-		CLog("quest1 camera: data block: error %d\n", e);
-		if (e)
+		if (e) {
+			CLog("quest1 camera: data block: error %d\n", e);
 			return;
+		}
 		memcpy(buf, verts.data(), verts.size() * 4);
 		int32_t elementCount = (int32_t)verts.size();
 		float pose[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
@@ -1221,7 +1230,8 @@ private:
 		table->ReleaseWriteOnlyBlock(queues[0], block);
 		uint8_t upToDate = 1;
 		WriteProp(queues[0], "/meshData/meshIsUpToDate", 4, &upToDate, 1);
-		CLog("quest1 camera: depth mesh published (%d vertices, %d indices)\n", vertexCount, indexCount);
+		if (meshId == 1)
+			CLog("quest1 camera: depth mesh published\n");
 	}
 
 	//! maps the 25088-byte VR_CameraPassthroughState file and keeps its "camera enabled" byte set
@@ -1229,8 +1239,10 @@ private:
 	{
 		uint8_t *state = nullptr;
 		size_t size = 25088;
+		uint64_t meshId = 0;
 		while (running) {
-			if (!state) {
+			PublishMesh(++meshId);
+			if (poke && !state) {
 				if (DIR *d = opendir("/dev/shm")) {
 					while (dirent *de = readdir(d)) {
 						if (strncmp(de->d_name, "u", 1) || !strstr(de->d_name, "-Shm_"))
@@ -1263,7 +1275,10 @@ private:
 	}
 
 	std::atomic<bool> running{false};
+	bool poke = true;
 	std::thread thread;
+	std::vector<float> verts;   //!< the depth mesh (BuildMesh)
+	std::vector<uint32_t> idx;
 	BlockQueueIface *table = nullptr;
 	PathsIface *paths = nullptr;
 	std::vector<uint64_t> queues;
