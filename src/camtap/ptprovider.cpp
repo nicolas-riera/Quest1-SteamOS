@@ -15,8 +15,8 @@
 // The roomview data is enabled (block byte +4) only once a frame is in place, and disabled again on exit or when the
 // camera ring goes stale: never leave it enabled without frames (vrcompositor's watchdog aborts).
 //
-// Env: PT_BLOCK (0|1, default 0), PT_N (records per camera, default 4), PT_HZ (default 30), PT_PATTERN=1 (synthetic
-// gradient instead of camera frames), PT_DUMP=1 (log record states once a second), PT_RING (ring path).
+// Env: PT_BLOCK (0|1, default 0), PT_N (records per camera, default 4), PT_HZ (default 30), PT_PATTERN=1|2 (synthetic
+// gradient or checkerboard instead of camera frames), PT_DUMP=1 (log record states once a second), PT_RING (ring path).
 // No frame content is logged or stored.
 #include <openvr.h>
 
@@ -121,6 +121,16 @@ static void FillDesc(uint8_t *desc, double captureS, int cam)
 	desc[224] = 1;
 }
 
+//! The "params" of IVRCameraPassthroughInternal (GetParams/SetParams, vrclient 0x1a49d8/0x1a4bf8) are 5 bytes at state+2: the
+//! compositor shows the roomview while state[2] is set (GetParams(nullptr) returns it, vrcompositor 0x15dda0, called per frame at
+//! 0x9ee6c) and reads state[4] as the "wanted" byte of its snapshot (+830, compared with the running state +837). On the
+//! Steam Frame the driver sets them (passthrough on/off); here the provider does while frames flow.
+static void SetShow(uint8_t *state, bool on)
+{
+	state[2] = on;
+	state[4] = on;
+}
+
 struct Img
 {
 	SharedTextureHandle_t h = 0;
@@ -135,7 +145,7 @@ int main()
 	const int blk = getenv("PT_BLOCK") ? atoi(getenv("PT_BLOCK")) & 1 : 0;
 	const int N = getenv("PT_N") ? std::max(2, std::min(16, atoi(getenv("PT_N")))) : 4;
 	const int hz = getenv("PT_HZ") ? std::max(1, atoi(getenv("PT_HZ"))) : 30;
-	const bool pattern = getenv("PT_PATTERN") != nullptr;
+	const int pattern = getenv("PT_PATTERN") ? atoi(getenv("PT_PATTERN")) : 0; // 1 gradient, 2 checkerboard
 	const bool dump = getenv("PT_DUMP") != nullptr;
 	const char *ringPath = getenv("PT_RING") ? getenv("PT_RING") : Q1CAM_RING_DEFAULT_PATH;
 
@@ -262,8 +272,13 @@ int main()
 				for (int y = 0; y < kH; y++)
 					for (int x = 0; x < kW; x++) {
 						uint8_t *p = im.map + ((size_t)y * kW + x) * 4;
-						p[0] = (uint8_t)(x * 255 / kW + (now / 20000000)), p[1] = (uint8_t)(y * 255 / kH);
-						p[2] = c ? 255 : 0;
+						if (pattern == 2) { // 32 px checkerboard, a corner marked, to check the memory layout
+							uint8_t v = ((x / 32 + y / 32) & 1) ? 255 : 32;
+							p[0] = x < 64 && y < 64 ? 255 : v, p[1] = v, p[2] = c ? v : 0;
+						} else {
+							p[0] = (uint8_t)(x * 255 / kW + (now / 20000000)), p[1] = (uint8_t)(y * 255 / kH);
+							p[2] = c ? 255 : 0;
+						}
 						p[3] = 255;
 					}
 			}
@@ -311,6 +326,7 @@ int main()
 			}
 			if (!b[4]) {
 				b[4] = 1; // enable only now that a frame is in place
+				SetShow(st, true);
 				printf("ptprovider: roomview data enabled\n");
 				fflush(stdout);
 			}
@@ -318,6 +334,7 @@ int main()
 		// no frame for 2 s: disable so that the compositor does not wait for frames
 		if (b[4] && now - lastFrame > 2000000000LL) {
 			b[4] = 0;
+			SetShow(st, false);
 			printf("ptprovider: no frames for 2 s, disabled\n");
 			fflush(stdout);
 		}
@@ -338,6 +355,7 @@ int main()
 			next = NowNs();
 	}
 	b[4] = 0; // never leave the roomview enabled without a provider
+	SetShow(st, false);
 	b[0x40] = 0;
 	for (int c = 0; c < 2; c++)
 		for (int k = 0; k < N; k++)

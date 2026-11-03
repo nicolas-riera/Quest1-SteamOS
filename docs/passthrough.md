@@ -150,3 +150,33 @@ compositor connection and every allocation fails):
   vrserver 0x77ec8.., manager vtable at 0x25d208..) to know what the driver must write.
 - Without a mesh the roomview draws nothing. Next: read the manager's header-property write API, publish layout + data blocks
   (flat quad), verify with a synthetic pattern.
+
+## Depth mesh protocol and the "show" params (2026-11-03)
+Reversed from vrcompositor 0x15fcc0 (per-frame roomview update), 0x15e300 (geometry build) and vrclient CVRCameraPassthroughInternal.
+- Block queue header "properties" are IVRPaths_001 values (`ReadPathBatch/WritePathBatch/StringToHandle/HandleToString`, vtable slots
+  0..3; a driver gets it with `GetGenericInterface("IVRPaths_001")`; PathWrite_t/PathRead_t as in openvr_capi.h, the driver SDK header
+  lacks them). Root = the queue handle (queue-wide) or the handle of an acquired block (per block), the key is a path string.
+- Layout queue `/xrservice/roomview3d/meshLayout`, one block: buffer = `indexCount` u32 triangle indices (the compositor swaps the
+  2nd/3rd index of each triangle); block props `/meshLayout/layoutId` (u64, tag 3), `/meshLayout/vertexCount` (i32, tag 2),
+  `/meshLayout/indexCount` (i32). The compositor rebuilds its GPU buffers only when layoutId changes.
+- Data queue `/xrservice/roomview3d/meshData`: buffer = `vertexCount` x float3 vertices; block props `/meshData/meshId` (u64, must
+  change for the compositor to re-read), `/meshData/layoutId` (u64, must equal the layout's), `/meshData/elementCount` (i32 = 3 x
+  vertexCount), `/meshData/rawFromMeshPose` (HmdMatrix34_t, tag 20), `/meshData/posePredictionBaseTime` (double, tag 7);
+  queue-wide (root = the queue handle) `/meshData/meshIsUpToDate` (bool, tag 4, must be 1).
+- Write sequence in the driver (`camera.cpp` `CompositorGate::PublishMesh`, props mode): AcquireWriteOnlyBlock (IVRBlockQueue vtable
+  slot 3), WritePathBatch per key on the block handle, ReleaseWriteOnlyBlock (slot 4); queues created with header size 1024. Every write
+  returns no error. The mesh is a static 3 m sphere (inside view, `QUEST1_CAMERA_MESH_RADIUS`) for now.
+- The "params" of IVRCameraPassthroughInternal (GetParams/SetParams) are 5 bytes at state+2 of the shared state. The compositor shows
+  the roomview only while `state[2]` != 0 (GetParams(nullptr), checked each frame at vrcompositor 0x9ee6c: this is the "w27" that used
+  to be forced in gdb) and reads `state[4]` into its snapshot byte +830 (compared with the running state +837). The Frame driver sets
+  them; `ptprovider` now sets both while frames flow (`SetShow`). Also: a client has to hold `AcquireVideoStreamingService`
+  (`trackedcam_test` with `PT_ROOMVIEW=2 PT_HOLD=<s>`) for the compositor to keep the depth mesh queues connected, and the provider must
+  have been enabled for ~15 s before that (otherwise "Failed to start RoomView since there's no camera enabled").
+- Layer snapshots taken before the params were set showed only SteamVR's default orange background (the mesh was not read:
+  vrcompositor 0x15fdd4, the read section, needs byte +835 which needs state[2]). Drawing with the params set: see todo.
+- `ptprovider` `PT_PATTERN=2` draws a 32 px checkerboard (corner marked) to check the shared image memory layout; `PT_PATTERN=1` the gradient.
+- More gates found (2026-11-03 pm): per frame the compositor (0x9ee6c..0x9ee8c) needs byte +3421 of its frame state, copied from the 8th
+  argument of 0x63920, = `camera.forceSceneAlphaBlending` or app flag bit 19; with the setting true it still read 0 here. Forcing it in
+  gdb (`$x27 = 1` at 0x9ee6c) made the compositor build and upload the sphere (1225 vertices, 6912 indices) but a layer snapshot with the
+  pattern provider still showed only SteamVR's default scene: the draw has further conditions not found yet (candidates: roomViewStyle,
+  stencil/chaperone bounds, byte +833/+864 in 0x15fcc0). `trackedcam_test` has `PT_BLEND=1` to set the setting.

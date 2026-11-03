@@ -1220,6 +1220,34 @@ struct BlockQueueIface
 		                                                                                                headerSize, blockCount, flags);
 	}
 	int Destroy(uint64_t handle) { return ((int (*)(void *, uint64_t))vtbl[2])(this, handle); }
+	int AcquireWriteOnlyBlock(uint64_t queue, uint64_t *block, void **buffer)
+	{
+		return ((int (*)(void *, uint64_t, uint64_t *, void **))vtbl[3])(this, queue, block, buffer);
+	}
+	int ReleaseWriteOnlyBlock(uint64_t queue, uint64_t block) { return ((int (*)(void *, uint64_t, uint64_t))vtbl[4])(this, queue, block); }
+};
+
+//! IVRPaths_001 (not in this SDK's openvr_driver.h): the block queues' header "properties" are path-keyed values on the
+//! queue handle (queue-wide) or on an acquired block handle (per block), read by vrcompositor with ReadPathBatch.
+struct PathWrite
+{
+	uint64_t path;
+	int32_t writeType; // PropertyWrite_Set
+	int32_t setError;
+	void *buffer;
+	uint32_t size;
+	uint32_t tag;
+	int32_t error;
+	const char *pszPath;
+};
+struct PathsIface
+{
+	void **vtbl;
+	int WritePathBatch(uint64_t root, PathWrite *batch, uint32_t count)
+	{
+		return ((int (*)(void *, uint64_t, PathWrite *, uint32_t))vtbl[1])(this, root, batch, count);
+	}
+	int StringToHandle(uint64_t *handle, const char *path) { return ((int (*)(void *, uint64_t *, const char *))vtbl[2])(this, handle, path); }
 };
 
 class CompositorGate
@@ -1262,11 +1290,91 @@ private:
 			char path[64];
 			snprintf(path, sizeof(path), "%s", name);
 			uint64_t h = 0;
-			int e = table->Create(&h, path, dataSize, 64, 3, 0);
+			int e = table->Create(&h, path, dataSize, 1024, 3, 0);
 			CLog("quest1 camera: block queue %s: error %d\n", name, e);
 			if (!e)
 				queues.push_back(h);
 		}
+		if (queues.size() == 2)
+			PublishMesh();
+	}
+
+	bool WriteProp(uint64_t root, const char *key, uint32_t tag, void *value, uint32_t size)
+	{
+		PathWrite w = {};
+		if (paths->StringToHandle(&w.path, key))
+			return false;
+		w.buffer = value;
+		w.size = size;
+		w.tag = tag;
+		int e = paths->WritePathBatch(root, &w, 1);
+		if (e || w.error)
+			CLog("quest1 camera: write %s on %llx: %d/%d\n", key, (unsigned long long)root, e, w.error);
+		return !e && !w.error;
+	}
+
+	//! The depth mesh vrcompositor's 3D roomview draws (see docs/passthrough.md): a layout block (index buffer, vertex and
+	//! index counts), a data block (float3 vertices, pose of the mesh in tracking space) and the queue-wide meshIsUpToDate.
+	//! For now a static sphere around the playspace centre, 3 m radius, seen from inside.
+	void PublishMesh()
+	{
+		EVRInitError err = VRInitError_None;
+		paths = (PathsIface *)VRDriverContext()->GetGenericInterface("IVRPaths_001", &err);
+		if (!paths) {
+			CLog("quest1 camera: no IVRPaths (%d), no depth mesh\n", (int)err);
+			return;
+		}
+		const int rings = 24, segs = 48;
+		const float radius = (float)atof(Env("QUEST1_CAMERA_MESH_RADIUS", "3")), cy = 1.4f;
+		std::vector<float> verts;
+		std::vector<uint32_t> idx;
+		for (int r = 0; r <= rings; r++) {
+			float th = (float)M_PI * r / rings;
+			for (int sgm = 0; sgm <= segs; sgm++) {
+				float ph = 2.f * (float)M_PI * sgm / segs;
+				verts.push_back(radius * sinf(th) * cosf(ph));
+				verts.push_back(cy + radius * cosf(th));
+				verts.push_back(radius * sinf(th) * sinf(ph));
+			}
+		}
+		for (int r = 0; r < rings; r++)
+			for (int sgm = 0; sgm < segs; sgm++) {
+				uint32_t a = r * (segs + 1) + sgm, b = a + segs + 1;
+				uint32_t t[6] = {a, b, a + 1, a + 1, b, b + 1};
+				idx.insert(idx.end(), t, t + 6);
+			}
+		int32_t vertexCount = (int32_t)(verts.size() / 3), indexCount = (int32_t)idx.size();
+		uint64_t layoutId = 1, meshId = 1;
+
+		uint64_t block = 0;
+		void *buf = nullptr;
+		int e = table->AcquireWriteOnlyBlock(queues[1], &block, &buf);
+		CLog("quest1 camera: layout block: error %d\n", e);
+		if (e)
+			return;
+		memcpy(buf, idx.data(), idx.size() * 4);
+		WriteProp(block, "/meshLayout/layoutId", 3, &layoutId, 8);
+		WriteProp(block, "/meshLayout/vertexCount", 2, &vertexCount, 4);
+		WriteProp(block, "/meshLayout/indexCount", 2, &indexCount, 4);
+		table->ReleaseWriteOnlyBlock(queues[1], block);
+
+		e = table->AcquireWriteOnlyBlock(queues[0], &block, &buf);
+		CLog("quest1 camera: data block: error %d\n", e);
+		if (e)
+			return;
+		memcpy(buf, verts.data(), verts.size() * 4);
+		int32_t elementCount = (int32_t)verts.size();
+		float pose[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+		double baseTime = 0;
+		WriteProp(block, "/meshData/meshId", 3, &meshId, 8);
+		WriteProp(block, "/meshData/layoutId", 3, &layoutId, 8);
+		WriteProp(block, "/meshData/elementCount", 2, &elementCount, 4);
+		WriteProp(block, "/meshData/rawFromMeshPose", 20, pose, sizeof(pose));
+		WriteProp(block, "/meshData/posePredictionBaseTime", 7, &baseTime, 8);
+		table->ReleaseWriteOnlyBlock(queues[0], block);
+		uint8_t upToDate = 1;
+		WriteProp(queues[0], "/meshData/meshIsUpToDate", 4, &upToDate, 1);
+		CLog("quest1 camera: depth mesh published (%d vertices, %d indices)\n", vertexCount, indexCount);
 	}
 
 	//! maps the 25088-byte VR_CameraPassthroughState file and keeps its "camera enabled" byte set
@@ -1310,6 +1418,7 @@ private:
 	std::atomic<bool> running{false};
 	std::thread thread;
 	BlockQueueIface *table = nullptr;
+	PathsIface *paths = nullptr;
 	std::vector<uint64_t> queues;
 };
 

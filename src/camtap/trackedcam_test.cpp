@@ -28,6 +28,10 @@ int main(int argc, char **argv)
 		printf("toggled camera.enableCamera (err %d)\n", (int)se);
 		usleep(1000000);
 	}
+	if (getenv("PT_BLEND")) { // the compositor only draws the roomview when this is set (vrcompositor 0x147fd4 -> 0x63920 -> byte +3421)
+		EVRSettingsError se;
+		VRSettings()->SetBool("camera", "forceSceneAlphaBlending", atoi(getenv("PT_BLEND")) != 0, &se);
+	}
 	if (getenv("PT_ROOMVIEW")) { // toggle camera.roomView (the compositor's passthrough view)
 		EVRSettingsError se;
 		int mode = atoi(getenv("PT_ROOMVIEW")); // 1 = 2D, 2 = 3D (depth mesh)
@@ -56,6 +60,12 @@ int main(int argc, char **argv)
 	printf("Acquire: err %d (%s) handle %llu\n", e, tc->GetCameraErrorNameFromEnum(e), (unsigned long long)hd);
 	if (e != VRTrackedCameraError_None)
 		return 2;
+	if (const char *hold = getenv("PT_HOLD")) { // keep the streaming service (and so the compositor's roomview) up for N seconds
+		sleep(atoi(hold));
+		tc->ReleaseVideoStreamingService(hd);
+		VR_Shutdown();
+		return 0;
+	}
 	std::vector<uint8_t> buf(sz);
 	uint32_t lastSeq = 0;
 	int got = 0;
