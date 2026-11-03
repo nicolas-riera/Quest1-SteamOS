@@ -15,6 +15,9 @@
 // The roomview data is enabled (block byte +4) only once a frame is in place, and disabled again on exit or when the
 // camera ring goes stale: never leave it enabled without frames (vrcompositor's watchdog aborts).
 //
+// Pixels: vrcompositor's roomview fragment shader reads the frame as YUV in an RGBA8 image (R = Cr, G = Y, B = Cb, chroma
+// centred on 0.5019) and converts it to linear RGB; the memory is NV12 (see WriteYuv).
+//
 // Env: PT_BLOCK (0|1, default 0), PT_N (records per camera, default 4), PT_HZ (default 30), PT_PATTERN=1|2 (synthetic
 // gradient or checkerboard instead of camera frames), PT_DUMP=1 (log record states once a second), PT_RING (ring path).
 // No frame content is logged or stored.
@@ -36,6 +39,7 @@
 #include <string>
 #include <vector>
 
+#include "../steamvr-quest1/q1json.h"
 #include "../steamvr-quest1/quest1_camera_ring.h"
 
 using namespace vr;
@@ -103,22 +107,88 @@ static uint8_t *MapState()
 	return out;
 }
 
-//! the per-frame descriptor the compositor copies (248 bytes). Field meanings are partly guessed (see the doc): known is
-//! +8 a double (capture time, s), +32..+44 four floats tested for "set", +48 and +144 3x4 float matrices, +220 a float,
-//! +224 a byte. Matrices are identity (head-locked, camera at the head origin) until tuned live.
-static void FillDesc(uint8_t *desc, double captureS, int cam)
+//! A camera's factory calibration (camera_calibration_v2.json, Meta's Fisheye62 model on the raw 640x480 image): focal
+//! length and principal point in pixels, the radial coefficients of theta^2..theta^12 (the roomview shader takes the
+//! first four: Kannala-Brandt), DeviceFromCamera (OpenCV camera axes in the device frame).
+struct Calib
+{
+	bool ok = false;
+	double f = 191, cx = 319.5, cy = 239.5;
+	double k[6] = {0.29, 0, -0.15, 0.09, -0.02, 0};
+	double m[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+};
+
+static Calib LoadCalib(int id)
+{
+	Calib c;
+	const char *paths[] = {getenv("PT_CALIB"), "/persist/calibration/camera_calibration_v2.json",
+	                       "/run/q1track/calibration/camera_calibration_v2.json"};
+	q1json::Json root;
+	for (const char *path : paths)
+		if (path && q1json::ParseJsonFile(path, root))
+			break;
+	const q1json::Json *list = root.Get("CameraCalibration");
+	if (!list || list->type != q1json::Json::Arr)
+		return c;
+	for (const q1json::Json &e : list->arr) {
+		const q1json::Json *jid = e.Get("Id");
+		int eid = !jid ? -1 : jid->type == q1json::Json::Num ? (int)jid->num : jid->type == q1json::Json::Str ? atoi(jid->str.c_str()) : -1;
+		if (eid != id)
+			continue;
+		const q1json::Json *pj = e.Get("Projection"), *dj = e.Get("Distortion"), *dfc = e.Get("DeviceFromCamera");
+		const q1json::Json *pc = pj ? pj->Get("Coefficients") : nullptr, *dc = dj ? dj->Get("Coefficients") : nullptr;
+		double proj[3], dist[8];
+		if (pc && dc && dfc && pc->Numbers(proj, 3) && dc->Numbers(dist, 8) && dfc->Numbers(c.m, 16)) {
+			c.f = proj[0], c.cx = proj[1], c.cy = proj[2];
+			for (int i = 0; i < 6; i++)
+				c.k[i] = dist[i];
+			c.ok = true;
+		}
+		break;
+	}
+	return c;
+}
+
+//! The per-frame record descriptor (248 bytes) vrcompositor copies (0x15f4bc) into its camera state (0x15f748..0x15f8b4):
+//!   +8 double capture time (s); +16..+28 float fx, fy, cx, cy (pixels: the shader divides by the block's image size);
+//!   +32..+44 float k1..k4 (Kannala-Brandt fisheye; all zero = pinhole); +224 u8 "spline" (adds the spline distortion
+//!   image, model 2); +228.. spline scale/offset; +48, +96, +144 three 3x4 float matrices (poses: not mapped yet).
+static void FillDesc(uint8_t *desc, double captureS, const Calib &cal, const HmdMatrix34_t &head)
 {
 	memset(desc, 0, 248);
 	memcpy(desc + 8, &captureS, sizeof(captureS));
-	// pinhole-ish normalized intrinsics of the 640x480 image (focal 191 px, centre of the image)
-	float k[4] = {191.0f / kW, 191.0f / kH, 0.5f, 0.5f};
-	memcpy(desc + 32, k, sizeof(k));
-	for (int off : {48, 144}) {
-		float m[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
-		m[3] = cam ? 0.032f : -0.032f; // half the IPD, a placeholder
-		memcpy(desc + off, m, sizeof(m));
+	float in[8] = {(float)cal.f, (float)cal.f, (float)(cal.cx + 0.5), (float)(cal.cy + 0.5),
+	               (float)cal.k[0], (float)cal.k[1], (float)cal.k[2], (float)cal.k[3]};
+	memcpy(desc + 16, in, sizeof(in));
+	// +48: the camera's pose (vrcompositor 0x15f660 inverts it per camera, then projects with +z forward, y down: OpenCV
+	// axes, as Meta's DeviceFromCamera); +96, +144: identity for now
+	// DeviceFromCamera: vrcompositor projects head-space points into the camera with its inverse (the roomview shader's
+	// "world" is the head: _m0 identity, _m1 head -> eye). PT_CAM_POSE=tracking: head pose x DeviceFromCamera instead,
+	// PT_CAM_POSE=forward: a camera looking straight ahead (tests).
+	float m1[12];
+	const bool relative = !getenv("PT_CAM_POSE") || strcmp(getenv("PT_CAM_POSE"), "tracking");
+	for (int r = 0; r < 3; r++)
+		for (int c = 0; c < 4; c++) {
+			double v = 0;
+			for (int k = 0; k < 3; k++)
+				v += (relative ? (r == k) : head.m[r][k]) * cal.m[k * 4 + c];
+			if (c == 3)
+				v += relative ? 0 : head.m[r][3];
+			m1[r * 4 + c] = (float)v;
+		}
+	if (getenv("PT_CAM_POSE") && !strcmp(getenv("PT_CAM_POSE"), "forward")) { // test: an OpenCV camera looking down -z
+		const float f[12] = {1, 0, 0, 0, 0, -1, 0, 0, 0, 0, -1, 0};
+		memcpy(m1, f, sizeof(f));
 	}
-	desc[224] = 1;
+	memcpy(desc + 48, m1, sizeof(m1));
+	// +96, +144: the head pose at capture (tracking space, raw universe like the depth mesh): which of the two
+	// vrcompositor uses for what is not mapped yet, both get it
+	for (int off : {96, 144})
+		memcpy(desc + off, &head.m[0][0], sizeof(head.m));
+	// +204..+216: the valid image area in texture coordinates (u min, v min, u max, v max; the fragment shader's bounds,
+	// vrcompositor 0x15f754 -> uniforms _m15/_m16): outside it the roomview is black
+	const float bounds[4] = {0, 0, 1, 1};
+	memcpy(desc + 204, bounds, sizeof(bounds));
 }
 
 //! The "params" of IVRCameraPassthroughInternal (GetParams/SetParams, vrclient 0x1a49d8/0x1a4bf8) are 5 bytes at state+2: the
@@ -138,6 +208,20 @@ struct Img
 	size_t len = 0;
 };
 
+//! The frame images as vrcompositor's roomview shader reads them: RGBA8 holding Y'CbCr (R = Cr, G = Y, B = Cb), linear
+//! rows of kW * 4 bytes (the compat layer makes these images linear; its log gives the row pitch). The gray cameras get
+//! neutral chroma; `red` marks pattern areas.
+template <class Luma, class Red>
+static void WriteYuv(Img &im, Luma luma, Red red)
+{
+	for (int j = 0; j < kH; j++)
+		for (int i = 0; i < kW; i++) {
+			uint8_t *p = im.map + ((size_t)j * kW + i) * 4;
+			bool r = red(i, j);
+			p[0] = r ? 240 : 128, p[1] = luma(i, j), p[2] = r ? 90 : 128, p[3] = 255;
+		}
+}
+
 int main()
 {
 	signal(SIGTERM, OnSig);
@@ -148,6 +232,11 @@ int main()
 	const int pattern = getenv("PT_PATTERN") ? atoi(getenv("PT_PATTERN")) : 0; // 1 gradient, 2 checkerboard
 	const bool dump = getenv("PT_DUMP") != nullptr;
 	const char *ringPath = getenv("PT_RING") ? getenv("PT_RING") : Q1CAM_RING_DEFAULT_PATH;
+	const Calib calib[2] = {LoadCalib(0), LoadCalib(2)}; // the bottom pair (left, right)
+	for (int c = 0; c < 2; c++)
+		printf("ptprovider: camera %d %s: f %.1f centre %.1f %.1f k %.3f %.3f %.3f %.3f\n", c ? 2 : 0,
+		       calib[c].ok ? "calibrated" : "NOT calibrated (defaults)", calib[c].f, calib[c].cx, calib[c].cy, calib[c].k[0],
+		       calib[c].k[1], calib[c].k[2], calib[c].k[3]);
 
 	// an Overlay-type connection starts vrserver and the dashboard when SteamVR is down: wait for it
 	while (!g_quit && !(Running("vrserver") && Running("vrcompositor")))
@@ -183,7 +272,9 @@ int main()
 	std::vector<Img> img[2];
 	Img spline[2];
 	auto make = [&](Img &im, uint32_t w, uint32_t h, uint32_t vkFormat) -> bool {
-		if (!rm->NewSharedVulkanImage(vkFormat, w, h, false, false, false, 1, 1, 0, 0, &im.h) || !im.h)
+		// 0x80 (input attachment): the compat layer's mark for linear tiling (the frames are written by the CPU; optimal
+		// RGBA8 images are UBWC-compressed on the Adreno 540)
+		if (!rm->NewSharedVulkanImage(vkFormat, w, h, false, false, false, 1, 1, 0, vkFormat == 37 ? 0x80 : 0, &im.h) || !im.h)
 			return false;
 		uint64_t ipc = 0;
 		int fd = -1;
@@ -217,6 +308,8 @@ int main()
 	// publish the pool (everything except the enabled byte), then frames, then enable
 	uint32_t zero = 0, nrec = (uint32_t)N, gen = 1;
 	memcpy(b + 8, &nrec, 4);
+	const uint32_t size[2] = {kW, kH}; // the image size the shader divides the projected pixel by (vrcompositor 0x15f504)
+	memcpy(b + 12, size, sizeof(size));
 	for (int c = 0; c < 2; c++) {
 		for (int k = 0; k < N; k++) {
 			uint8_t *rec = b + kRec0 + c * kCamStride + k * kRecStride;
@@ -269,18 +362,16 @@ int main()
 			fresh = true;
 			for (int c = 0; c < 2; c++) {
 				Img &im = img[c][slot[c]];
-				for (int y = 0; y < kH; y++)
-					for (int x = 0; x < kW; x++) {
-						uint8_t *p = im.map + ((size_t)y * kW + x) * 4;
-						if (pattern == 2) { // 32 px checkerboard, a corner marked, to check the memory layout
-							uint8_t v = ((x / 32 + y / 32) & 1) ? 255 : 32;
-							p[0] = x < 64 && y < 64 ? 255 : v, p[1] = v, p[2] = c ? v : 0;
-						} else {
-							p[0] = (uint8_t)(x * 255 / kW + (now / 20000000)), p[1] = (uint8_t)(y * 255 / kH);
-							p[2] = c ? 255 : 0;
-						}
-						p[3] = 255;
-					}
+				if (pattern >= 3) { // the whole buffer filled with one RGBA value (3: 255,0,0,255; 4: 0,0,255,255)
+					for (size_t o = 0; o + 4 <= im.len; o += 4)
+						im.map[o] = pattern == 3 ? 255 : 0, im.map[o + 1] = 0, im.map[o + 2] = pattern == 3 ? 0 : 255,
+						im.map[o + 3] = 255;
+				} else if (pattern == 2) // 32 px checkerboard, the top left corner red, to check the layout
+					WriteYuv(im, [](int x, int y) { return (uint8_t)(((x / 32 + y / 32) & 1) ? 235 : 40); },
+					          [](int x, int y) { return x < 64 && y < 64; });
+				else
+					WriteYuv(im, [&](int x, int) { return (uint8_t)(x * 255 / kW + (now / 20000000)); },
+					          [](int, int) { return false; });
 			}
 			lastFrame = now;
 		} else if (hdr) {
@@ -301,12 +392,8 @@ int main()
 								continue;
 							const uint8_t *src = base + rc.offset;
 							Img &im = img[c][slot[c]];
-							for (int y = 0; y < kH; y++)
-								for (int x = 0; x < kW; x++) {
-									uint8_t v = src[(size_t)y * rc.stride + x];
-									uint8_t *p = im.map + ((size_t)y * kW + x) * 4;
-									p[0] = p[1] = p[2] = v, p[3] = 255;
-								}
+							const uint32_t stride = rc.stride;
+							WriteYuv(im, [&](int x, int y) { return src[(size_t)y * stride + x]; }, [](int, int) { return false; });
 							got++;
 						}
 					if (got == 2 && __atomic_load_n(&s.seq, __ATOMIC_ACQUIRE) == seq0) {
@@ -318,9 +405,14 @@ int main()
 			}
 		}
 		if (fresh) {
+			// the head pose now (the frames are a few ms old: good enough until the capture-time pose is mapped)
+			TrackedDevicePose_t hp = {};
+			VRSystem()->GetDeviceToAbsoluteTrackingPose(TrackingUniverseRawAndUncalibrated, 0, &hp, 1);
+			HmdMatrix34_t head = hp.bPoseIsValid ? hp.mDeviceToAbsoluteTracking
+			                                     : HmdMatrix34_t{{{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}}};
 			for (int c = 0; c < 2; c++) {
 				uint8_t *rec = b + kRec0 + c * kCamStride + slot[c] * kRecStride;
-				FillDesc(rec + 4, capS, c);
+				FillDesc(rec + 4, capS, calib[c], head);
 				__atomic_store_n((uint32_t *)rec, 1u, __ATOMIC_RELEASE); // frame ready
 				slot[c] = (slot[c] + 1) % N;
 			}
@@ -344,7 +436,11 @@ int main()
 			for (int c = 0; c < 2; c++)
 				for (int k = 0; k < N; k++)
 					cnt[std::min<uint32_t>(2, *(uint32_t *)(b + kRec0 + c * kCamStride + k * kRecStride))]++;
-			printf("ptprovider: records free %d ready %d taken %d, enabled %d\n", cnt[0], cnt[1], cnt[2], b[4]);
+			TrackedDevicePose_t hp = {};
+			VRSystem()->GetDeviceToAbsoluteTrackingPose(TrackingUniverseRawAndUncalibrated, 0, &hp, 1);
+			printf("ptprovider: records free %d ready %d taken %d, enabled %d, head (raw) %.2f %.2f %.2f%s\n", cnt[0], cnt[1],
+			       cnt[2], b[4], hp.mDeviceToAbsoluteTracking.m[0][3], hp.mDeviceToAbsoluteTracking.m[1][3],
+			       hp.mDeviceToAbsoluteTracking.m[2][3], hp.bPoseIsValid ? "" : " (invalid)");
 			fflush(stdout);
 		}
 		next += period;

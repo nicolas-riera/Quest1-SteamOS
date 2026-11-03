@@ -24,6 +24,7 @@
 // SLAM exposure), delivered as RGBX32 (default), RGB24, NV12 or YUYV16.
 
 #include "camera.h"
+#include "q1json.h"
 #include "quest1_camera_ring.h"
 
 #include <fcntl.h>
@@ -78,164 +79,10 @@ const char *Env(const char *name, const char *def = nullptr)
 	return v && *v ? v : def;
 }
 
-// --- Minimal JSON reader (enough for camera_calibration_v2.json) ------------------------------------------
+// --- Minimal JSON reader: q1json.h ---------------------------------------------------------------------
 
-struct Json
-{
-	enum Type { Null, Bool, Num, Str, Arr, Obj } type = Null;
-	double num = 0;
-	std::string str;
-	std::vector<Json> arr;
-	std::map<std::string, Json> obj;
-
-	const Json *Get(const char *key) const
-	{
-		if (type != Obj)
-			return nullptr;
-		auto it = obj.find(key);
-		return it == obj.end() ? nullptr : &it->second;
-	}
-	bool Numbers(double *out, size_t n) const
-	{
-		if (type != Arr || arr.size() < n)
-			return false;
-		for (size_t i = 0; i < n; i++) {
-			if (arr[i].type != Num)
-				return false;
-			out[i] = arr[i].num;
-		}
-		return true;
-	}
-};
-
-struct JsonParser
-{
-	const char *p, *end;
-	int depth = 0;
-
-	void Ws()
-	{
-		while (p < end && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r'))
-			p++;
-	}
-	bool String(std::string &out)
-	{
-		if (p >= end || *p != '"')
-			return false;
-		p++;
-		while (p < end && *p != '"') {
-			if (*p == '\\' && p + 1 < end) {
-				p++;
-				char c = *p == 'n' ? '\n' : *p == 't' ? '\t' : *p; // \uXXXX kept as 'u' + digits
-				out += c;
-			} else {
-				out += *p;
-			}
-			p++;
-		}
-		if (p >= end)
-			return false;
-		p++;
-		return true;
-	}
-	bool Value(Json &v)
-	{
-		if (++depth > 32)
-			return false;
-		Ws();
-		if (p >= end)
-			return false;
-		bool ok = true;
-		if (*p == '{') {
-			v.type = Json::Obj;
-			p++;
-			Ws();
-			if (p < end && *p == '}') {
-				p++;
-			} else {
-				for (;;) {
-					Ws();
-					std::string key;
-					if (!String(key))
-						return false;
-					Ws();
-					if (p >= end || *p != ':')
-						return false;
-					p++;
-					if (!Value(v.obj[key]))
-						return false;
-					Ws();
-					if (p < end && *p == ',') {
-						p++;
-						continue;
-					}
-					if (p < end && *p == '}') {
-						p++;
-						break;
-					}
-					return false;
-				}
-			}
-		} else if (*p == '[') {
-			v.type = Json::Arr;
-			p++;
-			Ws();
-			if (p < end && *p == ']') {
-				p++;
-			} else {
-				for (;;) {
-					v.arr.emplace_back();
-					if (!Value(v.arr.back()))
-						return false;
-					Ws();
-					if (p < end && *p == ',') {
-						p++;
-						continue;
-					}
-					if (p < end && *p == ']') {
-						p++;
-						break;
-					}
-					return false;
-				}
-			}
-		} else if (*p == '"') {
-			v.type = Json::Str;
-			ok = String(v.str);
-		} else if (!strncmp(p, "true", std::min<size_t>(4, end - p)) && end - p >= 4) {
-			v.type = Json::Bool, v.num = 1, p += 4;
-		} else if (!strncmp(p, "false", std::min<size_t>(5, end - p)) && end - p >= 5) {
-			v.type = Json::Bool, p += 5;
-		} else if (!strncmp(p, "null", std::min<size_t>(4, end - p)) && end - p >= 4) {
-			p += 4;
-		} else {
-			std::string tmp(p, std::min<size_t>(64, end - p));
-			char *e = nullptr;
-			v.type = Json::Num;
-			v.num = strtod(tmp.c_str(), &e);
-			if (e == tmp.c_str())
-				return false;
-			p += e - tmp.c_str();
-		}
-		depth--;
-		return ok;
-	}
-};
-
-bool ParseJsonFile(const char *path, Json &out)
-{
-	FILE *f = fopen(path, "rb");
-	if (!f)
-		return false;
-	std::string s;
-	char buf[4096];
-	size_t n;
-	while ((n = fread(buf, 1, sizeof(buf), f)) > 0 && s.size() < (1u << 20))
-		s.append(buf, n);
-	fclose(f);
-	JsonParser jp{s.data(), s.data() + s.size()};
-	return jp.Value(out);
-}
+using q1json::Json;
+using q1json::ParseJsonFile;
 
 // --- Camera model ------------------------------------------------------------------------------------------
 
@@ -1325,7 +1172,7 @@ private:
 			return;
 		}
 		const int rings = 24, segs = 48;
-		const float radius = (float)atof(Env("QUEST1_CAMERA_MESH_RADIUS", "3")), cy = 1.4f;
+		const float radius = (float)atof(Env("QUEST1_CAMERA_MESH_RADIUS", "3")), cy = 0.0f; // around the head: vrcompositor draws the mesh in head space (its _m0 stays identity)
 		std::vector<float> verts;
 		std::vector<uint32_t> idx;
 		for (int r = 0; r <= rings; r++) {
@@ -1439,12 +1286,12 @@ const char *Mode()
 			fclose(f);
 		}
 	}
-	if (!m || (strcmp(m, "ring") && strcmp(m, "test") && strcmp(m, "1")))
+	if (!m || (strcmp(m, "ring") && strcmp(m, "test") && strcmp(m, "1") && strcmp(m, "props")))
 		return nullptr;
-	return !strcmp(m, "1") ? "ring" : m;
+	return !strcmp(m, "1") || !strcmp(m, "props") ? "ring" : m; // props: the camera component too (its intrinsics)
 }
 
-//! "props": only the HMD camera properties (HasCamera...), no IVRCameraComponent and no gate. vrcompositor's roomview
+//! "props": the camera component (as "ring") plus the roomview properties and depth-mesh queues. vrcompositor's roomview
 //! (camera.enableCamera + camera.roomView) is only armed when the HMD says it has a camera; the frames then come from
 //! src/camtap/ptprovider (VR_CameraPassthroughState), not from this driver.
 bool PropsOnly()
@@ -1482,6 +1329,10 @@ void Quest1CameraAttach(PropertyContainerHandle_t container, std::function<Drive
 {
 	if (PropsOnly()) {
 		if (container != k_ulInvalidPropertyContainer) {
+			// the camera component and its properties (calibration, distortion, camera-to-head): vrcompositor's roomview
+			// asks vrserver for the intrinsics (VRMsg_TrackedCamera_GetIntrinsics), which come from the component
+			if (Quest1Camera *c = Get())
+				c->Attach(container, headPose);
 			CVRPropertyHelpers *p = VRProperties();
 			p->SetBoolProperty(container, Prop_HasCamera_Bool, true);
 			p->SetBoolProperty(container, Prop_AllowCameraToggle_Bool, true);
@@ -1492,7 +1343,7 @@ void Quest1CameraAttach(PropertyContainerHandle_t container, std::function<Drive
 				p->SetBoolProperty(container, (ETrackedDeviceProperty)2500, true);
 			// Prop_SupportsRoomViewDepthProjection_Bool (2079): the 3D roomview (camera.roomView = 2) that uses the depth mesh
 			p->SetBoolProperty(container, (ETrackedDeviceProperty)2079, true);
-			CLog("quest1 camera: HMD camera properties set (props mode, no camera component)\n");
+			CLog("quest1 camera: HMD camera properties set (props mode, with the camera component)\n");
 			g_gate.Start(false); // the empty depth-mesh block queues vrcompositor's roomview connects to
 		}
 		return;

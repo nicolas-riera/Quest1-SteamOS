@@ -217,3 +217,22 @@ Reversed from vrcompositor 0x15fcc0 (per-frame roomview update), 0x15e300 (geome
 - Next: frames as YUV (gray -> R = B = 128), real camera frames, then the record descriptor fields the vertex shader's uniforms
   come from (`_m3` world-to-camera, `_m4` focal/centre, `_m5` fisheye coefficients with `_m7` = 1, `_m15/_m16` bounds), and
   whether the 2D mode (roomView 1) draws without the depth mesh.
+
+## It draws: SteamVR's own camera view with the real cameras (2026-11-03, late)
+What the provider (`ptprovider`) must give vrcompositor's roomview, found step by step with layer snapshots and gdb dumps of the
+roomview uniforms (they live at camera state + 192, 528 bytes; written per frame at vrcompositor 0x161b00..0x161cf8):
+- Frame images: RGBA8 holding Y'CbCr (R = Cr, G = Y, B = Cb, chroma centred on 0.5019), written by the CPU. The Adreno blob
+  compresses optimal RGBA8 images (UBWC), so raw bytes came out as blocks of colour: ptprovider marks its images with an unused
+  usage bit (input attachment, via NewSharedVulkanImage's extra usage flags) and the compat layer creates those linear (row pitch
+  2560, logged as "CPU-written image").
+- Block header +12/+16: image width and height (u32): the shader divides the projected pixel by them (`_m6`).
+- Record descriptor: +16..+28 fx, fy, cx, cy in pixels; +32..+44 Kannala-Brandt k1..k4 (all zero = pinhole); +224 spline flag
+  (0: fisheye only); +204..+216 the valid image area in texture coordinates (u0, v0, u1, v1; zero = everything black); +48 the
+  camera pose as a 3x4 matrix with OpenCV camera axes, inverted by vrcompositor into `_m3`. Meta's DeviceFromCamera
+  (camera_calibration_v2.json, Fisheye62: the first four radial coefficients are used) is in the OpenVR head frame (x right,
+  y up, -z forward) and is what works.
+- `camera.roomView = 1` (2D) draws the full view correctly with no depth mesh. The 3D mode (2) draws only part of the view with
+  the driver's sphere (the mesh frame is not fully understood yet: `_m0` stays identity, `_m1` is head -> eye).
+- Switching it on: props driver mode, ptprovider, a client holding AcquireVideoStreamingService, `set_camera_roomview_enabled`
+  on the system layer mailbox. Test scripts: `src/camtap/roomview-test/` (pt-live.sh: ROOMVIEW=1|2, PATTERN=0 real cameras,
+  KEEP=1 leaves it on; pt-undo.sh restores the default settings).

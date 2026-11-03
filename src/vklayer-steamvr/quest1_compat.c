@@ -168,6 +168,8 @@ struct device
 	PFN_vkQueueWaitIdle QueueWaitIdle;
 	PFN_vkCreateShaderModule CreateShaderModule;
 	PFN_vkDestroyShaderModule DestroyShaderModule;
+	PFN_vkCreateImage CreateImage;
+	PFN_vkGetImageSubresourceLayout GetImageSubresourceLayout;
 	PFN_vkCreateGraphicsPipelines CreateGraphicsPipelines;
 	PFN_vkCreateDescriptorSetLayout CreateDescriptorSetLayout;
 	PFN_vkCreatePipelineLayout CreatePipelineLayout;
@@ -1194,6 +1196,37 @@ static uint32_t *rewrite_layer_builtins(const uint32_t *w, uint32_t words, uint3
 	return o;
 }
 
+// Camera frames for vrcompositor's roomview (src/camtap/ptprovider): the provider allocates RGBA8 shared images and writes
+// their memory with the CPU. With optimal tiling the Adreno blob compresses such images (UBWC), so raw bytes decode to
+// blocks of noise. The provider marks them with an otherwise unused usage bit (input attachment); here they lose the
+// mark and get linear tiling (no compression), and their row pitch is logged.
+#define Q1_CPU_IMAGE_USAGE VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT
+
+static VKAPI_ATTR VkResult VKAPI_CALL CreateImage(VkDevice device, const VkImageCreateInfo *ci,
+                                                  const VkAllocationCallbacks *alloc, VkImage *out)
+{
+	struct device *d = device_of(device);
+	if (!(ci->usage & Q1_CPU_IMAGE_USAGE) || ci->format != VK_FORMAT_R8G8B8A8_UNORM || ci->tiling != VK_IMAGE_TILING_OPTIMAL ||
+	    ci->mipLevels != 1 || ci->arrayLayers != 1 || ci->imageType != VK_IMAGE_TYPE_2D)
+		return d->CreateImage(device, ci, alloc, out);
+	VkImageCreateInfo lin = *ci;
+	lin.usage &= ~Q1_CPU_IMAGE_USAGE;
+	lin.tiling = VK_IMAGE_TILING_LINEAR;
+	VkResult r = d->CreateImage(device, &lin, alloc, out);
+	if (r != VK_SUCCESS) {
+		LOG("CPU-written image %ux%u: linear tiling refused (%d), optimal kept\n", ci->extent.width, ci->extent.height, r);
+		lin.tiling = VK_IMAGE_TILING_OPTIMAL;
+		return d->CreateImage(device, &lin, alloc, out);
+	}
+	VkImageSubresource sub = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT};
+	VkSubresourceLayout l = {0};
+	d->GetImageSubresourceLayout(device, *out, &sub, &l);
+	LOG("CPU-written image %ux%u (usage 0x%x): linear, offset %llu row pitch %llu size %llu\n", ci->extent.width,
+	    ci->extent.height, lin.usage, (unsigned long long)l.offset, (unsigned long long)l.rowPitch,
+	    (unsigned long long)l.size);
+	return r;
+}
+
 // The code of every live module (as given to the driver), for the pipeline retry of CreateGraphicsPipelines.
 #define MOD_CODES 2048
 static struct { VkShaderModule module; uint32_t *code; uint32_t words; } mod_codes[MOD_CODES];
@@ -1828,6 +1861,8 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice pd, const Vk
 	GET(QueueWaitIdle);
 	GET(CreateShaderModule);
 	GET(DestroyShaderModule);
+	GET(CreateImage);
+	GET(GetImageSubresourceLayout);
 	GET(CreateGraphicsPipelines);
 	GET(CreateDescriptorSetLayout);
 	GET(CreatePipelineLayout);
@@ -1924,6 +1959,7 @@ static PFN_vkVoidFunction device_intercept(const char *name)
 	I("vkQueueWaitIdle", QueueWaitIdle)
 	I("vkCreateShaderModule", CreateShaderModule)
 	I("vkDestroyShaderModule", DestroyShaderModule)
+	I("vkCreateImage", CreateImage)
 	I("vkWaitForFences", WaitForFences)
 	I("vkCreateGraphicsPipelines", CreateGraphicsPipelines)
 	I("vkCreateDescriptorSetLayout", CreateDescriptorSetLayout)
