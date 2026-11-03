@@ -251,6 +251,10 @@ while `camera.enableCamera` and `camera.roomView` > 0. So the 3D mode is the one
   identity, posePredictionBaseTime 0), `gl_Position = _m2 * _m1 * p` (`_m1` head -> eye), and the camera projection
   `c = _m3 * p`, `_m3` = the record's +48 inverted, times a matrix from the head pose (identity while the head is still: the
   6DoF correction between capture and display). So for now the mesh is in head space: a 3 m sphere around the head.
+  Checked with a test pose: `_m0` is exactly `rawFromMeshPose` (whether posePredictionBaseTime is 0 or the current monotonic
+  time in seconds), and the head's tracking pose (raw y = 1.65) appears in no uniform: `_m1` is head -> eye times a tiny
+  rotation (a head-motion delta, presumably between the mesh's time and the display's). So "raw" here behaves as the head
+  frame at the mesh's time; to be confirmed with the headset moving before building a floor plane / tracking-space mesh.
 - **One camera per eye**: vrcompositor 0x160a80 picks, per eye, the camera whose pose is nearest to the eye. It reads the poses from
   the records' **+96** (mapped with marked matrices: +48 of record 0/1 -> its inverses at camera state +0x410/+0x450, +96 -> +0x83c/
   +0x86c) and the eye from `head -> eye`, so +96 = DeviceFromCamera in the head frame. It also needs params byte 1 (`state[3]`,
