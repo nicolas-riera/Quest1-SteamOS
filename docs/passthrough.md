@@ -180,3 +180,26 @@ Reversed from vrcompositor 0x15fcc0 (per-frame roomview update), 0x15e300 (geome
   gdb (`$x27 = 1` at 0x9ee6c) made the compositor build and upload the sphere (1225 vertices, 6912 indices) but a layer snapshot with the
   pattern provider still showed only SteamVR's default scene: the draw has further conditions not found yet (candidates: roomViewStyle,
   stencil/chaperone bounds, byte +833/+864 in 0x15fcc0). `trackedcam_test` has `PT_BLEND=1` to set the setting.
+
+## Switching the roomview on: the system layer mailbox (2026-11-03, evening)
+- vrcompositor's system layer (CSystemLayer::RegisterMailboxHandlers) listens on the mailbox `vrcompositor_systemlayer` for JSON
+  messages `{"type": ..., ...}`: `set_camera_roomview_enabled`, `set_camera_roomview_enabled_forsceneapps`,
+  `toggle_camera_roomview_forsceneapps`, the playspace commands (`set_playspace_mode`, `commit_playspace_bounds_drawing`, ...),
+  `set_scene_alpha_target`, `fade_to_color`... SteamVR's web UI sends them through vrserver's web socket (127.0.0.1:27062,
+  "mailbox_send <target> <json>"), which answers 401 without its token; a native client uses vrclient's `IVRMailbox_001`
+  (RegisterMailbox, UndoRegisterMailbox, SendMessage, ReadMessage): `src/camtap/vrmailbox`.
+- The draw gate (vrcompositor 0x9ee5c..0x9ee8c, byte +835 = b1581 && w27): w27 = show (state[2], from the provider) && either
+  - scene alpha (+3421, from `camera.forceSceneAlphaBlending` or the app's alpha-blend flag), only while a scene app submits
+    frames (an app that only calls WaitGetPoses does not count: `src/camtap/vrscene_idle`); or
+  - system layer byte +1580, copied each frame from the shared byte 2889 while camera.enableCamera && camera.roomView > 0
+    (byte this+0x1572). With no playspace set up (construction mode, shared float +636 > 0), 1580 follows
+    `camera.enableConstructRoomView`, which `set_camera_roomview_enabled` sets (and saves): the boundary-drawing passthrough.
+    Otherwise `..._forsceneapps` stores the roomview state in 2889.
+- With the props driver, ptprovider (pattern), `trackedcam_test PT_ROOMVIEW=2 PT_HOLD=` and `set_camera_roomview_enabled`, the
+  compositor logs "Augmented passthrough geometry updated" and reaches the "Cam: Room View" draw (0x161ec4), then crashes: the
+  roomview pipeline failed to build on the Adreno blob (vkCreateGraphicsPipelines -13 in the compat layer's log) and
+  0x2bdcb4 calls vkCmdBindPipeline with a null pipeline. Next: dump its two modules (`/etc/quest1-spirv-dump`, compat layer)
+  and make the blob accept them.
+- `camera.enableConstructRoomView` stays saved: until the pipeline works it crash-loops vrcompositor at every start. Undo the
+  test settings with `/root/pt-undo.sh` (stops SteamVR, removes `/etc/quest1-camera`, drops enableConstructRoomView and
+  forceSceneAlphaBlending, roomView 0, starts SteamVR).

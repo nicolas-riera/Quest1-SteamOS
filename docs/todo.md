@@ -35,7 +35,13 @@ Open items, roughly by priority. Done items move to the commit log.
   /root/bench-20261103/). Next: why each render model component is its own render pass, and a
   lighter render model (could also fix the Oculus button texture below).
 - Frame rate drops while the controllers move fast, until they stop (user, 2026-11-03): Meta's
-  controller tracking threads (CtrllrCam, CtrlTracking, SCHED_FIFO on cores 0-3) work harder.
+  controller tracking threads (CtrllrCam, CtrlTracking, SCHED_FIFO on cores 0-3) work harder. In
+  part (only in part) the laser pointer passing over Steam UI elements: their hover animations cost
+  frames (user).
+- Slim the install: drop what this headset never uses (other controllers' render models, SteamVR
+  Home if present, etc.): less storage, memory and load time (user, 2026-11-03).
+- Steam's UI and the dashboard lag, and so does Steam's VR keyboard (it is Steam's: it types fine,
+  the lag is Steam's UI). Faster Steam fixes both (user, 2026-11-03).
 - LSE atomics emulation (kernel/lse_emul.c): ~100,000 traps/s while SteamVR runs (vrserver ~38k,
   vrcompositor ~29k, steamwebhelper ~24k), 0.8 us each on a big core and 1.6 us on a little one,
   against ~20 ns native: ~10-15 % of one core. Make the emulation itself faster (trap path, hook
@@ -58,21 +64,29 @@ Open items, roughly by priority. Done items move to the commit log.
   `q1-audioring` (runtime unit on the headset) keeps the last 90 s of the sink monitor and the ALSA
   status every 20 ms; `systemctl kill -s USR1 q1-audioring` dumps them to /root/audioring-<time>/
   when the user hears it. Clean monitor + crackle = below PipeWire (ADSP, codec).
+  Capture 2026-11-03 18:07 in `/root/audioring-180736/` (crackle during and after a SteamVR crash
+  loop: load 10-13, kswapd ~46 %, 0.7 GB available; `extra-state.txt` has vmstat and top). Fix later.
 
 ## Display
-- A little stretch remains when the horizon is at the top or bottom of the view, without
-  re-projection too (user, 2026-11-03): the render's own lens distortion.
-- SteamVR popups (volume bar, IPD) show up too low in the view; the IPD popup has very strong
-  chromatic aberration. Probably the same vertical error.
 - Apply the per-panel calibration from `/persist/calibration/display` (decenter, roll, mura).
-- 90 Hz mode, selectable from SteamVR's refresh rate setting (low priority). Base:
-  github.com/TheCez/quest1-90hz-orangefox.
+- 90 Hz mode, selectable from the headset refresh rate setting (the Frame's quick menu / SteamVR's
+  setting) (low priority). Base: github.com/TheCez/quest1-90hz-orangefox.
 
 - Steam's VR UI: the right controller's Oculus button uses the menu button's texture (SteamVR's
   Quest render model). Fix the texture someday, e.g. from another Quest controller's Oculus button,
   matching the menu button's look (user, 2026-11-03, low priority).
 
 ## Passthrough
+- Goal (user, 2026-11-03): the cameras seen by SteamVR as a real camera, like on the Steam Frame:
+  its settings adjustable in SteamVR, usable as normal passthrough and as the passthrough used to
+  draw the boundary.
+- 2026-11-03: the roomview is switched on through vrcompositor's system layer mailbox
+  (`src/camtap/vrmailbox`, `set_camera_roomview_enabled` while no playspace is set = boundary
+  drawing, `..._forsceneapps` with a scene app). vrcompositor then reaches its draw ("Cam: Room
+  View") and crashes: the Adreno driver fails to build the roomview pipeline (-13) and
+  vrcompositor binds the null pipeline. Next: dump that shader (`/etc/quest1-spirv-dump`) and fix it
+  in the compat layer. Tests leave `camera.enableConstructRoomView` set, which crash-loops
+  vrcompositor (load ~12, crackling audio): always run `/root/pt-undo.sh` after.
 - SteamVR's own camera view (roomview), fed by `ptprovider` (docs/passthrough.md): it starts (driver
   "props" mode + camera.roomView toggle) and takes our frames, but draws nothing until the driver
   publishes a depth mesh on the roomview3d block queues (key/value write API of vrserver's block
@@ -105,10 +119,10 @@ Open items, roughly by priority. Done items move to the commit log.
   `device/holo-perf.sh`.
 
 ## Steam and desktop
-- The Steam Frame's desktop mode (the Frame's KDE Plasma) from the "+" menu. It works in the Quest 2
-  port (github.com/URFAVF3MBOY/quest2-steamos), whose author allows us to use its code: base it on
-  how that port does it.
-- Steam's VR keyboard works (types, fully usable) but lags (user, 2026-11-03).
+- Next after passthrough and the boundary (user, 2026-11-03): the Steam Frame's desktop mode (the
+  Frame's KDE Plasma) from the "+" menu, also to load the headset hard and see what really needs
+  optimizing. It works in the Quest 2 port (github.com/URFAVF3MBOY/quest2-steamos), whose author
+  allows us to use its code: base it on how that port does it.
 
 ## System
 - SteamOS and SteamVR updates must keep working without undoing our changes (after the
@@ -130,17 +144,20 @@ Open items, roughly by priority. Done items move to the commit log.
 ## Hardware
 - Power LED: Meta's battery colours since 2026-11-03 (`device/holo-battery.sh`). Later (low
   priority): let the user control it, e.g. from the quick menu.
-- Bluetooth.
+- Bluetooth: wanted (user, 2026-11-03), likely not hard, and easy to test (plenty of devices
+  around the user).
 - USB OTG (low priority): keyboards, storage and other USB devices on the headset's port.
 
 ## Steam Frame features (from a video walkthrough, user 2026-11-03)
-- Passthrough toggle by double-clicking the Steam button; performance overlay (4 levels: fps, then
-  temperatures and clocks); frame rate limiter; headset refresh rate setting; GPU clock in the quick
-  menu; window curvature toggle; windows docked to a controller (wrist).
+- Passthrough toggle by double-clicking the Steam button: the Touch controllers have no Steam
+  button, so probably a binding to add in the VR dashboard's bindings (once passthrough works).
+- Performance overlay (4 levels: fps, then temperatures and clocks): missing here (user confirmed).
+- Frame rate limiter; GPU clock in the quick menu. (Refresh rate: with the 90 Hz mode. Window
+  curvature and wrist-docked windows are SteamVR's and already work.)
 
 ## Later
 - Hand tracking.
-- x86 games (FEX, Proton).
+- x86 games (FEX, Proton): very low priority, no chance with today's performance and memory.
 - Other controllers (low priority, together):
   - Windows Mixed Reality controllers (for fun);
   - Quest 2 controllers, based on github.com/Juspertinry/q2ctrl-module (only a left one to test;

@@ -26,3 +26,5 @@ src/ovrstub/ovrstub
 src/camtap/ptprovider
 src/camtap/ptres_test
 src/camtap/trackedcam_test
+src/camtap/vrmailbox
+src/camtap/vrscene_idle
