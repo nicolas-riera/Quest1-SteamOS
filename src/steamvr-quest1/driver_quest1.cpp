@@ -1460,6 +1460,16 @@ public:
 		// shown half a period later.
 		VRProperties()->SetFloatProperty(c, Prop_SecondsFromVsyncToPhotons_Float, 0.022f);
 		VRProperties()->SetUint64Property(c, Prop_CurrentUniverseId_Uint64, 2);
+		// Default chaperone for universe 2 while the user has none (no chaperone_info.vrchap, or after
+		// Clear playspace): without a universe vrserver has no standing zero pose
+		// ("Cannot query GetRawZeroPoseToStandingAbsoluteTrackingPose"), so the Frame room setup draws no
+		// floor, no brush, and Accept commits nothing. The raw space is already floor-anchored
+		// (chaperone_frame.h: raw y = 0 is the floor), so standing = raw; no bounds until the user draws them.
+		VRProperties()->SetStringProperty(c, Prop_DriverProvidedChaperoneJson_String,
+		    "{\"jsonid\":\"chaperone_info\",\"version\":5,\"universes\":[{\"universeID\":\"2\","
+		    "\"collision_bounds\":[],\"play_area\":[0,0],"
+		    "\"seated\":{\"translation\":[0,0,0],\"yaw\":0},"
+		    "\"standing\":{\"translation\":[0,0,0],\"yaw\":0}}]}");
 		// Prop_SupportsInHMDRoomSetup_Bool (11003, not in the public headers): selects the Steam Frame's
 		// shipping in-HMD playspace setup (vrcompositor draws it, the dashboard starts it) instead of
 		// looking for the legacy "openvr.tool.steamvr_room_setup" app

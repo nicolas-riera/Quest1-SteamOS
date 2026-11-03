@@ -118,6 +118,18 @@ Open items, roughly by priority. Done items move to the commit log.
   Also seen: its floor/boundary vertex shader samples bindings 10/26 and 11/27 that the pipeline layout
   lacks (Adreno: "Bind group info mismatches"); the layer's retry turns those reads into 0 (displacement
   offsets of the grid), created once per setup start, not per frame.
+- 2026-11-04: with no chaperone_info.vrchap (e.g. after Clear playspace) vrserver had no universe, so no
+  standing pose ("Cannot query GetRawZeroPoseToStandingAbsoluteTrackingPose"): no floor, no brush, Accept
+  committed nothing. driver_quest1 now provides a default universe 2 (Prop_DriverProvidedChaperoneJson_String,
+  standing = raw). Floor height adjust and drawing then work (user-tested).
+  Left: the floor "circle" is a fan of lines converging on one floor point (photo by the user). Suspects:
+  `playspace-floordetection-geo` (draw_range .4-10 m) fed by the Frame's depth/floor detection, which we do
+  not provide (CTrackedCamera "Depth mesh block queues"), or the default play_area [0,0]. distort_tri_floor_gs
+  (a geometry shader) samples bindings 11/27 like the passthrough reprojection VS. Accept not tried yet.
+  Lag: the compat layer's "display:" line shows vrcompositor at 23-35 fps with the room view (28-42 ms per
+  frame, present-to-rendered 24-41 ms: GPU bound); Monado fills to 72 Hz by reprojection.
+  Side note: steamvr-q1 exports QUEST1_COMPAT_SPIRV empty, and the layer checks getenv() != NULL, so the
+  pipeline logging is always on (log noise).
 - Test in the headset (after passthrough, needed to draw the boundary): the playspace buttons
   (fixed with Prop 11004), and relocalization after a reboot in the persisted map (`q1anchord`,
   docs/boundary.md), then Clear playspace.
