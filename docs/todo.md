@@ -62,6 +62,13 @@ Open items, roughly by priority. Done items move to the commit log.
   distortion pass costs the same as a copy (3.6 ms per eye, bandwidth) and the warp then runs at
   every vsync with 3 samples: more GPU in total. Compare sharpness with the user once perf allows.
 
+## Steam settings
+- The timezone dropdown (Settings, next to the 24-hour clock) is hidden: Steam shows it only when
+  `IN_GAMESCOPE && IS_STEAMOS` (steamui library.js, export XM). Our Steam runs under Xvfb, not gamescope. The user
+  wants it (2026-11-03); meanwhile the system timezone is set with timedatectl (Europe/Paris). Find what sets
+  IN_GAMESCOPE and whether it can be set without gamescope's other paths; check IS_STEAMOS too (os-release is now
+  ID=steamos, device/holo-identity.sh).
+
 ## Audio
 - Audio randomly turns crackly for a while, then recovers by itself, sometimes stays stuck crackly
   (user, 2026-11-02/03). PipeWire sees no xrun at all (pw-top ERR 0, logged every 2 s for 20 min):

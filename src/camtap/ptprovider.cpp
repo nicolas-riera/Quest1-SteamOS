@@ -406,6 +406,7 @@ int main()
 	int slot[2] = {0, 0};
 	int readyIdx[2] = {-1, -1}; // the one ready record per camera (-1: none)
 	int64_t lastTake = 0;       // when the compositor last took a frame of ours
+	int64_t stallSince = 0, lastStallLog = 0;
 	auto Rec = [&](int c, int k) { return (uint32_t *)(b + kRec0 + c * kCamStride + k * kRecStride); };
 	const int64_t period = 1000000000LL / hz;
 	int64_t next = NowNs();
@@ -449,16 +450,46 @@ int main()
 					for (int i = 0; i < N && target[c] < 0; i++)
 						if ((slot[c] + i) % N != readyIdx[c] && __atomic_load_n(Rec(c, (slot[c] + i) % N), __ATOMIC_ACQUIRE) == 0)
 							target[c] = (slot[c] + i) % N;
+				bool reclaimed[2] = {false, false};
 				for (int c = 0; c < 2; c++) {
 					uint32_t ready = 1;
 					if (target[c] < 0 && readyIdx[c] >= 0 &&
 					    __atomic_compare_exchange_n(Rec(c, readyIdx[c]), &ready, 0u, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
 						target[c] = readyIdx[c]; // no free record: the untaken ready one gets the newer frame
-						readyIdx[c] = -1;
+						reclaimed[c] = true;
 					}
+				}
+				if (target[0] < 0 || target[1] < 0) {
+					// one camera has nowhere to write: keep the other camera's ready frame (freeing it left that eye
+					// with nothing ready while the compositor held every record of the other: the view froze)
+					for (int c = 0; c < 2; c++)
+						if (reclaimed[c])
+							__atomic_store_n(Rec(c, readyIdx[c]), 1u, __ATOMIC_RELEASE);
+					target[0] = target[1] = -1;
+				} else {
+					for (int c = 0; c < 2; c++)
+						if (reclaimed[c])
+							readyIdx[c] = -1;
 				}
 			}
 			canWrite = target[0] >= 0 && target[1] >= 0;
+			if (reading && !canWrite) {
+				if (!stallSince)
+					stallSince = now;
+				else if (now - stallSince > 500000000LL && now - lastStallLog > 2000000000LL) {
+					lastStallLog = now;
+					char sts[64];
+					int o = 0;
+					for (int c = 0; c < 2; c++)
+						for (int k = 0; k < N && o < 60; k++)
+							o += snprintf(sts + o, sizeof(sts) - o, "%u%s", __atomic_load_n(Rec(c, k), __ATOMIC_ACQUIRE),
+							              k == N - 1 && c == 0 ? " / " : "");
+					printf("ptprovider: no record to write for %.1f s (states %s, ready %d %d)\n", (now - stallSince) * 1e-9, sts,
+					       readyIdx[0], readyIdx[1]);
+					fflush(stdout);
+				}
+			} else
+				stallSince = 0;
 			if (canWrite) {
 				slot[0] = target[0], slot[1] = target[1];
 				if (!reading)
