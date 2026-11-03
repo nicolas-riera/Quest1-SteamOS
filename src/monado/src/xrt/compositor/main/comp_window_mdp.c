@@ -219,8 +219,12 @@ struct mdp_direct
 	uint64_t ack_pending; //!< ack mode vsync: frame committed, reported displayed at the next vsync
 	float held_delta[4];
 	uint32_t skipped;
-	float o[4]; //!< device space = o * LOCAL, estimated from the render poses
+	//! Device space = o * LOCAL, estimated from the render poses. A constant per OpenXR session of driver_quest1
+	//! (its LOCAL space is created at the head's yaw then), so it starts over with each layer connection.
+	float o[4];
 	bool o_valid;
+	uint32_t o_n;   //!< estimates averaged into o since it was seeded
+	uint32_t o_far; //!< consecutive estimates far from o: LOCAL changed (recentred, new session), seed again
 	//! The layer's images are undistorted eye renders (WARP_LENS_FILE): the warp does the lens distortion
 	bool lens, lens_read;
 	//! Their extent in tangents of each half's view (h: half 0 is view 1), as driver_quest1 projects them
@@ -507,6 +511,7 @@ direct_reset(struct mdp_target *t)
 	D->count = 0;
 	D->latest = -1;
 	D->fresh = false;
+	D->o_valid = false;
 }
 
 static void
@@ -1788,27 +1793,38 @@ direct_tick(struct mdp_target *t, int64_t vsync)
 			if (head_orientation(t, display_ns, qd) && head_orientation(t, D->latest_frame.time_ns, qt)) {
 				if (D->latest_frame.frame != D->calibrated_frame) {
 					// o: Monado's device space = o * LOCAL (a constant), averaged over the frames since the
-					// prediction error of each one is random
+					// prediction error of each one is random. A plain mean for the first frames, then a slow
+					// average; estimates far from it on several frames in a row mean LOCAL moved: seed again (a
+					// stale o made the warped frames sit off and swing slowly into place, 2026-11-03).
 					float cr[4], oe[4];
 					quat_conj(qr, cr);
 					quat_mul(qt, cr, oe);
-					if (!D->o_valid) {
+					float a = 0.0f;
+					if (D->o_valid) {
+						float co2[4], rl[4];
+						quat_conj(D->o, co2);
+						quat_mul(co2, oe, rl);
+						a = quat_angle_deg(rl);
+						a = a > 180.0f ? 360.0f - a : a;
+						D->stats.oe_sum += a;
+						D->stats.oe_max = a > D->stats.oe_max ? a : D->stats.oe_max;
+						D->stats.oe_n++;
+						D->o_far = a > 4.0f ? D->o_far + 1 : 0;
+					}
+					if (!D->o_valid || D->o_far >= 8) {
+						if (D->o_valid) {
+							U_LOG_W("mdp: direct: LOCAL moved %.1f deg from the device space, o seeded again", a);
+						}
 						memcpy(D->o, oe, sizeof(oe));
 						D->o_valid = true;
+						D->o_n = 1;
+						D->o_far = 0;
 					} else {
 						float dot = D->o[0] * oe[0] + D->o[1] * oe[1] + D->o[2] * oe[2] + D->o[3] * oe[3];
-						{
-							float co2[4], rl[4];
-							quat_conj(D->o, co2);
-							quat_mul(co2, oe, rl);
-							float a = quat_angle_deg(rl);
-							a = a > 180.0f ? 360.0f - a : a;
-							D->stats.oe_sum += a;
-							D->stats.oe_max = a > D->stats.oe_max ? a : D->stats.oe_max;
-							D->stats.oe_n++;
-						}
+						float k = D->o_n < 20 ? 1.0f / (float)(D->o_n + 1) : 0.05f;
+						D->o_n++;
 						for (int i = 0; i < 4; i++) {
-							D->o[i] += 0.05f * ((dot < 0 ? -oe[i] : oe[i]) - D->o[i]);
+							D->o[i] += k * ((dot < 0 ? -oe[i] : oe[i]) - D->o[i]);
 						}
 						quat_normalize(D->o);
 					}

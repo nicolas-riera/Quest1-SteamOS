@@ -38,6 +38,11 @@ Open items, roughly by priority. Done items move to the commit log.
   controller tracking threads (CtrllrCam, CtrlTracking, SCHED_FIFO on cores 0-3) work harder. In
   part (only in part) the laser pointer passing over Steam UI elements: their hover animations cost
   frames (user).
+- Re-projection off when the headset is put on, then swinging slowly into place while fresh frames
+  sit right (user, 2026-11-03): Monado's warp averaged the device-to-LOCAL rotation `o` at 5 % a
+  frame and never reset it, but driver_quest1's LOCAL space is created at the head's yaw with each
+  SteamVR start. Now seeded again per layer connection and when far for 8 frames (comp_window_mdp.c);
+  to confirm in the headset after a SteamVR restart.
 - Slim the install: drop what this headset never uses (other controllers' render models, SteamVR
   Home if present, etc.): less storage, memory and load time (user, 2026-11-03).
 - Steam's UI and the dashboard lag, and so does Steam's VR keyboard (it is Steam's: it types fine,
@@ -80,18 +85,20 @@ Open items, roughly by priority. Done items move to the commit log.
 - Goal (user, 2026-11-03): the cameras seen by SteamVR as a real camera, like on the Steam Frame:
   its settings adjustable in SteamVR, usable as normal passthrough and as the passthrough used to
   draw the boundary.
-- 2026-11-03: the roomview is switched on through vrcompositor's system layer mailbox
-  (`src/camtap/vrmailbox`, `set_camera_roomview_enabled` while no playspace is set = boundary
-  drawing, `..._forsceneapps` with a scene app). vrcompositor then reaches its draw ("Cam: Room
-  View") and crashes: the Adreno driver fails to build the roomview pipeline (-13) and
-  vrcompositor binds the null pipeline. Next: dump that shader (`/etc/quest1-spirv-dump`) and fix it
-  in the compat layer. Tests leave `camera.enableConstructRoomView` set, which crash-loops
-  vrcompositor (load ~12, crackling audio): always run `/root/pt-undo.sh` after.
-- SteamVR's own camera view (roomview), fed by `ptprovider` (docs/passthrough.md): it starts (driver
-  "props" mode + camera.roomView toggle) and takes our frames, but draws nothing until the driver
-  publishes a depth mesh on the roomview3d block queues (key/value write API of vrserver's block
-  queue manager to read). Then camera frames from the camtap ring instead of the test pattern.
-  The head-locked overlay (`q1-camoverlay`) is shelved: the user wants SteamVR's integration.
+- 2026-11-03: SteamVR's 2D roomview (camera.roomView = 1) shows the real cameras, fed by `ptprovider`
+  and switched on through vrcompositor's system layer mailbox (`src/camtap/vrmailbox`,
+  docs/passthrough.md). Test scripts in `src/camtap/roomview-test/`; tests leave
+  `camera.enableConstructRoomView` set, which crash-loops vrcompositor (load ~12, crackling audio):
+  always run `/root/pt-undo.sh` after. The head-locked overlay (`q1-camoverlay`) is shelved.
+- User's first test (2026-11-03), to fix:
+  - Too dark: Meta's passthrough is brighter (SteamVR tints it ×0.7; Meta's tone curve to copy).
+  - Only the left camera: Meta uses both, one per eye, with correction and synchronised exposure
+    (vrcompositor picks the camera per eye in 0x160a80).
+  - The top middle is black (no camera sees it): Meta stretches the image to fill it.
+  - Placement right for a start, not fine-tuned.
+  - No eye button on the dashboard (it should toggle passthrough, like the Frame). The dashboard's
+    "Room View" setting points to an option that does not exist; turning it on made the view black.
+- Then: ptprovider as a service, passthrough while drawing the boundary, the 3D roomview (depth mesh).
 
 ## Boundary
 - Test in the headset (after passthrough, needed to draw the boundary): the playspace buttons
