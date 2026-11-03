@@ -257,6 +257,28 @@ static void get_ctrl(uint64_t id, int64_t t, struct q1track_controller *c)
 	}
 }
 
+/* libossdk keeps a controller that lost power (battery out, asleep) with its last buttons, only its
+ * pose turns invalid; and a controller its cameras have not seen yet has a pose without a tracked
+ * position. Present = a pose (gaps up to 0.3 s), since a tracked position: SteamVR then shows a
+ * powered-off controller as off, and one not seen yet as searching (user, 2026-11-02). */
+static void liveness(int slot, int64_t t, struct q1track_controller *c)
+{
+	static int64_t last_valid[2];
+	static int seen[2];
+	if (c->pose.valid) {
+		last_valid[slot] = t;
+		if (c->pose.status & Q1TRACK_POS_TRACKED)
+			seen[slot] = 1;
+	} else if (t - last_valid[slot] > 300000000LL) {
+		seen[slot] = 0;
+	}
+	c->connected = seen[slot] && t - last_valid[slot] <= 300000000LL;
+	if (!c->connected) {
+		c->buttons = 0;
+		c->trigger = c->grip = c->stick_x = c->stick_y = 0.0f;
+	}
+}
+
 static void send_haptics(struct q1track_shm *m, int64_t now)
 {
 	static uint32_t last_seq[2];
@@ -370,6 +392,7 @@ static int do_serve(double hz)
 				int slot = devs[i].hand == HAND_LEFT ? 0 : devs[i].hand == HAND_RIGHT ? 1 : -1;
 				if (slot >= 0) {
 					get_ctrl(devs[i].id, t, &cs[slot]);
+					liveness(slot, t, &cs[slot]);
 					cs[slot].battery = devs[i].battery;
 				}
 			}
