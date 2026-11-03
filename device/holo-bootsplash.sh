@@ -6,11 +6,26 @@
 #  - packages: GStreamer's VP9 (libvpx) and Matroska plugins
 #  - /usr/local/lib/q1splash/q1splash: built from src/q1splash/q1splash.c
 #  - /usr/local/sbin/q1splash-play, quest1-bootsplash.service (enabled), monado.service waits for it
+#  - holo-panel-off.service (enabled): panels blanked at sysinit, so the bootloader's last frame does not
+#    stay lit (burn-in) until the splash or a compositor takes over
 # Before Steam has been installed (first boot) there is no movie and nothing is shown.
 set -e
 [ "$1" = install ] && [ -f "$2/q1splash.c" ] || { echo "usage: $0 install <q1splash source dir>" >&2; exit 2; }
 cd "$2"
 pacman -S --noconfirm --needed gst-plugins-base gst-plugins-good libvpx
+
+cat > /etc/systemd/system/holo-panel-off.service <<'EOF'
+[Unit]
+Description=Turn the Quest panels off at boot (no splash burn-in until a compositor takes over)
+DefaultDependencies=no
+After=systemd-udevd.service
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c "echo 0 > /sys/class/graphics/fb0/blank; dd if=/dev/zero of=/dev/fb0 bs=1M count=35 2>/dev/null; echo 4 > /sys/class/graphics/fb0/blank"
+[Install]
+WantedBy=sysinit.target
+EOF
+systemctl enable holo-panel-off.service
 
 mkdir -p /usr/local/lib/q1splash
 gcc -O2 -Wall -o /usr/local/lib/q1splash/q1splash q1splash.c -Iinc -I/opt/hybris/include -L/opt/hybris/lib \

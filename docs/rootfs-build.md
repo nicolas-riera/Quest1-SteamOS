@@ -17,23 +17,28 @@ could install it. Offline notes: nothing here has been run yet.
 | Android blobs and HALs | the headset's own `system_a` / `modem_a`, mounted read-only | no, never copied | `device/holo-android-blobs.sh`, `holo-android-hals.sh`, `holo-android-modem.sh` |
 | Monado | `gitlab.freedesktop.org/monado/monado` @ `cfa6078` + `src/monado/quest1-monado.patch` | yes | built on the headset, `device/holo-monado.sh` |
 | Wi-Fi, memory | `device/holo-wifi.sh`, `device/holo-perf.sh` | yes | run on the headset |
+| Identity | `device/holo-identity.sh` (os-release says SteamOS, host name `oculus-quest`) | yes | run on the headset |
 | x11vnc | LibVNCServer 0.9.15 + x11vnc 0.9.17 | yes | built on the headset (`-DCMAKE_POLICY_VERSION_MINIMUM=3.5`) |
 | xscreen, Steam session | `src/xscreen`, `device/holo-steam-session.sh` | yes | built on the headset |
 | Vulkan shim and SteamVR layer | `src/vklayer-steamvr` | yes | cross-built in WSL |
 | SteamVR driver | `src/steamvr-quest1` | yes | cross-built in WSL |
 | gtk2 (for `steamui.so`) | the Steam Frame rootfs | **no** | copied to `/usr/local/lib` |
 | Steam client (arm64) | the Steam Frame's `steam.tar.zst` | **no** | unpacked in `~steamos/.local/share/Steam`; it then updates itself |
-| SteamVR 2.17 (arm64) | the Steam Frame's `/opt/steamvr` | **no** | copied to `/opt/steamvr`, with local edits |
+| SteamVR 2.17 (arm64) | the Steam Frame's `/opt/steamvr` | **no** | copied to `/opt/steamvr`; the Quest 1 edits and `steamvr-q1` by `device/holo-steamvr.sh` |
 
 ### Packages installed with pacman
 
-`base-devel git cmake meson ninja python vulkan-icd-loader vulkan-tools vulkan-headers
-wayland wayland-protocols libdrm libglvnd mesa-utils gdb eigen glslang shaderc libbsd hidapi
-libusb libxrandr libxcb openxr python-jinja strace openssh xorg-server-xvfb xorg-xwininfo
-xorg-xdpyinfo xorg-xauth networkmanager wpa_supplicant iw iproute2 libjpeg-turbo libpng zlib
-openssl libxinerama libxcursor libxdamage libxcomposite libxi xorg-xwd alsa-lib at-spi2-core
-libcups gdk-pixbuf2 ibus openal libpipewire libpulse libva cairo pango lsof libvdpau
-sdl2-compat xorg-xset`
+Explicitly installed packages on the development headset (`pacman -Qqe`, 2026-11-03); the rest
+comes in as dependencies.
+
+`alsa-lib alsa-utils archlinux-keyring at-spi2-core base-devel ca-certificates
+ca-certificates-utils cmake dracut eigen gamescope gdb gdk-pixbuf2 git glslang
+gst-plugins-base gst-plugins-good hidapi ibus iproute2 iw libbsd libcups libdrm libglvnd
+libjpeg-turbo libpipewire libpulse libva libvdpau libvpx libxcursor libxdamage libxrandr
+linux lsof mesa-utils meson networkmanager ninja openal openssh openxr pipewire
+pipewire-alsa pipewire-pulse python python-jinja sdl2-compat shaderc upower vulkan-headers
+vulkan-icd-loader vulkan-tools wayland wayland-protocols wireplumber wpa_supplicant
+xorg-server-xvfb xorg-xauth xorg-xdpyinfo xorg-xset xorg-xwd xorg-xwininfo`
 
 ### libhybris configuration
 
@@ -46,14 +51,14 @@ make CFLAGS="-g -O2 -DVK_ENABLE_BETA_EXTENSIONS"
 
 ## Still only on the headset
 
-These must be copied back into the repository the next time the headset is connected,
-before an image can be rebuilt without it:
+Checked 2026-11-03 against the headset (services, `/usr/local`, `/etc` drop-ins, `/opt/steamvr`):
+everything the system needs now comes from a script in `device/`, a `src/` tree, or the Monado
+patch. What stays on the headset only:
 
-- `/usr/local/bin/steamvr-q1`, `/root/vrstart.sh` and the dashboard service command line;
-- the `/opt/steamvr/bin/vrwebhelper/linuxarm64/vrwebhelper.sh` edits (`.orig` kept next to it);
-- the keys set in `~steamos/.local/share/Steam/config/steamvr.vrsettings`;
-- any local change in `/root/libhybris` (`git -C /root/libhybris diff`);
-- the exact list of installed packages (`pacman -Qqe`), to check the list above.
+- the user's own SteamVR and Steam settings (tint, colors, room view, time zone);
+- development helpers and logs in `/root` (test scripts, binary backups, captures);
+- libhybris: no local change (`git -C /root/libhybris status` lists only the autotools
+  `COPYING`/`INSTALL` it generates).
 
 ## Proposed build
 

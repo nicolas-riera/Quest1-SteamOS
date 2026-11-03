@@ -81,11 +81,44 @@ FRAME = {
         "enableAchromaticDistortion": False,
     },
 }
+# The port's own choices (driver selection, Adreno 540 performance), set only where the key is absent:
+# a value the user changes in SteamVR's settings stays. Looks (colors, background, tint) are left to the user.
+PORT = {
+    "steamvr": {
+        "forcedDriver": "quest1",
+        "requireHmd": True,
+        "activateMultipleDrivers": False,
+        "enableLinuxVulkanAsync": True,     # high-priority queue for vrcompositor
+        "motionSmoothing": False,
+        "supersampleManualOverride": True,  # 100 %: the GPU has no headroom for more
+        "supersampleScale": 1,
+        "allowSupersampleFiltering": False,
+        "sharpening": False,
+        "overlayMips": 1,
+        "overlayRenderQuality_2": 1,
+        "renderSystemLayerInDistortPass": False,
+        "useFacetRenderer": False,
+        "depthReprojectionMesh": False,
+        "enableSimplifiedShaders": False,
+        "showMirrorView": False,
+        "enableHomeApp": False,
+    },
+    "power": {"pauseCompositorOnStandby": False},
+    "audio": {"enableSpatializeGlobal": False, "enableSpatializeSurround": False},
+    "camera": {"enableCamera": True},       # passthrough (q1-ptprovider)
+    "driver_quest1": {"enable": True},
+    # the Frame's own drivers and the PC headsets' ones, shipped in /opt/steamvr, must not claim the HMD
+    **{"driver_" + n: {"enable": False} for n in
+       ("frame_hmd", "frame_controller", "deckard", "oculus", "lighthouse", "htc", "indexcontroller")},
+}
 
 def main():
     if os.path.exists(P) and not os.path.exists(P + ".pre-frame"):
         shutil.copy2(P, P + ".pre-frame")
     d = json.load(open(P)) if os.path.exists(P) else {}
+    for sec, kv in PORT.items():
+        for k, v in kv.items():
+            d.setdefault(sec, {}).setdefault(k, v)
     for sec, kv in FRAME.items():
         d.setdefault(sec, {}).update(kv)
     # with Monado's warp doing the lens distortion and its chromatic aberration (/etc/quest1-warp-lens),

@@ -30,6 +30,36 @@ ExecStart=-/sbin/agetty --autologin root --keep-baud 115200,57600,38400,9600 - $
 TimeoutStopSec=2
 E
 
+# the saved random seed counts as entropy: kernel 4.4 has no other early source, getrandom() would block boot
+mkdir -p $S/systemd-random-seed.service.d
+cat > $S/systemd-random-seed.service.d/credit.conf <<'E'
+[Service]
+Environment=SYSTEMD_RANDOM_SEED_CREDIT=yes
+E
+# kernel 4.4: networkd must not manage foreign routes/next hops (netlink calls it lacks)
+mkdir -p /etc/systemd/networkd.conf.d
+cat > /etc/systemd/networkd.conf.d/holo-4.4.conf <<'E'
+[Network]
+ManageForeignNextHops=no
+ManageForeignRoutes=no
+ManageForeignRoutingPolicyRules=no
+E
+# journal in RAM, also on the kernel log (readable from the serial console and pstore)
+mkdir -p /etc/systemd/journald.conf.d
+cat > /etc/systemd/journald.conf.d/kmsg.conf <<'E'
+[Journal]
+ForwardToKMsg=yes
+MaxLevelKMsg=info
+Storage=volatile
+RuntimeMaxUse=64M
+E
+# a hung Android daemon must not hold power off for 90 s
+mkdir -p /etc/systemd/system.conf.d
+cat > /etc/systemd/system.conf.d/holo-timeouts.conf <<'E'
+[Manager]
+DefaultTimeoutStopSec=15s
+E
+
 # --- services ----------------------------------------------------------------
 systemctl set-default multi-user.target
 systemctl enable systemd-networkd.service systemd-networkd.socket serial-getty@ttyGS0.service
