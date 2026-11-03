@@ -152,7 +152,7 @@ static Calib LoadCalib(int id)
 //! The per-frame record descriptor (248 bytes) vrcompositor copies (0x15f4bc) into its camera state (0x15f748..0x15f8b4):
 //!   +8 double capture time (s); +16..+28 float fx, fy, cx, cy (pixels: the shader divides by the block's image size);
 //!   +32..+44 float k1..k4 (Kannala-Brandt fisheye; all zero = pinhole); +224 u8 "spline" (adds the spline distortion
-//!   image, model 2); +228.. spline scale/offset; +48, +96, +144 three 3x4 float matrices (poses: not mapped yet).
+//!   image, model 2); +228.. spline scale/offset; +48, +96, +144 three 3x4 float matrices (poses, below).
 static void FillDesc(uint8_t *desc, double captureS, const Calib &cal, const HmdMatrix34_t &head)
 {
 	memset(desc, 0, 248);
@@ -160,44 +160,35 @@ static void FillDesc(uint8_t *desc, double captureS, const Calib &cal, const Hmd
 	float in[8] = {(float)cal.f, (float)cal.f, (float)(cal.cx + 0.5), (float)(cal.cy + 0.5),
 	               (float)cal.k[0], (float)cal.k[1], (float)cal.k[2], (float)cal.k[3]};
 	memcpy(desc + 16, in, sizeof(in));
-	// +48: the camera's pose (vrcompositor 0x15f660 inverts it per camera, then projects with +z forward, y down: OpenCV
-	// axes, as Meta's DeviceFromCamera); +96, +144: identity for now
-	// DeviceFromCamera: vrcompositor projects head-space points into the camera with its inverse (the roomview shader's
-	// "world" is the head: _m0 identity, _m1 head -> eye). PT_CAM_POSE=tracking: head pose x DeviceFromCamera instead,
-	// PT_CAM_POSE=forward: a camera looking straight ahead (tests).
+	// +48: the camera's pose, Meta's DeviceFromCamera (OpenCV camera axes in the head frame): vrcompositor (0x15f660) inverts it
+	// into the shader's _m3, which projects head-space points (the depth mesh's frame) into the camera.
+	// +96: the same pose: vrcompositor (0x160a80) draws each eye with the camera nearest to it, comparing these with the eye
+	// positions (when params byte 1, state[3], is set: SetShow).
+	// +144: the head pose at capture (raw tracking space, like the depth mesh)
 	float m1[12];
-	const bool relative = !getenv("PT_CAM_POSE") || strcmp(getenv("PT_CAM_POSE"), "tracking");
 	for (int r = 0; r < 3; r++)
-		for (int c = 0; c < 4; c++) {
-			double v = 0;
-			for (int k = 0; k < 3; k++)
-				v += (relative ? (r == k) : head.m[r][k]) * cal.m[k * 4 + c];
-			if (c == 3)
-				v += relative ? 0 : head.m[r][3];
-			m1[r * 4 + c] = (float)v;
-		}
-	if (getenv("PT_CAM_POSE") && !strcmp(getenv("PT_CAM_POSE"), "forward")) { // test: an OpenCV camera looking down -z
-		const float f[12] = {1, 0, 0, 0, 0, -1, 0, 0, 0, 0, -1, 0};
-		memcpy(m1, f, sizeof(f));
-	}
+		for (int c = 0; c < 4; c++)
+			m1[r * 4 + c] = (float)cal.m[r * 4 + c];
 	memcpy(desc + 48, m1, sizeof(m1));
-	// +96, +144: the head pose at capture (tracking space, raw universe like the depth mesh): which of the two
-	// vrcompositor uses for what is not mapped yet, both get it
-	for (int off : {96, 144})
-		memcpy(desc + off, &head.m[0][0], sizeof(head.m));
+	memcpy(desc + 96, m1, sizeof(m1));
+	memcpy(desc + 144, &head.m[0][0], sizeof(head.m));
 	// +204..+216: the valid image area in texture coordinates (u min, v min, u max, v max; the fragment shader's bounds,
-	// vrcompositor 0x15f754 -> uniforms _m15/_m16): outside it the roomview is black
-	const float bounds[4] = {0, 0, 1, 1};
+	// vrcompositor 0x15f754 -> uniforms _m15/_m16): outside it the roomview is black.
+	// Unbounded: where the bottom cameras do not see (above the horizon), the image's edge is stretched (the sampler clamps
+	// to the edge) instead of black, as Meta's passthrough does
+	const float bounds[4] = {-100, -100, 101, 101};
 	memcpy(desc + 204, bounds, sizeof(bounds));
 }
 
 //! The "params" of IVRCameraPassthroughInternal (GetParams/SetParams, vrclient 0x1a49d8/0x1a4bf8) are 5 bytes at state+2: the
 //! compositor shows the roomview while state[2] is set (GetParams(nullptr) returns it, vrcompositor 0x15dda0, called per frame at
 //! 0x9ee6c) and reads state[4] as the "wanted" byte of its snapshot (+830, compared with the running state +837). On the
-//! Steam Frame the driver sets them (passthrough on/off); here the provider does while frames flow.
+//! Steam Frame the driver sets them (passthrough on/off); here the provider does while frames flow. state[3] (snapshot +829)
+//! gives each eye its own camera in the 3D roomview (0x161b98: without it both eyes take the left eye's camera).
 static void SetShow(uint8_t *state, bool on)
 {
 	state[2] = on;
+	state[3] = on;
 	state[4] = on;
 }
 
@@ -233,6 +224,13 @@ int main()
 	const bool dump = getenv("PT_DUMP") != nullptr;
 	const char *ringPath = getenv("PT_RING") ? getenv("PT_RING") : Q1CAM_RING_DEFAULT_PATH;
 	const Calib calib[2] = {LoadCalib(0), LoadCalib(2)}; // the bottom pair (left, right)
+	// The sensors' values are linear in light; the roomview shader decodes its Y' as sRGB (full-range BT.601, then the sRGB
+	// curve): encode them so that the light reaches the display linear, as Meta's passthrough does (its gamma steps cancel out)
+	uint8_t toSrgb[256];
+	for (int v = 0; v < 256; v++) {
+		double l = v / 255.0, e = l <= 0.0031308 ? 12.92 * l : 1.055 * pow(l, 1 / 2.4) - 0.055;
+		toSrgb[v] = (uint8_t)std::lround(std::min(1.0, e) * 255);
+	}
 	for (int c = 0; c < 2; c++)
 		printf("ptprovider: camera %d %s: f %.1f centre %.1f %.1f k %.3f %.3f %.3f %.3f\n", c ? 2 : 0,
 		       calib[c].ok ? "calibrated" : "NOT calibrated (defaults)", calib[c].f, calib[c].cx, calib[c].cy, calib[c].k[0],
@@ -393,7 +391,7 @@ int main()
 							const uint8_t *src = base + rc.offset;
 							Img &im = img[c][slot[c]];
 							const uint32_t stride = rc.stride;
-							WriteYuv(im, [&](int x, int y) { return src[(size_t)y * stride + x]; }, [](int, int) { return false; });
+							WriteYuv(im, [&](int x, int y) { return toSrgb[src[(size_t)y * stride + x]]; }, [](int, int) { return false; });
 							got++;
 						}
 					if (got == 2 && __atomic_load_n(&s.seq, __ATOMIC_ACQUIRE) == seq0) {

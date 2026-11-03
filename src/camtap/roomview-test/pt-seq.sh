@@ -5,7 +5,7 @@ sh /root/q1restart.sh main "roomview test" systemctl restart quest1-steamvr
 until pgrep -x vrcompositor >/dev/null; do sleep 1; done
 sleep 20
 cd /tmp
-(setsid nohup runuser -u steamos -- env XDG_RUNTIME_DIR=/run/user/1000 PT_PATTERN=${PATTERN:-2} PT_CAM_POSE=${CAM_POSE:-} PT_DUMP=1 /tmp/ptprovider > /tmp/ptprov.out 2>&1 &)
+(setsid nohup runuser -u steamos -- env XDG_RUNTIME_DIR=/run/user/1000 PT_PATTERN=${PATTERN:-2} PT_DUMP=1 /tmp/ptprovider > /tmp/ptprov.out 2>&1 &)
 sleep 16
 (setsid nohup runuser -u steamos -- env XDG_RUNTIME_DIR=/run/user/1000 PT_ROOMVIEW=${ROOMVIEW:-2} PT_HOLD=900 /tmp/trackedcam_test /tmp 1 > /tmp/tct.out 2>&1 &)
 sleep 5

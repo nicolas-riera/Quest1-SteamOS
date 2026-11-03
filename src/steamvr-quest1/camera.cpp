@@ -1162,7 +1162,8 @@ private:
 
 	//! The depth mesh vrcompositor's 3D roomview draws (see docs/passthrough.md): a layout block (index buffer, vertex and
 	//! index counts), a data block (float3 vertices, pose of the mesh in tracking space) and the queue-wide meshIsUpToDate.
-	//! For now a static sphere around the playspace centre, 3 m radius, seen from inside.
+	//! For now a static sphere around the head (vrcompositor draws the mesh in head space: its _m0 stays identity), 3 m
+	//! radius, its triangles facing inwards (vrcompositor culls the others).
 	void BuildMesh()
 	{
 		EVRInitError err = VRInitError_None;
@@ -1172,7 +1173,7 @@ private:
 			return;
 		}
 		const int rings = 24, segs = 48;
-		const float radius = (float)atof(Env("QUEST1_CAMERA_MESH_RADIUS", "3")), cy = 0.0f; // around the head: vrcompositor draws the mesh in head space (its _m0 stays identity)
+		const float radius = (float)atof(Env("QUEST1_CAMERA_MESH_RADIUS", "3")), cy = 0.0f;
 		for (int r = 0; r <= rings; r++) {
 			float th = (float)M_PI * r / rings;
 			for (int sgm = 0; sgm <= segs; sgm++) {
@@ -1185,7 +1186,7 @@ private:
 		for (int r = 0; r < rings; r++)
 			for (int sgm = 0; sgm < segs; sgm++) {
 				uint32_t a = r * (segs + 1) + sgm, b = a + segs + 1;
-				uint32_t t[6] = {a, b, a + 1, a + 1, b, b + 1};
+				uint32_t t[6] = {a, a + 1, b, a + 1, b + 1, b};
 				idx.insert(idx.end(), t, t + 6);
 			}
 		CLog("quest1 camera: depth mesh %zu vertices, %zu indices\n", verts.size() / 3, idx.size());
@@ -1199,6 +1200,8 @@ private:
 		if (!paths || queues.size() != 2 || verts.empty())
 			return;
 		int32_t vertexCount = (int32_t)(verts.size() / 3), indexCount = (int32_t)idx.size();
+		if (vertexCount > 65536)
+			return; // 16-bit indices
 		uint64_t layoutId = 1;
 		uint64_t block = 0;
 		void *buf = nullptr;
@@ -1207,7 +1210,15 @@ private:
 			CLog("quest1 camera: layout block: error %d\n", e);
 			return;
 		}
-		memcpy(buf, idx.data(), idx.size() * 4);
+		// vrcompositor draws 16-bit indices, but copies indexCount 32-bit words and turns each triple of words (a, b, c)
+		// into (a, c, b) on the way (0x15e300, its winding flip): pack the indices in pairs and swap the words beforehand
+		std::vector<uint32_t> w(idx.size() + 3, 0);
+		uint16_t *h = (uint16_t *)w.data();
+		for (size_t i = 0; i < idx.size(); i++)
+			h[i] = (uint16_t)idx[i];
+		for (size_t i = 0; i + 2 < idx.size(); i += 3)
+			std::swap(w[i + 1], w[i + 2]);
+		memcpy(buf, w.data(), idx.size() * 4);
 		WriteProp(block, "/meshLayout/layoutId", 3, &layoutId, 8);
 		WriteProp(block, "/meshLayout/vertexCount", 2, &vertexCount, 4);
 		WriteProp(block, "/meshLayout/indexCount", 2, &indexCount, 4);

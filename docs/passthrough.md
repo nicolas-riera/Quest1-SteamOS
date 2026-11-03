@@ -156,8 +156,8 @@ Reversed from vrcompositor 0x15fcc0 (per-frame roomview update), 0x15e300 (geome
 - Block queue header "properties" are IVRPaths_001 values (`ReadPathBatch/WritePathBatch/StringToHandle/HandleToString`, vtable slots
   0..3; a driver gets it with `GetGenericInterface("IVRPaths_001")`; PathWrite_t/PathRead_t as in openvr_capi.h, the driver SDK header
   lacks them). Root = the queue handle (queue-wide) or the handle of an acquired block (per block), the key is a path string.
-- Layout queue `/xrservice/roomview3d/meshLayout`, one block: buffer = `indexCount` u32 triangle indices (the compositor swaps the
-  2nd/3rd index of each triangle); block props `/meshLayout/layoutId` (u64, tag 3), `/meshLayout/vertexCount` (i32, tag 2),
+- Layout queue `/xrservice/roomview3d/meshLayout`, one block: buffer = `indexCount` 32-bit words (the compositor swaps the 2nd/3rd
+  word of each triple), but drawn as `indexCount` **16-bit** indices: see "The 3D roomview works" below; block props `/meshLayout/layoutId` (u64, tag 3), `/meshLayout/vertexCount` (i32, tag 2),
   `/meshLayout/indexCount` (i32). The compositor rebuilds its GPU buffers only when layoutId changes.
 - Data queue `/xrservice/roomview3d/meshData`: buffer = `vertexCount` x float3 vertices; block props `/meshData/meshId` (u64, must
   change for the compositor to re-read), `/meshData/layoutId` (u64, must equal the layout's), `/meshData/elementCount` (i32 = 3 x
@@ -231,8 +231,46 @@ roomview uniforms (they live at camera state + 192, 528 bytes; written per frame
   camera pose as a 3x4 matrix with OpenCV camera axes, inverted by vrcompositor into `_m3`. Meta's DeviceFromCamera
   (camera_calibration_v2.json, Fisheye62: the first four radial coefficients are used) is in the OpenVR head frame (x right,
   y up, -z forward) and is what works.
-- `camera.roomView = 1` (2D) draws the full view correctly with no depth mesh. The 3D mode (2) draws only part of the view with
-  the driver's sphere (the mesh frame is not fully understood yet: `_m0` stays identity, `_m1` is head -> eye).
+- `camera.roomView = 1` (2D) draws the full view correctly with no depth mesh. The 3D mode (2): see the next section.
 - Switching it on: props driver mode, ptprovider, a client holding AcquireVideoStreamingService, `set_camera_roomview_enabled`
   on the system layer mailbox. Test scripts: `src/camtap/roomview-test/` (pt-live.sh: ROOMVIEW=1|2, PATTERN=0 real cameras,
   KEEP=1 leaves it on; pt-undo.sh restores the default settings).
+
+## The 3D roomview works (2026-11-03, night)
+SteamVR's dashboard offers "Room View: On" = the 3D mode for this HMD (it declares SupportsInHMDRoomSetup like the Frame; the
+options are [Off, On = 3D], or [Off, 2D, 3D] / [Off, On = 2D] on other HMDs), and its eye button (dashboard right section) shows
+while `camera.enableCamera` and `camera.roomView` > 0. So the 3D mode is the one to make work. What it needed:
+- **Mesh publish race**: the compositor drops a data block whose layoutId differs from the layout it has read so far, and it may read
+  the data queue first: the driver publishes both blocks every second (`CompositorGate::Run`).
+- **16-bit indices**: vrcompositor 0x15e300 allocates and uploads `indexCount` 32-bit words (swapping the 2nd and 3rd word of each
+  triple, its winding flip), but the draw binds them as 16-bit indices (`indexCount` of them). With u32 indices every other index read
+  as 0: triangle fans to vertex 0 (vertical streaks, half the view black, a plain quad drew nothing). The driver packs the indices in
+  pairs and swaps the words of each triple beforehand, so at most 65536 vertices.
+- **Culling**: triangles must face the head; the other winding is culled.
+- **Mesh frame**: the vertices go to the GPU as they are; in the vertex shader `p = _m0 * v` with `_m0` identity (rawFromMeshPose
+  identity, posePredictionBaseTime 0), `gl_Position = _m2 * _m1 * p` (`_m1` head -> eye), and the camera projection
+  `c = _m3 * p`, `_m3` = the record's +48 inverted, times a matrix from the head pose (identity while the head is still: the
+  6DoF correction between capture and display). So for now the mesh is in head space: a 3 m sphere around the head.
+- **One camera per eye**: vrcompositor 0x160a80 picks, per eye, the camera whose pose is nearest to the eye. It reads the poses from
+  the records' **+96** (mapped with marked matrices: +48 of record 0/1 -> its inverses at camera state +0x410/+0x450, +96 -> +0x83c/
+  +0x86c) and the eye from `head -> eye`, so +96 = DeviceFromCamera in the head frame. It also needs params byte 1 (`state[3]`,
+  snapshot +829): otherwise both eyes take eye 0's camera. ptprovider now sets both; gdb shows camera 0 for the left eye, 1 for the
+  right. +144 is presumably the head pose at capture (ptprovider gives it the raw head pose).
+- **Above the cameras' view**: the fragment shader draws black where u is outside the record's bounds (+204..+216) and clamps
+  the uv to them; with bounds of +-100 the sampler's clamp to edge stretches the image's edge instead, as Meta's passthrough
+  does (Meta's comes from its depth mesh extrapolating past the stereo area).
+- **Brightness**: the shader decodes Y' as full-range BT.601 then sRGB; the OV7251 values are linear, so ptprovider encodes them
+  with the sRGB curve (they were shown about as L^2.2: too dark). The `_m9` tint 0.7 is vrcompositor's own fade (0x121604:
+  0.7 under a condition, likely while the dashboard is open, as on the Frame), not a setting.
+- Test scripts on the headset: `pt-live.sh` (KEEP=1 PATTERN=0 ROOMVIEW=2), `pt-ubo.sh <n>` (gdb dump of the uniforms and the
+  3D flags +835/+836/+864, index count +772, camera of the eye), `pt-state.py` (prints/sets the shared state's bytes).
+
+### How Meta's OS does it (MrServiceMonterey / libmrservice.so, libmrengine.so, mrsystemservice)
+- The bottom camera pair (0 and 2), one per eye; a stereo depth mesh computed per frame (libmrengine "PassthroughMesh",
+  `position = vec3(bearing.xy, sqrt(1 - |b|^2)) / invDepth`), drawn with `viewProj * model(capture pose)`: 6DoF reprojection from
+  the capture pose. Texture coordinates per vertex through a precomputed distortion-delta texture.
+- Where the stereo is not valid (top middle) the mesh is extrapolated (favor_foreground, temporal fg/bg filtering): the stretch.
+- Brightness: frames arrive gamma-encoded and the shader undoes it (pow 1.4 after the grayscale gamma): about linear light out, no
+  extra brightness or contrast stage. Exposure is the tracking's (shared histogram auto exposure), no separate passthrough exposure.
+- Next for us: a depth mesh (at least a floor plane + a far sphere in tracking space, then stereo depth like Meta), so near objects
+  line up; ptprovider as a service; the roomview following the dashboard switch instead of being forced on.
