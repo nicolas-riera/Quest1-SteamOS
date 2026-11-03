@@ -133,6 +133,10 @@ ExecStart=/usr/local/bin/steam-q1 -gamepadui -steamos3 -steamdeck -steamframe
 # Steam exits with status 0 on its own (e.g. when SteamVR restarts); like a console session it must come back
 Restart=always
 RestartSec=5
+# Steam saves and quits within ~2 s of SIGTERM; when part of it crashes on the way out, its crash
+# reporter tries to upload the dump with the network already down and held power off and restart
+# for 30 s (2026-11-03)
+TimeoutStopSec=8
 
 [Install]
 WantedBy=multi-user.target

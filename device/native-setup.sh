@@ -26,6 +26,8 @@ cat > $S/serial-getty@ttyGS0.service.d/autologin.conf <<'E'
 [Service]
 ExecStart=
 ExecStart=-/sbin/agetty --autologin root --keep-baud 115200,57600,38400,9600 - $TERM
+# the gadget serial port's agetty ignores SIGTERM: without this it holds power off for 15 s
+TimeoutStopSec=2
 E
 
 # --- services ----------------------------------------------------------------
