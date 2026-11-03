@@ -111,12 +111,13 @@ Open items, roughly by priority. Done items move to the commit log.
   objects sit at their true depth (the fixed 3 m sphere and the 11 cm camera baseline make them wrong).
 
 ## Boundary
-- Frame room setup (step 7) runs at ~3 fps: every frame vrcompositor creates a 0x0 R8_UNORM linear image
-  (usage transfer src/dst), its 0-byte vkAllocateMemory fails (-3, logged by the compat layer) and
-  "CVulkanVRRenderer::CreateTexture - Unable to allocate memory" repeats. Find what sizes it (probably
-  data the Frame's xrservice provides: floor/surface detection) and give it a size or the data. Also no
-  floor / boundary drawing tools shown. Debug with `touch /tmp/q1-webdebug` + `/root/cdp.py`
-  (`ConstructStore.setRoomSetupStep(7)` starts it).
+- Frame room setup (step 7) ran at ~3 fps: vrcompositor's "Playspace area SDF" texture (R8, linear) is 0x0
+  until a boundary exists; the Adreno driver gives it 0 bytes of memory, whose allocation fails, so
+  CreateTexture failed on every frame. Fixed 2026-11-03 in the compat layer (empty images made 1x1); to
+  check in the headset: frame rate in step 7, floor and laser drawing, Accept.
+  Also seen: its floor/boundary vertex shader samples bindings 10/26 and 11/27 that the pipeline layout
+  lacks (Adreno: "Bind group info mismatches"); the layer's retry turns those reads into 0 (displacement
+  offsets of the grid), created once per setup start, not per frame.
 - Test in the headset (after passthrough, needed to draw the boundary): the playspace buttons
   (fixed with Prop 11004), and relocalization after a reboot in the persisted map (`q1anchord`,
   docs/boundary.md), then Clear playspace.

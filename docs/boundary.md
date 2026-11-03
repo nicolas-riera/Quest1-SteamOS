@@ -23,6 +23,10 @@ the laser/brush and the boundary, through `IVRChaperoneSetup`.
 - No depth or camera is needed: the floor comes from the controller touching it, the boundary from the
   controller's laser projected on the floor.
 
+- vrcompositor keeps a "Playspace area SDF" texture (R8, linear, CPU-written) sized from the boundary: 0x0
+  before one exists. The compat layer makes such empty images 1x1 (the Adreno driver cannot allocate 0
+  bytes; without it room setup ran at ~3 fps).
+
 ## Raw space and persistence (`chaperone_frame.cpp`)
 
 Meta's tracking has no persistent map here (`/vision/insideout/mapdb`, `/data/misc/tracking` stay empty,

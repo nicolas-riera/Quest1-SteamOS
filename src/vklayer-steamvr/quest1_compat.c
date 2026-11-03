@@ -1225,8 +1225,23 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateImage(VkDevice device, const VkImage
 	struct device *d = device_of(device);
 	if (!(ci->usage & Q1_CPU_IMAGE_USAGE) || ci->format != VK_FORMAT_R8G8B8A8_UNORM || ci->tiling != VK_IMAGE_TILING_OPTIMAL ||
 	    ci->mipLevels != 1 || ci->arrayLayers != 1 || ci->imageType != VK_IMAGE_TYPE_2D) {
+		// vrcompositor sizes the "Playspace area SDF" texture from the boundary: 0x0 until one is drawn (room
+		// setup). The Adreno driver accepts the image but reports 0 bytes of memory, whose allocation fails, so
+		// vrcompositor's CreateTexture failed on every frame (room setup at ~3 fps). Made 1x1 instead.
+		VkImageCreateInfo one;
+		if (!ci->extent.width || !ci->extent.height || !ci->extent.depth) {
+			static int logged;
+			if (!logged++)
+				LOG("vkCreateImage %ux%ux%u format %d: empty image made 1x1x1 (logged once)\n", ci->extent.width,
+				    ci->extent.height, ci->extent.depth, ci->format);
+			one = *ci;
+			one.extent.width = one.extent.width ? one.extent.width : 1;
+			one.extent.height = one.extent.height ? one.extent.height : 1;
+			one.extent.depth = one.extent.depth ? one.extent.depth : 1;
+			ci = &one;
+		}
 		VkResult r = d->CreateImage(device, ci, alloc, out);
-		if ((r != VK_SUCCESS || !ci->extent.width || !ci->extent.height) && fail_logs < 40) {
+		if (r != VK_SUCCESS && fail_logs < 40) {
 			fail_logs++;
 			LOG("vkCreateImage %ux%ux%u format %d mips %u layers %u samples %d usage 0x%x flags 0x%x tiling %d: %d\n",
 			    ci->extent.width, ci->extent.height, ci->extent.depth, ci->format, ci->mipLevels, ci->arrayLayers,
