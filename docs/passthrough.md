@@ -288,6 +288,14 @@ while `camera.enableCamera` and `camera.roomView` > 0. So the 3D mode is the one
 - **Jumps for one frame**: some frames went out with the predicted pose because the capture pose was missing: the driver
   and ptprovider only looked at the newest ring slot, and a controller-exposure frame set often follows a headset one
   closely. Both now walk every new slot; ptprovider waits up to 15 ms for the pose and drops a frame without it.
+- **Jumps back in time under load** (user, 2026-11-03: "as soon as the CPU is a bit busy"): a 1 kHz watch of the records
+  (`/root/recmon.py`) saw vrcompositor take a frame older than the one it showed before 336 times in a minute, up to 1.7 s
+  older: ptprovider only wrote into free records and left older ready ones around, and the compositor takes any ready
+  record. Now at most one record per camera is ready, the newest; the previous one is freed when a new frame is ready
+  (a CAS, so one it took meanwhile stays). While nothing is taken for 1 s (roomview hidden) the ready frame is only
+  replaced twice a second.
+- **Tint slider**: vrcompositor applies `camera.monochromeTintHue` (HSV hue, 0.7, 1 at 0x122de0) only when the HMD's
+  Int32 property 1059 (`Prop_Reserved_1059`, read at 0x121294) is 2; otherwise its plain 0.7 grey. The props driver sets it.
 - **One eye lower than the other** (user: the left one): the shader's fisheye model is Kannala-Brandt with four terms and
   ptprovider passed Fisheye62's first four of six: 16 px off at 60 deg from the axis on camera 0 (82 px at 70 deg), 5 px
   on camera 2, and the cameras look 40 deg down, so the view ahead and above sits there. ptprovider now fits the four

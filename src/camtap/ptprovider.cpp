@@ -404,6 +404,8 @@ int main()
 	int64_t lastFrame = 0, lastBeat = 0, lastDump = 0, lastIdle = 0, lastWarn = 0;
 	int noCapturePose = 0;
 	int slot[2] = {0, 0};
+	int readyIdx[2] = {-1, -1}; // the one ready record per camera (-1: none)
+	int64_t lastTake = 0;       // when the compositor last took a frame of ours
 	auto Rec = [&](int c, int k) { return (uint32_t *)(b + kRec0 + c * kCamStride + k * kRecStride); };
 	const int64_t period = 1000000000LL / hz;
 	int64_t next = NowNs();
@@ -434,29 +436,34 @@ int main()
 			if (fd >= 0)
 				close(fd);
 		}
-		// The records to write this frame into: free ones (the compositor takes them while it shows the roomview). When none is
-		// free it is not reading (roomview off): take a ready one back, but only twice a second (those frames are not shown,
-		// they only must not be stale when it reads again). A record it has taken (2) is left alone.
+		// The records to write this frame into. At most one record per camera is ready (1) at a time, the newest frame: the
+		// compositor takes any ready record, and with several it took old ones (up to 1.7 s old, 336 times a minute while it
+		// ran slow: the view jumped back). A record it has taken (2) is left alone; it frees older taken ones itself.
+		// While it takes nothing (roomview hidden) the ready frame is only replaced twice a second, to keep the CPU idle.
 		bool canWrite;
 		{
+			bool reading = now - lastTake < 1000000000LL;
 			int target[2] = {-1, -1};
-			for (int c = 0; c < 2; c++)
-				for (int i = 0; i < N && target[c] < 0; i++)
-					if (__atomic_load_n(Rec(c, (slot[c] + i) % N), __ATOMIC_ACQUIRE) == 0)
-						target[c] = (slot[c] + i) % N;
-			if ((target[0] < 0 || target[1] < 0) && now - lastIdle >= 500000000LL) {
-				lastIdle = now;
+			if (reading || now - lastIdle >= 500000000LL) {
 				for (int c = 0; c < 2; c++)
-					for (int i = 0; i < N && target[c] < 0; i++) {
-						uint32_t ready = 1;
-						if (__atomic_compare_exchange_n(Rec(c, (slot[c] + i) % N), &ready, 0u, false, __ATOMIC_ACQ_REL,
-						                                __ATOMIC_ACQUIRE))
+					for (int i = 0; i < N && target[c] < 0; i++)
+						if ((slot[c] + i) % N != readyIdx[c] && __atomic_load_n(Rec(c, (slot[c] + i) % N), __ATOMIC_ACQUIRE) == 0)
 							target[c] = (slot[c] + i) % N;
+				for (int c = 0; c < 2; c++) {
+					uint32_t ready = 1;
+					if (target[c] < 0 && readyIdx[c] >= 0 &&
+					    __atomic_compare_exchange_n(Rec(c, readyIdx[c]), &ready, 0u, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+						target[c] = readyIdx[c]; // no free record: the untaken ready one gets the newer frame
+						readyIdx[c] = -1;
 					}
+				}
 			}
 			canWrite = target[0] >= 0 && target[1] >= 0;
-			if (canWrite)
+			if (canWrite) {
 				slot[0] = target[0], slot[1] = target[1];
+				if (!reading)
+					lastIdle = now;
+			}
 		}
 		bool fresh = false;
 		double capS = now * 1e-9;
@@ -538,6 +545,12 @@ int main()
 			for (int c = 0; c < 2; c++) {
 				FillDesc((uint8_t *)Rec(c, slot[c]) + 4, capS, calib[c], head);
 				__atomic_store_n(Rec(c, slot[c]), 1u, __ATOMIC_RELEASE); // frame ready
+				// the previous ready frame is now stale: free it, unless the compositor took it meanwhile
+				uint32_t ready = 1;
+				if (readyIdx[c] >= 0 && readyIdx[c] != slot[c] &&
+				    !__atomic_compare_exchange_n(Rec(c, readyIdx[c]), &ready, 0u, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+					lastTake = now; // it was taken: the compositor is reading
+				readyIdx[c] = slot[c];
 				slot[c] = (slot[c] + 1) % N;
 			}
 			if (!b[4]) {

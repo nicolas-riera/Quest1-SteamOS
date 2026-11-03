@@ -1474,6 +1474,9 @@ void Quest1CameraAttach(PropertyContainerHandle_t container, std::function<Drive
 			// 1062 (unnamed; vrwebhelper's bRoomViewMonochrome): monochrome cameras, the dashboard shows the Frame's tint slider
 			// (camera.monochromeTintHue, which vrcompositor reads for the room view's colour)
 			p->SetBoolProperty(container, (ETrackedDeviceProperty)1062, true);
+			// 1059 (Prop_Reserved_1059, Int32): vrcompositor (0x121294) applies that hue only when the HMD's value is 2
+			// (HSV hue, 0.7, 1 at 0x122de0), otherwise its plain 0.7 grey fade: the slider did nothing without it
+			p->SetInt32Property(container, (ETrackedDeviceProperty)1059, 2);
 			CLog("quest1 camera: HMD camera properties set (props mode, with the camera component)\n");
 			g_gate.Start(false); // the empty depth-mesh block queues vrcompositor's roomview connects to
 			g_capturePoses.Start(std::move(poseAt));

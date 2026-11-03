@@ -20,6 +20,11 @@
  * @ingroup comp_main
  */
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE // CPU_SET, pthread_setaffinity_np
+#endif
+#include <sched.h>
+
 #include "util/u_logging.h"
 #include "util/u_misc.h"
 #include "util/u_time.h"
@@ -155,6 +160,9 @@ struct mdp_direct_stats
 	double ax_sum, ay_sum, az_sum; //!< |delta| about the head's x / y / z axes (deg)
 	double oe_sum, oe_max;         //!< how far each new o estimate is from the running o (deg)
 	uint32_t oe_n;
+	uint32_t late;      //!< commits that returned after the next vsync: that vsync showed the previous image again
+	uint32_t gaps;      //!< vsync events never seen (the thread woke more than a period late)
+	double wake_ms_max; //!< vsync event -> this thread running
 };
 
 #define DIRECT_COMMITS 4
@@ -233,6 +241,7 @@ struct mdp_direct
 	int64_t left_ns; //!< when the layer went away
 
 	struct mdp_direct_stats stats;
+	int64_t prev_vsync; //!< the last vsync direct_tick saw (gap detection)
 
 	int (*recv_handle)(int, AHardwareBuffer **);
 };
@@ -604,7 +613,12 @@ direct_init(struct mdp_target *t, void *nw)
 	D->client_fd = -1;
 	D->listen_fd = -1;
 	D->latest = -1;
-	pthread_mutex_init(&D->lock, NULL);
+	// priority inheritance: the real-time vsync thread must not wait behind a preempted normal thread
+	pthread_mutexattr_t ma;
+	pthread_mutexattr_init(&ma);
+	pthread_mutexattr_setprotocol(&ma, PTHREAD_PRIO_INHERIT);
+	pthread_mutex_init(&D->lock, &ma);
+	pthread_mutexattr_destroy(&ma);
 	for (int c = 0; c < DIRECT_COMMITS; c++) {
 		D->commits[c].release_fence = D->commits[c].retire_fence = -1;
 		D->commits[c].image = -1;
@@ -1751,6 +1765,16 @@ direct_tick(struct mdp_target *t, int64_t vsync)
 	bool on = t->unblanked && worn;
 	os_thread_helper_unlock(&t->vsync_thread);
 	warp_read_knobs(D, now);
+	if (vsync > 0 && on) {
+		if (D->prev_vsync > 0 && vsync - D->prev_vsync > MDP_PERIOD_NS * 3 / 2) {
+			D->stats.gaps += (uint32_t)((vsync - D->prev_vsync + MDP_PERIOD_NS / 2) / MDP_PERIOD_NS) - 1;
+		}
+		double wake = (double)(now - vsync) / 1e6;
+		D->stats.wake_ms_max = wake > D->stats.wake_ms_max ? wake : D->stats.wake_ms_max;
+	}
+	if (vsync > 0) {
+		D->prev_vsync = on ? vsync : 0;
+	}
 	if (D->ack_pending != 0 && (vsync > 0 || !on)) {
 		direct_displayed(D, D->ack_pending);
 		D->ack_pending = 0;
@@ -1903,11 +1927,13 @@ direct_tick(struct mdp_target *t, int64_t vsync)
 				}
 			}
 		}
+		bool committed = warped;
 		if (warped) {
 			direct_ack_early(D);
 			D->fresh = false;
 			D->need_refresh = false;
 		} else if (commit_raw && direct_commit(t, D->buf[D->latest], D->latest, -1, direct_ack_frame(D))) {
+			committed = true;
 			D->stats.raw_commits++;
 			// the panels show this frame as rendered, i.e. warped by the identity: a head that stays still
 			// (delta < WARP_SKIP_DEG) needs no warp pass for it (it used to re-warp every raw frame once)
@@ -1918,6 +1944,9 @@ direct_tick(struct mdp_target *t, int64_t vsync)
 			D->fresh = false;
 			D->need_refresh = false;
 		}
+		if (committed && os_monotonic_get_ns() - vsync > MDP_PERIOD_NS) {
+			D->stats.late++;
+		}
 	}
 	direct_release_unused(D);
 	if (D->stats.since_ns == 0) {
@@ -1927,7 +1956,8 @@ direct_tick(struct mdp_target *t, int64_t vsync)
 		struct mdp_direct_stats *s = &D->stats;
 		U_LOG_W("mdp: direct: %.1f/s warped (%.1f/s of them fresh), %.1f/s raw, %.1f/s kept; warp gpu %.2f ms avg (max %.2f), "
 		        "cpu %.2f ms (mesh %.2f, gpu wait %.2f, commit %.2f); delta %.2f deg avg (max %.2f), "
-		        "per axis x %.2f y %.2f z %.2f; o jitter %.2f deg avg (max %.2f); no free set %u",
+		        "per axis x %.2f y %.2f z %.2f; o jitter %.2f deg avg (max %.2f); no free set %u; "
+		        "late %u, vsyncs missed %u, wake max %.2f ms",
 		        s->warp_commits / el, s->fresh_warped / el, s->raw_commits / el, s->skipped / el,
 		        s->warp_commits ? s->gpu_ms_sum / s->warp_commits : 0.0, s->gpu_ms_max,
 		        s->warp_commits ? s->cpu_ms_sum / s->warp_commits : 0.0,
@@ -1937,7 +1967,7 @@ direct_tick(struct mdp_target *t, int64_t vsync)
 		        s->angle_max,
 		        s->angle_n ? s->ax_sum / s->angle_n : 0.0, s->angle_n ? s->ay_sum / s->angle_n : 0.0,
 		        s->angle_n ? s->az_sum / s->angle_n : 0.0, s->oe_n ? s->oe_sum / s->oe_n : 0.0, s->oe_max,
-		        s->no_set);
+		        s->no_set, s->late, s->gaps, s->wake_ms_max);
 		*s = (struct mdp_direct_stats){.since_ns = now};
 	}
 	pthread_mutex_unlock(&D->lock);
@@ -1948,6 +1978,22 @@ vsync_thread_func(void *ptr)
 {
 	struct mdp_target *t = ptr;
 	os_thread_helper_name(&t->vsync_thread, "Quest1 vsync");
+
+	// Each vsync this thread warps and commits the next image within one 13.9 ms period. As a normal
+	// thread under SteamVR's load (load average 10+) it was sometimes scheduled too late, and the panels
+	// showed the previous image again for a vsync: a one-frame jump while the head turns. Real-time,
+	// on the big cores (Meta's real-time tracking threads are pinned to the little ones, 0-3).
+	struct sched_param sp = {.sched_priority = 40};
+	int se = pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
+	cpu_set_t big;
+	CPU_ZERO(&big);
+	for (int c = 4; c < 8; c++) {
+		CPU_SET(c, &big);
+	}
+	int ae = pthread_setaffinity_np(pthread_self(), sizeof(big), &big);
+	if (se != 0 || ae != 0) {
+		U_LOG_W("mdp: vsync thread: SCHED_FIFO %s, big cores %s", se ? strerror(se) : "ok", ae ? strerror(ae) : "ok");
+	}
 
 	char buf[64];
 	os_thread_helper_lock(&t->vsync_thread);

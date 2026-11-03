@@ -646,17 +646,10 @@ void State::UpdateHand(int h, double now, const XrPosef &headPose, bool headVali
 		return XR_SUCCEEDED(cxrGetActionStateFloat(xr.session, &gi, &s)) && s.isActive ? s.currentState : 0.f;
 	};
 	d->forced = pressHand == h && now < pressUntil ? (int)pressComp : -1;
+	// each hand's own button (left Menu, right Oculus): both are bound in our dashboard bindings, which
+	// driver_quest1 selects (the right one used to be copied onto the left, so it pressed both)
 	float system = boolean(ACT_SYSTEM);
-	// SteamVR takes the oculus_touch controller type (and its dashboard bindings) from its own
-	// Oculus driver resources, where only the left system button toggles the dashboard: the right
-	// Oculus button is reported as the left system button too (it is unbound on the right).
-	float otherSystem = 0;
-	if (d->left) {
-		gi.subactionPath = hand[1];
-		otherSystem = boolean(ACT_SYSTEM);
-		gi.subactionPath = hand[h];
-	}
-	d->Set(C_SYSTEM_CLICK, system != 0 || otherSystem != 0 ? 1.f : 0.f);
+	d->Set(C_SYSTEM_CLICK, system);
 	d->Set(C_PRIMARY_CLICK, boolean(ACT_PRIMARY));
 	d->Set(C_PRIMARY_TOUCH, boolean(ACT_PRIMARY_TOUCH));
 	d->Set(C_SECONDARY_CLICK, boolean(ACT_SECONDARY));
