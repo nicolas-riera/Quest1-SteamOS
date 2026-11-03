@@ -1297,6 +1297,97 @@ private:
 
 CompositorGate g_gate;
 
+//! Publishes the head pose at each camera frame set's capture (quest1_camera_ring.h, q1cam_poses) for ptprovider: the
+//! roomview reprojects each frame from that pose to the display's, and SteamVR's HMD pose is predicted to the display
+//! time (25-60 ms after the capture), which shook the view as the head turned.
+class CapturePoses
+{
+public:
+	void Start(std::function<bool(int64_t, HmdMatrix34_t &)> poseAt)
+	{
+		if (running.exchange(true) || !poseAt)
+			return;
+		this->poseAt = std::move(poseAt);
+		thread = std::thread([this] { Run(); });
+	}
+	void Stop()
+	{
+		if (!running.exchange(false))
+			return;
+		if (thread.joinable())
+			thread.join();
+	}
+
+private:
+	void Run()
+	{
+		pthread_setname_np(pthread_self(), "quest1 capposes");
+		int fd = open(Q1CAM_POSES_PATH, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+		if (fd < 0 || ftruncate(fd, sizeof(q1cam_poses))) {
+			CLog("quest1 camera: cannot create %s\n", Q1CAM_POSES_PATH);
+			if (fd >= 0)
+				close(fd);
+			return;
+		}
+		auto *out = (q1cam_poses *)mmap(nullptr, sizeof(q1cam_poses), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+		close(fd);
+		if (out == MAP_FAILED)
+			return;
+		out->magic = Q1CAM_POSES_MAGIC;
+		const q1cam_ring_header *hdr = nullptr;
+		size_t hdrLen = 0;
+		uint32_t last = 0;
+		while (running) {
+			if (!hdr) { // the ring appears once the camera producer runs
+				int rfd = open(Q1CAM_RING_DEFAULT_PATH, O_RDONLY | O_CLOEXEC);
+				struct stat st;
+				if (rfd >= 0 && !fstat(rfd, &st) && st.st_size >= (off_t)sizeof(q1cam_ring_header)) {
+					void *m = mmap(nullptr, st.st_size, PROT_READ, MAP_SHARED, rfd, 0);
+					if (m != MAP_FAILED) {
+						hdr = (const q1cam_ring_header *)m, hdrLen = st.st_size;
+						if (hdr->magic != Q1CAM_RING_MAGIC || hdr->version != Q1CAM_RING_VERSION)
+							munmap(m, hdrLen), hdr = nullptr;
+					}
+				}
+				if (rfd >= 0)
+					close(rfd);
+				if (!hdr) {
+					sleep(1);
+					continue;
+				}
+			}
+			uint32_t n = __atomic_load_n(&hdr->write_count, __ATOMIC_ACQUIRE);
+			if (n == last) {
+				timespec ts = {0, 200000000};
+				syscall(SYS_futex, (void *)&hdr->write_count, FUTEX_WAIT, n, &ts, nullptr, 0);
+				continue;
+			}
+			last = n;
+			const q1cam_ring_slot &s = hdr->slot[(n - 1) % hdr->slot_count];
+			uint32_t seq = __atomic_load_n(&s.seq, __ATOMIC_ACQUIRE);
+			int64_t cap = s.capture_mono_ns ? s.capture_mono_ns : s.arrival_mono_ns;
+			HmdMatrix34_t raw;
+			if ((seq & 1) || !cap || __atomic_load_n(&s.seq, __ATOMIC_ACQUIRE) != seq || !poseAt(cap, raw))
+				continue;
+			q1cam_pose_entry &e = out->entry[out->count % Q1CAM_POSES_COUNT];
+			__atomic_store_n(&e.seq, e.seq + 1, __ATOMIC_RELEASE);
+			e.capture_mono_ns = cap;
+			memcpy(e.raw_from_head, &raw.m[0][0], sizeof(e.raw_from_head));
+			__atomic_store_n(&e.seq, e.seq + 1, __ATOMIC_RELEASE);
+			__atomic_store_n(&out->count, out->count + 1, __ATOMIC_RELEASE);
+		}
+		if (hdr)
+			munmap((void *)hdr, hdrLen);
+		munmap(out, sizeof(q1cam_poses));
+	}
+
+	std::atomic<bool> running{false};
+	std::thread thread;
+	std::function<bool(int64_t, HmdMatrix34_t &)> poseAt;
+};
+
+CapturePoses g_capturePoses;
+
 Quest1Camera *g_camera = nullptr;
 std::once_flag g_once;
 
@@ -1351,7 +1442,8 @@ Quest1Camera *Get()
 
 } // namespace
 
-void Quest1CameraAttach(PropertyContainerHandle_t container, std::function<DriverPose_t()> headPose)
+void Quest1CameraAttach(PropertyContainerHandle_t container, std::function<DriverPose_t()> headPose,
+                        std::function<bool(int64_t monoNs, HmdMatrix34_t &raw)> poseAt)
 {
 	if (PropsOnly()) {
 		if (container != k_ulInvalidPropertyContainer) {
@@ -1374,6 +1466,7 @@ void Quest1CameraAttach(PropertyContainerHandle_t container, std::function<Drive
 			p->SetBoolProperty(container, Prop_Hmd_SupportsRoomViewDirect_Bool, true);
 			CLog("quest1 camera: HMD camera properties set (props mode, with the camera component)\n");
 			g_gate.Start(false); // the empty depth-mesh block queues vrcompositor's roomview connects to
+			g_capturePoses.Start(std::move(poseAt));
 		}
 		return;
 	}
@@ -1391,6 +1484,7 @@ IVRCameraComponent *Quest1CameraComponent()
 
 void Quest1CameraDetach()
 {
+	g_capturePoses.Stop();
 	g_gate.Stop();
 	if (g_camera)
 		g_camera->Detach();

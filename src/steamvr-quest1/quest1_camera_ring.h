@@ -69,6 +69,27 @@ struct q1cam_ring_header
 	struct q1cam_ring_slot slot[Q1CAM_RING_SLOTS];
 };
 
+/* The head pose at each frame set's capture, published by driver_quest1 (it asks Monado for the pose at capture_mono_ns)
+ * for the passthrough provider: SteamVR's own poses are predicted to the display time. */
+#define Q1CAM_POSES_PATH "/dev/shm/quest1-capture-poses"
+#define Q1CAM_POSES_MAGIC 0x50433151u /* "Q1CP" */
+#define Q1CAM_POSES_COUNT 16
+
+struct q1cam_pose_entry
+{
+	volatile uint32_t seq;   /* odd while the writer fills the entry */
+	uint32_t _pad;
+	int64_t capture_mono_ns; /* the frame set's capture_mono_ns */
+	float raw_from_head[12]; /* row-major 3x4, SteamVR's raw tracking space (TrackingUniverseRawAndUncalibrated) */
+};
+
+struct q1cam_poses
+{
+	uint32_t magic;
+	volatile uint32_t count; /* entries written since creation: the latest is entry[(count - 1) % COUNT] */
+	struct q1cam_pose_entry entry[Q1CAM_POSES_COUNT];
+};
+
 static inline uint64_t q1cam_ring_file_size(uint32_t slot_bytes)
 {
 	return (uint64_t)sizeof(struct q1cam_ring_header) + (uint64_t)Q1CAM_RING_SLOTS * slot_bytes;

@@ -275,7 +275,10 @@ while `camera.enableCamera` and `camera.roomView` > 0. So the 3D mode is the one
   `camera.enableCamera` and `camera.roomView` > 0 (RoomViewStore.showRoomViewButton).
 - **Shaking**: the record's +144 must be the head pose at the frame's capture (vrcompositor reprojects from it to the display
   pose: the tiny rotation in `_m1`). The frames arrive 25-35 ms after mid-exposure; ptprovider gave the pose at write time.
-  It now asks SteamVR for the pose at the capture time (negative prediction) and wakes on the ring's futex.
+  SteamVR's HMD pose is no help: driver_quest1 hands SteamVR poses already predicted to the display time, without
+  velocities, so a negative prediction changes nothing. driver_quest1 now asks Monado (xrLocateSpace) for the head pose
+  at each frame set's capture time and publishes it in `/dev/shm/quest1-capture-poses` (quest1_camera_ring.h,
+  `q1cam_poses`); ptprovider wakes on the ring's futex and uses it.
 - Record +8 (capture time) is CLOCK_MONOTONIC seconds, the compositor's clock. The block's +0x41bc (double) / +0x41c4 (3x4)
   are a "motion backout" pose applied to frames captured before that time (camera state +1168/+0x498; unused here, NaN).
 - **Scale**: everything looks smaller than reality (user, 2026-11-03): the bottom cameras are ~11 cm apart, the eyes ~6.5 cm,

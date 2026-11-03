@@ -251,6 +251,9 @@ public:
 	// therefore rendered with it, and the frame thread submits frame k+1 to Monado with that same
 	// pose. Monado's reprojection then only corrects the latency, not a render/submit mismatch.
 	bool LocateAhead(DriverPose_t &pose, XrPosef *xrPose);
+	//! The head's pose in SteamVR's raw space (as the HMD pose: floor and anchor applied) at a CLOCK_MONOTONIC time
+	bool LocateRawAt(int64_t monoNs, HmdMatrix34_t &raw);
+	void ApplyNeckModel(XrSpaceLocation &loc);
 	int64_t lastWhenNs = 0; //!< CLOCK_MONOTONIC time of the last LocateAhead's prediction (same thread as its caller)
 	void RecordFramePose(uint64_t frame, const XrPosef &pose);
 	std::function<void(uint64_t presentedFrame)> onPresent;
@@ -631,6 +634,23 @@ bool XrBackend::LocateAhead(DriverPose_t &pose, XrPosef *xrPose)
 		pose.result = TrackingResult_Running_OutOfRange;
 		return false;
 	}
+	ApplyNeckModel(loc);
+	*xrPose = loc.pose;
+	Quest1FrameUpdate(loc.pose, (loc.locationFlags & XR_SPACE_LOCATION_POSITION_TRACKED_BIT) != 0);
+	Quest1FrameApply(pose);
+	pose.qRotation = {loc.pose.orientation.w, loc.pose.orientation.x, loc.pose.orientation.y,
+	                  loc.pose.orientation.z};
+	pose.vecPosition[0] = loc.pose.position.x;
+	pose.vecPosition[1] = loc.pose.position.y;
+	pose.vecPosition[2] = loc.pose.position.z;
+	// no velocities: SteamVR must not extrapolate, the pose is already predicted
+	pose.poseIsValid = true;
+	pose.willDriftInYaw = true; // 3DoF IMU, no magnetometer
+	return true;
+}
+
+void XrBackend::ApplyNeckModel(XrSpaceLocation &loc)
+{
 	// no neck model when Monado tracks the head's position (Meta's 6DoF): it would move the eyes twice
 	if (neckModel && !(loc.locationFlags & XR_SPACE_LOCATION_POSITION_TRACKED_BIT)) {
 		// Oculus SDK defaults: eyes 7.5 cm above and 8.05 cm in front of the neck pivot.
@@ -644,17 +664,44 @@ bool XrBackend::LocateAhead(DriverPose_t &pose, XrPosef *xrPose)
 		loc.pose.position.y += r.y - n.y;
 		loc.pose.position.z += r.z - n.z;
 	}
-	*xrPose = loc.pose;
-	Quest1FrameUpdate(loc.pose, (loc.locationFlags & XR_SPACE_LOCATION_POSITION_TRACKED_BIT) != 0);
-	Quest1FrameApply(pose);
-	pose.qRotation = {loc.pose.orientation.w, loc.pose.orientation.x, loc.pose.orientation.y,
-	                  loc.pose.orientation.z};
-	pose.vecPosition[0] = loc.pose.position.x;
-	pose.vecPosition[1] = loc.pose.position.y;
-	pose.vecPosition[2] = loc.pose.position.z;
-	// no velocities: SteamVR must not extrapolate, the pose is already predicted
-	pose.poseIsValid = true;
-	pose.willDriftInYaw = true; // 3DoF IMU, no magnetometer
+}
+
+bool XrBackend::LocateRawAt(int64_t monoNs, HmdMatrix34_t &raw)
+{
+	if (!session || !pxrConvertTimespecTimeToTimeKHR)
+		return false;
+	timespec ts = {(time_t)(monoNs / 1000000000ll), (long)(monoNs % 1000000000ll)};
+	XrTime when = 0;
+	if (XR_FAILED(pxrConvertTimespecTimeToTimeKHR(instance, &ts, &when)))
+		return false;
+	XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
+	if (XR_FAILED(pxrLocateSpace(view, local, when, &loc)) || !(loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT))
+		return false;
+	ApplyNeckModel(loc);
+	DriverPose_t p = {};
+	Quest1FrameApply(p);
+	// raw = worldFromDriver * head: rotation qw * q, translation qw * position + tw
+	const HmdQuaternion_t &w = p.qWorldFromDriverRotation;
+	const XrQuaternionf &h = loc.pose.orientation;
+	const double qw = w.w * h.w - w.x * h.x - w.y * h.y - w.z * h.z, qx = w.w * h.x + w.x * h.w + w.y * h.z - w.z * h.y,
+	             qy = w.w * h.y - w.x * h.z + w.y * h.w + w.z * h.x, qz = w.w * h.z + w.x * h.y - w.y * h.x + w.z * h.w;
+	auto rotate = [](const HmdQuaternion_t &q, const double v[3], double o[3]) {
+		const double tx = 2 * (q.y * v[2] - q.z * v[1]), ty = 2 * (q.z * v[0] - q.x * v[2]), tz = 2 * (q.x * v[1] - q.y * v[0]);
+		o[0] = v[0] + q.w * tx + (q.y * tz - q.z * ty);
+		o[1] = v[1] + q.w * ty + (q.z * tx - q.x * tz);
+		o[2] = v[2] + q.w * tz + (q.x * ty - q.y * tx);
+	};
+	const double pos[3] = {loc.pose.position.x, loc.pose.position.y, loc.pose.position.z};
+	double t[3];
+	rotate(w, pos, t);
+	const double m[3][3] = {{1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy - qz * qw), 2 * (qx * qz + qy * qw)},
+	                        {2 * (qx * qy + qz * qw), 1 - 2 * (qx * qx + qz * qz), 2 * (qy * qz - qx * qw)},
+	                        {2 * (qx * qz - qy * qw), 2 * (qy * qz + qx * qw), 1 - 2 * (qx * qx + qy * qy)}};
+	for (int r = 0; r < 3; r++) {
+		for (int c = 0; c < 3; c++)
+			raw.m[r][c] = (float)m[r][c];
+		raw.m[r][3] = (float)(t[r] + p.vecWorldFromDriverTranslation[r]);
+	}
 	return true;
 }
 
@@ -1424,7 +1471,8 @@ public:
 		VRProperties()->SetBoolProperty(c, Prop_DisplayDebugMode_Bool, false);
 		VRProperties()->SetBoolProperty(c, Prop_DeviceProvidesBatteryStatus_Bool, false);
 		Quest1BatteryAttach(Quest1Battery_Head, c); // battery.cpp: level and charging, polled
-		Quest1CameraAttach(c, [this] { return GetPose(); }); // camera.cpp: tracking cameras (off unless enabled)
+		Quest1CameraAttach(c, [this] { return GetPose(); }, // camera.cpp: tracking cameras (off unless enabled)
+		                   [this](int64_t monoNs, HmdMatrix34_t &raw) { return xr.LocateRawAt(monoNs, raw); });
 
 		poseThreadRunning = true;
 		poseThread = std::thread([this] {

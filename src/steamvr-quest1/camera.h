@@ -14,8 +14,10 @@
 #include <functional>
 
 //! From the HMD's Activate: sets the camera properties on the HMD's container (when enabled).
-//! headPose returns the HMD's current pose (stamped into each frame as m_RawTrackedDevicePose).
-void Quest1CameraAttach(vr::PropertyContainerHandle_t container, std::function<vr::DriverPose_t()> headPose);
+//! headPose returns the HMD's current pose (stamped into each frame as m_RawTrackedDevicePose); poseAt the head's pose in
+//! the raw tracking space at a CLOCK_MONOTONIC time (for the passthrough provider: quest1_camera_ring.h, q1cam_poses).
+void Quest1CameraAttach(vr::PropertyContainerHandle_t container, std::function<vr::DriverPose_t()> headPose,
+                        std::function<bool(int64_t monoNs, vr::HmdMatrix34_t &raw)> poseAt);
 
 //! For the HMD's GetComponent(IVRCameraComponent_Version): the component, or nullptr when disabled.
 vr::IVRCameraComponent *Quest1CameraComponent();

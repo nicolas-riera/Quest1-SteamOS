@@ -182,6 +182,37 @@ static void FillDesc(uint8_t *desc, double captureS, const Calib &cal, const Hmd
 	memcpy(desc + 204, bounds, sizeof(bounds));
 }
 
+//! The head pose (raw tracking space) at a frame set's capture, from driver_quest1 (quest1_camera_ring.h, q1cam_poses). It
+//! wakes on the same frame set as we do: wait a few ms for it.
+static bool CapturePose(int64_t capNs, HmdMatrix34_t &out)
+{
+	static const q1cam_poses *poses = nullptr;
+	if (!poses) {
+		int fd = open(Q1CAM_POSES_PATH, O_RDONLY | O_CLOEXEC);
+		if (fd < 0)
+			return false;
+		void *m = mmap(nullptr, sizeof(q1cam_poses), PROT_READ, MAP_SHARED, fd, 0);
+		close(fd);
+		if (m == MAP_FAILED)
+			return false;
+		poses = (const q1cam_poses *)m;
+	}
+	if (!capNs || poses->magic != Q1CAM_POSES_MAGIC)
+		return false;
+	for (int tries = 0; tries < 8; tries++) {
+		for (const q1cam_pose_entry &e : poses->entry) {
+			uint32_t seq = __atomic_load_n(&e.seq, __ATOMIC_ACQUIRE);
+			if ((seq & 1) || e.capture_mono_ns != capNs)
+				continue;
+			memcpy(&out.m[0][0], (const void *)e.raw_from_head, sizeof(out.m));
+			if (__atomic_load_n(&e.seq, __ATOMIC_ACQUIRE) == seq)
+				return true;
+		}
+		usleep(500);
+	}
+	return false;
+}
+
 //! The "params" of IVRCameraPassthroughInternal (GetParams/SetParams, vrclient 0x1a49d8/0x1a4bf8) are 5 bytes at state+2: the
 //! compositor shows the roomview while state[2] is set (GetParams(nullptr) returns it, vrcompositor 0x15dda0, called per frame at
 //! 0x9ee6c) and reads state[4] as the "wanted" byte of its snapshot (+830, compared with the running state +837). On the
@@ -386,6 +417,7 @@ int main()
 		}
 		bool fresh = false;
 		double capS = now * 1e-9;
+		int64_t capNs = 0;
 		if (canWrite && pattern) {
 			fresh = true;
 			for (int c = 0; c < 2; c++) {
@@ -431,7 +463,8 @@ int main()
 					if (got == 2 && __atomic_load_n(&s.seq, __ATOMIC_ACQUIRE) == seq0) {
 						fresh = true;
 						lastFrame = now;
-						capS = (s.capture_mono_ns ? s.capture_mono_ns : s.arrival_mono_ns) * 1e-9;
+						capNs = s.capture_mono_ns ? s.capture_mono_ns : s.arrival_mono_ns;
+						capS = capNs * 1e-9;
 					}
 				}
 			}
@@ -439,12 +472,14 @@ int main()
 		if (fresh) {
 			// the head pose at capture (+144: vrcompositor reprojects the frame from it to the head pose it displays with):
 			// the frames reach us 25-35 ms after their mid-exposure, and a pose of the wrong time shakes the view as the head
-			// turns. SteamVR extrapolates back from the latest pose.
-			TrackedDevicePose_t hp = {};
-			VRSystem()->GetDeviceToAbsoluteTrackingPose(TrackingUniverseRawAndUncalibrated, (float)(capS - NowNs() * 1e-9),
-			                                            &hp, 1);
-			HmdMatrix34_t head = hp.bPoseIsValid ? hp.mDeviceToAbsoluteTracking
-			                                     : HmdMatrix34_t{{{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}}};
+			// turns. driver_quest1 publishes it (Monado's pose at the capture time); SteamVR's own HMD pose is predicted to
+			// the display time, so it is only the fallback.
+			HmdMatrix34_t head;
+			if (!CapturePose(capNs, head)) {
+				TrackedDevicePose_t hp = {};
+				VRSystem()->GetDeviceToAbsoluteTrackingPose(TrackingUniverseRawAndUncalibrated, 0, &hp, 1);
+				head = hp.bPoseIsValid ? hp.mDeviceToAbsoluteTracking : HmdMatrix34_t{{{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}}};
+			}
 			for (int c = 0; c < 2; c++) {
 				FillDesc((uint8_t *)Rec(c, slot[c]) + 4, capS, calib[c], head);
 				__atomic_store_n(Rec(c, slot[c]), 1u, __ATOMIC_RELEASE); // frame ready
