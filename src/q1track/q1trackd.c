@@ -66,6 +66,7 @@ typedef struct big_state (*cin_get_buttons_fn)(void *self, uint64_t id);
 typedef uint64_t (*cin_get_touchpad_fn)(void *self, uint64_t id);
 typedef uint64_t (*hub_changed_fn)(void *self, uint64_t *token);
 typedef struct dev_array (*hub_enum_fn)(void *self);
+typedef uint16_t (*hub_battery_fn)(void *self, uint64_t id); /* Optional<uint8_t> percent: byte 1 = has_value */
 typedef uint64_t (*haptic_simple_fn)(void *self, uint64_t id, float amp);
 static void *hub, *ctrls, *cinput, *haptics;
 
@@ -155,7 +156,7 @@ static float get_ipd(void)
 
 /* ---- controllers ---- */
 #define MAXDEV 4
-static struct { uint64_t id; uint32_t type, hand; } devs[MAXDEV];
+static struct { uint64_t id; uint32_t type, hand; float battery; } devs[MAXDEV];
 static int ndevs;
 
 static void refresh_devices(int force)
@@ -173,9 +174,21 @@ static void refresh_devices(int force)
 		memcpy(&devs[ndevs].id, e, 8);
 		memcpy(&devs[ndevs].type, e + 0x08, 4);
 		memcpy(&devs[ndevs].hand, e + 0x10, 4);
+		devs[ndevs].battery = -1.0f;
 		fprintf(stderr, "q1trackd: device %016llx type %u handedness %u\n", (unsigned long long)devs[ndevs].id,
 			devs[ndevs].type, devs[ndevs].hand);
 		ndevs++;
+	}
+}
+
+/* battery level, 0..1 or -1: IInputHub v1 vtable[5] (trackinginterface_cli calls it through the v2
+ * interface, vtable[2]; v1 [2] and [3] are the destructors) */
+static void refresh_batteries(void)
+{
+	void **vt = *(void ***)hub;
+	for (int i = 0; i < ndevs; i++) {
+		uint16_t b = ((hub_battery_fn)vt[5])(hub, devs[i].id);
+		devs[i].battery = b >> 8 && (b & 0xff) <= 100 ? (b & 0xff) / 100.0f : -1.0f;
 	}
 }
 
@@ -331,7 +344,7 @@ static int do_serve(double hz)
 	rename(Q1TRACK_SHM_PATH ".tmp", Q1TRACK_SHM_PATH);
 	fprintf(stderr, "q1trackd: publishing at %.0f Hz in %s\n", hz, Q1TRACK_SHM_PATH);
 
-	int64_t next = now_ns(), last_log = 0, last_ipd = 0, last_dev = 0;
+	int64_t next = now_ns(), last_log = 0, last_ipd = 0, last_dev = 0, last_battery = 0;
 	uint64_t valid = 0, n = 0;
 	float ipd = 0;
 	while (!stop) {
@@ -349,10 +362,16 @@ static int do_serve(double hz)
 				refresh_devices(0);
 				last_dev = t;
 			}
+			if (hub && t - last_battery > 5000000000LL) {
+				refresh_batteries();
+				last_battery = t;
+			}
 			for (int i = 0; i < ndevs; i++) {
 				int slot = devs[i].hand == HAND_LEFT ? 0 : devs[i].hand == HAND_RIGHT ? 1 : -1;
-				if (slot >= 0)
+				if (slot >= 0) {
 					get_ctrl(devs[i].id, t, &cs[slot]);
+					cs[slot].battery = devs[i].battery;
+				}
 			}
 		}
 		m->seq++;
