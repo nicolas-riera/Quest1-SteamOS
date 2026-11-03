@@ -20,27 +20,57 @@ Open items, roughly by priority. Done items move to the commit log.
   6-7 ms each. Needs a fair A/B against the old renderer in one quiet window
   (`/root/facet-iter2.sh 0|1 <dir>`), with the dashboard shown (dropped stencil dynamic states).
   Leave it off unless it wins.
+- Light, safe overclocks (user, 2026-11-03): GPU (A540 max 710 MHz on the Quest 1) and CPU OPPs a
+  step above stock, only within ranges other MSM8998 devices run stable, watching tsens and the
+  fan. Kernel DT/OPP tables, so a new boot image (fastboot boot only).
 
 - User, 2026-11-02 (after the present-wait, UBWC warp and memory changes): "no more shaking, much
   better perf", but controllers are still not smooth (vrcompositor's frame rate), and the dashboard
   and Steam's UI lag.
+- The controllers cost ~10 fps (2026-11-03, headset on a table, dashboard shown, no re-projection):
+  ~46 fps while SteamVR draws no controller, 34-36 fps with both drawn (vrcompositor's GPU batch
+  20 -> 25-27 ms). The layer's profiler shows each visible controller as a ~0.6 ms pass (9792
+  vertices, the body) plus 6 small passes (~0.1 ms each, the buttons), per eye: ~5 ms a frame.
+  Monado's build, achromatic distortion and the vm settings made no difference (bench in
+  /root/bench-20261103/). Next: why each render model component is its own render pass, and a
+  lighter render model (could also fix the Oculus button texture below).
+- Frame rate drops while the controllers move fast, until they stop (user, 2026-11-03): Meta's
+  controller tracking threads (CtrllrCam, CtrlTracking, SCHED_FIFO on cores 0-3) work harder.
+- LSE atomics emulation (kernel/lse_emul.c): ~100,000 traps/s while SteamVR runs (vrserver ~38k,
+  vrcompositor ~29k, steamwebhelper ~24k), 0.8 us each on a big core and 1.6 us on a little one,
+  against ~20 ns native: ~10-15 % of one core. Make the emulation itself faster (trap path, hook
+  lookup, decode). Not binary rewriting: patched Valve binaries break with Steam updates and
+  can't be shipped (user, 2026-11-03).
+- systemd-journald spends ~8 % of a core on trackingservice's log spam ("failed to extrapolate
+  controller tracking state" every 2 s, CONSTELLATION status), and kswapd up to ~40 %.
+- The kernel logs "SPI transaction rejected by SyncBoss" / "Bad magic number 0xcacacaca" several
+  times a minute (2026-11-03): check against Android, and whether IMU or controller data is lost.
+- Lens distortion in Monado's warp (`/etc/quest1-warp-lens` = 1, off by default): vrcompositor hands
+  over undistorted eyes, Monado does distortion, chromatic aberration and re-projection in one pass
+  like Meta's TimeWarp. Geometry right since Meta's lens centre (2026-11-03), but vrcompositor's
+  distortion pass costs the same as a copy (3.6 ms per eye, bandwidth) and the warp then runs at
+  every vsync with 3 samples: more GPU in total. Compare sharpness with the user once perf allows.
 
 ## Audio
-- Audio randomly turns crackly for a while, then recovers by itself (user, 2026-11-02).
+- Audio randomly turns crackly for a while, then recovers by itself, sometimes stays stuck crackly
+  (user, 2026-11-02/03). PipeWire sees no xrun at all (pw-top ERR 0, logged every 2 s for 20 min):
+  not the graph. Seen with memory pressure (kswapd 50 %, swappiness raised to 100). Capture:
+  `q1-audioring` (runtime unit on the headset) keeps the last 90 s of the sink monitor and the ALSA
+  status every 20 ms; `systemctl kill -s USR1 q1-audioring` dumps them to /root/audioring-<time>/
+  when the user hears it. Clean monitor + crackle = below PipeWire (ADSP, codec).
 
 ## Display
-- Monado's re-projection in Meta tracking mode deforms the image (user, 2026-11-01): turning the head
-  left stretches the top of the view to the right, "soft". Sign is right (negating it is far worse).
-  Suspects: q1trackd's angular velocity frame used for extrapolation, or a frame mismatch between
-  the render pose and Monado's head pose. Live knobs in `/tmp/quest1-reproj` (`vel=0`, `delay=1`,
-  `rx/ry/rz=`), per-axis delta and o-jitter in Monado's `direct_tick` log.
-- Lens distortion and chromatic aberration are better but still off at the edges (user,
-  2026-11-01). `q1grid` findings to port into driver_quest1 `ComputeDistortion` and Monado's warp.
+- A little stretch remains when the horizon is at the top or bottom of the view, without
+  re-projection too (user, 2026-11-03): the render's own lens distortion.
 - SteamVR popups (volume bar, IPD) show up too low in the view; the IPD popup has very strong
   chromatic aberration. Probably the same vertical error.
 - Apply the per-panel calibration from `/persist/calibration/display` (decenter, roll, mura).
 - 90 Hz mode, selectable from SteamVR's refresh rate setting (low priority). Base:
   github.com/TheCez/quest1-90hz-orangefox.
+
+- Steam's VR UI: the right controller's Oculus button uses the menu button's texture (SteamVR's
+  Quest render model). Fix the texture someday, e.g. from another Quest controller's Oculus button,
+  matching the menu button's look (user, 2026-11-03, low priority).
 
 ## Passthrough
 - SteamVR's own camera view (roomview), fed by `ptprovider` (docs/passthrough.md): it starts (driver
@@ -55,27 +85,24 @@ Open items, roughly by priority. Done items move to the commit log.
   docs/boundary.md), then Clear playspace.
 - Pairing Quest controllers from the headset (Steam's UI). Pairing goes through SyncBoss
   (`syncboss_input_pair`): never call it without the user's explicit go.
-- Controller connection state (user, 2026-11-02, low priority): a controller that loses power (battery
-  removed) stays shown in SteamVR instead of turning disconnected; and right after the tracking
-  service starts, controllers it has not seen yet show up inside the headset instead of staying
-  "searching" until their first tracked pose.
-- Controller battery levels no longer show in Steam's battery panel (user, 2026-11-02); they did before.
-  Cause: in Meta tracking mode the level comes from q1trackd's shared memory, and q1trackd always
-  writes -1 (unknown). Read it from libossdk's `IInputHub::enumerateAll` element (0xB8 bytes; the
-  battery field's offset is still unknown, docs/tracking-ipc.md §3.3) and publish it there.
+- Controller connection state: a powered-off controller now turns disconnected within 0.3 s
+  (tested 2026-11-03). Left to check at the next boot: right after the tracking service starts, a
+  controller it has not seen yet should stay "searching" until its first tracked position.
 
 ## Power
 - Power button and sleep work (2026-11-02: short press = Steam's sleep, panels off and Meta's
   tracking asleep with its cameras; 1 s press = Steam's power menu). Left (user, 2026-11-03):
-  - the sleep animation shows inside the dashboard panel instead of full screen;
-  - sleep must be a real sleep: everything suspended, the headset in its lowest power state (today
-    only a standby: panels and tracking off, SteamVR, Steam and the CPU/GPU still running).
-- Boot animation: its sound plays but nothing shows in the headset. On the Steam Frame it shows full
-  screen, drawn straight on the panels (no tracking). It must also be the Steam Frame's animation,
-  not SteamOS's.
-- Shut down from Steam works but takes long before the headset turns off (user, 2026-11-03): find
-  which units hold the shutdown (TimeoutStopSec, Meta's services, SteamVR's 15 s). Restart from
-  Steam: retest. If both work, drop the sshd `pam_systemd` workaround in `device/holo-perf.sh`.
+  - the sleep animation shows inside the dashboard panel instead of full screen, and it is
+    SteamOS's (deck-suspend-animation), the Frame's one if it has its own;
+  - real sleep: suspend to RAM works (`/etc/quest1-sleep` deep, opt-in) but on resume Meta's
+    tracking was lost (head spinning), the sound gone, the proximity sensor kept waking the headset
+    while worn (SyncBoss "wakeup received", irq 271), and the fan and power LED stayed on.
+    syncboss_spi.c (Meta's kernel) eats PROX_ON until a PROX_OFF when suspended while worn.
+- Steam's own startup movie (each Steam start, also after a SteamVR restart) is SteamOS's: Steam
+  picks it from its hardware type (5001 = Frame, read from /proc/device-tree: the Frame's DT says
+  qcom,sm8650-deckard), not from -steamframe. The boot animation (q1splash) plays the Frame's.
+- Restart from Steam: retest. If it works, drop the sshd `pam_systemd` workaround in
+  `device/holo-perf.sh`.
 
 ## Steam and desktop
 - The Steam Frame's desktop mode (the Frame's KDE Plasma) from the "+" menu. It works in the Quest 2
@@ -86,7 +113,6 @@ Open items, roughly by priority. Done items move to the commit log.
 ## System
 - SteamOS and SteamVR updates must keep working without undoing our changes (after the
   system and performance items above).
-- Wi-Fi from Steam's menu does not find other networks (user, 2026-11-03): fix the scan.
 - The Steam Frame's first-run setup: untested.
 
 ## Streaming
@@ -102,11 +128,15 @@ Open items, roughly by priority. Done items move to the commit log.
   SteamVR now restarts by itself when it quits.
 
 ## Hardware
-- Power LED: it must get its stock behaviour back (it stays solid yellow/orange). The front LED
-  already lights while the cameras run. Later (low priority): let the user control it, e.g. from
-  the quick menu; it turns off when the headset sleeps, except while charging.
+- Power LED: Meta's battery colours since 2026-11-03 (`device/holo-battery.sh`). Later (low
+  priority): let the user control it, e.g. from the quick menu.
 - Bluetooth.
 - USB OTG (low priority): keyboards, storage and other USB devices on the headset's port.
+
+## Steam Frame features (from a video walkthrough, user 2026-11-03)
+- Passthrough toggle by double-clicking the Steam button; performance overlay (4 levels: fps, then
+  temperatures and clocks); frame rate limiter; headset refresh rate setting; GPU clock in the quick
+  menu; window curvature toggle; windows docked to a controller (wrist).
 
 ## Later
 - Hand tracking.
@@ -114,9 +144,9 @@ Open items, roughly by priority. Done items move to the commit log.
 - Other controllers (low priority, together):
   - Windows Mixed Reality controllers (for fun);
   - Quest 2 controllers, based on github.com/Juspertinry/q2ctrl-module (only a left one to test;
-    assume the right one works the same);
-  - Quest 3 controllers, based on github.com/mlsplays/Touch3-on-Quest-2;
-  - Quest Pro controllers: from scratch, maybe impossible.
+    assume the right one works the same).
+  - Not Quest 3 / Pro controllers: they pair with ECDH, which the Quest 1's MCU firmware lacks;
+    replacing that firmware risks a brick (Touch3-on-Quest-2's developer, 2026-11-03).
 - Windows installer that downloads SteamOS from Valve, reads the tracking software from the
   user's own headset, builds the image and flashes it (slot B), once everything works. Much later:
   dual boot with a boot selector shown in the headset at start-up (very low priority).

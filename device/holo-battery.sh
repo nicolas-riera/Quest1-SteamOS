@@ -1,5 +1,5 @@
 #!/bin/sh
-# Battery state for Steam and the power LED (q1-battery, every 5 s).
+# Battery state for Steam (every 5 s) and the power LED (every second): q1-battery.
 #
 # Steam: on the Steam Frame (-steamframe), Steam reads the battery from /run/vpower/ (steamclient's
 # battery manager, query mode 3) before the Deck's /sys/class/power_supply/BAT* and SDL: without it
@@ -10,15 +10,16 @@
 # (it did, 2026-11-03), so it is never under 60 s except on an empty battery without charger; when
 # UPower has no time to empty (charging) it is estimated from the charge and the current.
 #
-# LED: as on the stock Quest 1 OS, where Meta's BatteryService drives it through the Monterey light
-# HAL (the PMI8998 RGB LED, /sys/class/leds/{red,green,blue}):
-#  - under 10 % (config_lowBatteryWarningLevel): red, charging or not (no flashing: Meta's
+# LED (the PMI8998 RGB LED, /sys/class/leds/{red,green,blue}), as on the stock Quest 1:
+#  - under 10 % (config_lowBatteryWarningLevel): red, steady (Meta's
 #    config_notificationsBatteryLowAnimation is empty);
-#  - charging: orange, green when full or from 98 % (config_oculusFullBatteryLevel);
-#  - otherwise off.
-# Colours from framework-res (low 0xff0000, medium 0xff4600, full 0x00ff00), each channel scaled
-# by the HAL's 0.2745 (70/255): red 70, orange 70/19, green 70. The bootloader leaves it lit
-# (yellow) and nothing turned it off before.
+#  - charging: orange, green when full or from 98 % (config_oculusFullBatteryLevel), asleep too;
+#  - on battery: white while the headset is on (user, 2026-11-03), off in standby
+#    (/run/quest1-standby).
+# Meta's BatteryService sets the battery colours through the Monterey light HAL (framework-res:
+# low 0xff0000, medium 0xff4600, full 0x00ff00), each channel scaled by the HAL's 0.2745 (70/255):
+# red 70, orange 70/19, green 70; white the same 70. The bootloader leaves it lit (yellow) and
+# nothing turned it off before.
 #
 # Run as root: sh holo-battery.sh install
 set -e
@@ -46,6 +47,7 @@ put() { # file value: written only when it changes, atomically
 upower_secs() { busctl get-property $U "$1" 2>/dev/null | awk '{print $2 + 0}'; }
 trap 'rgb 0 0 0; exit 0' TERM INT
 mkdir -p $V
+n=0
 while :; do
 	read -r level <$P/battery/capacity
 	read -r status <$P/battery/status
@@ -55,31 +57,37 @@ while :; do
 	Charging | Full) st=$status ;;
 	*) st=Discharging; [ $ac = Connected ] && st=Charging ;; # plugged but not charging: Steam's charge limit
 	esac
-	put battery_percent "$level"
-	put ac_status $ac
-	put battery_status $st
-	full=$(upower_secs TimeToFull)
-	empty=$(upower_secs TimeToEmpty)
-	if [ "${empty:-0}" -le 0 ]; then # µAh left / µA drawn (at least 0.5 A when charging)
-		read -r cf <$P/battery/charge_full
-		read -r cn <$P/battery/current_now
-		empty=$(awk -v f="$cf" -v l="$level" -v c="$cn" 'BEGIN { c = c < 0 ? -c : c; if (c < 500000) c = 500000;
-			print int(f * l / 100 / c * 3600) }')
-	fi
-	[ "${empty:-0}" -lt 60 ] && { [ "$level" -gt 0 ] || [ $st != Discharging ]; } && empty=60
-	put secs_until_battery_full "${full:-0}"
-	put secs_until_shutdown_request "$empty"
 
-	if [ "$level" -lt 10 ]; then
+	if [ -e /run/quest1-standby ] && [ "$status" != Charging ] && [ "$status" != Full ]; then
+		rgb 0 0 0
+	elif [ "$level" -lt 10 ]; then
 		rgb 70 0 0
 	elif [ "$status" = Full ] || { [ "$status" = Charging ] && [ "$level" -ge 98 ]; }; then
 		rgb 0 70 0
 	elif [ "$status" = Charging ]; then
 		rgb 70 19 0
 	else
-		rgb 0 0 0
+		rgb 70 70 70
 	fi
-	sleep 5 &
+
+	if [ $((n % 5)) -eq 0 ]; then
+		put battery_percent "$level"
+		put ac_status $ac
+		put battery_status $st
+		full=$(upower_secs TimeToFull)
+		empty=$(upower_secs TimeToEmpty)
+		if [ "${empty:-0}" -le 0 ]; then # µAh left / µA drawn (at least 0.5 A when charging)
+			read -r cf <$P/battery/charge_full
+			read -r cn <$P/battery/current_now
+			empty=$(awk -v f="$cf" -v l="$level" -v c="$cn" 'BEGIN { c = c < 0 ? -c : c; if (c < 500000) c = 500000;
+				print int(f * l / 100 / c * 3600) }')
+		fi
+		[ "${empty:-0}" -lt 60 ] && { [ "$level" -gt 0 ] || [ $st != Discharging ]; } && empty=60
+		put secs_until_battery_full "${full:-0}"
+		put secs_until_shutdown_request "$empty"
+	fi
+	n=$((n + 1))
+	sleep 1 &
 	wait $!
 done
 EOF
