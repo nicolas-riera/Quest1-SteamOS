@@ -48,10 +48,14 @@ ExecStop=/usr/local/sbin/quest1-zram stop
 WantedBy=swap.target
 EOF
 
-# swap less eagerly: zram is fast, but the file swap is not
+# Memory runs short (Steam's webhelpers, SteamVR): compress idle anonymous memory into zram rather
+# than drop the file cache, which comes back from the loop-mounted image (I/O wait, kswapd at 50 %,
+# Steam's audio crackling until it settles; 2026-11-03). The file swap has the lower priority, it
+# only takes what zram can't. min_free_kbytes: room for allocations without direct reclaim stalls.
 cat > /etc/sysctl.d/90-quest1-vm.conf <<'EOF'
-vm.swappiness=60
+vm.swappiness=100
 vm.page-cluster=0
+vm.min_free_kbytes=49152
 EOF
 
 # reclaim the Steam client's memory before the compositors' and the tracking's (cgroup v2 memory.low)
