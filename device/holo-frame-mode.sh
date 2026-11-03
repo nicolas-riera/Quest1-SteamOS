@@ -183,10 +183,14 @@ mkdir -p /etc/polkit-1/rules.d
 cat > /etc/polkit-1/rules.d/50-quest1-power.rules <<'EOF'
 // Frame mode: Steam and SteamVR (user steamos, no seat session) may power off, reboot and "suspend"
 // (suspend is replaced by quest1-standby, see systemd-suspend.service.d/quest1-standby.conf).
+// Steam's network settings need NetworkManager's actions too (Wi-Fi scan, connect, forget), its
+// first-run setup the time zone and hostname ones.
 polkit.addRule(function(action, subject) {
 	if (subject.user != "steamos")
 		return polkit.Result.NOT_HANDLED;
 	if (/^org\.freedesktop\.login1\.(power-off|reboot|suspend)(-multiple-sessions|-ignore-inhibit)?$/.test(action.id))
+		return polkit.Result.YES;
+	if (/^org\.freedesktop\.(NetworkManager\.|timedate1\.|hostname1\.|locale1\.)/.test(action.id))
 		return polkit.Result.YES;
 	return polkit.Result.NOT_HANDLED;
 });
@@ -194,19 +198,28 @@ EOF
 
 cat > /usr/local/sbin/quest1-standby <<'EOF'
 #!/usr/bin/python3
-# Replaces the kernel suspend (systemd-suspend.service) on the Quest 1: suspend-to-RAM of this
-# Android 4.4 kernel without Android is untested. Instead, while this runs:
-#  - logind has sent PrepareForSleep(true) (SteamVR's vrserver listens for it) and will send
-#    PrepareForSleep(false) when we exit; logind ignores other power actions meanwhile
+# Steam's "Sleep" on the Quest 1 (replaces systemd-suspend.service's ExecStart). While this runs:
+#  - logind has sent PrepareForSleep(true) (SteamVR's vrserver and NetworkManager listen for it) and
+#    will send PrepareForSleep(false) when we exit; logind ignores other power actions meanwhile
 #  - /run/quest1-standby exists (Monado turns the panels off until wake)
 #  - Meta's tracking sleeps (cameras and their LED off): ovrstub's vrpowermanager tells
 #    trackingservice SLEEP, then RUNNING on wake
-# A power button press (qpnp_pon KEY_POWER) wakes. QUEST1_STANDBY_MAX (seconds) bounds it.
+# Then the kernel suspends to RAM (everything frozen, the SoC in its lowest power state) until the
+# power button (qpnp_pon KEY_POWER) wakes it. Other wakeups (Wi-Fi, alarms) suspend again. While a
+# wakeup source is held (the USB link to a PC holds a800000.ssusb) or the suspend fails, the
+# headset stays in this standby awake and retries. Only with /etc/quest1-sleep "deep": on resume
+# (2026-11-03) Meta's tracking was lost, the sound gone, the proximity sensor woke the headset while
+# worn, and the fan and power LED stayed on. Without it: standby awake.
+# QUEST1_STANDBY_MAX (seconds) bounds it.
 import os, select, struct, subprocess, sys, time
 
 KEY_POWER, EV_KEY = 116, 1
 EVENT = struct.Struct("llHHi")
 FLAG = "/run/quest1-standby"
+SETTING = "/etc/quest1-sleep"
+WAKEUP_SOURCES = "/sys/kernel/debug/wakeup_sources"
+SETTLE = 3.0 # panels off and tracking asleep before the first suspend
+RETRY = 10.0 # light standby between suspend attempts
 
 def devices():
     out = []
@@ -224,35 +237,100 @@ def tracking(sig):
     subprocess.run(["systemctl", "kill", "--kill-whom=main", "-s", sig, "android-ovrstub.service"],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+def boottime():
+    return time.clock_gettime(time.CLOCK_BOOTTIME)
+
+def deep_sleep():
+    try:
+        with open(SETTING) as f:
+            return f.read().strip() == "deep"
+    except OSError:
+        return False
+
+def held_wakeup_sources():
+    # sources active right now (active_since != 0)
+    try:
+        with open(WAKEUP_SOURCES) as f:
+            rows = [l.split() for l in f.readlines()[1:]]
+        return [r[0] for r in rows if len(r) > 5 and r[5] != "0"]
+    except OSError:
+        return []
+
+def suspend():
+    # True once the kernel has suspended and resumed, False if it refused (wakeup pending, a driver
+    # failed to suspend, tasks failed to freeze)
+    try:
+        with open("/sys/power/state", "w") as f:
+            f.write("mem")
+    except OSError as e:
+        print(f"quest1-standby: suspend refused: {e.strerror}", flush=True)
+        return False
+    try:
+        with open("/sys/power/pm_wakeup_irq") as f:
+            irq = f.read().strip()
+    except OSError:
+        irq = "?"
+    print(f"quest1-standby: resumed (wakeup irq {irq})", flush=True)
+    return True
+
+def power_pressed(fds, t0, timeout):
+    # waits up to timeout seconds (None: forever) for a power button press
+    ready, _, _ = select.select(fds, [], [], timeout)
+    pressed = False
+    for fd in ready:
+        try:
+            data = os.read(fd, EVENT.size * 64)
+        except BlockingIOError:
+            continue
+        for off in range(0, len(data) - EVENT.size + 1, EVENT.size):
+            _, _, t, code, value = EVENT.unpack_from(data, off)
+            # ignore the press that put us to sleep: only presses 1 s after start count
+            if t == EV_KEY and code == KEY_POWER and value == 1 and boottime() - t0 > 1.0:
+                pressed = True
+    return pressed
+
 def main():
-    t0 = time.monotonic()
+    t0 = boottime()
     limit = float(os.environ.get("QUEST1_STANDBY_MAX", "0") or 0)
     with open(FLAG, "w") as f:
         f.write(f"{int(time.time())}\n")
     tracking("SIGUSR2")
     print("quest1-standby: sleeping until the power button is pressed", flush=True)
     fds = [os.open(p, os.O_RDONLY | os.O_NONBLOCK) for p in devices()]
+    next_try = t0 + SETTLE
+    held_logged = None
     try:
         while True:
-            left = None if limit <= 0 else max(0.0, limit - (time.monotonic() - t0))
-            if left == 0.0:
+            now = boottime()
+            if limit > 0 and now - t0 >= limit:
                 print("quest1-standby: time limit", flush=True)
                 break
-            ready, _, _ = select.select(fds, [], [], left)
-            woke = False
-            for fd in ready:
-                try:
-                    data = os.read(fd, EVENT.size * 64)
-                except BlockingIOError:
-                    continue
-                for off in range(0, len(data) - EVENT.size + 1, EVENT.size):
-                    _, _, t, code, value = EVENT.unpack_from(data, off)
-                    # ignore the press that put us to sleep: only presses 1 s after start count
-                    if t == EV_KEY and code == KEY_POWER and value == 1 and time.monotonic() - t0 > 1.0:
-                        woke = True
-            if woke:
-                print("quest1-standby: power button, waking up", flush=True)
+            wait = None
+            if deep_sleep():
+                wait = max(0.0, next_try - now)
+            if limit > 0:
+                left = limit - (now - t0)
+                wait = left if wait is None else min(wait, left)
+            if power_pressed(fds, t0, wait):
                 break
+            if not deep_sleep() or boottime() < next_try:
+                continue
+            held = held_wakeup_sources()
+            if held:
+                if held != held_logged:
+                    print(f"quest1-standby: not suspending, wakeup sources held: {' '.join(held)}", flush=True)
+                    held_logged = held
+                next_try = boottime() + RETRY
+                continue
+            held_logged = None
+            if not suspend():
+                next_try = boottime() + RETRY
+                continue
+            # the press that woke the kernel is delivered after resume
+            if power_pressed(fds, t0, 1.0):
+                break
+            next_try = boottime() + 1.0
+        print("quest1-standby: power button, waking up", flush=True)
     finally:
         tracking("SIGUSR1")
         try:
