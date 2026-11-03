@@ -1,0 +1,1 @@
+(()=>{const T='__TYPE__';let n=0;document.querySelectorAll('vsg-node').forEach(el=>{if(typeof el.buildNode!=='function')return;let t;try{const r=el.buildNode({},el);t=r&&r[1]&&r[1].type}catch(e){}if(t===T){el.remove();n++}});__q1req(5723).my();return 'removed '+n+' '+T})()

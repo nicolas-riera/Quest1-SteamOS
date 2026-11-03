@@ -126,6 +126,16 @@ Open items, roughly by priority. Done items move to the commit log.
   `playspace-floordetection-geo` (draw_range .4-10 m) fed by the Frame's depth/floor detection, which we do
   not provide (CTrackedCamera "Depth mesh block queues"), or the default play_area [0,0]. distort_tri_floor_gs
   (a geometry shader) samples bindings 11/27 like the passthrough reprojection VS. Accept not tried yet.
+  2026-11-04 later: the user confirms huge graphical glitches: the setup geometry's lines do not behave (fan of
+  rays from one floor point, varying lengths). Ruled out: the distortion LUT (the area uses geom_playspace_
+  drawing_area_vs, no LUT) and the depth sphere (step 7 only adds the geom_bounds_color pipeline). Pipelines
+  in use mapped to /opt/steamvr shader files by md5 of the compat layer's SPIR-V dumps. Next: with the user
+  looking at the fan, remove the step 7 nodes one by one (tools/headset-dev/sg-hide.sh) and snapshot, then
+  look at that node's vertex data / shader on the Adreno.
+  Also wrong: ComputeInverseDistortion returns identity while direct scanout distorts (distort_geom_* shaders
+  place geometry with the inverse LUT).
+  LEFT ON THE HEADSET (2026-11-04, it rebooted into Android before cleanup): /etc/quest1-spirv-dump (remove
+  it, logs and /tmp dumps every module) and the /root helpers.
   Lag: the compat layer's "display:" line shows vrcompositor at 23-35 fps with the room view (28-42 ms per
   frame, present-to-rendered 24-41 ms: GPU bound); Monado fills to 72 Hz by reprojection.
   Side note: steamvr-q1 exports QUEST1_COMPAT_SPIRV empty, and the layer checks getenv() != NULL, so the
