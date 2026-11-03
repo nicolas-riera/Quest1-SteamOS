@@ -285,6 +285,17 @@ while `camera.enableCamera` and `camera.roomView` > 0. So the 3D mode is the one
   and with a fixed-depth mesh the disparity is too large in front of it (hyperstereo: a "dollhouse" world). Meta has no zoom
   setting; its per-frame stereo depth mesh puts every point at its true depth, and each eye's view is synthesised from it.
 
+- **Jumps for one frame**: some frames went out with the predicted pose because the capture pose was missing: the driver
+  and ptprovider only looked at the newest ring slot, and a controller-exposure frame set often follows a headset one
+  closely. Both now walk every new slot; ptprovider waits up to 15 ms for the pose and drops a frame without it.
+- **One eye lower than the other** (user: the left one): the shader's fisheye model is Kannala-Brandt with four terms and
+  ptprovider passed Fisheye62's first four of six: 16 px off at 60 deg from the axis on camera 0 (82 px at 70 deg), 5 px
+  on camera 2, and the cameras look 40 deg down, so the view ahead and above sits there. ptprovider now fits the four
+  terms to the full model (under 0.4 px).
+- **Dashboard camera settings like the Frame's**: `Hmd_CameraSettingsModel_Int32` (2122) = 1 (SteamFrame) drops the
+  Edge A/B room view styles; prop 1062 (vrwebhelper's bRoomViewMonochrome, unnamed in the SDK) shows the tint slider
+  (`camera.monochromeTintHue`, read by vrcompositor 0x115810).
+
 ### How Meta's OS does it (MrServiceMonterey / libmrservice.so, libmrengine.so, mrsystemservice)
 - The bottom camera pair (0 and 2), one per eye; a stereo depth mesh computed per frame (libmrengine "PassthroughMesh",
   `position = vec3(bearing.xy, sqrt(1 - |b|^2)) / invDepth`), drawn with `viewProj * model(capture pose)`: 6DoF reprojection from

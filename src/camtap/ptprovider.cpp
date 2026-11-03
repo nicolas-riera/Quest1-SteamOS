@@ -117,8 +117,49 @@ struct Calib
 	bool ok = false;
 	double f = 191, cx = 319.5, cy = 239.5;
 	double k[6] = {0.29, 0, -0.15, 0.09, -0.02, 0};
+	double kb[4] = {0.29, 0, -0.15, 0.09}; // the four coefficients the roomview shader takes, fitted to all six (FitKB)
 	double m[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
 };
+
+//! The roomview shader's fisheye model is Kannala-Brandt with four radial terms (theta^3..theta^9); Meta's Fisheye62 has six
+//! (to theta^13). Dropping the last two is not small off-axis: 16 px at 60 deg and 82 px at 70 deg on camera 0 (5 and 27 on
+//! camera 2), and the bottom cameras look 40 deg down, so the view ahead and above sits there: one eye's image was lower than
+//! the other's. Least-squares fit of the four over theta in [0, 1.4] instead (under 0.4 px).
+static void FitKB(const double k[6], double kb[4])
+{
+	double ata[4][5] = {};
+	for (int n = 0; n <= 400; n++) {
+		const double th = 1.4 * n / 400, t2 = th * th;
+		double full = 0, p = th, a[4];
+		for (int i = 0; i < 6; i++) {
+			p *= t2;
+			full += k[i] * p;
+			if (i < 4)
+				a[i] = p;
+		}
+		for (int r = 0; r < 4; r++) {
+			for (int c = 0; c < 4; c++)
+				ata[r][c] += a[r] * a[c];
+			ata[r][4] += a[r] * full;
+		}
+	}
+	for (int c = 0; c < 4; c++) { // Gauss-Jordan, partial pivoting
+		int piv = c;
+		for (int r = c + 1; r < 4; r++)
+			if (fabs(ata[r][c]) > fabs(ata[piv][c]))
+				piv = r;
+		for (int j = 0; j < 5; j++)
+			std::swap(ata[c][j], ata[piv][j]);
+		for (int r = 0; r < 4; r++)
+			if (r != c) {
+				const double m = ata[r][c] / ata[c][c];
+				for (int j = c; j < 5; j++)
+					ata[r][j] -= m * ata[c][j];
+			}
+	}
+	for (int i = 0; i < 4; i++)
+		kb[i] = ata[i][4] / ata[i][i];
+}
 
 static Calib LoadCalib(int id)
 {
@@ -144,6 +185,7 @@ static Calib LoadCalib(int id)
 			c.f = proj[0], c.cx = proj[1], c.cy = proj[2];
 			for (int i = 0; i < 6; i++)
 				c.k[i] = dist[i];
+			FitKB(c.k, c.kb);
 			c.ok = true;
 		}
 		break;
@@ -160,7 +202,7 @@ static void FillDesc(uint8_t *desc, double captureS, const Calib &cal, const Hmd
 	memset(desc, 0, 248);
 	memcpy(desc + 8, &captureS, sizeof(captureS));
 	float in[8] = {(float)cal.f, (float)cal.f, (float)(cal.cx + 0.5), (float)(cal.cy + 0.5),
-	               (float)cal.k[0], (float)cal.k[1], (float)cal.k[2], (float)cal.k[3]};
+	               (float)cal.kb[0], (float)cal.kb[1], (float)cal.kb[2], (float)cal.kb[3]};
 	memcpy(desc + 16, in, sizeof(in));
 	// +48: the camera's pose, Meta's DeviceFromCamera (OpenCV camera axes in the head frame): vrcompositor (0x15f660) inverts it
 	// into the shader's _m3, which projects head-space points (the depth mesh's frame) into the camera.
@@ -183,7 +225,7 @@ static void FillDesc(uint8_t *desc, double captureS, const Calib &cal, const Hmd
 }
 
 //! The head pose (raw tracking space) at a frame set's capture, from driver_quest1 (quest1_camera_ring.h, q1cam_poses). It
-//! wakes on the same frame set as we do: wait a few ms for it.
+//! wakes on the same frame set as we do: wait up to 15 ms for it.
 static bool CapturePose(int64_t capNs, HmdMatrix34_t &out)
 {
 	static const q1cam_poses *poses = nullptr;
@@ -199,7 +241,7 @@ static bool CapturePose(int64_t capNs, HmdMatrix34_t &out)
 	}
 	if (!capNs || poses->magic != Q1CAM_POSES_MAGIC)
 		return false;
-	for (int tries = 0; tries < 8; tries++) {
+	for (int tries = 0; tries < 30; tries++) {
 		for (const q1cam_pose_entry &e : poses->entry) {
 			uint32_t seq = __atomic_load_n(&e.seq, __ATOMIC_ACQUIRE);
 			if ((seq & 1) || e.capture_mono_ns != capNs)
@@ -268,9 +310,9 @@ int main()
 	for (int v = 0; v < 256; v++)
 		grayPx[v] = 0xff000000u | 128u << 16 | (uint32_t)toSrgb[v] << 8 | 128u;
 	for (int c = 0; c < 2; c++)
-		printf("ptprovider: camera %d %s: f %.1f centre %.1f %.1f k %.3f %.3f %.3f %.3f\n", c ? 2 : 0,
-		       calib[c].ok ? "calibrated" : "NOT calibrated (defaults)", calib[c].f, calib[c].cx, calib[c].cy, calib[c].k[0],
-		       calib[c].k[1], calib[c].k[2], calib[c].k[3]);
+		printf("ptprovider: camera %d %s: f %.1f centre %.1f %.1f, fitted KB %.4f %.4f %.4f %.4f\n", c ? 2 : 0,
+		       calib[c].ok ? "calibrated" : "NOT calibrated (defaults)", calib[c].f, calib[c].cx, calib[c].cy, calib[c].kb[0],
+		       calib[c].kb[1], calib[c].kb[2], calib[c].kb[3]);
 
 	// an Overlay-type connection starts vrserver and the dashboard when SteamVR is down: wait for it
 	while (!g_quit && !(Running("vrserver") && Running("vrcompositor")))
@@ -359,7 +401,8 @@ int main()
 
 	const q1cam_ring_header *hdr = nullptr;
 	uint32_t last = 0;
-	int64_t lastFrame = 0, lastBeat = 0, lastDump = 0, lastIdle = 0;
+	int64_t lastFrame = 0, lastBeat = 0, lastDump = 0, lastIdle = 0, lastWarn = 0;
+	int noCapturePose = 0;
 	int slot[2] = {0, 0};
 	auto Rec = [&](int c, int k) { return (uint32_t *)(b + kRec0 + c * kCamStride + k * kRecStride); };
 	const int64_t period = 1000000000LL / hz;
@@ -437,8 +480,16 @@ int main()
 		} else if (canWrite && hdr) {
 			uint32_t n = __atomic_load_n(&hdr->write_count, __ATOMIC_ACQUIRE);
 			if (n && n != last) {
-				last = n;
+				// the newest headset-exposure frame set since the last one (a controller-exposure set often follows it)
 				uint32_t si = (n - 1) % hdr->slot_count;
+				for (uint32_t k = n; k != n - std::min<uint32_t>(n - last, hdr->slot_count); k--) {
+					const q1cam_ring_slot &c = hdr->slot[(k - 1) % hdr->slot_count];
+					if (c.frame_type == Q1CAM_FRAME_HEADSET || c.frame_type == 0) {
+						si = (k - 1) % hdr->slot_count;
+						break;
+					}
+				}
+				last = n;
 				const q1cam_ring_slot &s = hdr->slot[si];
 				uint32_t seq0 = __atomic_load_n(&s.seq, __ATOMIC_ACQUIRE);
 				if (!(seq0 & 1) && (s.frame_type == Q1CAM_FRAME_HEADSET || s.frame_type == 0)) {
@@ -469,13 +520,17 @@ int main()
 				}
 			}
 		}
+		// the head pose at capture (+144: vrcompositor reprojects the frame from it to the head pose it displays with): the
+		// frames reach us 25-35 ms after their mid-exposure, and a pose of the wrong time shakes the view as the head turns.
+		// driver_quest1 publishes it (Monado's pose at the capture time). A camera frame without it is dropped (the previous
+		// one stays, reprojected): SteamVR's own HMD pose is predicted to the display time and made the view jump.
+		HmdMatrix34_t head;
+		if (fresh && capNs && !CapturePose(capNs, head)) {
+			noCapturePose++;
+			fresh = false;
+		}
 		if (fresh) {
-			// the head pose at capture (+144: vrcompositor reprojects the frame from it to the head pose it displays with):
-			// the frames reach us 25-35 ms after their mid-exposure, and a pose of the wrong time shakes the view as the head
-			// turns. driver_quest1 publishes it (Monado's pose at the capture time); SteamVR's own HMD pose is predicted to
-			// the display time, so it is only the fallback.
-			HmdMatrix34_t head;
-			if (!CapturePose(capNs, head)) {
+			if (!capNs) { // test patterns
 				TrackedDevicePose_t hp = {};
 				VRSystem()->GetDeviceToAbsoluteTrackingPose(TrackingUniverseRawAndUncalibrated, 0, &hp, 1);
 				head = hp.bPoseIsValid ? hp.mDeviceToAbsoluteTracking : HmdMatrix34_t{{{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}}};
@@ -491,6 +546,12 @@ int main()
 				printf("ptprovider: roomview data enabled\n");
 				fflush(stdout);
 			}
+		}
+		if (noCapturePose && now - lastWarn > 10000000000LL) {
+			lastWarn = now;
+			printf("ptprovider: %d camera frames dropped: no capture pose\n", noCapturePose);
+			fflush(stdout);
+			noCapturePose = 0;
 		}
 		// no frame for 2 s: disable so that the compositor does not wait for frames
 		if (b[4] && now - lastFrame > 2000000000LL) {

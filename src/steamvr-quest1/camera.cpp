@@ -1362,19 +1362,23 @@ private:
 				syscall(SYS_futex, (void *)&hdr->write_count, FUTEX_WAIT, n, &ts, nullptr, 0);
 				continue;
 			}
+			// every frame set completed since the last wake (a controller-exposure set often follows a headset one closely)
+			for (uint32_t k = n - std::min<uint32_t>(n - last, hdr->slot_count); k != n; k++) {
+				const q1cam_ring_slot &s = hdr->slot[k % hdr->slot_count];
+				uint32_t seq = __atomic_load_n(&s.seq, __ATOMIC_ACQUIRE);
+				int64_t cap = s.capture_mono_ns ? s.capture_mono_ns : s.arrival_mono_ns;
+				const bool headset = s.frame_type == Q1CAM_FRAME_HEADSET || s.frame_type == 0;
+				HmdMatrix34_t raw;
+				if ((seq & 1) || !cap || !headset || __atomic_load_n(&s.seq, __ATOMIC_ACQUIRE) != seq || !poseAt(cap, raw))
+					continue;
+				q1cam_pose_entry &e = out->entry[out->count % Q1CAM_POSES_COUNT];
+				__atomic_store_n(&e.seq, e.seq + 1, __ATOMIC_RELEASE);
+				e.capture_mono_ns = cap;
+				memcpy(e.raw_from_head, &raw.m[0][0], sizeof(e.raw_from_head));
+				__atomic_store_n(&e.seq, e.seq + 1, __ATOMIC_RELEASE);
+				__atomic_store_n(&out->count, out->count + 1, __ATOMIC_RELEASE);
+			}
 			last = n;
-			const q1cam_ring_slot &s = hdr->slot[(n - 1) % hdr->slot_count];
-			uint32_t seq = __atomic_load_n(&s.seq, __ATOMIC_ACQUIRE);
-			int64_t cap = s.capture_mono_ns ? s.capture_mono_ns : s.arrival_mono_ns;
-			HmdMatrix34_t raw;
-			if ((seq & 1) || !cap || __atomic_load_n(&s.seq, __ATOMIC_ACQUIRE) != seq || !poseAt(cap, raw))
-				continue;
-			q1cam_pose_entry &e = out->entry[out->count % Q1CAM_POSES_COUNT];
-			__atomic_store_n(&e.seq, e.seq + 1, __ATOMIC_RELEASE);
-			e.capture_mono_ns = cap;
-			memcpy(e.raw_from_head, &raw.m[0][0], sizeof(e.raw_from_head));
-			__atomic_store_n(&e.seq, e.seq + 1, __ATOMIC_RELEASE);
-			__atomic_store_n(&out->count, out->count + 1, __ATOMIC_RELEASE);
 		}
 		if (hdr)
 			munmap((void *)hdr, hdrLen);
@@ -1464,6 +1468,12 @@ void Quest1CameraAttach(PropertyContainerHandle_t container, std::function<Drive
 			// Prop_Hmd_SupportsRoomViewDirect_Bool (2105): vrcompositor copies it into the shared state byte that
 			// IVROverlayInternal::HasCameraRoomViewCapability returns (vrclient 0x21bad8): the dashboard's eye button
 			p->SetBoolProperty(container, Prop_Hmd_SupportsRoomViewDirect_Bool, true);
+			// Hmd_CameraSettingsModel_Int32 (2122) = ECameraSettingsModel_SteamFrame: the dashboard's camera settings as on the
+			// Frame (no Edge A/B room view styles, which do not work here)
+			p->SetInt32Property(container, (ETrackedDeviceProperty)2122, 1);
+			// 1062 (unnamed; vrwebhelper's bRoomViewMonochrome): monochrome cameras, the dashboard shows the Frame's tint slider
+			// (camera.monochromeTintHue, which vrcompositor reads for the room view's colour)
+			p->SetBoolProperty(container, (ETrackedDeviceProperty)1062, true);
 			CLog("quest1 camera: HMD camera properties set (props mode, with the camera component)\n");
 			g_gate.Start(false); // the empty depth-mesh block queues vrcompositor's roomview connects to
 			g_capturePoses.Start(std::move(poseAt));
