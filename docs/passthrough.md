@@ -269,6 +269,19 @@ while `camera.enableCamera` and `camera.roomView` > 0. So the 3D mode is the one
 - Test scripts on the headset: `pt-live.sh` (KEEP=1 PATTERN=0 ROOMVIEW=2), `pt-ubo.sh <n>` (gdb dump of the uniforms and the
   3D flags +835/+836/+864, index count +772, camera of the eye), `pt-state.py` (prints/sets the shared state's bytes).
 
+- **Eye button**: the dashboard shows/enables it from `VRHTML.VROverlayInternal.HasCameraRoomViewCapability()`, which
+  returns a byte of the compositor's shared state (vrclient 0x21bad8: +0x40000+2899) that vrcompositor fills from the HMD's
+  `Prop_Hmd_SupportsRoomViewDirect_Bool` (2105, 0x124da8); the props driver now sets it. The bar button also needs
+  `camera.enableCamera` and `camera.roomView` > 0 (RoomViewStore.showRoomViewButton).
+- **Shaking**: the record's +144 must be the head pose at the frame's capture (vrcompositor reprojects from it to the display
+  pose: the tiny rotation in `_m1`). The frames arrive 25-35 ms after mid-exposure; ptprovider gave the pose at write time.
+  It now asks SteamVR for the pose at the capture time (negative prediction) and wakes on the ring's futex.
+- Record +8 (capture time) is CLOCK_MONOTONIC seconds, the compositor's clock. The block's +0x41bc (double) / +0x41c4 (3x4)
+  are a "motion backout" pose applied to frames captured before that time (camera state +1168/+0x498; unused here, NaN).
+- **Scale**: everything looks smaller than reality (user, 2026-11-03): the bottom cameras are ~11 cm apart, the eyes ~6.5 cm,
+  and with a fixed-depth mesh the disparity is too large in front of it (hyperstereo: a "dollhouse" world). Meta has no zoom
+  setting; its per-frame stereo depth mesh puts every point at its true depth, and each eye's view is synthesised from it.
+
 ### How Meta's OS does it (MrServiceMonterey / libmrservice.so, libmrengine.so, mrsystemservice)
 - The bottom camera pair (0 and 2), one per eye; a stereo depth mesh computed per frame (libmrengine "PassthroughMesh",
   `position = vec3(bearing.xy, sqrt(1 - |b|^2)) / invDepth`), drawn with `viewProj * model(capture pose)`: 6DoF reprojection from

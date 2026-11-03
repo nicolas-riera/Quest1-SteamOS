@@ -24,6 +24,8 @@
 #include <openvr.h>
 
 #include <dirent.h>
+#include <linux/futex.h>
+#include <sys/syscall.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <sys/mman.h>
@@ -435,9 +437,12 @@ int main()
 			}
 		}
 		if (fresh) {
-			// the head pose now (the frames are a few ms old: good enough until the capture-time pose is mapped)
+			// the head pose at capture (+144: vrcompositor reprojects the frame from it to the head pose it displays with):
+			// the frames reach us 25-35 ms after their mid-exposure, and a pose of the wrong time shakes the view as the head
+			// turns. SteamVR extrapolates back from the latest pose.
 			TrackedDevicePose_t hp = {};
-			VRSystem()->GetDeviceToAbsoluteTrackingPose(TrackingUniverseRawAndUncalibrated, 0, &hp, 1);
+			VRSystem()->GetDeviceToAbsoluteTrackingPose(TrackingUniverseRawAndUncalibrated, (float)(capS - NowNs() * 1e-9),
+			                                            &hp, 1);
 			HmdMatrix34_t head = hp.bPoseIsValid ? hp.mDeviceToAbsoluteTracking
 			                                     : HmdMatrix34_t{{{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}}};
 			for (int c = 0; c < 2; c++) {
@@ -474,7 +479,14 @@ int main()
 		}
 		next += period;
 		int64_t wait = next - NowNs();
-		if (wait > 0)
+		if (hdr && !pattern && canWrite) {
+			// wake as soon as the producer completes a frame set (its futex word), at the latest after a period
+			if (__atomic_load_n(&hdr->write_count, __ATOMIC_ACQUIRE) == last) {
+				timespec ts = {0, (long)std::clamp<int64_t>(wait, 1000000, period)};
+				syscall(SYS_futex, (void *)&hdr->write_count, FUTEX_WAIT, last, &ts, nullptr, 0);
+			}
+			next = NowNs();
+		} else if (wait > 0)
 			usleep((useconds_t)(wait / 1000));
 		else
 			next = NowNs();
