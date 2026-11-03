@@ -371,7 +371,9 @@ context.objects = [
       audio.rate = 48000
       audio.channels = 1
       audio.position = [ MONO ]
-      priority.session = 2000
+      # above the output's monitor (2000), else WirePlumber makes that the default source and
+      # Steam finds no microphone
+      priority.session = 2100
     }
   }
 ]
