@@ -190,6 +190,25 @@ static void refresh_batteries(void)
 		uint16_t b = ((hub_battery_fn)vt[5])(hub, devs[i].id);
 		devs[i].battery = b >> 8 && (b & 0xff) <= 100 ? (b & 0xff) / 100.0f : -1.0f;
 	}
+	/* that level stays 100 % here (in Android Meta's Java services forward the real one to
+	 * trackingservice): the sensors HAL's, which fakelogd reads from its log, wins */
+	FILE *f = fopen("/run/q1track/ctlbattery", "r");
+	if (!f)
+		return;
+	char line[64];
+	while (fgets(line, sizeof(line), f)) { /* "<8 hex> <percent>"; no scanf: glibc headers, bionic libc */
+		char *end;
+		long pct = strtol(line + 8, &end, 10);
+		if (line[8] != ' ' || end == line + 9 || pct < 0 || pct > 100)
+			continue;
+		for (int i = 0; i < ndevs; i++) {
+			char want[9];
+			snprintf(want, sizeof(want), "%08x", (unsigned)(devs[i].id >> 32));
+			if (!strncmp(line, want, 8))
+				devs[i].battery = pct / 100.0f;
+		}
+	}
+	fclose(f);
 }
 
 /* handedness enum value of the left / right controller (printed at device discovery) */
