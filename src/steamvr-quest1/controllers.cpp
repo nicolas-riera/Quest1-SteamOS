@@ -19,7 +19,8 @@
 // Position: Monado's when it is tracked (6DoF), otherwise our own arm model hung below the head
 // (Monado's 3DoF controllers sit in a different tracking origin than its HMD).
 //
-// Live knobs (read every ~0.5 s) in /tmp/quest1-ctrl: "<default pitch deg> <velocities 0|1> <debug 0|1>".
+// Live knobs (read every ~0.5 s) in /tmp/quest1-ctrl: "<default pitch deg> <velocity scale> <debug 0|1>"
+// (the scale of the velocities SteamVR predicts the poses to the display time with; 0 = no prediction).
 
 #include "controllers.h"
 #include "battery.h"
@@ -382,7 +383,9 @@ struct State
 
 	// knobs
 	std::atomic<float> pitchDeg{40.0f}; //!< default aim = IMU frame pitched up by this much (rift_s: 40)
-	std::atomic<bool> velocities{true};
+	//! scale of the velocities SteamVR predicts with: Meta's full velocities over SteamVR's whole prediction
+	//! time overshoot when the hand stops (user, 2026-11-03: 0.5 is right)
+	std::atomic<float> velocities{0.5f};
 	std::atomic<bool> debug{false};
 	time_t calMtime = 0;
 	// debug: a simulated button press from /tmp/quest1-ctrl-press ("<left|right> <system|a|b|trigger>")
@@ -609,17 +612,17 @@ void State::ReadKnobs()
 	FILE *f = fopen("/tmp/quest1-ctrl", "r");
 	if (!f)
 		return;
-	float pitch = pitchDeg;
-	int vel = velocities, dbg = debug;
-	int n = fscanf(f, "%f %d %d", &pitch, &vel, &dbg);
+	float pitch = pitchDeg, vel = velocities;
+	int dbg = debug;
+	int n = fscanf(f, "%f %f %d", &pitch, &vel, &dbg);
 	fclose(f);
 	if (n < 1)
 		return;
-	if (pitch != pitchDeg || (vel != 0) != velocities || (dbg != 0) != debug)
-		CLog("quest1: controllers: default pitch %.1f deg, velocities %s, debug %s\n", pitch, vel ? "on" : "off",
+	if (pitch != pitchDeg || vel != velocities || (dbg != 0) != debug)
+		CLog("quest1: controllers: default pitch %.1f deg, velocity scale %.2f, debug %s\n", pitch, vel,
 		     dbg ? "on" : "off");
 	pitchDeg = pitch;
-	velocities = vel != 0;
+	velocities = vel;
 	debug = dbg != 0;
 }
 
@@ -784,16 +787,17 @@ void State::UpdateHand(int h, double now, const XrPosef &headPose, bool headVali
 		p.vecDriverFromHeadTranslation[0] = dfh.t.x;
 		p.vecDriverFromHeadTranslation[1] = dfh.t.y;
 		p.vecDriverFromHeadTranslation[2] = dfh.t.z;
-		if (velocities && (vel.velocityFlags & XR_SPACE_VELOCITY_ANGULAR_VALID_BIT)) {
+		const float vs = velocities;
+		if (vs > 0 && (vel.velocityFlags & XR_SPACE_VELOCITY_ANGULAR_VALID_BIT)) {
 			Vec w = Rotate(hd.yaw, {vel.angularVelocity.x, vel.angularVelocity.y, vel.angularVelocity.z});
-			p.vecAngularVelocity[0] = w.x;
-			p.vecAngularVelocity[1] = w.y;
-			p.vecAngularVelocity[2] = w.z;
+			p.vecAngularVelocity[0] = w.x * vs;
+			p.vecAngularVelocity[1] = w.y * vs;
+			p.vecAngularVelocity[2] = w.z * vs;
 		}
-		if (velocities && MetaTracking() && havePos && (vel.velocityFlags & XR_SPACE_VELOCITY_LINEAR_VALID_BIT)) {
-			p.vecVelocity[0] = vel.linearVelocity.x;
-			p.vecVelocity[1] = vel.linearVelocity.y;
-			p.vecVelocity[2] = vel.linearVelocity.z;
+		if (vs > 0 && MetaTracking() && havePos && (vel.velocityFlags & XR_SPACE_VELOCITY_LINEAR_VALID_BIT)) {
+			p.vecVelocity[0] = vel.linearVelocity.x * vs;
+			p.vecVelocity[1] = vel.linearVelocity.y * vs;
+			p.vecVelocity[2] = vel.linearVelocity.z * vs;
 		}
 		p.poseIsValid = true;
 		p.result = TrackingResult_Running_OK;

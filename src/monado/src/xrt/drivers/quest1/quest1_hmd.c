@@ -635,8 +635,11 @@ meta_push(struct quest1_hmd *h, const struct q1track_pose *p)
 		flags |= XRT_SPACE_RELATION_POSITION_TRACKED_BIT;
 	}
 	if (h->mt.use_velocity && !meta_velocity_off()) {
-		rel.angular_velocity =
-		    (struct xrt_vec3){p->angular_velocity[0], p->angular_velocity[1], p->angular_velocity[2]};
+		// libossdk gives the head's angular velocity in the head frame (the gyro's), Monado wants it
+		// in the base frame like the linear one: measured against the orientation's derivative
+		// (2026-11-03; as base-frame vector it was off by 147 %, which sheared every re-projection)
+		struct xrt_vec3 w_head = {p->angular_velocity[0], p->angular_velocity[1], p->angular_velocity[2]};
+		math_quat_rotate_vec3(&rel.pose.orientation, &w_head, &rel.angular_velocity);
 		rel.linear_velocity =
 		    (struct xrt_vec3){p->linear_velocity[0], p->linear_velocity[1], p->linear_velocity[2]};
 		if (flags & XRT_SPACE_RELATION_ORIENTATION_VALID_BIT) {
@@ -699,6 +702,15 @@ meta_push_controller(struct quest1_hmd *h, int i, const struct q1track_controlle
 	            XRT_SPACE_RELATION_POSITION_VALID_BIT;
 	if (p->status & Q1TRACK_POS_TRACKED) {
 		flags |= XRT_SPACE_RELATION_POSITION_TRACKED_BIT;
+	}
+	// both already in the base frame for the controllers (measured, 2026-11-03): SteamVR predicts
+	// the controllers to the display time with them
+	if (h->mt.use_velocity) {
+		rel.angular_velocity =
+		    (struct xrt_vec3){p->angular_velocity[0], p->angular_velocity[1], p->angular_velocity[2]};
+		rel.linear_velocity =
+		    (struct xrt_vec3){p->linear_velocity[0], p->linear_velocity[1], p->linear_velocity[2]};
+		flags |= XRT_SPACE_RELATION_ANGULAR_VELOCITY_VALID_BIT | XRT_SPACE_RELATION_LINEAR_VELOCITY_VALID_BIT;
 	}
 	rel.relation_flags = (enum xrt_space_relation_flags)flags;
 	quest1_controller_push_meta_pose(qc, ts, &rel);
