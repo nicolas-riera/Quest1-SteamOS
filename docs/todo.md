@@ -85,20 +85,20 @@ Open items, roughly by priority. Done items move to the commit log.
 - Goal (user, 2026-11-03): the cameras seen by SteamVR as a real camera, like on the Steam Frame:
   its settings adjustable in SteamVR, usable as normal passthrough and as the passthrough used to
   draw the boundary.
-- 2026-11-03: SteamVR's 2D roomview (camera.roomView = 1) shows the real cameras, fed by `ptprovider`
-  and switched on through vrcompositor's system layer mailbox (`src/camtap/vrmailbox`,
-  docs/passthrough.md). Test scripts in `src/camtap/roomview-test/`; tests leave
-  `camera.enableConstructRoomView` set, which crash-loops vrcompositor (load ~12, crackling audio):
-  always run `/root/pt-undo.sh` after. The head-locked overlay (`q1-camoverlay`) is shelved.
-- User's first test (2026-11-03), to fix:
-  - Too dark: Meta's passthrough is brighter (SteamVR tints it ×0.7; Meta's tone curve to copy).
-  - Only the left camera: Meta uses both, one per eye, with correction and synchronised exposure
-    (vrcompositor picks the camera per eye in 0x160a80).
-  - The top middle is black (no camera sees it): Meta stretches the image to fill it.
-  - Placement right for a start, not fine-tuned.
-  - No eye button on the dashboard (it should toggle passthrough, like the Frame). The dashboard's
-    "Room View" setting points to an option that does not exist; turning it on made the view black.
-- Then: ptprovider as a service, passthrough while drawing the boundary, the 3D roomview (depth mesh).
+- 2026-11-03 night: SteamVR's 3D roomview works (docs/passthrough.md, "The 3D roomview works"): one
+  bottom camera per eye, the image's edge stretched above the cameras' view, linear light (sRGB-encoded
+  frames). Installed by `device/holo-passthrough.sh`: driver_quest1 in "props" mode
+  (`/etc/quest1-camera`) and `q1-ptprovider.service` (with SteamVR; 7.5% of a core while shown,
+  0.7% while hidden). Switched by vrcompositor itself: the dashboard's Room View (On = 3D) and eye
+  button, the room setup (with no playspace it follows `camera.enableConstructRoomView`, set by
+  `set_camera_roomview_enabled`). Test scripts in `src/camtap/roomview-test/` (`pt-undo.sh`
+  restores the defaults; `pt-flow.sh`-style tests need no `trackedcam_test`).
+- To check in the headset (user): the eye button and Room View On/Off from the dashboard, brightness,
+  stereo comfort, alignment (a fixed 3 m sphere: near objects are off, as expected), the ×0.7 dim
+  (vrcompositor's own, probably while the dashboard is open).
+- Then: a depth mesh in tracking space (floor plane + far sphere, then stereo depth like Meta) for
+  alignment of near objects and 6DoF; passthrough while drawing the boundary; the chaperone's
+  passthrough. The head-locked overlay (`q1-camoverlay`) is shelved.
 
 ## Boundary
 - Test in the headset (after passthrough, needed to draw the boundary): the playspace buttons

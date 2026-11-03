@@ -231,6 +231,9 @@ int main()
 		double l = v / 255.0, e = l <= 0.0031308 ? 12.92 * l : 1.055 * pow(l, 1 / 2.4) - 0.055;
 		toSrgb[v] = (uint8_t)std::lround(std::min(1.0, e) * 255);
 	}
+	uint32_t grayPx[256]; // the frame image's RGBA8 pixel (R = Cr, G = Y', B = Cb, A) for each sensor value: neutral chroma
+	for (int v = 0; v < 256; v++)
+		grayPx[v] = 0xff000000u | 128u << 16 | (uint32_t)toSrgb[v] << 8 | 128u;
 	for (int c = 0; c < 2; c++)
 		printf("ptprovider: camera %d %s: f %.1f centre %.1f %.1f k %.3f %.3f %.3f %.3f\n", c ? 2 : 0,
 		       calib[c].ok ? "calibrated" : "NOT calibrated (defaults)", calib[c].f, calib[c].cx, calib[c].cy, calib[c].k[0],
@@ -323,8 +326,9 @@ int main()
 
 	const q1cam_ring_header *hdr = nullptr;
 	uint32_t last = 0;
-	int64_t lastFrame = 0, lastBeat = 0, lastDump = 0;
+	int64_t lastFrame = 0, lastBeat = 0, lastDump = 0, lastIdle = 0;
 	int slot[2] = {0, 0};
+	auto Rec = [&](int c, int k) { return (uint32_t *)(b + kRec0 + c * kCamStride + k * kRecStride); };
 	const int64_t period = 1000000000LL / hz;
 	int64_t next = NowNs();
 	while (!g_quit) {
@@ -354,9 +358,33 @@ int main()
 			if (fd >= 0)
 				close(fd);
 		}
+		// The records to write this frame into: free ones (the compositor takes them while it shows the roomview). When none is
+		// free it is not reading (roomview off): take a ready one back, but only twice a second (those frames are not shown,
+		// they only must not be stale when it reads again). A record it has taken (2) is left alone.
+		bool canWrite;
+		{
+			int target[2] = {-1, -1};
+			for (int c = 0; c < 2; c++)
+				for (int i = 0; i < N && target[c] < 0; i++)
+					if (__atomic_load_n(Rec(c, (slot[c] + i) % N), __ATOMIC_ACQUIRE) == 0)
+						target[c] = (slot[c] + i) % N;
+			if ((target[0] < 0 || target[1] < 0) && now - lastIdle >= 500000000LL) {
+				lastIdle = now;
+				for (int c = 0; c < 2; c++)
+					for (int i = 0; i < N && target[c] < 0; i++) {
+						uint32_t ready = 1;
+						if (__atomic_compare_exchange_n(Rec(c, (slot[c] + i) % N), &ready, 0u, false, __ATOMIC_ACQ_REL,
+						                                __ATOMIC_ACQUIRE))
+							target[c] = (slot[c] + i) % N;
+					}
+			}
+			canWrite = target[0] >= 0 && target[1] >= 0;
+			if (canWrite)
+				slot[0] = target[0], slot[1] = target[1];
+		}
 		bool fresh = false;
 		double capS = now * 1e-9;
-		if (pattern) {
+		if (canWrite && pattern) {
 			fresh = true;
 			for (int c = 0; c < 2; c++) {
 				Img &im = img[c][slot[c]];
@@ -372,7 +400,7 @@ int main()
 					          [](int, int) { return false; });
 			}
 			lastFrame = now;
-		} else if (hdr) {
+		} else if (canWrite && hdr) {
 			uint32_t n = __atomic_load_n(&hdr->write_count, __ATOMIC_ACQUIRE);
 			if (n && n != last) {
 				last = n;
@@ -390,8 +418,12 @@ int main()
 								continue;
 							const uint8_t *src = base + rc.offset;
 							Img &im = img[c][slot[c]];
-							const uint32_t stride = rc.stride;
-							WriteYuv(im, [&](int x, int y) { return toSrgb[src[(size_t)y * stride + x]]; }, [](int, int) { return false; });
+							for (int y = 0; y < kH; y++) {
+								const uint8_t *row = src + (size_t)y * rc.stride;
+								uint32_t *out = (uint32_t *)im.map + (size_t)y * kW;
+								for (int x = 0; x < kW; x++)
+									out[x] = grayPx[row[x]];
+							}
 							got++;
 						}
 					if (got == 2 && __atomic_load_n(&s.seq, __ATOMIC_ACQUIRE) == seq0) {
@@ -409,9 +441,8 @@ int main()
 			HmdMatrix34_t head = hp.bPoseIsValid ? hp.mDeviceToAbsoluteTracking
 			                                     : HmdMatrix34_t{{{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}}};
 			for (int c = 0; c < 2; c++) {
-				uint8_t *rec = b + kRec0 + c * kCamStride + slot[c] * kRecStride;
-				FillDesc(rec + 4, capS, calib[c], head);
-				__atomic_store_n((uint32_t *)rec, 1u, __ATOMIC_RELEASE); // frame ready
+				FillDesc((uint8_t *)Rec(c, slot[c]) + 4, capS, calib[c], head);
+				__atomic_store_n(Rec(c, slot[c]), 1u, __ATOMIC_RELEASE); // frame ready
 				slot[c] = (slot[c] + 1) % N;
 			}
 			if (!b[4]) {

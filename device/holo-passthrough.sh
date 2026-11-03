@@ -4,6 +4,9 @@
 #  - q1-camoverlay.service: head-locked camera view overlay, started with SteamVR (binary /usr/local/bin/q1-camoverlay,
 #    built by src/camtap/build_overlay.sh; libq1camtap.so from src/camtap/build.sh in /data/local/tmp)
 #  - /usr/local/bin/q1-passthrough on|off|toggle
+#  - SteamVR's own camera view (the dashboard's Room View and eye button, the room setup's passthrough): driver_quest1 in
+#    "props" mode (/etc/quest1-camera) and q1-ptprovider.service, the frame provider (binary /usr/local/bin/q1-ptprovider,
+#    built by src/camtap/build_probe.sh)
 set -e
 [ "$1" = install ] || { echo "usage: $0 install" >&2; exit 2; }
 mkdir -p /etc/systemd/system/android-trackingservice.service.d
@@ -38,5 +41,20 @@ esac
 [ -e $f ] && echo on || echo off
 EOT
 chmod 755 /usr/local/bin/q1-passthrough
+echo props > /etc/quest1-camera
+cat > /etc/systemd/system/q1-ptprovider.service <<EOT
+[Unit]
+Description=Passthrough: camera frames for SteamVR's room view (vrcompositor)
+After=quest1-steamvr.service
+BindsTo=quest1-steamvr.service
+
+[Service]
+User=steamos
+Environment=XDG_RUNTIME_DIR=/run/user/1000 HOME=/home/steamos
+ExecStart=/usr/local/bin/q1-ptprovider
+Restart=always
+RestartSec=5
+EOT
 systemctl daemon-reload
 systemctl add-wants quest1-steamvr.service q1-camoverlay.service
+systemctl add-wants quest1-steamvr.service q1-ptprovider.service
