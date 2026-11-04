@@ -157,7 +157,9 @@ def nbd_serve(s, path, size):
         recvn(s, 4)
         magic, opt, n = struct.unpack(">8sII", recvn(s, 16))
         recvn(s, n)
-        s.sendall(struct.pack(">QH", size, 1 | 4 | 32))  # HAS_FLAGS | SEND_FLUSH | SEND_TRIM
+        # HAS_FLAGS | SEND_TRIM; no SEND_FLUSH: a scratch disk needs no durability, and an fsync of this big file
+        # can stall it for a minute (the headset's dirty pages pile up and the agent stops answering)
+        s.sendall(struct.pack(">QH", size, 1 | 32))
         while True:
             _, _, typ, handle, off, length = struct.unpack(">IHH8sQI", recvn(s, 28))
             reply = struct.pack(">II8s", 0x67446698, 0, handle)
@@ -172,9 +174,7 @@ def nbd_serve(s, path, size):
                 s.sendall(reply)
             elif typ == 2:  # disconnect
                 return
-            elif typ == 3:  # flush
-                f.flush()
-                os.fsync(f.fileno())
+            elif typ == 3:  # flush (not offered, see above): nothing to make durable
                 s.sendall(reply)
             elif typ == 4:  # trim: give the room back (punch a hole), zeros as a fallback
                 f.flush()
@@ -272,7 +272,11 @@ def follow(ag, path, body):
     n = ag.ok("GET", "/events?from=0")["total"]
     ag.ok("POST", path, body)
     while True:
-        js = ag.ok("GET", "/events?from=%d" % n)
+        try:
+            js = ag.ok("GET", "/events?from=%d" % n, timeout=120)
+        except OSError as e:  # a busy headset answers late: never give up (and the scratch disk) for that
+            print("(agent slow: %s, asking again)" % e, flush=True)
+            continue
         for l in js["lines"]:
             print(l, flush=True)
         n = js["next"]

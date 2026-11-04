@@ -19,6 +19,10 @@ mount -t pstore pstore /sys/fs/pstore 2>/dev/null
 mount -t configfs configfs /sys/kernel/config
 exec >/dev/kmsg 2>&1
 log() { echo "q1-installer: $*"; }
+# write back in small steps: the scratch disk is behind the USB cable, and gigabytes of dirty pages waiting for
+# it make every allocation wait (the agent stopped answering for over a minute)
+echo $((128 << 20)) > /proc/sys/vm/dirty_bytes
+echo $((32 << 20)) > /proc/sys/vm/dirty_background_bytes
 log "init"
 
 # --- USB gadget first: the way in when anything below goes wrong ---------------------------------------------

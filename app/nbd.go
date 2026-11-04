@@ -59,7 +59,9 @@ func serveNBD(c net.Conn, r *bufio.Reader, path string) {
 	}
 	reply := make([]byte, 10)
 	be.PutUint64(reply, scratchSize)
-	be.PutUint16(reply[8:], 1|4|32) // HAS_FLAGS | SEND_FLUSH | SEND_TRIM
+	// HAS_FLAGS | SEND_TRIM; no SEND_FLUSH: a scratch disk needs no durability, and an fsync of this big
+	// file can stall it for a minute (the headset's dirty pages pile up and the agent stops answering)
+	be.PutUint16(reply[8:], 1|32)
 	c.Write(reply)
 
 	req := make([]byte, 28)
@@ -96,8 +98,7 @@ func serveNBD(c net.Conn, r *bufio.Reader, path string) {
 		case 2: // disconnect
 			w.Flush()
 			return
-		case 3: // flush
-			f.Sync()
+		case 3: // flush (not offered, see above): nothing to make durable
 			w.Write(head)
 		case 4: // trim
 			zeroRange(f, off, length)
