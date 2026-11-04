@@ -23,6 +23,11 @@ log() { echo "q1-installer: $*"; }
 # it make every allocation wait (the agent stopped answering for over a minute)
 echo $((128 << 20)) > /proc/sys/vm/dirty_bytes
 echo $((32 << 20)) > /proc/sys/vm/dirty_background_bytes
+# memory kept free for the network's atomic allocations: with the default 7 MB, page cache filled the rest,
+# nbd0 got "page allocation failure", packets were lost (the agent silent for a minute) and at last the scratch
+# disk's connection broke (EHOSTUNREACH). extra_free_kbytes (Android kernels) makes kswapd start earlier.
+echo 65536 > /proc/sys/vm/min_free_kbytes
+[ -e /proc/sys/vm/extra_free_kbytes ] && echo 65536 > /proc/sys/vm/extra_free_kbytes
 log "init"
 
 # --- USB gadget first: the way in when anything below goes wrong ---------------------------------------------
