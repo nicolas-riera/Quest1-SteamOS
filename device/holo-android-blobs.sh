@@ -1,13 +1,17 @@
 #!/bin/sh
 # Make Meta's Android blobs usable from native Holo (libhybris), without running Android.
-# Everything is read-only or in RAM: system_a and modem_a are mounted ro, overrides live in tmpfs.
+# Everything is read-only or in RAM: system and modem (partitions or bundled images) are mounted ro, overrides in tmpfs.
 # Installed as /usr/local/sbin/holo-android-blobs, run by holo-android-blobs.service.
 set -e
 part() { echo /dev/$(grep -l "PARTNAME=$1\$" /sys/class/block/sd*/uevent | head -1 | cut -d/ -f5); }
+# Meta's images bundled in the SteamOS image (full install from the PC installer: no Android partitions left,
+# installer/prepare.py takes them from Meta's OTA), else the headset's own partitions (dual boot)
+M=/usr/lib/quest1/meta
+src() { if [ -f "$M/$1.img" ]; then echo "-o loop $M/$1.img"; else echo "$(part ${1}_a)"; fi; }
 
 # /android = system_a (system-as-root); /system, /vendor, /apex like on Android
 mkdir -p /android /firmware /apex
-mountpoint -q /android || mount -t ext4 -o ro,noload "$(part system_a)" /android
+mountpoint -q /android || mount -t ext4 -o ro,noload $(src system) /android
 mountpoint -q /system || mount --bind /android/system /system
 mountpoint -q /apex || mount -t tmpfs -o mode=755 tmpfs /apex
 for a in /android/system/apex/*; do
@@ -17,7 +21,7 @@ done
 
 # /firmware = modem_a (NON-HLOS vfat: GPU zap shader, ADSP, venus, wlan...)
 # Android's options (fstab.monterey): world-readable, the modem's tftp_server (uid vendor_rfs) reads wlanmdsp.mbn
-mountpoint -q /firmware || mount -t vfat -o ro,shortname=lower,uid=1000,gid=1000,dmask=222,fmask=333 "$(part modem_a)" /firmware
+mountpoint -q /firmware || mount -t vfat -o ro,shortname=lower,uid=1000,gid=1000,dmask=222,fmask=333 $(src modem) /firmware
 mountpoint -q /system/vendor/firmware_mnt || mount --bind /firmware /system/vendor/firmware_mnt
 
 # one directory for the kernel firmware loader (it takes a single path)

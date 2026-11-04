@@ -1,0 +1,36 @@
+{
+  "comment": "Everything the installer fetches. Pinned hashes are checked; a null hash is computed and printed (pin it after review).",
+  "repo": {
+    "comment": "Our own files: the source tree of this repository at a ref (not a release).",
+    "zip_url": "https://codeload.github.com/nicolas-riera/Quest1-SteamOS/zip/refs/heads/{ref}",
+    "ref": "main"
+  },
+  "holo_rootfs": {
+    "comment": "SteamOS Holo core for aarch64, Valve's public package server.",
+    "url": "https://holo-packages.steamos.cloud/holo-core-aarch64-preview/mash-20251118.3/system.rootfs.zst",
+    "sha256": "7e3fb88454e1ac633b7488abb72d3ca0cc7d2578a38146fdd7d58b50fcbd60bf"
+  },
+  "steam_client": {
+    "comment": "Steam client for linuxarm64 from Valve's public client CDN: the channel manifest lists zips (each with its sha256), unpacked into ~/.local/share/Steam like Steam's bootstrapper does.",
+    "cdn": "https://client-update.steamstatic.com/",
+    "channel": "steam_client_linuxarm64"
+  },
+  "steamvr": {
+    "comment": "NOT AUTOMATED YET. SteamVR (app 250820) has no public arm64 download. Candidate: depot 4128110 (linux, ~1 GB, gated by a hidden DLC that appeared with the Steam Frame); needs the user's Steam login (DepotDownloader with QR login) and maybe a Frame entitlement. To test.",
+    "app": 250820,
+    "depot_candidate": 4128110
+  },
+  "gtk2": {
+    "comment": "steamui.so needs GTK 2 (gone from Holo and Arch Linux ARM): Debian 12's arm64 build, only the libraries are taken.",
+    "url": "https://deb.debian.org/debian/pool/main/g/gtk+2.0/libgtk2.0-0_2.24.33-2+deb12u1_arm64.deb",
+    "sha256": "d035cfd259b330a641a6b7310748ba2f42903b795d4923fa4fb23bacb872ac07",
+    "members": ["libgtk-x11-2.0.so", "libgdk-x11-2.0.so"]
+  },
+  "meta_ota": {
+    "comment": "Meta's last Quest 1 OTA (full A/B payload). Its system and modem images are bit-identical to a headset on this build (checked 2026-11-04 against a dump).",
+    "url": "https://files.cocaine.trade/firmware/meta/Quest/q1_49845030443200410.zip",
+    "sha256": "7c1f75ecd807b59d5215a67ff69e8e8c6da4b966eb08464d48e00d2d5a8b6aaa",
+    "post_build": "oculus/vr_monterey/monterey:10/QQ3A.200805.001/49845030443200410:user/release-keys",
+    "partitions": ["system", "modem", "boot"]
+  }
+}
