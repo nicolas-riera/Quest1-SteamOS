@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""Installer step 3 (PC): have the headset build the image. Talks to installer/agent.py in the micro Linux
-(fastboot-booted, USB network): scratch space, upload of prepare.py's stage/, build with progress, download of
-the sparse image. The reference for the app; standard library only.
+"""Installer (PC side): have the headset download everything and build the image. Talks to installer/agent.py
+in the micro Linux (fastboot-booted, USB network): scratch space, prepare.py run on the headset (its downloads go
+through tunnels this side opens: no incoming connection on the PC), build with progress, download of the sparse
+image. The reference for the app; standard library only.
 
-    remote_build.py --stage DIR --out userdata.simg [--agent http://192.168.77.1:8077] [--only STEPS]
+    remote_build.py --out userdata.simg [--agent http://192.168.77.1:8077] [--prepare-only STEPS] [--only STEPS]
+    remote_build.py --stage DIR ...    development: upload a stage prepare.py made on the PC instead
 
-Files already on the headset with the same sha256 are not sent again (an interrupted install resumes).
+Uploaded files already on the headset with the same sha256 are not sent again (an interrupted install resumes).
 Progress for the app: the build's own "@step"/"@progress" lines are passed through, plus "@step"/"@progress"
 for the upload ("upload") and the download ("download").
 """
-import argparse, hashlib, http.client, json, os, sys, time
+import argparse, hashlib, http.client, json, os, socket, sys, threading, time
 from urllib.parse import urlparse, quote
 
 CONFIRM = "erase userdata"
@@ -108,17 +110,81 @@ def upload(ag, stage):
     event("step", step="upload", status="done")
 
 
-def build(ag, only):
-    ag.ok("POST", "/build", {"only": only} if only else {})
-    n = 0
+def splice(a, b):
+    def pump(src, dst):
+        try:
+            for chunk in iter(lambda: src.recv(1 << 16), b""):
+                dst.sendall(chunk)
+        except OSError:
+            pass
+        for x in (src, dst):
+            try:
+                x.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+    t = threading.Thread(target=pump, args=(b, a), daemon=True)
+    t.start()
+    pump(a, b)
+    t.join()
+    a.close()
+    b.close()
+
+
+def tunnel_worker(ag):
+    """Lend the headset one connection at a time to the internet: only outgoing connections from the PC."""
+    while True:
+        try:
+            s = socket.create_connection((ag.host, ag.port), timeout=30)
+            s.sendall(b"GET /tunnel HTTP/1.1\r\nHost: headset\r\nUpgrade: q1tunnel\r\nConnection: Upgrade\r\n\r\n")
+            buf = b""
+            while b"\r\n\r\n" not in buf:
+                b = s.recv(4096)
+                if not b:
+                    raise OSError("tunnel refused")
+                buf += b
+            head, buf = buf.split(b"\r\n\r\n", 1)
+            if b" 101 " not in head.split(b"\r\n")[0]:
+                raise OSError("tunnel refused")
+            s.settimeout(None)  # idle until the headset needs it
+            while b"\n" not in buf:
+                b = s.recv(4096)
+                if not b:
+                    raise OSError("tunnel closed")
+                buf += b
+            target, buf = buf.split(b"\n", 1)
+            host, port = target.decode().rsplit(":", 1)
+            try:
+                t = socket.create_connection((host.strip("[]"), int(port)), timeout=30)
+                t.settimeout(None)
+            except OSError:
+                s.sendall(b"NO\n")
+                s.close()
+                continue
+            s.sendall(b"OK\n")
+            if buf:
+                t.sendall(buf)
+            threading.Thread(target=splice, args=(s, t), daemon=True).start()
+        except OSError:
+            time.sleep(1)
+
+
+def start_tunnels(ag, n=4):
+    for _ in range(n):
+        threading.Thread(target=tunnel_worker, args=(ag,), daemon=True).start()
+
+
+def follow(ag, path, body):
+    """Start a job on the headset (/prepare, /build) and pass its output through until it ends."""
+    n = ag.ok("GET", "/events?from=0")["total"]
+    ag.ok("POST", path, body)
     while True:
         js = ag.ok("GET", "/events?from=%d" % n)
         for l in js["lines"]:
             print(l, flush=True)
         n = js["next"]
-        if js["build"] in ("done", "failed") and not js["lines"]:
-            if js["build"] == "failed":
-                sys.exit("the build failed on the headset")
+        if js["state"] in ("done", "failed") and not js["lines"]:
+            if js["state"] == "failed":
+                sys.exit("%s failed on the headset" % path)
             return
         if not js["lines"]:
             time.sleep(1)
@@ -143,16 +209,21 @@ def download(ag, out):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--agent", default="http://192.168.77.1:8077")
-    ap.add_argument("--stage", required=True)
+    ap.add_argument("--stage", help="development: upload this prepare.py stage (else the headset downloads)")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--prepare-only", help="prepare.py steps run on the headset (default: all)")
     ap.add_argument("--only", help="build_image.py steps (default: all)")
     a = ap.parse_args()
     ag = Agent(a.agent)
     info = ag.ok("GET", "/info")
     print("agent:", info, flush=True)
     ag.ok("POST", "/scratch", {"confirm": CONFIRM}, timeout=600)
-    upload(ag, a.stage)
-    build(ag, a.only)
+    if a.stage:
+        upload(ag, a.stage)
+    else:  # the app's way: the headset downloads everything itself, through tunnels the PC opens
+        start_tunnels(ag)
+        follow(ag, "/prepare", {"only": a.prepare_only})
+    follow(ag, "/build", {"only": a.only} if a.only else {})
     download(ag, a.out)
     print("image:", a.out, os.path.getsize(a.out), "bytes", flush=True)
 

@@ -32,13 +32,14 @@ Windows cannot write an ext4 file system with Linux permissions, owners, symlink
 and the Holo rootfs is a `tar.zst`. So **the headset builds the image, the PC flashes it**: the app
 `fastboot boot`s a micro Linux (our kernel + an installer initramfs, in RAM only, nothing flashed), which
 brings up the USB network the project already uses (`192.168.77.1`, NCM/RNDIS; Windows has the drivers).
-The app streams the downloads to it; the micro Linux, with real tools (GNU tar with xattrs, zstd,
-e2fsprogs, btrfs-progs), builds the system image, the app copies the image back to the PC, reboots the
-headset to its bootloader and flashes everything with fastboot. All partition writes are plain fastboot
+The micro Linux downloads everything itself (`prepare.py`, through tunnels the app opens to it: the PC
+only makes outgoing connections, so no firewall prompt), builds the system image with real tools (GNU tar
+with xattrs, zstd, e2fsprogs, btrfs-progs), the app copies the image back to the PC (only that image is
+stored on the PC, ~9 GB), reboots the headset to its bootloader and flashes everything with fastboot. All partition writes are plain fastboot
 flashes from the PC, and the PC keeps the finished image: re-flashing or repairing needs no rebuild.
 (Recovery "sideload" cannot be used: it only takes OTA packages signed by Meta.)
 
-1. **Download** on the PC (prototype: [`prepare.py`](prepare.py), tested 2026-11-04, sources pinned in
+1. **Download**, on the headset (or on a PC for development: [`prepare.py`](prepare.py), tested 2026-11-04, sources pinned in
    [`sources.json`](sources.json), every file checked against a hash):
 
    | What | From | Status |
@@ -133,8 +134,8 @@ SteamVR driver registration (`openvrpaths.vrpath`), the libhybris commit and Mon
 (`tools/build-native.sh`), the vrcompositor Vulkan shim (built as Steam's), the bionic stubs `q1trackd` and
 `libq1camtap.so` link against, the Meta exclusions, the micro Linux on the 4.4 kernel (Alpine's musl).
 
-## App technology (to decide)
+## The app
 
-A single small `.exe`: Go or Rust (HTTP, zip, zstd, a hash, adb/fastboot driving, a minimal ext4/vfat
-reader are all simple there), UI through WebView2 (present on Windows 10/11) or a native toolkit.
-`prepare.py` is the reference for the download step.
+[`app/`](../app/README.md): Go, one exe (~20 MB with adb/fastboot), Edge WebView2 for the window. Its install
+sequence is the one [`remote_build.py`](remote_build.py) runs (the Python reference, used for the tests in
+WSL), plus the checks and the flash.

@@ -125,7 +125,7 @@ installer() {
 		-o -name ensurepip -o -name turtledemo \) -prune -exec rm -rf {} +
 	aarch64-linux-gnu-gcc -static -O2 -Wall -o root/bin/rb "$P/initrd/rb.c"
 	mkdir -p root/installer root/scratch
-	cp "$P/installer/agent.py" "$P/installer/build_image.py" root/installer/
+	cp "$P/installer/agent.py" "$P/installer/build_image.py" "$P/installer/prepare.py" "$P/installer/sources.json" root/installer/
 	tr -d '\r' < "$P/installer/micro-init" > root/init; chmod 755 root/init
 	(cd root && find . | cpio -o -H newc -R 0:0 --quiet) | gzip -9n > ramdisk.gz
 	mkboot ramdisk.gz "$OUT"

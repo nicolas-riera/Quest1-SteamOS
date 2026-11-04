@@ -55,7 +55,8 @@ cd $S/libhybris/hybris
 ./autogen.sh --prefix=/opt/hybris --enable-arch=arm64 --enable-adreno-quirks --enable-wayland \
 	--with-android-headers=/opt/hybris/include/android \
 	--with-default-hybris-ld-library-path=/vendor/lib64/egl:/vendor/lib64/hw:/vendor/lib64:/system/lib64:/apex/com.android.runtime/lib64/bionic >/dev/null
-make -j$J CFLAGS="-g -O2 -DVK_ENABLE_BETA_EXTENSIONS" >/dev/null
+# GCC 14+: implicit declarations are errors; some of libhybris's tests (test_audio) rely on them
+make -j$J CFLAGS="-g -O2 -DVK_ENABLE_BETA_EXTENSIONS -Wno-error=implicit-function-declaration -Wno-error=int-conversion -Wno-error=incompatible-pointer-types" >/dev/null
 make install DESTDIR=$D >/dev/null
 # the other builds find libhybris at its final path
 rm -rf /opt/hybris; cp -a $D/opt/hybris /opt/hybris
