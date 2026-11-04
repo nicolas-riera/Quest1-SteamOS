@@ -16,9 +16,9 @@
     "channel": "steam_client_linuxarm64"
   },
   "steamvr": {
-    "comment": "NOT AUTOMATED YET. SteamVR (app 250820) has no public arm64 download. Candidate: depot 4128110 (linux, ~1 GB, gated by a hidden DLC that appeared with the Steam Frame); needs the user's Steam login (DepotDownloader with QR login) and maybe a Frame entitlement. To test.",
-    "app": 250820,
-    "depot_candidate": 4128110
+    "comment": "NOT AUTOMATED YET. SteamVR arm64 (and GTK 2) come from the Steam Frame's recovery image, public on Valve's servers: URL to pin. app 250820's public depots are x86 only (depot 4128110, DLC-gated, is the other candidate).",
+    "frame_recovery_url": null,
+    "sha256": null
   },
   "gtk2": {
     "comment": "steamui.so needs GTK 2 (gone from Holo and Arch Linux ARM): Debian 12's arm64 build, only the libraries are taken.",
