@@ -26,9 +26,10 @@ MAGISK=https://github.com/topjohnwu/Magisk/releases/download/v28.1/Magisk-v28.1.
 ALPINE=https://dl-cdn.alpinelinux.org/alpine/v3.24
 ALPINE_ROOTFS=alpine-minirootfs-3.24.3-aarch64.tar.gz
 ALPINE_SHA256=4d3f80afaebd447c5591a63a73bde380a149fe8b2d85488cafabb2ff97551f50
-# the micro Linux's tools: build_image.py needs python3, GNU tar (xattrs), zstd, e2fsprogs, btrfs-progs (the
-# Frame image's btrfs, read with `btrfs restore`); blkid for the scratch space; udhcpd/telnetd from busybox-extras
-ALPINE_PKGS="python3 tar zstd e2fsprogs btrfs-progs blkid busybox-extras"
+# the micro Linux's tools: build_image.py needs python3, GNU tar (xattrs), zstd (also its libzstd, for
+# installer/btrfsread.py: the Frame image's btrfs), e2fsprogs; blkid for the scratch space; udhcpd/telnetd from
+# busybox-extras
+ALPINE_PKGS="python3 tar zstd e2fsprogs blkid busybox-extras"
 DEBIAN=https://deb.debian.org/debian
 CMDLINE="androidboot.configfs=true androidboot.hardware=monterey ehci-hcd.park=3 lpm_levels.sleep_disabled=1 msm_rtb.filter=0x237 sched_enable_hmp=1 sched_enable_power_aware=1 service_locator.enable=1 softdog.soft_panic=1 swiotlb=2048 user_debug=31 bootver=1596585601 cursysver=1596585601 minsysver=1 buildvariant=user veritykeyid=id:cc158dc3bf03e76f1e4f8e38b2841cb9f2d421e4 rng_core.default_quality=700"
 
@@ -122,7 +123,8 @@ installer() {
 	aarch64-linux-gnu-gcc -static -O2 -Wall -o root/bin/rb "$P/initrd/rb.c"
 	aarch64-linux-gnu-gcc -static -O2 -Wall -s -o root/bin/fbblank "$P/initrd/fbblank.c"
 	mkdir -p root/installer root/scratch
-	cp "$P/installer/agent.py" "$P/installer/build_image.py" "$P/installer/prepare.py" "$P/installer/sources.json" root/installer/
+	cp "$P/installer/agent.py" "$P/installer/build_image.py" "$P/installer/btrfsread.py" "$P/installer/prepare.py" \
+		"$P/installer/sources.json" root/installer/
 	# the init and its debug path (USB gadget, telnetd, serial shell) run on a static busybox, as in the native
 	# initramfs: nothing there depends on Alpine's musl; the console nodes the kernel opens before /dev is mounted
 	busybox_static; install -m755 bb/usr/bin/busybox root/bin/busybox-static

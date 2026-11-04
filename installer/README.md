@@ -36,7 +36,7 @@ and the Holo rootfs is a `tar.zst`. So **the headset builds the image, the PC fl
 brings up the USB network the project already uses (`192.168.77.1`, NCM/RNDIS; Windows has the drivers).
 The micro Linux downloads everything itself (`prepare.py`, through tunnels the app opens to it: the PC
 only makes outgoing connections, so no firewall prompt) and builds the system image with real tools (GNU tar
-with xattrs, zstd, e2fsprogs, btrfs-progs). It works on a disk that is a file on the PC: a sparse file the app
+with xattrs, zstd, e2fsprogs; the Frame image's btrfs is read by [`btrfsread.py`](btrfsread.py)). It works on a disk that is a file on the PC: a sparse file the app
 serves as a network block device (NBD) through one of the same tunnels, formatted and mounted by the headset
 with `discard` (what the build deletes is given back on the PC). **The headset's storage is never written
 before the final flash**, whatever its size (64 or 128 GB) and content, which also keeps later updates and a
@@ -65,7 +65,7 @@ flashes from the PC, and the PC keeps the finished image: re-flashing or repairi
    still to download + what is staged beyond the downloads + the image that comes back (12 GB), +15 %.
 2. **Check and boot the installer:** `adb reboot bootloader`, `fastboot boot installer.img`: the micro Linux
    ([`micro-init`](micro-init), built by `tools/build-boot.sh installer`: our kernel + Alpine aarch64 with
-   python3, GNU tar, zstd, e2fsprogs, btrfs-progs; 36 MB, in RAM only) brings up the USB network and runs
+   python3, GNU tar, zstd, e2fsprogs; 36 MB, in RAM only) brings up the USB network and runs
    [`agent.py`](agent.py) on `http://192.168.77.1:8077`. Its scratch space (`POST /scratch`) is the PC's
    disk (NBD export `scratch`, kept between attempts so a retry resumes); nothing is written to the headset.
 3. **Build on the headset:** the app uploads the staged files (resumable: files already there with the same

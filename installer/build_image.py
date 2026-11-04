@@ -26,6 +26,8 @@ Steps:
 """
 import argparse, bz2, json, os, re, shutil, stat, struct, subprocess, sys, tempfile, time, zipfile
 
+import btrfsread  # noqa: E402 (next to this file)
+
 USERDATA_BYTES = 56092471296  # Quest 1 userdata partition (GPT of the 64 GB model)
 GB = 1 << 30
 
@@ -225,8 +227,7 @@ class Build:
 
     def frame(self, prog):
         """The Frame image is a GPT disk (esp, efi-A, rootfs-A (btrfs), var-A, home); only rootfs-A is kept, cut
-        out of the bz2 stream. SteamVR and GTK 2 are copied from it; mounted read-only, or read with
-        `btrfs restore` when the kernel cannot mount it."""
+        out of the bz2 stream. SteamVR and GTK 2 are copied from it with installer/btrfsread.py."""
         d = os.path.join(self.stage, "frame")
         bz = os.path.join(d, [f for f in os.listdir(d) if f.endswith(".img.bz2")][0])
         prog.total = os.path.getsize(bz)
@@ -256,25 +257,23 @@ class Build:
             finally:
                 pieces.close()
             o.truncate()
-        m = os.path.join(self.a.scratch, "frame")
-        os.makedirs(m, exist_ok=True)
+        # read with our own btrfs reader on every host: the headset's kernel cannot mount it, and `btrfs restore`
+        # gets its small files wrong (installer/btrfsread.py)
+        im = btrfsread.Image(part)
+        steamvr = os.path.join(self.mnt, "opt", "steamvr")
+        shutil.rmtree(steamvr, ignore_errors=True)
+        os.makedirs(os.path.dirname(steamvr), exist_ok=True)
+        im.copy(im.lookup("/opt/steamvr"), steamvr)
         local = os.path.join(self.mnt, "usr", "local", "lib")
         os.makedirs(local, exist_ok=True)
         gtk = ("libgtk-x11-2.0.so", "libgdk-x11-2.0.so", "libgailutil.so")
-        if subprocess.run(["mount", "-o", "loop,ro", part, m]).returncode == 0:
-            try:
-                run("cp", "-a", os.path.join(m, "opt", "steamvr"), os.path.join(self.mnt, "opt") + "/")
-                for f in os.listdir(os.path.join(m, "usr", "lib")):
-                    if f.startswith(gtk):
-                        run("cp", "-a", os.path.join(m, "usr", "lib", f), local + "/")
-            finally:
-                run("umount", m)
-        else:
-            run("btrfs", "restore", "-i", "--path-regex", r"^/(|opt(|/steamvr(|/.*)))$", part, self.mnt)
-            run("btrfs", "restore", "-i", "--path-regex", r"^/(|usr(|/lib(|/lib(gtk|gdk)-x11-2\.0\.so.*|/libgailutil\.so.*)))$",
-                part, os.path.join(self.a.scratch, "frame-usr"))
-            for f in os.listdir(os.path.join(self.a.scratch, "frame-usr", "usr", "lib")):
-                run("cp", "-a", os.path.join(self.a.scratch, "frame-usr", "usr", "lib", f), local + "/")
+        for name, child in im.children(im.lookup("/usr/lib")):
+            f = os.fsdecode(name)
+            if f.startswith(gtk):
+                if os.path.lexists(os.path.join(local, f)):
+                    os.remove(os.path.join(local, f))
+                im.copy(child, os.path.join(local, f))
+        im.f.close()
         os.remove(part)
         # our SteamVR edits and steamvr-q1 (device/holo-steamvr.sh), from outside (Holo core has no python3)
         run("sh", os.path.join(self.repo, "device", "holo-steamvr.sh"), "install",
