@@ -15,16 +15,10 @@
     "cdn": "https://client-update.steamstatic.com/",
     "channel": "steam_client_linuxarm64"
   },
-  "steamvr": {
-    "comment": "SteamVR arm64 (/opt/steamvr) and GTK 2 from the Steam Frame's public recovery image (linked from store.steampowered.com/steamos/download/?ver=steamframe; '-latest' redirects to the versioned file pinned here). Extraction (disk image, rootfs probably btrfs) is done on the headset. Not in prepare.py yet.",
-    "frame_recovery_url": "https://steamdeck-images.steamos.cloud/recovery/steamframe-oobe-repair-20260922.5153644-0.3.0.img.bz2",
-    "sha256": null
-  },
-  "gtk2": {
-    "comment": "steamui.so needs GTK 2 (gone from Holo and Arch Linux ARM): Debian 12's arm64 build, only the libraries are taken.",
-    "url": "https://deb.debian.org/debian/pool/main/g/gtk+2.0/libgtk2.0-0_2.24.33-2+deb12u1_arm64.deb",
-    "sha256": "d035cfd259b330a641a6b7310748ba2f42903b795d4923fa4fb23bacb872ac07",
-    "members": ["libgtk-x11-2.0.so", "libgdk-x11-2.0.so"]
+  "steam_frame": {
+    "comment": "The Steam Frame's public recovery image (linked from store.steampowered.com/steamos/download/?ver=steamframe; '-latest' redirects to this versioned file): SteamVR arm64 (/opt/steamvr), GTK 2. Extracted by build_image.py (the rootfs is read with Linux tools). app 250820's public depots are x86 only.",
+    "url": "https://steamdeck-images.steamos.cloud/recovery/steamframe-oobe-repair-20260922.5153644-0.3.0.img.bz2",
+    "sha256": "3a4a077f1b1f40688ab3279affcb56776bd97c54db1573e7c65fc52a97106676"
   },
   "meta_ota": {
     "comment": "Meta's last Quest 1 OTA (full A/B payload). Its system and modem images are bit-identical to a headset on this build (checked 2026-11-04 against a dump).",

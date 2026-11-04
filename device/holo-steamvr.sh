@@ -10,10 +10,11 @@
 #  - resources/safe_mode_driver_whitelist.json: "quest1", so safe mode after a crash keeps our driver
 #  - /usr/local/bin/steamvr-q1 (the environment every SteamVR program runs with) and the /etc/quest1-direct-*
 #    and /etc/quest1-warp-lens defaults
-# Usage (root): holo-steamvr.sh install [steamvr dir, default /opt/steamvr]
+# Usage (root): holo-steamvr.sh install [steamvr dir, default $ROOT/opt/steamvr]
+# ROOT=<dir> works on a system image from outside (the installer's build): only python3 is needed on the host.
 set -e
 [ "$1" = install ] || { echo "usage: $0 install [steamvr dir]" >&2; exit 1; }
-R=${2:-/opt/steamvr}
+R=${2:-$ROOT/opt/steamvr}
 [ -x "$R/bin/linuxarm64/vrserver" ] || { echo "no SteamVR in $R" >&2; exit 1; }
 python3 - "$R" <<'PY'
 import json, os, sys
@@ -77,7 +78,8 @@ if "quest1" not in json.loads(s)["drivers"]:
 PY
 
 # steamvr-q1: how every SteamVR program is started here (quest1-steamvr, -vrsession and -frame-dashboard units)
-cat > /usr/local/bin/steamvr-q1 <<'Q1EOF'
+mkdir -p "$ROOT/usr/local/bin"
+cat > "$ROOT/usr/local/bin/steamvr-q1" <<'Q1EOF'
 #!/bin/sh
 # steamvr-q1 [program args]: run a SteamVR program (default vrserver) on the Quest 1:
 # hybris GPU env, Monado as the OpenXR runtime for driver_quest1, Vulkan through quest1_vkshim
@@ -114,10 +116,10 @@ export QUEST1_DISPLAY_SIZE=${QUEST1_DISPLAY_SIZE:-1836x1020}
 prog=${1:-vrserver}; [ $# -gt 0 ] && shift
 exec $S/$prog "$@"
 Q1EOF
-chmod 755 /usr/local/bin/steamvr-q1
+chmod 755 "$ROOT/usr/local/bin/steamvr-q1"
 # display defaults read by steamvr-q1 and quest1-frame-settings, kept if already set:
 # direct scanout on (vrcompositor's output goes straight to the panels), its orientation flags (driver_quest1
 # DirectFlip), and vrcompositor (not Monado's warp) doing the lens distortion
-[ -f /etc/quest1-direct-scanout ] || echo 1 > /etc/quest1-direct-scanout
-[ -f /etc/quest1-direct-flip ] || echo 19 > /etc/quest1-direct-flip
-[ -f /etc/quest1-warp-lens ] || echo 0 > /etc/quest1-warp-lens
+[ -f "$ROOT/etc/quest1-direct-scanout" ] || echo 1 > "$ROOT/etc/quest1-direct-scanout"
+[ -f "$ROOT/etc/quest1-direct-flip" ] || echo 19 > "$ROOT/etc/quest1-direct-flip"
+[ -f "$ROOT/etc/quest1-warp-lens" ] || echo 0 > "$ROOT/etc/quest1-warp-lens"

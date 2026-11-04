@@ -8,8 +8,8 @@ owner's server, into `%TEMP%\quest1-steamos`, and deletes that folder when it is
 
 1. Downloads `Quest1-SteamOS.exe` (a few MB) from the GitHub releases and runs it.
 2. **Welcome page:** what the app does, what is needed (a Quest 1 on Android with developer mode and USB
-   debugging, an **unlocked bootloader** (how to unlock it), a USB cable, ~10 GB free on the PC, a charged
-   headset), and a "Start" button.
+   debugging, an **unlocked bootloader** (how to unlock it), a USB cable, ~30 GB free on the PC (checked before
+   anything starts), a charged headset), and a "Start" button.
 3. **Checks** (the user plugs the headset in):
    - `adb`: a Quest 1 (`ro.product.device` = `monterey`) on Meta's last build `49845030443200410` (the
      bundled tracking stack comes from that build's OTA and must match the headset's firmware partitions,
@@ -45,23 +45,31 @@ flashes from the PC, and the PC keeps the finished image: re-flashing or repairi
    | --- | --- | --- |
    | Our files | a folder of this repository's source tree (not a release): scripts, configs, prebuilt arm64 binaries, the boot and installer images | scripts work; **to do**: the prebuilt folder |
    | SteamOS Holo core aarch64 | `holo-packages.steamos.cloud` (public), `system.rootfs.zst` (tar.zst), 385 MB | works |
-   | Steam client arm64 | Valve's client CDN, channel `steam_client_linuxarm64` (public): 35 zips, ~1 GB | works |
-   | SteamVR arm64, GTK 2 | **the Steam Frame's recovery image**, public: `steamframe-oobe-repair-20260922.5153644-0.3.0.img.bz2` on Valve's image server (linked from store.steampowered.com/steamos/download/?ver=steamframe), 4.07 GB. It ships `/opt/steamvr` (where the development headset's SteamVR comes from) and the GTK 2 libraries `steamui.so` needs. SteamVR has no other public arm64 download (app 250820's public depots are x86) | pinned in `sources.json`; **to do**: its disk layout (the rootfs is probably btrfs: extracted by the micro Linux with `btrfs restore`, no kernel support needed). GTK 2 also works from Debian's arm64 package (tested) |
+   | Steam client arm64 | Valve's client CDN, channel `steam_client_linuxarm64` (public): 35 zips, ~1 GB, staged as they are (the build unpacks them) | works |
+   | SteamVR arm64, GTK 2 | **the Steam Frame's recovery image**, public: `steamframe-oobe-repair-20260922.5153644-0.3.0.img.bz2` on Valve's image server (linked from store.steampowered.com/steamos/download/?ver=steamframe), 4.07 GB. It ships `/opt/steamvr` (where the development headset's SteamVR comes from) and the GTK 2 libraries `steamui.so` needs (gone from Holo and Arch ARM). SteamVR has no other public arm64 download (app 250820's public depots are x86) | works: a GPT disk (512-byte sectors: esp, efi-A, rootfs-A, var-A, home); the build cuts `rootfs-A` (btrfs) out of the bz2 stream and copies from it |
    | Meta's tracking stack, GPU driver, firmware | Meta's last Quest 1 OTA (`q1_49845030443200410.zip`, files.cocaine.trade): `system`, `modem` (+ `boot` to restore stock) from its `payload.bin` | works: all three are **bit-identical** to a dump of a headset on that build |
 
    Meta: only the files the system uses are kept, not the whole 2.7 GB `system` image. **To do**: the list
    (`meta-files.txt`), recorded on the development headset (files opened while the tracking stack, the
    GPU, audio, Wi-Fi and the cameras run), and the app's reader for the OTA's ext4 `system` and vfat
    `modem` images (read-only, small).
+   Before anything is downloaded, `prepare.py` checks the free space of the work folder's drive: what is
+   still to download + what is staged beyond the downloads + the image that comes back (12 GB), +15 %.
 2. **Check and boot the installer:** `adb reboot bootloader`, `fastboot boot installer.img`.
 3. **Build on the headset:** `userdata` (56 GB, wiped anyway) is the scratch space. The micro Linux
    creates an ext4 file system the size of `userdata` (no `metadata_csum`, mountable by kernel 4.4) in an
    image file, unpacks Holo into it, run our setup scripts (`device/native-setup.sh`, `device/holo-*.sh install`) in a
    chroot, copy Meta's files to `/usr/lib/quest1/meta` (`device/holo-android-blobs.sh` uses them instead of
    the Android partitions), Steam to `/home/steamos/.local/share/Steam`, SteamVR to `/opt/steamvr` (then
-   `device/holo-steamvr.sh install`). Packages that Holo lacks (pacman) come with our files, prebuilt.
-   It turns the image into an Android sparse image (only the used blocks: ~8-10 GB) and the app copies it
-   to the PC.
+   `device/holo-steamvr.sh install`, run from outside with `ROOT=`: Holo core has no python3). Packages
+   that Holo lacks (pacman) come with our files, prebuilt. It turns the image into an Android sparse image
+   (only the used blocks) and the app copies it to the PC.
+
+   Prototype: [`build_image.py`](build_image.py) (steps `format holo setup frame steam meta ours finish
+   sparse`, `--only` to resume), tested 2026-11-04 in WSL 2 (Debian, the arm64 chroot through qemu-user
+   binfmt) on the files `prepare.py` staged. What the micro Linux needs: python3, GNU tar (xattrs: Holo's
+   file capabilities), zstd, e2fsprogs (`mkfs.ext4`, `e2fsck`), loop and btrfs mounts (or btrfs-progs for
+   `btrfs restore`), `chroot`; it runs arm64 natively, so no qemu.
 4. **Flash** from the PC (`adb`/`fastboot` reboot to the bootloader): `fastboot flash userdata` with the
    sparse image (fastboot splits it to the bootloader's download size), our boot image to `boot_a` and
    `boot_b`, `system_a`/`system_b` erased, slot `a` active. Cost of the round trip: ~8-10 GB back over
@@ -74,6 +82,16 @@ flashes from the PC, and the PC keeps the finished image: re-flashing or repairi
 
 **Back to stock** (a button in the app): the OTA's `boot.img` and `system.img` to both slots, `userdata`
 wiped; the headset boots Meta's OS and can update itself.
+
+## Progress (for the app)
+
+`prepare.py` and `build_image.py` print a human log plus machine lines the app parses:
+
+- `@space {"need": bytes, "free": bytes}`: the free-space check (prepare.py stops when it fails)
+- `@step {"step": name, "status": "start"|"done"}`: one per step (download: `repo holo steam frame meta`;
+  build: `format holo setup frame steam meta ours finish sparse`)
+- `@progress {"step": name, "done": n, "total": n}`: bytes of the step (downloaded, read, written), at most
+  twice a second, so each step gets its own bar.
 
 ## Updates
 
