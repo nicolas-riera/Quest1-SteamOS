@@ -1,0 +1,21 @@
+# Holo packages the system needs on top of Holo core (pacman names, one per line or space-separated).
+# The installer downloads them with their dependencies from Valve's Holo repositories (prepare.py, step
+# "pkgs") and installs them offline in the image (build_image.py). The development headset's explicit list
+# (docs/rootfs-build.md) minus the build tools (base-devel, cmake, meson, ninja, git, gdb, glslang, shaderc,
+# eigen, vulkan-headers, wayland-protocols, python-jinja, dracut, linux): tools/build-native.sh installs those
+# in its own build root.
+
+# base
+ca-certificates archlinux-keyring iproute2 iw lsof openssh python upower
+# Wi-Fi (holo-wifi.sh)
+networkmanager wpa_supplicant
+# audio (holo-audio.sh)
+alsa-lib alsa-utils pipewire pipewire-alsa pipewire-pulse wireplumber libpulse openal
+# boot animation (holo-bootsplash.sh)
+gst-plugins-base gst-plugins-good libvpx
+# graphics, OpenXR, Monado's and our binaries' libraries
+libdrm libglvnd mesa-utils vulkan-icd-loader vulkan-tools openxr hidapi wayland libbsd
+# Steam session: X server, Steam's libraries
+xorg-server-xvfb xorg-xauth xorg-xdpyinfo xorg-xset xorg-xwd xorg-xwininfo
+libxcursor libxdamage libxrandr libjpeg-turbo libcups libva libvdpau sdl2-compat ibus at-spi2-core
+gdk-pixbuf2 gamescope

@@ -1,0 +1,5 @@
+# Holo packages tools/build-native.sh builds with (installed in its build root only, never in the image)
+base-devel git cmake meson ninja pkgconf autoconf automake libtool python python-mako
+eigen glslang shaderc vulkan-headers vulkan-icd-loader openxr hidapi libdrm wayland wayland-protocols libbsd
+libx11 libxcb libxext libxtst libxdamage libxrandr libxfixes libxinerama libjpeg-turbo libpng openssl zlib
+libpipewire libpulse sdl2-compat zstd

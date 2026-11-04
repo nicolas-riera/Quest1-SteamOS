@@ -25,6 +25,28 @@
     "url": "https://files.cocaine.trade/firmware/meta/Quest/q1_49845030443200410.zip",
     "sha256": "7c1f75ecd807b59d5215a67ff69e8e8c6da4b966eb08464d48e00d2d5a8b6aaa",
     "post_build": "oculus/vr_monterey/monterey:10/QQ3A.200805.001/49845030443200410:user/release-keys",
-    "partitions": ["system", "modem", "boot"]
+    "partitions": [
+      "system",
+      "modem",
+      "boot"
+    ]
+  },
+  "holo_packages": {
+    "comment": "Holo's pacman repositories (Valve's public package server, the snapshot the rootfs comes from): the packages of device/packages.txt with all their dependencies, installed offline by build_image.py. Each file is checked against the repository database's sha256.",
+    "server": "https://holo-packages.steamos.cloud/holo-core-aarch64-preview/mash-20251118/{repo}/os/aarch64/",
+    "repos": [
+      "core",
+      "extra"
+    ],
+    "list": "device/packages.txt"
+  },
+  "prebuilt": {
+    "comment": "Our binaries, built by .github/workflows/prebuilt.yml from this repository and published on its prebuilt branch: manifest.json lists each file's sha256.",
+    "base": "https://raw.githubusercontent.com/nicolas-riera/Quest1-SteamOS/prebuilt/",
+    "files": [
+      "native-arm64.tar.zst",
+      "boot-native-holo.img",
+      "installer.img"
+    ]
   }
 }

@@ -43,33 +43,42 @@ flashes from the PC, and the PC keeps the finished image: re-flashing or repairi
 
    | What | From | Status |
    | --- | --- | --- |
-   | Our files | a folder of this repository's source tree (not a release): scripts, configs, prebuilt arm64 binaries, the boot and installer images | scripts work; **to do**: the prebuilt folder |
+   | Our files | this repository's source tree (a zip of the branch, not a release): scripts, configs; our arm64 binaries, the boot and installer images from its `prebuilt` branch, built by CI ([`prebuilt.yml`](../.github/workflows/prebuilt.yml), [`tools/build-native.sh`](../tools/build-native.sh)) | scripts work; binaries: built locally, CI to run |
+   | Holo packages | Holo's pacman repositories (public, the rootfs's snapshot): [`device/packages.txt`](../device/packages.txt) + dependencies, resolved like pacman does, each file checked against the repository database | works: 367 packages, 434 MB (temporary list, it will change) |
    | SteamOS Holo core aarch64 | `holo-packages.steamos.cloud` (public), `system.rootfs.zst` (tar.zst), 385 MB | works |
    | Steam client arm64 | Valve's client CDN, channel `steam_client_linuxarm64` (public): 35 zips, ~1 GB, staged as they are (the build unpacks them) | works |
    | SteamVR arm64, GTK 2 | **the Steam Frame's recovery image**, public: `steamframe-oobe-repair-20260922.5153644-0.3.0.img.bz2` on Valve's image server (linked from store.steampowered.com/steamos/download/?ver=steamframe), 4.07 GB. It ships `/opt/steamvr` (where the development headset's SteamVR comes from) and the GTK 2 libraries `steamui.so` needs (gone from Holo and Arch ARM). SteamVR has no other public arm64 download (app 250820's public depots are x86) | works: a GPT disk (512-byte sectors: esp, efi-A, rootfs-A, var-A, home); the build cuts `rootfs-A` (btrfs) out of the bz2 stream and copies from it |
    | Meta's tracking stack, GPU driver, firmware | Meta's last Quest 1 OTA (`q1_49845030443200410.zip`, files.cocaine.trade): `system`, `modem` (+ `boot` to restore stock) from its `payload.bin` | works: all three are **bit-identical** to a dump of a headset on that build |
 
-   Meta: only the files the system uses are kept, not the whole 2.7 GB `system` image. **To do**: the list
-   (`meta-files.txt`), recorded on the development headset (files opened while the tracking stack, the
-   GPU, audio, Wi-Fi and the cameras run), and the app's reader for the OTA's ext4 `system` and vfat
-   `modem` images (read-only, small).
+   Meta: native Holo runs no Android framework, no Java, no app and no 32-bit process, so the build leaves
+   them out of the `system` tree ([`meta-exclude.txt`](meta-exclude.txt)): 577 MB kept of 1.9 GB (the
+   native 64-bit userspace, configs, firmware, the DSPs' code). To refine with a record of the files really
+   opened on the headset.
    Before anything is downloaded, `prepare.py` checks the free space of the work folder's drive: what is
    still to download + what is staged beyond the downloads + the image that comes back (12 GB), +15 %.
-2. **Check and boot the installer:** `adb reboot bootloader`, `fastboot boot installer.img`.
-3. **Build on the headset:** `userdata` (56 GB, wiped anyway) is the scratch space. The micro Linux
+2. **Check and boot the installer:** `adb reboot bootloader`, `fastboot boot installer.img`: the micro Linux
+   ([`micro-init`](micro-init), built by `tools/build-boot.sh installer`: our kernel + Alpine aarch64 with
+   python3, GNU tar, zstd, e2fsprogs, btrfs-progs; 36 MB, in RAM only) brings up the USB network and runs
+   [`agent.py`](agent.py) on `http://192.168.77.1:8077`. Nothing is written until the app asks for the
+   scratch space (`POST /scratch` with the confirmation text): `userdata` is formatted and mounted.
+3. **Build on the headset:** the app uploads the staged files (resumable: files already there with the same
+   sha256 are skipped), starts the build and shows its progress, then downloads the sparse image
+   ([`remote_build.py`](remote_build.py) is the reference client). [`build_image.py`](build_image.py)
    creates an ext4 file system the size of `userdata` (no `metadata_csum`, mountable by kernel 4.4) in an
-   image file, unpacks Holo into it, run our setup scripts (`device/native-setup.sh`, `device/holo-*.sh install`) in a
-   chroot, copy Meta's files to `/usr/lib/quest1/meta` (`device/holo-android-blobs.sh` uses them instead of
-   the Android partitions), Steam to `/home/steamos/.local/share/Steam`, SteamVR to `/opt/steamvr` (then
-   `device/holo-steamvr.sh install`, run from outside with `ROOT=`: Holo core has no python3). Packages
-   that Holo lacks (pacman) come with our files, prebuilt. It turns the image into an Android sparse image
-   (only the used blocks) and the app copies it to the PC.
+   image file and fills it:
 
-   Prototype: [`build_image.py`](build_image.py) (steps `format holo setup frame steam meta ours finish
-   sparse`, `--only` to resume), tested 2026-11-04 in WSL 2 (Debian, the arm64 chroot through qemu-user
-   binfmt) on the files `prepare.py` staged. What the micro Linux needs: python3, GNU tar (xattrs: Holo's
-   file capabilities), zstd, e2fsprogs (`mkfs.ext4`, `e2fsck`), loop and btrfs mounts (or btrfs-progs for
-   `btrfs restore`), `chroot`; it runs arm64 natively, so no qemu.
+   | Step | What |
+   | --- | --- |
+   | `format`, `holo` | the file system, Holo core unpacked with its xattrs (file capabilities) |
+   | `setup` | `device/native-setup.sh` in an arm64 chroot, full layout (`QUEST1_LAYOUT=full`: the root is `userdata`, swap file made at first boot) |
+   | `pkgs` | the Holo packages, pacman offline from the staged files |
+   | `frame` | `/opt/steamvr` and GTK 2 from the Frame image (`rootfs-A` cut out of the bz2 stream), then `device/holo-steamvr.sh install` from outside (`ROOT=`: no python3 in Holo core) |
+   | `steam` | Valve's client zips unpacked into `~steamos/.local/share/Steam` |
+   | `meta` | Meta's trimmed `system` tree and the `modem` image in `/usr/lib/quest1/meta` (`device/holo-android-blobs.sh` mounts them) |
+   | `native` | our binaries (`native-arm64.tar.zst`), then [`device/install-image.sh`](../device/install-image.sh) in the chroot: the `steamos` user, the units set up by hand on the development headset, every `device/holo-*.sh install`, the SteamVR driver's registration |
+   | `ours`, `finish`, `sparse` | this repository in `/usr/lib/quest1/repo` and the version file, `e2fsck`, the Android sparse image (only the used blocks) |
+
+   Tested 2026-11-04 in WSL 2 (the arm64 chroot through qemu-user) on the files `prepare.py` staged.
 4. **Flash** from the PC (`adb`/`fastboot` reboot to the bootloader): `fastboot flash userdata` with the
    sparse image (fastboot splits it to the bootloader's download size), our boot image to `boot_a` and
    `boot_b`, `system_a`/`system_b` erased, slot `a` active. Cost of the round trip: ~8-10 GB back over
@@ -77,7 +86,8 @@ flashes from the PC, and the PC keeps the finished image: re-flashing or repairi
    (`xbl`, `abl`, `tz`, `rpm`, `hyp`, `pmic`, `keymaster`, `cmnlib*`, `devcfg`, `ovrtz`, `modem`,
    `bluetooth`...) and the per-device data (`persist`, `private` = the calibration the tracking reads,
    `vision` = Meta's tracking maps, `misc`, `frp`, `devinfo`): none of them is in the OTA or can be rebuilt.
-   `initrd/init` then mounts `userdata` as the root (today it loop-mounts `/data/steamos/holo.img`).
+   `initrd/init` mounts `userdata` as the root when it holds a system (`/usr/lib/systemd/systemd`), else
+   the development layout (`/data/steamos/holo.img` in Android's `userdata`).
 5. **Reboot** into SteamOS; the app deletes `%TEMP%\quest1-steamos`.
 
 **Back to stock** (a button in the app): the OTA's `boot.img` and `system.img` to both slots, `userdata`
@@ -88,8 +98,9 @@ wiped; the headset boots Meta's OS and can update itself.
 `prepare.py` and `build_image.py` print a human log plus machine lines the app parses:
 
 - `@space {"need": bytes, "free": bytes}`: the free-space check (prepare.py stops when it fails)
-- `@step {"step": name, "status": "start"|"done"}`: one per step (download: `repo holo steam frame meta`;
-  build: `format holo setup frame steam meta ours finish sparse`)
+- `@step {"step": name, "status": "start"|"done"}`: one per step (download: `repo prebuilt holo pkgs steam
+  frame meta`; on the headset: `upload`, then the build's `format holo setup pkgs frame steam meta native
+  ours finish sparse`, then `download`)
 - `@progress {"step": name, "done": n, "total": n}`: bytes of the step (downloaded, read, written), at most
   twice a second, so each step gets its own bar.
 
@@ -111,8 +122,16 @@ The user must not reinstall for each improvement. The system is split so that ea
 - `Quest1-SteamOS.exe` is the release asset; releases are normal releases (not prereleases), starting at
   **0.0.1**.
 - The prerelease workflow (`.github/workflows/prerelease.yml`, boot image built on each push) is removed
-  then: the boot and installer images and our binaries live in a folder of the repository, which the app
-  downloads.
+  then: the boot and installer images and our binaries are on the `prebuilt` branch (one commit, replaced by
+  each CI build, so the history does not grow with binaries), which the app downloads.
+
+## To check on the headset
+
+Written from the scripts and docs only, the development headset being unplugged (2026-11-04): the
+`holo-android-blobs` and `fakelogd` units, the `steamos` user's groups (`device/install-image.sh`), the
+SteamVR driver registration (`openvrpaths.vrpath`), the libhybris commit and Monado's CMake options
+(`tools/build-native.sh`), the vrcompositor Vulkan shim (built as Steam's), the bionic stubs `q1trackd` and
+`libq1camtap.so` link against, the Meta exclusions, the micro Linux on the 4.4 kernel (Alpine's musl).
 
 ## App technology (to decide)
 

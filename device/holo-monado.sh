@@ -1,14 +1,17 @@
 #!/bin/sh
-# Install the Quest 1 Monado build (headset tree /root/monado/build) as the system OpenXR runtime,
-# started at boot. The MDP compositor target keeps the panels off and the GPU at its normal
+# Install the Quest 1 Monado build (headset tree /root/monado/build, else the prebuilt one already in
+# /opt/monado: tools/build-native.sh, unpacked by the installer) as the system OpenXR runtime, started at boot. The MDP compositor target keeps the panels off and the GPU at its normal
 # governor whenever no app is showing frames.
 set -e
 B=/root/monado/build
 P=/opt/monado
 
-install -m755 $B/src/xrt/targets/service/monado-service $P/bin/monado-service
-install -m755 $B/src/xrt/targets/cli/monado-cli $P/bin/monado-cli
-install -m755 $B/src/xrt/targets/openxr/libopenxr_monado.so $P/lib/libopenxr_monado.so
+if [ -d $B ]; then
+	install -Dm755 $B/src/xrt/targets/service/monado-service $P/bin/monado-service
+	install -Dm755 $B/src/xrt/targets/cli/monado-cli $P/bin/monado-cli
+	install -Dm755 $B/src/xrt/targets/openxr/libopenxr_monado.so $P/lib/libopenxr_monado.so
+fi
+[ -x $P/bin/monado-service ] || { echo "no Monado build in $B or $P" >&2; exit 1; }
 mkdir -p /etc/xdg/openxr/1
 ln -sf $P/share/openxr/1/openxr_monado.json /etc/xdg/openxr/1/active_runtime.json
 

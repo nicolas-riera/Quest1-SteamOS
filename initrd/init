@@ -61,10 +61,20 @@ telnetd -l /bin/sh -b 192.168.77.1
 if [ "$MODE" = holo ]; then
 	UD=/dev/$(grep -l PARTNAME=userdata /sys/class/block/sd*/uevent | head -1 | cut -d/ -f5)
 	log "userdata=$UD"
-	if mount -t ext4 -o rw,noatime $UD /data && LOOP=$(losetup -f) && losetup $LOOP /data/steamos/holo.img \
-		&& mount -t ext4 -o rw,noatime $LOOP /newroot; then
-		mkdir -p /newroot/userdata
-		mount --move /data /newroot/userdata
+	ROOT=
+	if mount -t ext4 -o rw,noatime $UD /data; then
+		if [ -x /data/usr/lib/systemd/systemd ]; then
+			# full install (the PC installer): userdata is the SteamOS root file system itself
+			mount --move /data /newroot && ROOT=userdata
+		elif LOOP=$(losetup -f) && losetup $LOOP /data/steamos/holo.img \
+			&& mount -t ext4 -o rw,noatime $LOOP /newroot; then
+			# dual boot: the system image in Android's userdata, which stays reachable as /userdata
+			mkdir -p /newroot/userdata
+			mount --move /data /newroot/userdata && ROOT=holo.img
+		fi
+	fi
+	if [ -n "$ROOT" ]; then
+		log "root: $ROOT"
 		# hand over: the gadget (usb0 + ttyGS0) stays bound; systemd-networkd and
 		# serial-getty@ttyGS0 take it from here. Kill every initramfs process.
 		log "switching to holo"

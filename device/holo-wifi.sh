@@ -3,7 +3,8 @@
 # systemd-networkd. wlan0 itself comes from android-modem.service (holo-android-modem.sh).
 # Usage (on the headset): holo-wifi.sh install
 set -e
-pacman -S --needed --noconfirm networkmanager wpa_supplicant iw iproute2
+P="networkmanager wpa_supplicant iw iproute2"
+pacman -Q $P >/dev/null 2>&1 || pacman -S --needed --noconfirm $P
 mkdir -p /etc/NetworkManager/conf.d
 cat > /etc/NetworkManager/conf.d/10-holo-quest.conf <<EOF2
 # NetworkManager runs the Wi-Fi only; usb0 (the USB link to the PC) stays with systemd-networkd.

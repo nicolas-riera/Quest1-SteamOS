@@ -9,6 +9,8 @@ still matches), stage/ what the image build (build_image.py, on the headset) tak
     stage/holo/       system.rootfs.zst, SteamOS Holo core aarch64 (Valve)
     stage/steam/      the arm64 Steam client: package/ holds Valve's zips + manifest (unpacked by the build)
     stage/frame/      the Steam Frame's recovery image (.img.bz2, Valve): SteamVR and GTK 2, extracted by the build
+    stage/prebuilt/   our binaries (prebuilt branch): native-arm64.tar.zst, boot-native-holo.img, installer.img
+    stage/pkgs/       Holo packages (device/packages.txt + dependencies) and the repository databases
     stage/meta/       system.img and modem.img from Meta's OTA (tracking stack, GPU driver, firmware), boot.img (restore)
     stage/report.json versions and hashes of all of the above
 Progress for the app: lines "@step {json}" (a step starts/ends) and "@progress {json}" (bytes done/total of the
@@ -17,9 +19,10 @@ drive is checked against what is still to download, to stage and to build (the i
 Standard library only. --cleanup deletes the work folder (after flashing).
 Nothing here is ever shipped: every file comes from its owner's server on the user's machine.
 """
-import argparse, hashlib, importlib.util, json, os, re, shutil, sys, tempfile, time, urllib.request, zipfile
+import argparse, hashlib, importlib.util, io, json, lzma, os, re, shutil, sys, tarfile, tempfile, time, urllib.request, zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+LOCAL_PREBUILT = None
 UA = {"User-Agent": "Quest1-SteamOS-installer"}
 GB = 1 << 30
 IMAGE_BYTES = 12 * GB    # the sparse userdata image that comes back from the headset (~8-10 GB)
@@ -171,6 +174,102 @@ def step_steam(src, dl, stage, rep, prog):
     rep["steam"] = {"channel": src["channel"], "version": plat.get("version"), "packages": len(pkgs)}
 
 
+def step_prebuilt(src, dl, stage, rep, prog):
+    out = os.path.join(stage, "prebuilt")
+    os.makedirs(out, exist_ok=True)
+    if LOCAL_PREBUILT:  # development: files built locally (tools/build-native.sh, tools/build-boot.sh)
+        for f in src["files"]:
+            place(os.path.join(LOCAL_PREBUILT, f), os.path.join(out, f))
+            prog.add(os.path.getsize(os.path.join(out, f)))
+        rep["prebuilt"] = {"local": LOCAL_PREBUILT}
+        return
+    with urllib.request.urlopen(urllib.request.Request(src["base"] + "manifest.json", headers=UA), timeout=60) as r:
+        man = json.load(r)
+    prog.total = sum(man["files"][f]["size"] for f in src["files"])
+    for f in src["files"]:
+        d = os.path.join(dl, "prebuilt", f)
+        fetch(src["base"] + f, d, man["files"][f]["sha256"], prog, man["files"][f]["size"])
+        place(d, os.path.join(out, f))
+    rep["prebuilt"] = {"commit": man["commit"]}
+
+
+def pacman_dbs(src):
+    """{repo: {pkgname: desc dict}} from the repositories' .db files (tar.xz of name-version/desc)."""
+    dbs = {}
+    for repo in src["repos"]:
+        url = src["server"].format(repo=repo) + repo + ".db"
+        with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=60) as r:
+            raw = r.read()
+        pk = {}
+        with tarfile.open(fileobj=io.BytesIO(lzma.decompress(raw) if raw[:6] == b"\xfd7zXZ\x00" else raw)) as t:
+            for m in t:
+                if m.name.endswith("/desc"):
+                    d, key = {}, None
+                    for line in t.extractfile(m).read().decode().splitlines():
+                        if line.startswith("%") and line.endswith("%"):
+                            key = line[1:-1]
+                            d[key] = []
+                        elif line and key:
+                            d[key].append(line)
+                    pk[d["NAME"][0]] = d
+        dbs[repo] = (raw, pk)
+    return dbs
+
+
+def pacman_closure(dbs, wanted):
+    """Package names needed for `wanted`, with their dependencies. A dependency is the package of that name, else
+    the first provider in repository order then name order, as pacman --noconfirm picks it."""
+    names, provides = {}, {}
+    for repo, (_, pk) in dbs.items():
+        for n in sorted(pk):
+            names.setdefault(n, (repo, pk[n]))
+            for pv in pk[n].get("PROVIDES", []):
+                provides.setdefault(re.split("[<>=]", pv)[0], (repo, pk[n]))
+    out, todo = {}, list(wanted)
+    while todo:
+        dep = re.split("[<>=]", todo.pop())[0]
+        hit = names.get(dep) or provides.get(dep)
+        if not hit:
+            sys.exit("Holo packages: nothing provides %s" % dep)
+        repo, d = hit
+        n = d["NAME"][0]
+        if n not in out:
+            out[n] = (repo, d)
+            todo += d.get("DEPENDS", [])
+    return out
+
+
+def step_pkgs(src, dl, stage, rep, prog):
+    lst = os.path.join(stage, "repo", src["list"])
+    if not os.path.exists(lst):
+        lst = os.path.join(HERE, "..", src["list"])
+    wanted = [w for l in open(lst) for w in l.split("#")[0].split()]
+    dbs = pacman_dbs(src)
+    need = pacman_closure(dbs, wanted)
+    prog.total = sum(int(d["CSIZE"][0]) for _, d in need.values())
+    log("Holo packages: %d asked, %d with dependencies, %.0f MB" % (len(wanted), len(need), prog.total / 1e6))
+    out = os.path.join(stage, "pkgs")
+    os.makedirs(out, exist_ok=True)
+    for repo, (raw, _) in dbs.items():
+        with open(os.path.join(out, repo + ".db"), "wb") as f:
+            f.write(raw)
+    keep = set()
+    for n, (repo, d) in sorted(need.items()):
+        fn = d["FILENAME"][0]
+        local = fn.replace(":", "%3A")  # epochs ("1:1.4.9"): no ':' in Windows file names; the build decodes it
+        z = os.path.join(dl, "pkgs", local)
+        fetch(src["server"].format(repo=repo) + fn.replace(":", "%3A"), z, d["SHA256SUM"][0], prog, int(d["CSIZE"][0]))
+        place(z, os.path.join(out, local))
+        keep.add(local)
+    for f in os.listdir(out):  # packages of an older list
+        if f.endswith(".pkg.tar.zst") or f.endswith(".pkg.tar.xz"):
+            if f not in keep:
+                os.remove(os.path.join(out, f))
+    with open(os.path.join(out, "packages.txt"), "w", newline="\n") as f:
+        f.write(" ".join(wanted) + "\n")
+    rep["pkgs"] = {"asked": len(wanted), "installed": len(need)}
+
+
 def step_meta(src, dl, stage, rep, prog):
     z = os.path.join(dl, os.path.basename(src["url"]))
     fetch(src["url"], z, src["sha256"], prog)
@@ -199,7 +298,9 @@ def step_meta(src, dl, stage, rep, prog):
 
 # name, function, sources.json key, download size estimate (bytes) or None (HEAD), staged bytes beyond the download
 STEPS = [("repo", step_repo, "repo", 8 << 20, 16 << 20),
+         ("prebuilt", step_prebuilt, "prebuilt", 80 << 20, 0),
          ("holo", step_file("holo"), "holo_rootfs", None, 0),
+         ("pkgs", step_pkgs, "holo_packages", None, 0),
          ("steam", step_steam, "steam_client", None, 0),
          ("frame", step_file("frame"), "steam_frame", None, 0),
          ("meta", step_meta, "meta_ota", None, int(2.8 * GB))]
@@ -212,6 +313,8 @@ def check_space(src, workdir, steps, dl):
         s = src[key]
         if name == "steam":
             size = sum(int(v["size"]) for v in steam_manifest(s)[2].values())
+        elif name == "pkgs":
+            size = 600 << 20
         elif est is not None:
             size = est
         else:
@@ -234,7 +337,10 @@ def main():
     ap.add_argument("--workdir", default=os.path.join(tempfile.gettempdir(), "quest1-steamos"))
     ap.add_argument("--only", help="comma-separated steps: " + ",".join(s[0] for s in STEPS))
     ap.add_argument("--cleanup", action="store_true", help="delete the work folder and exit")
+    ap.add_argument("--prebuilt", help="development: take our binaries from this local folder")
     a = ap.parse_args()
+    global LOCAL_PREBUILT
+    LOCAL_PREBUILT = a.prebuilt
     if a.cleanup:
         shutil.rmtree(a.workdir, ignore_errors=True)
         log("removed", a.workdir)

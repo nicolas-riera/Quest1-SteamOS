@@ -3,6 +3,7 @@
 # in the user's Steam install: nothing of Valve's is shipped here), drawn straight on the panels, with
 # its sound, before Monado and SteamVR take the display.
 # Run as root: sh holo-bootsplash.sh install <dir with q1splash.c and inc/ (kernel uapi msm_mdp_ext.h)>
+#             sh holo-bootsplash.sh install    (q1splash already built: tools/build-native.sh)
 #  - packages: GStreamer's VP9 (libvpx) and Matroska plugins
 #  - /usr/local/lib/q1splash/q1splash: built from src/q1splash/q1splash.c
 #  - /usr/local/sbin/q1splash-play, quest1-bootsplash.service (enabled), monado.service waits for it
@@ -10,9 +11,10 @@
 #    stay lit (burn-in) until the splash or a compositor takes over
 # Before Steam has been installed (first boot) there is no movie and nothing is shown.
 set -e
-[ "$1" = install ] && [ -f "$2/q1splash.c" ] || { echo "usage: $0 install <q1splash source dir>" >&2; exit 2; }
-cd "$2"
-pacman -S --noconfirm --needed gst-plugins-base gst-plugins-good libvpx
+[ "$1" = install ] && { [ -f "$2/q1splash.c" ] || [ -x /usr/local/lib/q1splash/q1splash ]; } ||
+	{ echo "usage: $0 install <q1splash source dir>" >&2; exit 2; }
+P="gst-plugins-base gst-plugins-good libvpx"
+pacman -Q $P >/dev/null 2>&1 || pacman -S --noconfirm --needed $P
 
 cat > /etc/systemd/system/holo-panel-off.service <<'EOF'
 [Unit]
@@ -28,7 +30,7 @@ EOF
 systemctl enable holo-panel-off.service
 
 mkdir -p /usr/local/lib/q1splash
-gcc -O2 -Wall -o /usr/local/lib/q1splash/q1splash q1splash.c -Iinc -I/opt/hybris/include -L/opt/hybris/lib \
+[ -n "$2" ] && cd "$2" && gcc -O2 -Wall -o /usr/local/lib/q1splash/q1splash q1splash.c -Iinc -I/opt/hybris/include -L/opt/hybris/lib \
 	-Wl,-rpath,/opt/hybris/lib -lhybris-common
 
 cat > /usr/local/sbin/q1splash-play <<'EOF'

@@ -73,6 +73,46 @@ systemctl mask systemd-firstboot.service
 # don't let NetworkManager (if any) fight networkd over usb0
 systemctl disable NetworkManager.service 2>/dev/null || true
 
+if [ "${QUEST1_LAYOUT:-}" = full ]; then
+# full install (the PC installer): the root is userdata itself; the 4 GB swap file is made at the first boot
+# (writing it into the image would add 4 GB to flash)
+cat > /usr/local/sbin/quest1-swapfile <<'E'
+#!/bin/sh
+F=/var/swap/swapfile
+[ -f $F ] && exit 0
+mkdir -p /var/swap && chmod 700 /var/swap
+dd if=/dev/zero of=$F.new bs=1M count=4096 status=none && chmod 600 $F.new && mkswap $F.new >/dev/null && mv $F.new $F
+E
+chmod 755 /usr/local/sbin/quest1-swapfile
+cat > $S/quest1-swapfile.service <<'E'
+[Unit]
+Description=Create the swap file (first boot)
+DefaultDependencies=no
+After=local-fs.target
+Before=var-swap-swapfile.swap
+ConditionPathExists=!/var/swap/swapfile
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/quest1-swapfile
+
+[Install]
+RequiredBy=var-swap-swapfile.swap
+E
+cat > $S/var-swap-swapfile.swap <<'E'
+[Unit]
+Description=Swap file
+After=quest1-swapfile.service
+
+[Swap]
+What=/var/swap/swapfile
+Priority=5
+
+[Install]
+WantedBy=swap.target
+E
+systemctl enable quest1-swapfile.service var-swap-swapfile.swap
+else
 # Android userdata, moved here by the initramfs
 mkdir -p /userdata
 # swap file lives in userdata (unencrypted)
@@ -88,6 +128,7 @@ Priority=5
 WantedBy=swap.target
 E
 systemctl enable userdata-steamos-swap.swap
+fi
 
 # root over SSH with the PC's key (if provided)
 if [ -f /root/pc.pub ]; then

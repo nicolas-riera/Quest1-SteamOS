@@ -12,6 +12,8 @@
 #   bc bison flex libssl-dev device-tree-compiler cpio gcc-aarch64-linux-gnu curl git python3 unzip
 # usage: build-boot.sh kernel <workdir> <kernel-out dir>      (Image.gz-dtb + gen_init_cpio)
 #        build-boot.sh image <workdir> <kernel-out dir> <output.img>
+#        build-boot.sh installer <workdir> <kernel-out dir> <output.img>   (the installer's micro Linux:
+#            Alpine aarch64 + installer/agent.py, see installer/README.md; needs no arm64 machine)
 set -eo pipefail
 P=$(cd "$(dirname "$0")/.." && pwd)
 STEP=$1; W=$(mkdir -p "$2" && cd "$2" && pwd); KO=$(mkdir -p "$3" && cd "$3" && pwd)
@@ -21,6 +23,12 @@ KCOMMIT=6929f734ce0e602018790ff3a52dc7bad646af60 # oculus-quest-kernel-master
 TC=https://android.googlesource.com/platform/prebuilts/gcc/linux-x86
 TCREF=refs/heads/android10-release
 MAGISK=https://github.com/topjohnwu/Magisk/releases/download/v28.1/Magisk-v28.1.apk
+ALPINE=https://dl-cdn.alpinelinux.org/alpine/v3.24
+ALPINE_ROOTFS=alpine-minirootfs-3.24.3-aarch64.tar.gz
+ALPINE_SHA256=4d3f80afaebd447c5591a63a73bde380a149fe8b2d85488cafabb2ff97551f50
+# the micro Linux's tools: build_image.py needs python3, GNU tar (xattrs), zstd, e2fsprogs, btrfs-progs (the
+# Frame image's btrfs, read with `btrfs restore`); blkid for the scratch space; udhcpd/telnetd from busybox-extras
+ALPINE_PKGS="python3 tar zstd e2fsprogs btrfs-progs blkid busybox-extras"
 DEBIAN=https://deb.debian.org/debian
 CMDLINE="androidboot.configfs=true androidboot.hardware=monterey ehci-hcd.park=3 lpm_levels.sleep_disabled=1 msm_rtb.filter=0x237 sched_enable_hmp=1 sched_enable_power_aware=1 service_locator.enable=1 softdog.soft_panic=1 swiotlb=2048 user_debug=31 bootver=1596585601 cursysver=1596585601 minsysver=1 buildvariant=user veritykeyid=id:cc158dc3bf03e76f1e4f8e38b2841cb9f2d421e4 rng_core.default_quality=700"
 
@@ -95,9 +103,39 @@ image() {
 	file /init $I/init 755 0 0
 	EOF
 	"$KO/gen_init_cpio" spec | gzip -9n > ramdisk.gz
+	mkboot ramdisk.gz "$OUT"
+	echo "built $OUT ($(stat -c %s "$OUT") bytes), busybox: $(basename "$DEB")"
+}
 
+installer() {
+	OUT=$1; I=$W/installer; rm -rf "$I"; mkdir -p "$I/root"; cd "$I"
+	curl -fsSL "$ALPINE/releases/aarch64/$ALPINE_ROOTFS" -o rootfs.tgz
+	echo "$ALPINE_SHA256  rootfs.tgz" | sha256sum -c --quiet
+	tar -xzf rootfs.tgz -C root
+	# apk.static (x86_64) installs the aarch64 packages without running them; signatures checked with the
+	# rootfs's own keys. Package scripts are skipped: Alpine's are busybox links and cache triggers
+	APKS=$(curl -fsSL "$ALPINE/main/x86_64/APKINDEX.tar.gz" | tar -xzO APKINDEX | awk -F: '/^P:apk-tools-static$/{p=1} p&&/^V:/&&!v{v=$2} END{print v}')
+	curl -fsSL "$ALPINE/main/x86_64/apk-tools-static-$APKS.apk" | tar -xzf - sbin/apk.static 2>/dev/null
+	echo "$ALPINE/main" > root/etc/apk/repositories; echo "$ALPINE/community" >> root/etc/apk/repositories
+	./sbin/apk.static --root root --arch aarch64 --keys-dir etc/apk/keys --no-scripts --update-cache \
+		add $ALPINE_PKGS >/dev/null
+	# smaller: no compiled caches, tests, docs, Tk, IDLE, pip
+	rm -rf root/usr/share/man root/usr/share/doc root/var/cache/apk/*
+	find root/usr/lib/python3* \( -name __pycache__ -o -name test -o -name tests -o -name idlelib -o -name tkinter \
+		-o -name ensurepip -o -name turtledemo \) -prune -exec rm -rf {} +
+	aarch64-linux-gnu-gcc -static -O2 -Wall -o root/bin/rb "$P/initrd/rb.c"
+	mkdir -p root/installer root/scratch
+	cp "$P/installer/agent.py" "$P/installer/build_image.py" root/installer/
+	tr -d '\r' < "$P/installer/micro-init" > root/init; chmod 755 root/init
+	(cd root && find . | cpio -o -H newc -R 0:0 --quiet) | gzip -9n > ramdisk.gz
+	mkboot ramdisk.gz "$OUT"
+	echo "built $OUT ($(stat -c %s "$OUT") bytes), Alpine $ALPINE_ROOTFS + $ALPINE_PKGS"
+}
+
+mkboot() { # ramdisk.gz output.img: the kernel and a ramdisk into a signed boot image
+	local RD=$1 OUT=$2
 	# boot image v0 with the stock header values (base 0, 4 KiB pages, Android 10 / 2024-07)
-	python3 - "$KO/Image.gz-dtb" ramdisk.gz new.img "$CMDLINE" <<-'PY'
+	python3 - "$KO/Image.gz-dtb" "$RD" new.img "$CMDLINE" <<-'PY'
 	import gzip, hashlib, struct, sys, zlib
 	src, rd, out, cmdline = sys.argv[1:5]
 	d = zlib.decompressobj(31); kernel = d.decompress(open(src, 'rb').read()); dtb = d.unused_data
@@ -124,11 +162,11 @@ image() {
 	"$W/magiskboot" sign new.img >/dev/null 2>&1
 	"$W/magiskboot" verify new.img >/dev/null 2>&1
 	mkdir -p "$(dirname "$OUT")"; cp new.img "$OUT"
-	echo "built $OUT ($(stat -c %s "$OUT") bytes), busybox: $(basename "$DEB")"
 }
 
 case "$STEP" in
 kernel) kernel ;;
 image) image "$(realpath -m "$4")" ;;
-*) echo "usage: $0 kernel|image <workdir> <kernel-out dir> [output.img]" >&2; exit 2 ;;
+installer) installer "$(realpath -m "$4")" ;;
+*) echo "usage: $0 kernel|image|installer <workdir> <kernel-out dir> [output.img]" >&2; exit 2 ;;
 esac

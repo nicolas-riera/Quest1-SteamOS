@@ -4,14 +4,19 @@
 # Installed as /usr/local/sbin/holo-android-blobs, run by holo-android-blobs.service.
 set -e
 part() { echo /dev/$(grep -l "PARTNAME=$1\$" /sys/class/block/sd*/uevent | head -1 | cut -d/ -f5); }
-# Meta's images bundled in the SteamOS image (full install from the PC installer: no Android partitions left,
-# installer/prepare.py takes them from Meta's OTA), else the headset's own partitions (dual boot)
+# Meta's files bundled in the SteamOS image (full install from the PC installer: no Android partitions left;
+# installer/build_image.py takes them from Meta's OTA: system as a directory without what native Holo never uses,
+# installer/meta-exclude.txt, and the modem image), else the headset's own partitions (dual boot)
 M=/usr/lib/quest1/meta
 src() { if [ -f "$M/$1.img" ]; then echo "-o loop $M/$1.img"; else echo "$(part ${1}_a)"; fi; }
 
 # /android = system_a (system-as-root); /system, /vendor, /apex like on Android
 mkdir -p /android /firmware /apex
-mountpoint -q /android || mount -t ext4 -o ro,noload $(src system) /android
+if [ -d $M/system/system ]; then
+	mountpoint -q /android || { mount --bind $M/system /android && mount -o remount,bind,ro /android; }
+else
+	mountpoint -q /android || mount -t ext4 -o ro,noload $(src system) /android
+fi
 mountpoint -q /system || mount --bind /android/system /system
 mountpoint -q /apex || mount -t tmpfs -o mode=755 tmpfs /apex
 for a in /android/system/apex/*; do

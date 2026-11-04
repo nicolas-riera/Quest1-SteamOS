@@ -1,0 +1,28 @@
+# What the installer leaves out of Meta's system image (paths relative to its root, tar --exclude patterns).
+# Everything else is kept: the native 64-bit userspace the system runs from /android (bionic, the HALs, the
+# tracking stack, the GPU driver, the Wi-Fi/modem daemons, configs, firmware) and the DSP code.
+# Native Holo runs no Android framework, no Java, no app and no 32-bit process, so these are never used:
+# apps and their data
+./system/app
+./system/priv-app
+./system/product
+./system/vendor/app
+./system/media
+./system/fonts
+# Java (framework jars, the boot image, the APEX Java libraries)
+./system/framework
+./system/apex/*/javalib
+# 32-bit userspace; lib/rfsa and vendor/lib/rfsa are Hexagon code loaded by the DSPs (FastRPC): kept
+./system/lib/[!r]*
+./system/lib/r[!f]*
+./system/vendor/lib/[!r]*
+./system/vendor/lib/r[!f]*
+./system/bin/app_process32
+./system/bin/crash_dump32
+./system/bin/drmserver
+./system/bin/mediaserver
+./system/bin/ovr_crashreporter
+./system/bin/ovr_crashuploader
+./system/vendor/bin/hw/android.hardware.audio@2.0-service
+./system/vendor/bin/hw/android.hardware.cas@1.1-service
+./system/vendor/bin/hw/android.hardware.media.omx@1.0-service

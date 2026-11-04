@@ -395,7 +395,8 @@ enable_boot() {
 }
 
 do_install() {
-	pacman -S --needed --noconfirm pipewire pipewire-pulse pipewire-alsa wireplumber alsa-utils
+	P="pipewire pipewire-pulse pipewire-alsa wireplumber alsa-utils"
+	pacman -Q $P >/dev/null 2>&1 || pacman -S --needed --noconfirm $P
 	cp -f "$0" /usr/local/sbin/holo-audio
 	chmod 755 /usr/local/sbin/holo-audio
 	install_ucm

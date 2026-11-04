@@ -12,15 +12,19 @@ Progress for the app: "@step {json}" / "@progress {json}" lines, as in prepare.p
 Steps:
     format  ext4 the size of userdata, no metadata_csum (kernel 4.4)
     holo    SteamOS Holo core aarch64 (tar.zst, with xattrs: file capabilities)
-    setup   our base setup in an arm64 chroot (device/native-setup.sh)
+    setup   our base setup in an arm64 chroot (device/native-setup.sh, full layout: the root is userdata)
+    pkgs    Holo packages (device/packages.txt + dependencies, staged by prepare.py), pacman offline
     frame   SteamVR (/opt/steamvr) and GTK 2 from the Steam Frame's recovery image
     steam   the Steam client into ~steamos/.local/share/Steam
-    meta    Meta's images (/usr/lib/quest1/meta, loop-mounted by device/holo-android-blobs.sh)
+    meta    Meta's files in /usr/lib/quest1/meta: the system tree without what native Holo never uses
+            (installer/meta-exclude.txt) and the modem image, mounted by device/holo-android-blobs.sh
+    native  our prebuilt binaries (stage/prebuilt/native-arm64.tar.zst, tools/build-native.sh), then every
+            install script in the chroot (device/install-image.sh)
     ours    this repository (/usr/lib/quest1/repo) and the version file
     finish  unmount, e2fsck
     sparse  Android sparse image
 """
-import argparse, bz2, json, os, shutil, stat, struct, subprocess, sys, tempfile, time, zipfile
+import argparse, bz2, json, os, re, shutil, stat, struct, subprocess, sys, tempfile, time, zipfile
 
 USERDATA_BYTES = 56092471296  # Quest 1 userdata partition (GPT of the 64 GB model)
 GB = 1 << 30
@@ -174,7 +178,7 @@ class Build:
         if z1.wait() or p.wait():
             sys.exit("unpacking Holo failed")
 
-    def chroot(self, *cmd):
+    def chroot(self, *cmd, on_line=None):
         m = self.mnt
         binds = [("proc", "proc"), ("sysfs", "sys"), ("devtmpfs", "dev"), ("devpts", "dev/pts")]
         done = []
@@ -183,7 +187,17 @@ class Build:
                 os.makedirs(os.path.join(m, d), exist_ok=True)
                 run("mount", "-t", fs, fs, os.path.join(m, d))
                 done.append(os.path.join(m, d))
-            run("chroot", m, *cmd)
+            env = {"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin", "HOME": "/root", "LANG": "C.UTF-8",
+                   "QUEST1_LAYOUT": "full"}
+            log("$ chroot", m, *cmd)
+            p = subprocess.Popen(["chroot", m, *cmd], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                 text=True, errors="replace")
+            for line in p.stdout:
+                print(line, end="", flush=True)
+                if on_line:
+                    on_line(line)
+            if p.wait():
+                sys.exit("%s failed (%d)" % (" ".join(cmd), p.returncode))
         finally:
             for d in reversed(done):
                 subprocess.run(["umount", "-l", d])
@@ -263,14 +277,75 @@ class Build:
                 shutil.copyfile(os.path.join(pkg, f), os.path.join(dst, "package", f))
         run("chown", "-R", "1000:1000", home)
 
+    def pkgs(self, prog):
+        """Offline pacman: the repositories' databases and the downloaded packages in the image's own cache."""
+        src = os.path.join(self.stage, "pkgs")
+        sync = os.path.join(self.mnt, "var", "lib", "pacman", "sync")
+        cache = os.path.join(self.mnt, "var", "cache", "pacman", "pkg")
+        os.makedirs(sync, exist_ok=True)
+        os.makedirs(cache, exist_ok=True)
+        for f in os.listdir(src):
+            if f.endswith(".db"):
+                shutil.copyfile(os.path.join(src, f), os.path.join(sync, f))
+            elif ".pkg.tar." in f:
+                shutil.copyfile(os.path.join(src, f), os.path.join(cache, f.replace("%3A", ":")))
+        wanted = open(os.path.join(src, "packages.txt")).read().split()
+
+        def on_line(line):  # "(12/367) installing foo"
+            m = re.match(r"\((\d+)/(\d+)\) installing", line)
+            if m:
+                prog.total = int(m.group(2))
+                prog.add(int(m.group(1)) - prog.done)
+        self.chroot("pacman", "-S", "--needed", "--noconfirm", "--noprogressbar", *wanted, on_line=on_line)
+        shutil.rmtree(cache)
+        os.makedirs(cache)
+
     def meta(self, prog):
+        """Meta's system tree minus what native Holo never runs (apps, Java, 32-bit, fonts...), and the modem image."""
         d = os.path.join(self.mnt, "usr", "lib", "quest1", "meta")
         os.makedirs(d, exist_ok=True)
-        imgs = ["system.img", "modem.img"]
-        prog.total = sum(os.path.getsize(os.path.join(self.stage, "meta", i)) for i in imgs)
-        for i in imgs:
-            shutil.copyfile(os.path.join(self.stage, "meta", i), os.path.join(d, i))
-            prog.add(os.path.getsize(os.path.join(d, i)))
+        sysimg, modem = (os.path.join(self.stage, "meta", i) for i in ("system.img", "modem.img"))
+        prog.total = os.path.getsize(modem) + (600 << 20)
+        m = os.path.join(self.a.scratch, "meta-system")
+        os.makedirs(m, exist_ok=True)
+        run("mount", "-t", "ext4", "-o", "loop,ro,noload", sysimg, m)
+        ex = os.path.join(self.a.scratch, "meta-exclude")
+        with open(os.path.join(self.repo, "installer", "meta-exclude.txt")) as f, open(ex, "w") as o:
+            o.write("".join(l for l in f if l.strip() and not l.startswith("#")))
+        out = os.path.join(d, "system")
+        shutil.rmtree(out, ignore_errors=True)
+        os.makedirs(out)
+        try:
+            src = subprocess.Popen(["tar", "-C", m, "-c", "--xattrs", "--numeric-owner", "-X", ex, "."],
+                                   stdout=subprocess.PIPE)
+            dst = subprocess.Popen(["tar", "-C", out, "-x", "--xattrs", "--numeric-owner", "-p"], stdin=subprocess.PIPE)
+            for b in iter(lambda: src.stdout.read(1 << 20), b""):
+                dst.stdin.write(b)
+                prog.add(len(b))
+            dst.stdin.close()
+            if src.wait() or dst.wait():
+                sys.exit("copying Meta's system tree failed")
+        finally:
+            run("umount", m)
+        shutil.copyfile(modem, os.path.join(d, "modem.img"))
+        prog.add(os.path.getsize(modem))
+
+    def native(self, prog):
+        """Our binaries, then every install script inside the image (device/install-image.sh)."""
+        tz = os.path.join(self.stage, "prebuilt", "native-arm64.tar.zst")
+        prog.total = os.path.getsize(tz) * 2
+        z = subprocess.Popen(["zstd", "-dc", tz], stdout=subprocess.PIPE)
+        run("tar", "-C", self.mnt, "-xp", "--numeric-owner", "--no-overwrite-dir", stdin=z.stdout)
+        if z.wait():
+            sys.exit("unpacking %s failed" % tz)
+        prog.add(prog.total // 2)
+        tmp = os.path.join(self.mnt, "root", "q1src")
+        shutil.rmtree(tmp, ignore_errors=True)
+        for sub in ("device", "tools"):
+            copytree(os.path.join(self.repo, sub), os.path.join(tmp, sub), Progress("native", 1))
+        self.chroot("/bin/sh", "-e", "/root/q1src/device/install-image.sh")
+        shutil.rmtree(tmp)
+        prog.add(prog.total // 2)
 
     def ours(self, prog):
         src = self.repo
@@ -361,7 +436,7 @@ def write_sparse(raw, out, prog, blk=4096, chunk=64 << 20):
     log("sparse image: %s, %.2f GB of data in %d chunks" % (out, prog.total / GB, len(chunks)))
 
 
-STEPS = ["format", "holo", "setup", "frame", "steam", "meta", "ours", "finish", "sparse"]
+STEPS = ["format", "holo", "setup", "pkgs", "frame", "steam", "meta", "native", "ours", "finish", "sparse"]
 
 
 def main():
