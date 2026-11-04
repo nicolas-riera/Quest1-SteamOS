@@ -5,6 +5,9 @@
 > hardware by a human who did not write the code. It works on the headset it was tested on;
 > expect rough edges elsewhere, and use it at your own risk.
 
+![banner](docs/readme_banner_RxVReality.jpeg)  
+*(Source : [RxVReality](https://www.reddit.com/user/RxVReality/))*
+
 **Native SteamOS on the Oculus Quest 1**, the way the Steam Frame runs it: Valve's SteamOS
 (Holo, arm64) boots directly on the headset as the main system, with no Android underneath.
 SteamVR runs on the headset itself. Head tracking, the panels, the controllers and the
