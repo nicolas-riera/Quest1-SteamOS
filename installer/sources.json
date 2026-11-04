@@ -16,8 +16,8 @@
     "channel": "steam_client_linuxarm64"
   },
   "steamvr": {
-    "comment": "NOT AUTOMATED YET. SteamVR arm64 (and GTK 2) come from the Steam Frame's recovery image, public on Valve's servers: URL to pin. app 250820's public depots are x86 only (depot 4128110, DLC-gated, is the other candidate).",
-    "frame_recovery_url": null,
+    "comment": "SteamVR arm64 (/opt/steamvr) and GTK 2 from the Steam Frame's public recovery image (linked from store.steampowered.com/steamos/download/?ver=steamframe; '-latest' redirects to the versioned file pinned here). Extraction (disk image, rootfs probably btrfs) is done on the headset. Not in prepare.py yet.",
+    "frame_recovery_url": "https://steamdeck-images.steamos.cloud/recovery/steamframe-oobe-repair-20260922.5153644-0.3.0.img.bz2",
     "sha256": null
   },
   "gtk2": {

@@ -29,11 +29,14 @@ user's own. It needs no WSL and no other tool on the PC.
 ## How it works (no WSL)
 
 Windows cannot write an ext4 file system with Linux permissions, owners, symlinks and file capabilities,
-and the Holo rootfs is a `tar.zst`. So **the headset builds its own system**: the app `fastboot boot`s an
-installer boot image (our kernel + an installer initramfs, in RAM only, nothing flashed yet), which brings
-up the USB network the project already uses (`192.168.77.1`, NCM/RNDIS; Windows has the drivers). The app
-streams the files to it; the installer, a Linux system with real tools (GNU tar with xattrs, zstd,
-e2fsprogs, btrfs-progs), writes them to the headset's storage.
+and the Holo rootfs is a `tar.zst`. So **the headset builds the image, the PC flashes it**: the app
+`fastboot boot`s a micro Linux (our kernel + an installer initramfs, in RAM only, nothing flashed), which
+brings up the USB network the project already uses (`192.168.77.1`, NCM/RNDIS; Windows has the drivers).
+The app streams the downloads to it; the micro Linux, with real tools (GNU tar with xattrs, zstd,
+e2fsprogs, btrfs-progs), builds the system image, the app copies the image back to the PC, reboots the
+headset to its bootloader and flashes everything with fastboot. All partition writes are plain fastboot
+flashes from the PC, and the PC keeps the finished image: re-flashing or repairing needs no rebuild.
+(Recovery "sideload" cannot be used: it only takes OTA packages signed by Meta.)
 
 1. **Download** on the PC (prototype: [`prepare.py`](prepare.py), tested 2026-11-04, sources pinned in
    [`sources.json`](sources.json), every file checked against a hash):
@@ -43,7 +46,7 @@ e2fsprogs, btrfs-progs), writes them to the headset's storage.
    | Our files | a folder of this repository's source tree (not a release): scripts, configs, prebuilt arm64 binaries, the boot and installer images | scripts work; **to do**: the prebuilt folder |
    | SteamOS Holo core aarch64 | `holo-packages.steamos.cloud` (public), `system.rootfs.zst` (tar.zst), 385 MB | works |
    | Steam client arm64 | Valve's client CDN, channel `steam_client_linuxarm64` (public): 35 zips, ~1 GB | works |
-   | SteamVR arm64, GTK 2 | **the Steam Frame's recovery image (public on Valve's servers)**: it ships `/opt/steamvr` and the GTK 2 libraries `steamui.so` needs. SteamVR has no other public arm64 download (app 250820's public depots are x86) | **to do**: pin the image, find its layout (the rootfs is probably btrfs: extracted on the headset with `btrfs restore`, no kernel support needed). GTK 2 also works from Debian's arm64 package (tested) |
+   | SteamVR arm64, GTK 2 | **the Steam Frame's recovery image**, public: `steamframe-oobe-repair-20260922.5153644-0.3.0.img.bz2` on Valve's image server (linked from store.steampowered.com/steamos/download/?ver=steamframe), 4.07 GB. It ships `/opt/steamvr` (where the development headset's SteamVR comes from) and the GTK 2 libraries `steamui.so` needs. SteamVR has no other public arm64 download (app 250820's public depots are x86) | pinned in `sources.json`; **to do**: its disk layout (the rootfs is probably btrfs: extracted by the micro Linux with `btrfs restore`, no kernel support needed). GTK 2 also works from Debian's arm64 package (tested) |
    | Meta's tracking stack, GPU driver, firmware | Meta's last Quest 1 OTA (`q1_49845030443200410.zip`, files.cocaine.trade): `system`, `modem` (+ `boot` to restore stock) from its `payload.bin` | works: all three are **bit-identical** to a dump of a headset on that build |
 
    Meta: only the files the system uses are kept, not the whole 2.7 GB `system` image. **To do**: the list
@@ -51,13 +54,18 @@ e2fsprogs, btrfs-progs), writes them to the headset's storage.
    GPU, audio, Wi-Fi and the cameras run), and the app's reader for the OTA's ext4 `system` and vfat
    `modem` images (read-only, small).
 2. **Check and boot the installer:** `adb reboot bootloader`, `fastboot boot installer.img`.
-3. **Build on the headset:** format `userdata` (56 GB) as ext4 (no `metadata_csum`, mountable by kernel
-   4.4), unpack Holo, run our setup scripts (`device/native-setup.sh`, `device/holo-*.sh install`) in a
+3. **Build on the headset:** `userdata` (56 GB, wiped anyway) is the scratch space. The micro Linux
+   creates an ext4 file system the size of `userdata` (no `metadata_csum`, mountable by kernel 4.4) in an
+   image file, unpacks Holo into it, run our setup scripts (`device/native-setup.sh`, `device/holo-*.sh install`) in a
    chroot, copy Meta's files to `/usr/lib/quest1/meta` (`device/holo-android-blobs.sh` uses them instead of
    the Android partitions), Steam to `/home/steamos/.local/share/Steam`, SteamVR to `/opt/steamvr` (then
    `device/holo-steamvr.sh install`). Packages that Holo lacks (pacman) come with our files, prebuilt.
-4. **Flash** (from the installer, after the build succeeded): our boot image to `boot_a` and `boot_b`,
-   `system_a`/`system_b` erased, slot `a` active. **Never touched:** the boot chain and firmware
+   It turns the image into an Android sparse image (only the used blocks: ~8-10 GB) and the app copies it
+   to the PC.
+4. **Flash** from the PC (`adb`/`fastboot` reboot to the bootloader): `fastboot flash userdata` with the
+   sparse image (fastboot splits it to the bootloader's download size), our boot image to `boot_a` and
+   `boot_b`, `system_a`/`system_b` erased, slot `a` active. Cost of the round trip: ~8-10 GB back over
+   USB and as much free space on the PC, about 10 more minutes. **Never touched:** the boot chain and firmware
    (`xbl`, `abl`, `tz`, `rpm`, `hyp`, `pmic`, `keymaster`, `cmnlib*`, `devcfg`, `ovrtz`, `modem`,
    `bluetooth`...) and the per-device data (`persist`, `private` = the calibration the tracking reads,
    `vision` = Meta's tracking maps, `misc`, `frp`, `devinfo`): none of them is in the OTA or can be rebuilt.
