@@ -201,8 +201,10 @@ class Build:
             env = {"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin", "HOME": "/root", "LANG": "C.UTF-8",
                    "QUEST1_LAYOUT": "full"}
             log("$ chroot", m, *cmd)
-            p = subprocess.Popen(["chroot", m, *cmd], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                 text=True, errors="replace")
+            # stdin /dev/null, never closed: pacman hands its hooks their targets on a pipe, and with fd 0 closed
+            # that pipe takes fd 0 and the hooks read nothing ("read: 0: read error: Bad file descriptor")
+            p = subprocess.Popen(["chroot", m, *cmd], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                 stderr=subprocess.STDOUT, text=True, errors="replace")
             for line in p.stdout:
                 print(line, end="", flush=True)
                 if on_line:
@@ -229,27 +231,30 @@ class Build:
         bz = os.path.join(d, [f for f in os.listdir(d) if f.endswith(".img.bz2")][0])
         prog.total = os.path.getsize(bz)
         part = os.path.join(self.a.scratch, "frame-rootfs.img")
-        dec, head, pos, rng = bz2.BZ2Decompressor(), b"", 0, None
-        with open(bz, "rb") as f, open(part, "wb") as o:
-            for b in iter(lambda: f.read(1 << 20), b""):
-                prog.add(len(b))
-                out = dec.decompress(b)
-                if rng is None:
-                    head += out
-                    if len(head) < 34 * 512:
-                        continue
-                    rng = gpt_find(head, "rootfs-A")
-                    out, pos = head, 0
-                s, e = max(rng[0], pos), min(rng[1], pos + len(out))
-                if s < e:
-                    piece = out[s - pos:e - pos]
-                    if piece.count(0) == len(piece):
-                        o.seek(len(piece), 1)  # empty space of the partition: a hole
-                    else:
-                        o.write(piece)
-                pos += len(out)
-                if pos >= rng[1]:
-                    break
+        head, pos, rng = b"", 0, None
+        pieces = bunzip2(bz, prog)  # on every core: one core of the headset takes 40 min
+        with open(part, "wb") as o:
+            try:
+                for out in pieces:
+                    if rng is None:
+                        head += bytes(out) if isinstance(out, int) else out
+                        if len(head) < 34 * 512:
+                            continue
+                        rng = gpt_find(head, "rootfs-A")
+                        out, pos = head, 0
+                    n = out if isinstance(out, int) else len(out)
+                    s, e = max(rng[0], pos), min(rng[1], pos + n)
+                    if s < e:
+                        piece = None if isinstance(out, int) else out[s - pos:e - pos]
+                        if piece is None or piece.count(0) == len(piece):
+                            o.seek(e - s, 1)  # empty space of the partition: a hole
+                        else:
+                            o.write(piece)
+                    pos += n
+                    if pos >= rng[1]:
+                        break
+            finally:
+                pieces.close()
             o.truncate()
         m = os.path.join(self.a.scratch, "frame")
         os.makedirs(m, exist_ok=True)
@@ -396,6 +401,109 @@ class Build:
 
     def sparse(self, prog):
         write_sparse(self.raw, self.a.out, prog)
+
+
+# --- bzip2 on every core ---------------------------------------------------------------------------------------
+# Python's bz2 (libbz2) uses one core: ~1.8 MB/s of input on the headset, 40 min for the Frame image, and Alpine
+# has no lbzip2/pbzip2. A bzip2 stream is a series of independent blocks, each starting with a 48-bit magic
+# number at any bit offset; each block, cut out and given a stream header and trailer (its own CRC as the
+# stream's), is a valid .bz2 that decompresses on its own. A magic number can also occur inside compressed data:
+# such a block fails its CRC and is decompressed again joined to the next one.
+BZ_BLOCK, BZ_EOS = 0x314159265359, 0x177245385090
+
+
+def bz_magics(buf):
+    """Bit offsets of the block and end-of-stream magic numbers in buf: [(bit, is_block)], sorted."""
+    found = []
+    for magic in (BZ_BLOCK, BZ_EOS):
+        for s in range(8):  # the magic starting at bit s of a byte: 7 bytes, the 5 middle ones whole
+            pat = (magic << (8 - s)).to_bytes(7, "big")
+            m0, m6 = (0xFF >> s), (0xFF << (8 - s)) & 0xFF
+            i = buf.find(pat[1:6], 1)
+            while 0 <= i and i + 6 <= len(buf):
+                if buf[i - 1] & m0 == pat[0] & m0 and buf[i + 5] & m6 == pat[6] & m6:
+                    found.append(((i - 1) * 8 + s, magic == BZ_BLOCK))
+                i = buf.find(pat[1:6], i + 1)
+    return sorted(found)
+
+
+def bz_block_stream(buf, a, b):
+    """Bits [a, b) of buf (one or more blocks) as a stand-alone .bz2: header, the bits, end-of-stream, CRC."""
+    n = int.from_bytes(buf[a // 8:(b + 7) // 8], "big") >> ((-b) % 8)
+    nbits = b - a
+    n &= (1 << nbits) - 1
+    crc = (n >> (nbits - 80)) & 0xFFFFFFFF  # right after the block magic
+    v = (((int.from_bytes(b"BZh9", "big") << nbits | n) << 48 | BZ_EOS) << 32) | crc
+    total = 32 + nbits + 80
+    return (v << (-total % 8)).to_bytes((total + 7) // 8, "big")
+
+
+def _bz_decompress(data, a, b):
+    """Bits [a, b) of data decompressed as one block (in a worker process): its bytes, or their count when all
+    zeros (a disk image's empty space: up to ~45 MB from ~50 bytes, not worth carrying between processes).
+    None when it is not a whole block (a false magic cut it)."""
+    try:
+        out = bz2.decompress(bz_block_stream(data, a, b))
+    except (OSError, ValueError, EOFError):
+        return None
+    return len(out) if out.count(0) == len(out) else out
+
+
+def bunzip2(path, prog, workers=None):
+    """The decompressed contents of a .bz2 file (one or more streams), in order, in pieces: bytes, or an int for
+    that many zero bytes. Blocks are decompressed in parallel processes; stops cleanly when the caller stops
+    reading (close the generator). Memory: about 2 x cores blocks of output at most."""
+    import concurrent.futures, multiprocessing
+    workers = workers or os.cpu_count() or 1
+    pool = concurrent.futures.ProcessPoolExecutor(workers, mp_context=multiprocessing.get_context("fork"))
+    pending = []  # [(future, buf, a, b)] in stream order
+
+    def segments():
+        """(buf, a, b): the bits of each block, between its magic and the next one (end-of-stream included;
+        what follows an end-of-stream up to the next block is a stream trailer and header, skipped)."""
+        buf = b""
+        with open(path, "rb") as f:
+            while True:
+                chunk = f.read(16 << 20)
+                prog.add(len(chunk))
+                buf += chunk
+                marks = bz_magics(buf)
+                for (a, blk), (b, _) in zip(marks, marks[1:]):
+                    if blk:
+                        yield buf, a, b
+                if not chunk:
+                    if not marks or marks[-1][1]:
+                        raise ValueError("bunzip2: %s ends inside a block" % path)
+                    return
+                if marks:  # the last block goes on in the next chunk
+                    buf = buf[marks[-1][0] // 8:]
+
+    def resolve(i):
+        """pending[i]'s output; a block cut at a false magic is joined with the following segments."""
+        fut, buf, a, b = pending[i]
+        out = fut.result()
+        j = i
+        while out is None:  # false magic at b: decompress [a, next end) on our own
+            j += 1
+            if j >= len(pending) or pending[j][1] is not buf or j - i > 8:
+                raise ValueError("bunzip2: corrupt block in %s" % path)
+            b = pending[j][3]
+            out = _bz_decompress(buf, a, b)
+        for k in range(i + 1, j + 1):
+            pending[k][0].cancel()
+        del pending[:j + 1]
+        return out
+
+    try:
+        for buf, a, b in segments():
+            sl = a // 8  # the worker gets the block's bytes only, and cuts and wraps its bits
+            pending.append((pool.submit(_bz_decompress, buf[sl:(b + 7) // 8], a - 8 * sl, b - 8 * sl), buf, a, b))
+            while len(pending) > 2 * workers:
+                yield resolve(0)
+        while pending:
+            yield resolve(0)
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
 
 
 def gpt_find(head, name):

@@ -168,8 +168,9 @@ def safe_path(rel, base="stage"):
 def run_job(name, cmd, env=None):
     with lock:
         lines.append("@agent " + json.dumps({"job": name, "cmd": cmd}))
-    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace",
-                         env=dict(os.environ, **(env or {})))
+    # stdin /dev/null: the micro Linux's init may have none, and pacman's hooks then get no targets
+    p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                         errors="replace", env=dict(os.environ, **(env or {})))
     for l in p.stdout:
         with lock:
             lines.append(l.rstrip("\n"))
