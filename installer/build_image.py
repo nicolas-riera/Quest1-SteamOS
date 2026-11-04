@@ -279,7 +279,7 @@ class Build:
         """Valve's client packages (zips + manifest, as prepare.py staged them) unpacked into ~steamos: a few big
         files to read instead of thousands of small ones. package/ is kept, the client checks it on start."""
         pkg = os.path.join(self.stage, "steam", "package")
-        zips = sorted(f for f in os.listdir(pkg) if ".zip" in f)  # name.zip.<sha1>, as the client keeps them
+        zips = sorted(f for f in os.listdir(pkg) if re.search(r"\.zip\.[0-9a-f]{40}$", f))  # name.zip.<sha1>
         prog.total = sum(os.path.getsize(os.path.join(pkg, z)) for z in zips)
         home = os.path.join(self.mnt, "home", "steamos")
         dst = os.path.join(home, ".local", "share", "Steam")
@@ -303,16 +303,30 @@ class Build:
         for f in os.listdir(src):
             if f.endswith(".db"):
                 shutil.copyfile(os.path.join(src, f), os.path.join(sync, f))
-            elif ".pkg.tar." in f:
+            elif f.endswith((".pkg.tar.zst", ".pkg.tar.xz")):
                 shutil.copyfile(os.path.join(src, f), os.path.join(cache, f.replace("%3A", ":")))
         wanted = open(os.path.join(src, "packages.txt")).read().split()
+        # offline for real: the repositories point nowhere, so a package missing from the staged ones fails the
+        # build here (on the headset there is no network for pacman anyway)
+        conf = os.path.join(self.mnt, "etc", "pacman.conf")
+        with open(conf) as f:
+            text = f.read()
+        off = re.sub(r"(?m)^Include\s*=.*mirrorlist\s*$", "Server = file:///nonexistent", text)
+        # Holo's repositories are unsigned (SigLevel Optional): pacman then wants each package's .sig and
+        # downloads the package again to get it. Integrity: every file was checked against the repository
+        # database's sha256 when downloaded, and pacman checks it again
+        off = re.sub(r"(?m)^SigLevel\s*=.*$", "SigLevel = Never", off)
+        with open(os.path.join(self.mnt, "etc", "pacman-offline.conf"), "w") as f:
+            f.write(off)
 
         def on_line(line):  # "(12/367) installing foo"
             m = re.match(r"\((\d+)/(\d+)\) installing", line)
             if m:
                 prog.total = int(m.group(2))
                 prog.add(int(m.group(1)) - prog.done)
-        self.chroot("pacman", "-S", "--needed", "--noconfirm", "--noprogressbar", *wanted, on_line=on_line)
+        self.chroot("pacman", "--config", "/etc/pacman-offline.conf", "-S", "--needed", "--noconfirm",
+                    "--noprogressbar", *wanted, on_line=on_line)
+        os.remove(os.path.join(self.mnt, "etc", "pacman-offline.conf"))
         shutil.rmtree(cache)
         os.makedirs(cache)
 

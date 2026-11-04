@@ -26,7 +26,7 @@ For development: agent.py --userdata <file> --listen 127.0.0.1 (the size of the 
 """
 import argparse, fcntl, hashlib, json, os, queue, re, socket, struct, subprocess, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, unquote
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -79,10 +79,19 @@ def recvn(s, n):
     return b
 
 
-def nbd_attach(export, dev="/dev/nbd0"):
+def free_nbd():
+    """The first NBD device not connected (a crashed attempt may leave one behind)."""
+    for i in range(16):
+        if os.path.exists("/dev/nbd%d" % i) and not os.path.exists("/sys/block/nbd%d/pid" % i):
+            return "/dev/nbd%d" % i
+    raise OSError("no free NBD device")
+
+
+def nbd_attach(export, dev=None):
     """The PC's export through a tunnel: fixed newstyle handshake here, then the kernel's NBD client takes the
     socket (NBD_DO_IT runs in a thread for as long as the device is attached)."""
     subprocess.run(["modprobe", "nbd"], stderr=subprocess.DEVNULL)  # built in on the headset
+    dev = dev or free_nbd()
     s, done = tunnels.get(timeout=60)
     s.sendall(b"nbd:" + export.encode() + b"\n")
     if recvn(s, 3) != b"OK\n":
@@ -136,11 +145,13 @@ def prepare_scratch():
     subprocess.run(["mount", "-o", "discard,noatime", dev, A.scratch], check=True)
 
 
-def safe_path(rel):
-    parts = [p for p in rel.split("/") if p]
+def safe_path(rel, base="stage"):
+    """A stage file from an upload URL (percent-decoded: package names have ':' and '+'); the uploads' sha256
+    sidecars live apart (base "sums") so that nothing but the files themselves is in the stage."""
+    parts = [p for p in unquote(rel).split("/") if p]
     if not parts or any(p in (".", "..") for p in parts):
         return None
-    return os.path.join(A.scratch, "work", "stage", *parts)
+    return os.path.join(A.scratch, "work", base, *parts)
 
 
 def run_job(name, cmd, env=None):
@@ -309,16 +320,17 @@ class H(BaseHTTPRequestHandler):
 
     def do_HEAD(self):
         u = urlparse(self.path)
-        p = safe_path(u.path[len("/stage/"):]) if u.path.startswith("/stage/") and scratch_ready() else None
-        if not p or not os.path.exists(p) or not os.path.exists(p + ".sha256"):
+        rel = u.path[len("/stage/"):]
+        p = safe_path(rel) if u.path.startswith("/stage/") and scratch_ready() else None
+        if not p or not os.path.exists(p) or not os.path.exists(safe_path(rel, "sums")):
             return self.reply(404)
-        self.reply(200, None, {"X-Size": str(os.path.getsize(p)), "X-Sha256": open(p + ".sha256").read().strip()})
+        self.reply(200, None, {"X-Size": str(os.path.getsize(p)), "X-Sha256": open(safe_path(rel, "sums")).read().strip()})
 
     def do_PUT(self):
         u = urlparse(self.path)
         if not u.path.startswith("/stage/") or not scratch_ready():
             return self.reply(409, {"error": "no scratch space (POST /scratch first)"})
-        p = safe_path(u.path[len("/stage/"):])
+        p, sums = safe_path(u.path[len("/stage/"):]), safe_path(u.path[len("/stage/"):], "sums")
         want = (self.headers.get("X-Sha256") or "").lower()
         if not p or not re.fullmatch("[0-9a-f]{64}", want):
             return self.reply(400, {"error": "bad path or missing X-Sha256"})
@@ -337,7 +349,8 @@ class H(BaseHTTPRequestHandler):
             os.remove(p + ".part")
             return self.reply(422, {"error": "upload incomplete or sha256 mismatch"})
         os.replace(p + ".part", p)
-        with open(p + ".sha256", "w") as f:
+        os.makedirs(os.path.dirname(sums), exist_ok=True)
+        with open(sums, "w") as f:
             f.write(want)
         self.reply(200, {"ok": True})
 

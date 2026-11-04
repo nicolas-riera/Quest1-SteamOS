@@ -12,6 +12,23 @@ T=$D/../tools
 U=/etc/systemd/system
 say() { echo "install-image: $*"; }
 
+# In a chroot nothing runs systemd: the scripts' daemon-reload/start/stop/is-active have nothing to talk to
+# (daemon-reload fails), so they are skipped; enable/disable/mask (links only) go to the real systemctl.
+if [ ! -d /run/systemd/system ]; then
+	mkdir -p /run/q1-image-shim
+	cat > /run/q1-image-shim/systemctl <<'EOF'
+#!/bin/sh
+case "$1" in
+daemon-reload | daemon-reexec | start | stop | restart | reload | try-restart | reload-or-restart | is-active | kill) exit 0 ;;
+esac
+args=
+for a; do [ "$a" = --now ] || args="$args $a"; done
+exec /usr/bin/systemctl $args
+EOF
+	chmod 755 /run/q1-image-shim/systemctl
+	export PATH=/run/q1-image-shim:$PATH
+fi
+
 # --- users: Android's network groups (paranoid network, firstboot.sh) and Steam's user ----------------------
 sh "$D/firstboot.sh" || true   # its last line probes the network: no network during the build
 for g in render video audio input wheel; do getent group $g >/dev/null || groupadd -r $g; done
