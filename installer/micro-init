@@ -12,6 +12,7 @@ mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 mount -t devtmpfs devtmpfs /dev
 mkdir -p /dev/pts && mount -t devpts devpts /dev/pts
+mkdir -p /dev/shm && mount -t tmpfs -o mode=1777 tmpfs /dev/shm  # Python's multiprocessing (its semaphores)
 mount -t tmpfs -o mode=755 tmpfs /run
 mount -t tmpfs -o mode=1777 tmpfs /tmp
 mount -t pstore pstore /sys/fs/pstore 2>/dev/null
