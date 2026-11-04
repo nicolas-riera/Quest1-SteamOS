@@ -301,6 +301,9 @@ def download(ag, out):
 
 
 def main():
+    # the build's output has non-ASCII text; a Windows console or redirect would otherwise be cp1252 and stop us
+    # (and with us the headset's scratch disk, served from this process)
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--agent", default="http://192.168.77.1:8077")
     ap.add_argument("--stage", help="development: upload this prepare.py stage (else the headset downloads)")
@@ -315,7 +318,7 @@ def main():
     global SCRATCH_FILE
     SCRATCH_FILE = a.scratch_file
     start_tunnels(ag)
-    ag.ok("POST", "/scratch", {}, timeout=600)
+    ag.ok("POST", "/scratch", {"time": time.time()}, timeout=600)
     if a.stage:
         upload(ag, a.stage)
     else:  # the app's way: the headset downloads everything itself, through the tunnels

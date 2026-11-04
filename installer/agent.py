@@ -9,7 +9,8 @@ The headset only computes; the app flashes the result at the end.
 
     GET  /info                 {"agent", "userdata": bytes, "mem": bytes, "scratch": bool, "job", "state", "rc"}
     POST /scratch              attach the PC's disk (NBD export "scratch" through a tunnel), format it the
-                               first time (it keeps its contents between attempts), mount it on /scratch
+                               first time (it keeps its contents between attempts), mount it on /scratch;
+                               body {"time": the PC's Unix time}: the headset has no clock at boot (1970)
     POST /prepare              body {"only": steps}: run prepare.py here; it downloads through the tunnels the
                                app keeps open (GET /tunnel): the headset has no other way out
     GET  /tunnel               (Upgrade) a connection the app lends for one download: we send "host:port\n",
@@ -374,7 +375,9 @@ class H(BaseHTTPRequestHandler):
     def do_POST(self):
         u = urlparse(self.path)
         if u.path == "/scratch":
-            self.body()
+            t = self.body().get("time")
+            if t and abs(time.time() - t) > 60:  # else the files the build writes are dated 1970
+                time.clock_settime(time.CLOCK_REALTIME, t)
             try:
                 prepare_scratch()
             except (OSError, queue.Empty, subprocess.CalledProcessError) as e:

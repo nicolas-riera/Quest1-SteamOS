@@ -86,7 +86,8 @@ func (a *App) Install() error {
 		go ag.Tunnel()
 	}
 	step("scratch", "start")
-	if err := ag.Post("/scratch", map[string]any{}, nil); err != nil {
+	// the PC's time with it: the headset has no clock at boot, the build's files would be dated 1970
+	if err := ag.Post("/scratch", map[string]any{"time": time.Now().Unix()}, nil); err != nil {
 		return err
 	}
 	step("scratch", "done")
