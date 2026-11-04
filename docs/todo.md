@@ -210,6 +210,7 @@ Open items, roughly by priority. Done items move to the commit log.
     assume the right one works the same).
   - Not Quest 3 / Pro controllers: they pair with ECDH, which the Quest 1's MCU firmware lacks;
     replacing that firmware risks a brick (Touch3-on-Quest-2's developer, 2026-11-03).
-- Windows installer that downloads SteamOS from Valve, reads the tracking software from the
-  user's own headset, builds the image and flashes it (slot B), once everything works. Much later:
-  dual boot with a boot selector shown in the headset at start-up (very low priority).
+- The installer (app/, installer/) is under way: the Windows app, the headset builds the image in
+  its micro Linux. Much later (user, 2026-11-04): a Linux version of the app, where the PC itself
+  builds the image (build_image.py runs there, no scratch disk over USB) before flashing it.
+- Much later: dual boot with a boot selector shown in the headset at start-up (very low priority).
