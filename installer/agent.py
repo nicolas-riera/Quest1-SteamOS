@@ -92,7 +92,7 @@ def nbd_attach(export, dev=None):
     socket (NBD_DO_IT runs in a thread for as long as the device is attached)."""
     subprocess.run(["modprobe", "nbd"], stderr=subprocess.DEVNULL)  # built in on the headset
     dev = dev or free_nbd()
-    s, done = tunnels.get(timeout=60)
+    s, done = take_tunnel()
     s.sendall(b"nbd:" + export.encode() + b"\n")
     if recvn(s, 3) != b"OK\n":
         raise OSError("NBD: the PC refused the export")
@@ -198,6 +198,23 @@ tunnels = queue.Queue()
 PROXY = ("127.0.0.1", 3128)
 
 
+def take_tunnel(timeout=60):
+    """A tunnel that is still open: those whose PC side went away (the app restarted, a run was killed) are
+    dropped here instead of failing the request that would use them. queue.Empty when none comes."""
+    end = time.time() + timeout
+    while True:
+        t, done = tunnels.get(timeout=max(0.1, end - time.time()))
+        try:
+            alive = t.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT) != b""  # the PC never speaks first
+        except BlockingIOError:
+            alive = True
+        except OSError:
+            alive = False
+        if alive:
+            return t, done
+        done.set()
+
+
 def splice(a, b):
     def pump(src, dst):
         try:
@@ -233,7 +250,7 @@ def proxy_client(c):
         with lock:
             lines.append("@tunnel " + json.dumps({"to": target}))
         try:
-            t, done = tunnels.get(timeout=60)
+            t, done = take_tunnel()
         except queue.Empty:
             c.sendall(b"HTTP/1.1 503 No tunnel from the PC\r\n\r\n")
             return

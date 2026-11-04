@@ -147,8 +147,11 @@ def nbd_serve(s, path, size):
     """NBD server (fixed newstyle, one export) on a tunnel: the headset's scratch disk is this sparse file."""
     if not os.path.exists(path):
         with open(path, "wb") as f:
-            f.truncate(size)
+            make_sparse(f)
+            f.seek(size - 1)  # not truncate(): on Windows it extends by writing zeros, the whole size
+            f.write(bytes(1))
     f = open(path, "r+b")
+    make_sparse(f)
     try:
         s.sendall(b"NBDMAGICIHAVEOPT" + struct.pack(">H", 3))
         recvn(s, 4)
@@ -188,7 +191,27 @@ def nbd_serve(s, path, size):
         s.close()
 
 
+def win_fsctl(f, code, inbuf=None):
+    """DeviceIoControl on an open file (Windows): the NTFS sparse-file controls, as app/nbd.go uses them."""
+    import ctypes, msvcrt
+    from ctypes import wintypes
+    k = ctypes.windll.kernel32
+    k.DeviceIoControl.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.c_char_p, wintypes.DWORD, ctypes.c_void_p,
+                                  wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p]
+    done = wintypes.DWORD()
+    return bool(k.DeviceIoControl(msvcrt.get_osfhandle(f.fileno()), code, inbuf, len(inbuf or b""), None, 0,
+                                  ctypes.byref(done), None))
+
+
+def make_sparse(f):
+    """NTFS allocates a file's whole length unless it is marked sparse (Linux files are sparse already)."""
+    if os.name == "nt":
+        win_fsctl(f, 0x900C4)  # FSCTL_SET_SPARSE
+
+
 def punch_hole(f, off, length):
+    if os.name == "nt":  # FSCTL_SET_ZERO_DATA: deallocates the range of a sparse file
+        return win_fsctl(f, 0x980C8, struct.pack("<qq", off, off + length))
     try:
         import ctypes
         libc = ctypes.CDLL(None, use_errno=True)
