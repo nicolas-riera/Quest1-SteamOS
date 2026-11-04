@@ -40,6 +40,7 @@ class Agent:
         if stream:
             return r
         data = r.read()
+        c.close()
         return r.status, (json.loads(data) if data else None), r
 
     def ok(self, method, path, body=None, **kw):
@@ -93,24 +94,45 @@ def upload(ag, stage):
     for rel in files:
         p = os.path.join(stage, rel)
         size, h = os.path.getsize(p), sha256(p)
-        st, _, r = ag.req("HEAD", "/stage/" + quote(rel))
-        if st == 200 and r.getheader("X-Sha256") == h:
-            prog.add(size)
-            continue
-        c = http.client.HTTPConnection(ag.host, ag.port, timeout=600)
+        for attempt in range(5):  # a connection refused by Windows now and then (WinError 10055): try again
+            try:
+                upload_one(ag, rel, p, size, h, prog)
+                break
+            except OSError as e:
+                if attempt == 4:
+                    raise
+                print("(upload %s: %s, trying again)" % (rel, e), flush=True)
+                time.sleep(2)
+    event("step", step="upload", status="done")
+
+
+def upload_one(ag, rel, p, size, h, prog):
+    st, _, r = ag.req("HEAD", "/stage/" + quote(rel))
+    if st == 200 and r.getheader("X-Sha256") == h:
+        prog.add(size)
+        return
+    c = http.client.HTTPConnection(ag.host, ag.port, timeout=600)
+    try:
         c.putrequest("PUT", "/stage/" + quote(rel))
         c.putheader("Content-Length", str(size))
         c.putheader("X-Sha256", h)
         c.endheaders()
-        with open(p, "rb") as f:
-            for b in iter(lambda: f.read(1 << 20), b""):
-                c.send(b)
-                prog.add(len(b))
+        sent = 0
+        try:
+            with open(p, "rb") as f:
+                for b in iter(lambda: f.read(1 << 20), b""):
+                    c.send(b)
+                    sent += len(b)
+                    prog.add(len(b))
+        except OSError:
+            prog.done -= sent
+            raise
         r = c.getresponse()
         if r.status != 200:
             sys.exit("upload %s: %d %s" % (rel, r.status, r.read()))
         r.read()
-    event("step", step="upload", status="done")
+    finally:
+        c.close()
 
 
 def splice(a, b):
