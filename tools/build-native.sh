@@ -149,9 +149,11 @@ install -m755 src/x11vnc $D/usr/local/bin/x11vnc
 step package
 rm -rf $D/usr/local/include $D/usr/local/lib/pkgconfig $D/usr/local/lib/cmake $D/opt/monado/include
 find $D -name '*.a' -delete; find $D -name '*.la' -delete
+# no debug info in the image (Monado alone: 475 MB with it)
+find $D -type f -exec sh -c 'for f; do head -c4 "$f" | grep -q ELF && strip --strip-debug "$f"; done' sh {} +
 mkdir -p $D/usr/lib
 cat >$D/usr/lib/quest1-native.json <<EOF
-{"repo": "$(git -C "$R" rev-parse HEAD 2>/dev/null || echo unknown)",
+{"repo": "$(git -c safe.directory='*' -C "$R" rev-parse HEAD 2>/dev/null || echo unknown)",
  "libhybris": "$HYBRIS_COMMIT", "android-headers": "$AHEADERS_COMMIT", "monado": "$MONADO_COMMIT",
  "openvr": "$OPENVR_TAG", "libvncserver": "$VNCSERVER_TAG", "x11vnc": "$X11VNC_TAG"}
 EOF
