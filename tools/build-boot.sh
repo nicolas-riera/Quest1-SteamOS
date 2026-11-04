@@ -74,11 +74,7 @@ kernel() {
 
 image() {
 	OUT=$1; I=$W/initramfs; rm -rf "$I"; mkdir -p "$I"; cd "$I"
-	# static busybox from Debian stable (arm64)
-	curl -fsSL "$DEBIAN/dists/stable/main/binary-arm64/Packages.xz" | xz -d > Packages
-	DEB=$(awk '/^Package: busybox-static$/{p=1} p&&/^Filename:/{print $2; exit}' Packages)
-	curl -fsSL "$DEBIAN/$DEB" -o busybox.deb
-	mkdir bb && dpkg-deb -x busybox.deb bb
+	busybox_static
 	aarch64-linux-gnu-gcc -static -O2 -Wall -o fbtest "$P/initrd/fbtest.c"
 	aarch64-linux-gnu-gcc -static -O2 -Wall -o rb "$P/initrd/rb.c"
 	echo holo > holo-mode
@@ -124,12 +120,25 @@ installer() {
 	find root/usr/lib/python3* \( -name __pycache__ -o -name test -o -name tests -o -name idlelib -o -name tkinter \
 		-o -name ensurepip -o -name turtledemo \) -prune -exec rm -rf {} +
 	aarch64-linux-gnu-gcc -static -O2 -Wall -o root/bin/rb "$P/initrd/rb.c"
+	aarch64-linux-gnu-gcc -static -O2 -Wall -s -o root/bin/fbblank "$P/initrd/fbblank.c"
 	mkdir -p root/installer root/scratch
 	cp "$P/installer/agent.py" "$P/installer/build_image.py" "$P/installer/prepare.py" "$P/installer/sources.json" root/installer/
+	# the init and its debug path (USB gadget, telnetd, serial shell) run on a static busybox, as in the native
+	# initramfs: nothing there depends on Alpine's musl; the console nodes the kernel opens before /dev is mounted
+	busybox_static; install -m755 bb/usr/bin/busybox root/bin/busybox-static
+	rm -f root/dev/console root/dev/kmsg
+	mknod -m 600 root/dev/console c 5 1; mknod -m 644 root/dev/kmsg c 1 11
 	tr -d '\r' < "$P/installer/micro-init" > root/init; chmod 755 root/init
 	(cd root && find . | cpio -o -H newc -R 0:0 --quiet) | gzip -9n > ramdisk.gz
 	mkboot ramdisk.gz "$OUT"
 	echo "built $OUT ($(stat -c %s "$OUT") bytes), Alpine $ALPINE_ROOTFS + $ALPINE_PKGS"
+}
+
+busybox_static() { # Debian stable's static busybox (arm64) into ./bb/usr/bin/busybox, its package in $DEB
+	curl -fsSL "$DEBIAN/dists/stable/main/binary-arm64/Packages.xz" | xz -d > Packages
+	DEB=$(awk '/^Package: busybox-static$/{p=1} p&&/^Filename:/{print $2; exit}' Packages)
+	curl -fsSL "$DEBIAN/$DEB" -o busybox.deb
+	mkdir bb && dpkg-deb -x busybox.deb bb
 }
 
 mkboot() { # ramdisk.gz output.img: the kernel and a ramdisk into a signed boot image

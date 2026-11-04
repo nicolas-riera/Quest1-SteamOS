@@ -1,9 +1,12 @@
-#!/bin/sh
+#!/bin/busybox-static sh
 # The installer's micro Linux (tools/build-boot.sh installer): fastboot-booted by the PC app, runs from RAM.
 # USB network as the native boot image (headset 192.168.77.1, the PC gets 192.168.77.2), then the installer
 # agent (installer/agent.py, http://192.168.77.1:8077), which the app drives. Nothing is mounted or written
-# here: the agent formats userdata only when the app asks for it. Debug: telnet 192.168.77.1.
-export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+# here; the agent's scratch space is a disk on the PC (NBD). Debug: telnet 192.168.77.1, or the ACM serial.
+# The debug path runs on Debian's static busybox, like initrd/init, before anything that can block: Alpine
+# (musl, python) is only for the agent, and the panels are switched off in the background.
+/bin/busybox-static mkdir -p /sbb && /bin/busybox-static --install -s /sbb
+export PATH=/sbb
 mkdir -p /proc /sys /dev /run /tmp
 mount -t proc proc /proc
 mount -t sysfs sysfs /sys
@@ -11,19 +14,13 @@ mount -t devtmpfs devtmpfs /dev
 mkdir -p /dev/pts && mount -t devpts devpts /dev/pts
 mount -t tmpfs -o mode=755 tmpfs /run
 mount -t tmpfs -o mode=1777 tmpfs /tmp
+mount -t pstore pstore /sys/fs/pstore 2>/dev/null
 mount -t configfs configfs /sys/kernel/config
 exec >/dev/kmsg 2>&1
 log() { echo "q1-installer: $*"; }
+log "init"
 
-# panels off at once: the bootloader's last frame (Meta's logo) must not stay lit for the whole install
-# (burn-in); black frame first, then blank, as holo-panel-off.service does on the installed system
-for i in 1 2 3 4 5 6 7 8 9 10; do [ -e /dev/fb0 ] && break; sleep 0.3; done
-if [ -e /dev/fb0 ]; then
-	echo 0 > /sys/class/graphics/fb0/blank
-	dd if=/dev/zero of=/dev/fb0 bs=1M count=35 2>/dev/null
-	echo 4 > /sys/class/graphics/fb0/blank && log "panels off"
-fi
-
+# --- USB gadget first: the way in when anything below goes wrong ---------------------------------------------
 G=/sys/kernel/config/usb_gadget/g1
 mkdir -p $G && cd $G
 echo 0x1d6b > idVendor; echo 0x0104 > idProduct; echo 0x0200 > bcdUSB
@@ -37,7 +34,8 @@ echo "NCM+ACM" > configs/c.1/strings/0x409/configuration
 echo 500 > configs/c.1/MaxPower
 ln -s functions/ncm.usb0 configs/c.1/
 ln -s functions/acm.GS0 configs/c.1/
-ls /sys/class/udc | head -1 > UDC && log "gadget up" || log "gadget bind FAILED"
+UDC=$(ls /sys/class/udc | head -1)
+echo "$UDC" > UDC && log "gadget on $UDC" || log "gadget bind FAILED"
 cd /
 
 for i in 1 2 3 4 5 6 7 8 9 10; do [ -e /sys/class/net/usb0 ] && break; sleep 0.5; done
@@ -51,11 +49,18 @@ lease_file /run/udhcpd.leases
 option subnet 255.255.255.0
 EOF
 touch /run/udhcpd.leases
-busybox-extras udhcpd /run/udhcpd.conf
-busybox-extras telnetd -l /bin/sh -b 192.168.77.1
+udhcpd /run/udhcpd.conf
+telnetd -l /sbb/sh -b 192.168.77.1
 ( while :; do [ -e /dev/ttyGS0 ] && setsid sh -c 'exec sh </dev/ttyGS0 >/dev/ttyGS0 2>&1'; sleep 1; done ) &
 
+# --- panels off: the bootloader's last frame (Meta's logo) must not stay lit for the whole install (burn-in).
+# Writing the sysfs blank and /dev/fb0 does nothing to that frame: fbblank (initrd/fbblank.c) takes the display
+# over, commits a black frame and powers the panels down. In the background, so a display driver that blocks
+# shows in dmesg instead of stopping the boot.
+( /bin/fbblank && log "panels off" || log "panels: fbblank failed" ) &
+
 log "agent on http://192.168.77.1:8077"
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 while :; do
 	python3 -u /installer/agent.py >> /run/agent.log 2>&1
 	log "agent exited ($?), restarting"; sleep 1
