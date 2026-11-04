@@ -32,7 +32,8 @@ const (
 
 type App struct {
 	w      webview2.WebView
-	work   string // %TEMP%\quest1-steamos
+	work   string // %TEMP%\quest1-steamos: adb/fastboot, the window's data
+	big    string // the scratch disk and images: %TEMP%\quest1-steamos\work, or X:\TEMP-STEAMOS-QUEST1
 	dev    *Device
 	mu     sync.Mutex
 	busy   bool
@@ -85,7 +86,7 @@ func main() {
 		return
 	}
 	defer w.Destroy()
-	a := &App{w: w, work: work}
+	a := &App{w: w, work: work, big: filepath.Join(work, "work")}
 	dev, err := NewDevice(filepath.Join(work, "platform-tools"))
 	if err != nil {
 		msgBox("Quest1-SteamOS installer", "Could not unpack adb/fastboot: "+err.Error())
@@ -94,6 +95,8 @@ func main() {
 	a.dev = dev
 	w.Bind("q1Version", func() string { return Version })
 	w.Bind("q1Check", func() { a.start("check", a.Check) })
+	w.Bind("q1Drives", a.Drives)
+	w.Bind("q1SetDrive", a.SetDrive)
 	w.Bind("q1Install", func() { a.start("install", a.Install) })
 	w.Bind("q1Open", func(url string) { exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start() })
 	w.SetHtml(uiHTML)

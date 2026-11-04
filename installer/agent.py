@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Installer agent: runs in the micro Linux the PC app fastboot-boots on the headset (tools/build-boot.sh installer)
-and lets the app download everything and build the SteamOS image there, over the USB network (http://192.168.77.1:8077). Standard library only.
+and lets the app download everything and build the SteamOS image there, over the USB network
+(http://192.168.77.1:8077). Standard library only.
 
-Nothing is written to the headset until the app asks for the scratch space (POST /scratch with the confirmation
-text): then `userdata` (wiped by the install anyway, flashed by the app at the end) is formatted and mounted as
-/scratch. Every other partition is left alone.
+Nothing is ever written to the headset's storage: the scratch space (/scratch: downloads, the image being built)
+is a disk on the PC, a sparse file the app serves as a network block device (NBD) through one of its tunnels.
+The headset only computes; the app flashes the result at the end.
 
     GET  /info                 {"agent", "userdata": bytes, "mem": bytes, "scratch": bool, "job", "state", "rc"}
-    POST /scratch              body {"confirm": "erase userdata"}: format (once) and mount the scratch space
+    POST /scratch              attach the PC's disk (NBD export "scratch" through a tunnel), format it the
+                               first time (it keeps its contents between attempts), mount it on /scratch
     POST /prepare              body {"only": steps}: run prepare.py here; it downloads through the tunnels the
                                app keeps open (GET /tunnel): the headset has no other way out
     GET  /tunnel               (Upgrade) a connection the app lends for one download: we send "host:port\n",
@@ -17,17 +19,19 @@ text): then `userdata` (wiped by the install anyway, flashed by the app at the e
     POST /build                body {"only": "steps" (optional)}: run build_image.py on the stage
     GET  /events?from=N        {"next": M, "lines": [...], "state"}: the running job's output from line N (the
                                @step/@progress lines of prepare.py and build_image.py drive the progress bars)
-    GET  /image                the sparse userdata image (for `fastboot flash userdata`)
+    GET  /image                the sparse userdata image (for `fastboot flash userdata`), made on the fly from
+                               the built file system: it is never stored on the scratch space
     POST /reboot               body {"target": "bootloader" | ""}
-For development: agent.py --userdata <file or device> --listen 127.0.0.1 (anything else stays the same).
+For development: agent.py --userdata <file> --listen 127.0.0.1 (the size of the image to build).
 """
-import argparse, hashlib, json, os, queue, re, socket, subprocess, sys, threading, time
+import argparse, fcntl, hashlib, json, os, queue, re, socket, struct, subprocess, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+import build_image  # noqa: E402 (sparse_plan / sparse_stream for GET /image)
 VERSION = 1
-CONFIRM = "erase userdata"
 A = None
 state = {"job": None, "state": "idle", "rc": None}
 lines, lock = [], threading.Lock()
@@ -59,17 +63,77 @@ def scratch_ready():
     return os.path.ismount(A.scratch)
 
 
+# --- the scratch space: a disk on the PC (NBD) --------------------------------------------------------------
+NBD_SET_SOCK, NBD_SET_BLKSIZE, NBD_DO_IT, NBD_CLEAR_SOCK, NBD_CLEAR_QUE = 0xab00, 0xab01, 0xab03, 0xab04, 0xab05
+NBD_SET_SIZE_BLOCKS, NBD_DISCONNECT, NBD_SET_TIMEOUT, NBD_SET_FLAGS = 0xab07, 0xab08, 0xab09, 0xab0a
+nbd = {}
+
+
+def recvn(s, n):
+    b = b""
+    while len(b) < n:
+        c = s.recv(n - len(b))
+        if not c:
+            raise OSError("NBD: connection closed during the handshake")
+        b += c
+    return b
+
+
+def nbd_attach(export, dev="/dev/nbd0"):
+    """The PC's export through a tunnel: fixed newstyle handshake here, then the kernel's NBD client takes the
+    socket (NBD_DO_IT runs in a thread for as long as the device is attached)."""
+    subprocess.run(["modprobe", "nbd"], stderr=subprocess.DEVNULL)  # built in on the headset
+    s, done = tunnels.get(timeout=60)
+    s.sendall(b"nbd:" + export.encode() + b"\n")
+    if recvn(s, 3) != b"OK\n":
+        raise OSError("NBD: the PC refused the export")
+    if recvn(s, 16) != b"NBDMAGICIHAVEOPT":
+        raise OSError("NBD: not a newstyle server")
+    recvn(s, 2)
+    s.sendall(struct.pack(">I", 3))  # FIXED_NEWSTYLE | NO_ZEROES
+    s.sendall(b"IHAVEOPT" + struct.pack(">II", 1, len(export)) + export.encode())  # NBD_OPT_EXPORT_NAME
+    size, flags = struct.unpack(">QH", recvn(s, 10))
+    fd = os.open(dev, os.O_RDWR)
+    fcntl.ioctl(fd, NBD_SET_BLKSIZE, 4096)
+    fcntl.ioctl(fd, NBD_SET_SIZE_BLOCKS, size // 4096)
+    fcntl.ioctl(fd, NBD_SET_FLAGS, flags)
+    fcntl.ioctl(fd, NBD_SET_SOCK, s.fileno())
+
+    def serve():
+        try:
+            fcntl.ioctl(fd, NBD_DO_IT)
+        except OSError:
+            pass
+        for op in (NBD_CLEAR_QUE, NBD_CLEAR_SOCK):
+            try:
+                fcntl.ioctl(fd, op)
+            except OSError:
+                pass
+        with lock:
+            lines.append("@agent " + json.dumps({"nbd": export, "detached": True}))
+        nbd.pop(export, None)
+        done.set()
+    nbd[export] = (dev, fd, s)
+    threading.Thread(target=serve, daemon=True).start()
+    for _ in range(50):  # the kernel reads the partition table first
+        if os.path.exists("/sys/block/%s/size" % os.path.basename(dev)) and \
+                int(open("/sys/block/%s/size" % os.path.basename(dev)).read()) > 0:
+            break
+        time.sleep(0.1)
+    return dev
+
+
 def prepare_scratch():
     if scratch_ready():
         return
-    dev = A.userdata
+    dev = nbd_attach("scratch")
     os.makedirs(A.scratch, exist_ok=True)
-    loop = ["-o", "loop"] if os.path.isfile(dev) else []
     label = subprocess.run(["blkid", "-s", "LABEL", "-o", "value", dev], capture_output=True, text=True).stdout.strip()
-    if label != "q1scratch":  # first time: format (no metadata_csum etc.: the 4.4 kernel mounts it)
+    if label != "q1scratch":  # a new disk: format it (no metadata_csum etc.: the 4.4 kernel mounts it)
         subprocess.run(["mkfs.ext4", "-q", "-F", "-L", "q1scratch", "-O", "^orphan_file,^metadata_csum_seed,^metadata_csum",
                         dev], check=True)
-    subprocess.run(["mount", *loop, dev, A.scratch], check=True)
+    # discard: what the build deletes is given back on the PC (the sparse file shrinks)
+    subprocess.run(["mount", "-o", "discard,noatime", dev, A.scratch], check=True)
 
 
 def safe_path(rel):
@@ -101,15 +165,17 @@ def start_job(name, cmd, env=None):
 
 def build_cmd(only):
     w = os.path.join(A.scratch, "work")
+    # every step but "sparse": GET /image makes the sparse image on the fly; inputs deleted once used
+    steps = only or ",".join(s for s in build_image.STEPS if s != "sparse")
     cmd = [sys.executable, os.path.join(HERE, "build_image.py"), "--stage", os.path.join(w, "stage"),
            "--scratch", os.path.join(A.scratch, "build"), "--out", os.path.join(A.scratch, "userdata.simg"),
-           "--size", str(size_of(A.userdata))]
+           "--size", str(size_of(A.userdata)), "--consume", "--only", steps]
     os.makedirs(os.path.join(A.scratch, "build"), exist_ok=True)
-    return cmd + (["--only", only] if only else [])
+    return cmd
 
 
 def prepare_cmd(only):
-    cmd = [sys.executable, os.path.join(HERE, "prepare.py"), "--workdir", os.path.join(A.scratch, "work")]
+    cmd = [sys.executable, os.path.join(HERE, "prepare.py"), "--workdir", os.path.join(A.scratch, "work"), "--move"]
     return cmd + (["--only", only] if only else [])
 
 
@@ -229,16 +295,15 @@ class H(BaseHTTPRequestHandler):
                 chunk = lines[n:n + 2000]
             return self.reply(200, {"next": n + len(chunk), "total": len(lines), "lines": chunk, **state})
         if u.path == "/image":
-            img = os.path.join(A.scratch, "userdata.simg")
-            if state["job"] != "build" or state["state"] != "done" or not os.path.exists(img):
+            raw = os.path.join(A.scratch, "build", "userdata.raw")
+            if state["job"] != "build" or state["state"] != "done" or not os.path.exists(raw):
                 return self.reply(409, {"error": "no image built"})
+            chunks, length, _ = build_image.sparse_plan(raw)
             self.send_response(200)
             self.send_header("Content-Type", "application/octet-stream")
-            self.send_header("Content-Length", str(os.path.getsize(img)))
+            self.send_header("Content-Length", str(length))
             self.end_headers()
-            with open(img, "rb") as f:
-                for b in iter(lambda: f.read(1 << 20), b""):
-                    self.wfile.write(b)
+            build_image.sparse_stream(raw, chunks, self.wfile.write)
             return
         self.reply(404, {"error": "not found"})
 
@@ -279,12 +344,11 @@ class H(BaseHTTPRequestHandler):
     def do_POST(self):
         u = urlparse(self.path)
         if u.path == "/scratch":
-            if self.body().get("confirm") != CONFIRM:
-                return self.reply(403, {"error": "confirmation text missing"})
+            self.body()
             try:
                 prepare_scratch()
-            except subprocess.CalledProcessError as e:
-                return self.reply(500, {"error": str(e)})
+            except (OSError, queue.Empty, subprocess.CalledProcessError) as e:
+                return self.reply(500, {"error": "scratch space: %s" % e})
             return self.reply(200, {"scratch": True})
         if u.path in ("/build", "/prepare"):
             if not scratch_ready():
@@ -305,6 +369,11 @@ class H(BaseHTTPRequestHandler):
             subprocess.run(["sync"])
             if scratch_ready():
                 subprocess.run(["umount", A.scratch])
+            for dev, fd, _ in list(nbd.values()):
+                try:
+                    fcntl.ioctl(fd, NBD_DISCONNECT)
+                except OSError:
+                    pass
             time.sleep(0.5)
             os.execv("/bin/rb", ["rb"] + ([target] if target else [])) if os.path.exists("/bin/rb") else subprocess.run(["reboot", "-f"])
             return
@@ -319,7 +388,7 @@ def main():
     ap.add_argument("--userdata", help="device or file (default: the partition named userdata)")
     ap.add_argument("--scratch", default="/scratch")
     A = ap.parse_args()
-    A.userdata = A.userdata or userdata_dev()
+    A.userdata = A.userdata or userdata_dev()  # only its size is read
     if not A.userdata:
         sys.exit("no userdata partition")
     threading.Thread(target=proxy_server, daemon=True).start()

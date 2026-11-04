@@ -20,10 +20,13 @@ import (
 	"unsafe"
 )
 
-const imageBytes = 12 << 30 // the sparse image that comes back from the headset (~9-10 GB)
+// room needed on the PC: the headset's scratch disk (downloads, the image being built: ~20 GB at most, given
+// back as the build goes) and the sparse image that comes back (~9-10 GB)
+const needBytes = 30e9
 
 // Install: the whole sequence once the user accepted the wipe. Steps (one progress bar each on the page):
 // files, boot, scratch, dl:* (prepare.py on the headset), build:* (build_image.py), download, flash, cleanup.
+// The headset's storage is only written by the final flash: its scratch space is a file here (nbd.go).
 func (a *App) Install() error {
 	serial := a.serial
 	if serial == "" {
@@ -43,6 +46,7 @@ func (a *App) Install() error {
 	if err := getJSON(prebuiltBase+"manifest.json", &man); err != nil {
 		return fmt.Errorf("prebuilt files: %w", err)
 	}
+	os.MkdirAll(a.big, 0o755)
 	files := []string{"installer.img", "boot-native-holo.img"}
 	var total, done int64
 	for _, f := range files {
@@ -50,7 +54,7 @@ func (a *App) Install() error {
 	}
 	for _, f := range files {
 		m := man.Files[f]
-		if err := download(prebuiltBase+f, filepath.Join(a.work, f), m.Sha256, func(n int64) {
+		if err := download(prebuiltBase+f, filepath.Join(a.big, f), m.Sha256, func(n int64) {
 			a.progress("files", done+n, total)
 		}); err != nil {
 			return fmt.Errorf("%s: %w", f, err)
@@ -67,25 +71,25 @@ func (a *App) Install() error {
 	if err := a.dev.WaitFastboot(serial, 90*time.Second); err != nil {
 		return err
 	}
-	if out, err := a.dev.Fastboot(serial, "boot", filepath.Join(a.work, "installer.img")); err != nil {
+	if out, err := a.dev.Fastboot(serial, "boot", filepath.Join(a.big, "installer.img")); err != nil {
 		return fmt.Errorf("fastboot boot: %s", out)
 	}
-	ag := &Agent{base: agentURL}
+	scratch := filepath.Join(a.big, "scratch.img")
+	ag := &Agent{base: agentURL, scratch: scratch}
 	if err := ag.Wait(3 * time.Minute); err != nil {
 		return errors.New("the installer did not come up on the USB network (is the USB NCM driver installed?)")
 	}
 	step("boot", "done")
 
-	// from here userdata is wiped: the user accepted it on the warning page
-	step("scratch", "start")
-	if err := ag.Post("/scratch", map[string]any{"confirm": "erase userdata"}, nil); err != nil {
-		return err
-	}
-	step("scratch", "done")
-
+	// the headset's way out (downloads) and its scratch disk: connections we open to it
 	for i := 0; i < 4; i++ {
 		go ag.Tunnel()
 	}
+	step("scratch", "start")
+	if err := ag.Post("/scratch", map[string]any{}, nil); err != nil {
+		return err
+	}
+	step("scratch", "done")
 	if err := a.follow(ag, "/prepare", "dl:"); err != nil {
 		return err
 	}
@@ -94,19 +98,21 @@ func (a *App) Install() error {
 	}
 
 	step("download", "start")
-	img := filepath.Join(a.work, "userdata.simg")
+	img := filepath.Join(a.big, "userdata.simg")
 	if err := ag.Image(img, func(n, t int64) { a.progress("download", n, t) }); err != nil {
 		return err
 	}
 	step("download", "done")
 
-	// flash: back to the bootloader (the agent reboots into it), then only these partitions
+	// flash: back to the bootloader (the agent unmounts and detaches the scratch disk first), the scratch
+	// file goes, then only these partitions are written
 	step("flash", "start")
 	ag.Post("/reboot", map[string]any{"target": "bootloader"}, nil)
 	if err := a.dev.WaitFastboot(serial, 2*time.Minute); err != nil {
 		return err
 	}
-	boot := filepath.Join(a.work, "boot-native-holo.img")
+	os.Remove(scratch)
+	boot := filepath.Join(a.big, "boot-native-holo.img")
 	cmds := [][]string{
 		{"flash", "boot_a", boot}, {"flash", "boot_b", boot},
 		{"flash", "userdata", img},
@@ -124,9 +130,7 @@ func (a *App) Install() error {
 	step("flash", "done")
 
 	step("cleanup", "start")
-	for _, f := range []string{"userdata.simg", "installer.img", "boot-native-holo.img"} {
-		os.Remove(filepath.Join(a.work, f))
-	}
+	os.RemoveAll(a.big)
 	step("cleanup", "done")
 	a.emit(map[string]any{"type": "done"})
 	return nil
@@ -180,7 +184,7 @@ func (a *App) follow(ag *Agent, path, prefix string) error {
 
 // --- the agent (installer/agent.py) --------------------------------------------------------------------
 
-type Agent struct{ base string }
+type Agent struct{ base, scratch string }
 
 var client = &http.Client{Timeout: 10 * time.Minute}
 
@@ -287,6 +291,11 @@ func (g *Agent) tunnelOnce(host string) error {
 		c.Close()
 		return err
 	}
+	if strings.TrimSpace(target) == "nbd:scratch" { // the scratch disk, served from here
+		c.Write([]byte("OK\n"))
+		go serveNBD(c, br, g.scratch)
+		return nil
+	}
 	t, err := net.DialTimeout("tcp", strings.TrimSpace(target), 30*time.Second)
 	if err != nil {
 		c.Write([]byte("NO\n"))
@@ -382,10 +391,10 @@ func fileSha256(p string) (string, error) {
 }
 
 var (
-	kernel32       = syscall.NewLazyDLL("kernel32.dll")
-	getDiskFreeEx  = kernel32.NewProc("GetDiskFreeSpaceExW")
-	user32         = syscall.NewLazyDLL("user32.dll")
-	messageBoxW    = user32.NewProc("MessageBoxW")
+	kernel32      = syscall.NewLazyDLL("kernel32.dll")
+	getDiskFreeEx = kernel32.NewProc("GetDiskFreeSpaceExW")
+	user32        = syscall.NewLazyDLL("user32.dll")
+	messageBoxW   = user32.NewProc("MessageBoxW")
 )
 
 func freeSpace(dir string) (uint64, error) {

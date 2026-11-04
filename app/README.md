@@ -12,8 +12,11 @@ adb and fastboot are embedded.
 | Install | one progress bar per step: installer files, micro Linux started (`fastboot boot`), scratch space, the headset's downloads (`prepare.py`), the build (`build_image.py`), image copied back, flash, cleanup |
 
 The PC never accepts a connection: the headset downloads through tunnels the app opens to it (`GET /tunnel`
-of [`installer/agent.py`](../installer/agent.py)), so there is no firewall prompt and nothing to set up.
-Only the finished image (~9 GB) is stored on the PC, in `%TEMP%\quest1-steamos`, and deleted after flashing.
+of [`installer/agent.py`](../installer/agent.py)), so there is no firewall prompt and nothing to set up. Its
+scratch space is a sparse file here, served through a tunnel as a network block device ([`nbd.go`](nbd.go)):
+the headset is only written by the final flash. About 30 GB on the PC while installing, in
+`%TEMP%\quest1-steamos\work`, or `X:\TEMP-STEAMOS-QUEST1` on a drive the user picks when the system drive is
+too full; deleted at the end (the scratch file as soon as the image is back).
 
 Flashed partitions: `boot_a`, `boot_b`, `userdata`; `system_a`/`system_b` erased; slot `a`. Nothing else.
 

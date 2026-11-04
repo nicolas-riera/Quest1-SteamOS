@@ -6,9 +6,11 @@ owner's server, into `%TEMP%\quest1-steamos`, and deletes that folder when it is
 
 ## What the user does
 
-1. Downloads `Quest1-SteamOS.exe` (a few MB) from the GitHub releases and runs it.
+1. Downloads `Quest1-SteamOS.exe` (about 20 MB, adb and fastboot included) from the GitHub releases and runs it.
 2. **Welcome page:** what the app does, what is needed (a Quest 1 on Android with developer mode and USB
-   debugging, an **unlocked bootloader** (how to unlock it), a USB cable, ~30 GB free on the PC (checked before
+   debugging, an **unlocked bootloader** (how to unlock it), a USB cable, ~30 GB free on the PC: the scratch disk
+   (~20 GB at most) and the image; when the system drive lacks it, the user picks another drive (a drive list,
+   no folder: `X:\TEMP-STEAMOS-QUEST1`, else `%TEMP%\quest1-steamos`), deleted at the end (checked before
    anything starts), a charged headset), and a "Start" button.
 3. **Checks** (the user plugs the headset in):
    - `adb`: a Quest 1 (`ro.product.device` = `monterey`) on Meta's last build `49845030443200410` (the
@@ -33,9 +35,13 @@ and the Holo rootfs is a `tar.zst`. So **the headset builds the image, the PC fl
 `fastboot boot`s a micro Linux (our kernel + an installer initramfs, in RAM only, nothing flashed), which
 brings up the USB network the project already uses (`192.168.77.1`, NCM/RNDIS; Windows has the drivers).
 The micro Linux downloads everything itself (`prepare.py`, through tunnels the app opens to it: the PC
-only makes outgoing connections, so no firewall prompt), builds the system image with real tools (GNU tar
-with xattrs, zstd, e2fsprogs, btrfs-progs), the app copies the image back to the PC (only that image is
-stored on the PC, ~9 GB), reboots the headset to its bootloader and flashes everything with fastboot. All partition writes are plain fastboot
+only makes outgoing connections, so no firewall prompt) and builds the system image with real tools (GNU tar
+with xattrs, zstd, e2fsprogs, btrfs-progs). It works on a disk that is a file on the PC: a sparse file the app
+serves as a network block device (NBD) through one of the same tunnels, formatted and mounted by the headset
+with `discard` (what the build deletes is given back on the PC). **The headset's storage is never written
+before the final flash**, whatever its size (64 or 128 GB) and content, which also keeps later updates and a
+dual boot possible. The sparse image is streamed back to the PC, the app reboots the headset to its bootloader
+and flashes everything with fastboot. All partition writes are plain fastboot
 flashes from the PC, and the PC keeps the finished image: re-flashing or repairing needs no rebuild.
 (Recovery "sideload" cannot be used: it only takes OTA packages signed by Meta.)
 
@@ -60,8 +66,8 @@ flashes from the PC, and the PC keeps the finished image: re-flashing or repairi
 2. **Check and boot the installer:** `adb reboot bootloader`, `fastboot boot installer.img`: the micro Linux
    ([`micro-init`](micro-init), built by `tools/build-boot.sh installer`: our kernel + Alpine aarch64 with
    python3, GNU tar, zstd, e2fsprogs, btrfs-progs; 36 MB, in RAM only) brings up the USB network and runs
-   [`agent.py`](agent.py) on `http://192.168.77.1:8077`. Nothing is written until the app asks for the
-   scratch space (`POST /scratch` with the confirmation text): `userdata` is formatted and mounted.
+   [`agent.py`](agent.py) on `http://192.168.77.1:8077`. Its scratch space (`POST /scratch`) is the PC's
+   disk (NBD export `scratch`, kept between attempts so a retry resumes); nothing is written to the headset.
 3. **Build on the headset:** the app uploads the staged files (resumable: files already there with the same
    sha256 are skipped), starts the build and shows its progress, then downloads the sparse image
    ([`remote_build.py`](remote_build.py) is the reference client). [`build_image.py`](build_image.py)

@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
 """Installer (PC side): have the headset download everything and build the image. Talks to installer/agent.py
-in the micro Linux (fastboot-booted, USB network): scratch space, prepare.py run on the headset (its downloads go
-through tunnels this side opens: no incoming connection on the PC), build with progress, download of the sparse
-image. The reference for the app; standard library only.
+in the micro Linux (fastboot-booted, USB network). This side only makes outgoing connections ("tunnels") that the
+headset uses for its downloads and for its scratch space, a sparse file here served as a network block device
+(NBD): the headset's own storage is never written. Then prepare.py and the build run there, with progress, and
+the sparse image comes back. The reference for the app; standard library only.
 
-    remote_build.py --out userdata.simg [--agent http://192.168.77.1:8077] [--prepare-only STEPS] [--only STEPS]
+    remote_build.py --out userdata.simg --scratch-file scratch.img [--agent http://192.168.77.1:8077]
+                    [--prepare-only STEPS] [--only STEPS]
     remote_build.py --stage DIR ...    development: upload a stage prepare.py made on the PC instead
 
 Uploaded files already on the headset with the same sha256 are not sent again (an interrupted install resumes).
 Progress for the app: the build's own "@step"/"@progress" lines are passed through, plus "@step"/"@progress"
 for the upload ("upload") and the download ("download").
 """
-import argparse, hashlib, http.client, json, os, socket, sys, threading, time
+import argparse, hashlib, http.client, json, os, socket, struct, sys, threading, time
 from urllib.parse import urlparse, quote
 
-CONFIRM = "erase userdata"
+SCRATCH_SIZE = 64 << 30  # the scratch disk's size (a sparse file: only what is written takes room)
+SCRATCH_FILE = None
 
 
 def event(kind, **kw):
@@ -130,6 +133,70 @@ def splice(a, b):
     b.close()
 
 
+def recvn(s, n):
+    b = b""
+    while len(b) < n:
+        c = s.recv(n - len(b))
+        if not c:
+            raise OSError("closed")
+        b += c
+    return b
+
+
+def nbd_serve(s, path, size):
+    """NBD server (fixed newstyle, one export) on a tunnel: the headset's scratch disk is this sparse file."""
+    if not os.path.exists(path):
+        with open(path, "wb") as f:
+            f.truncate(size)
+    f = open(path, "r+b")
+    try:
+        s.sendall(b"NBDMAGICIHAVEOPT" + struct.pack(">H", 3))
+        recvn(s, 4)
+        magic, opt, n = struct.unpack(">8sII", recvn(s, 16))
+        recvn(s, n)
+        s.sendall(struct.pack(">QH", size, 1 | 4 | 32))  # HAS_FLAGS | SEND_FLUSH | SEND_TRIM
+        while True:
+            _, _, typ, handle, off, length = struct.unpack(">IHH8sQI", recvn(s, 28))
+            reply = struct.pack(">II8s", 0x67446698, 0, handle)
+            if typ == 0:  # read
+                f.seek(off)
+                data = f.read(length)
+                s.sendall(reply + data + bytes(length - len(data)))
+            elif typ == 1:  # write
+                data = recvn(s, length)
+                f.seek(off)
+                f.write(data)
+                s.sendall(reply)
+            elif typ == 2:  # disconnect
+                return
+            elif typ == 3:  # flush
+                f.flush()
+                os.fsync(f.fileno())
+                s.sendall(reply)
+            elif typ == 4:  # trim: give the room back (punch a hole), zeros as a fallback
+                f.flush()
+                if not punch_hole(f, off, length):
+                    f.seek(off)
+                    f.write(bytes(length))
+                s.sendall(reply)
+            else:
+                s.sendall(struct.pack(">II8s", 0x67446698, 22, handle))  # EINVAL
+    except OSError:
+        pass
+    finally:
+        f.close()
+        s.close()
+
+
+def punch_hole(f, off, length):
+    try:
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        return libc.fallocate(f.fileno(), 3, ctypes.c_long(off), ctypes.c_long(length)) == 0  # PUNCH_HOLE|KEEP_SIZE
+    except (OSError, AttributeError):
+        return False
+
+
 def tunnel_worker(ag):
     """Lend the headset one connection at a time to the internet: only outgoing connections from the PC."""
     while True:
@@ -152,6 +219,10 @@ def tunnel_worker(ag):
                     raise OSError("tunnel closed")
                 buf += b
             target, buf = buf.split(b"\n", 1)
+            if target.startswith(b"nbd:"):  # the scratch disk, served here
+                s.sendall(b"OK\n")
+                threading.Thread(target=nbd_serve, args=(s, SCRATCH_FILE, SCRATCH_SIZE), daemon=True).start()
+                continue
             host, port = target.decode().rsplit(":", 1)
             try:
                 t = socket.create_connection((host.strip("[]"), int(port)), timeout=30)
@@ -211,17 +282,20 @@ def main():
     ap.add_argument("--agent", default="http://192.168.77.1:8077")
     ap.add_argument("--stage", help="development: upload this prepare.py stage (else the headset downloads)")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--scratch-file", required=True, help="the headset's scratch disk (sparse file, kept for a retry)")
     ap.add_argument("--prepare-only", help="prepare.py steps run on the headset (default: all)")
     ap.add_argument("--only", help="build_image.py steps (default: all)")
     a = ap.parse_args()
     ag = Agent(a.agent)
     info = ag.ok("GET", "/info")
     print("agent:", info, flush=True)
-    ag.ok("POST", "/scratch", {"confirm": CONFIRM}, timeout=600)
+    global SCRATCH_FILE
+    SCRATCH_FILE = a.scratch_file
+    start_tunnels(ag)
+    ag.ok("POST", "/scratch", {}, timeout=600)
     if a.stage:
         upload(ag, a.stage)
-    else:  # the app's way: the headset downloads everything itself, through tunnels the PC opens
-        start_tunnels(ag)
+    else:  # the app's way: the headset downloads everything itself, through the tunnels
         follow(ag, "/prepare", {"only": a.prepare_only})
     follow(ag, "/build", {"only": a.only} if a.only else {})
     download(ag, a.out)

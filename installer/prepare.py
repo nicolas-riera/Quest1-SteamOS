@@ -23,6 +23,7 @@ import argparse, hashlib, importlib.util, io, json, lzma, os, re, shutil, sys, t
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 LOCAL_PREBUILT = None
+MOVE = False  # --move: no copy kept in dl/ (the headset's run: the build deletes what it used)
 UA = {"User-Agent": "Quest1-SteamOS-installer"}
 GB = 1 << 30
 IMAGE_BYTES = 12 * GB    # the sparse userdata image that comes back from the headset (~8-10 GB)
@@ -85,10 +86,13 @@ def fetch(url, dest, want=None, prog=None, size=None):
 
 
 def place(src, dst):
-    """Put a downloaded file into stage/ without a second copy (hard link, else copy)."""
+    """Put a downloaded file into stage/ without a second copy (hard link, else copy; moved with --move)."""
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     if os.path.exists(dst):
         os.remove(dst)
+    if MOVE:
+        os.replace(src, dst)
+        return
     try:
         os.link(src, dst)
     except OSError:
@@ -135,7 +139,6 @@ def step_repo(src, dl, stage, rep, prog):
     if os.path.exists(z):
         os.remove(z)  # a branch moves: always fetch
     rep["repo"] = {"ref": src["ref"], "sha256": fetch(url, z, prog=prog)}
-    place(z, os.path.join(stage, "repo.zip"))  # the build unpacks it again: Windows loses the Unix modes
     out = os.path.join(stage, "repo")
     shutil.rmtree(out, ignore_errors=True)
     with zipfile.ZipFile(z) as f:
@@ -147,6 +150,7 @@ def step_repo(src, dl, stage, rep, prog):
                 os.makedirs(os.path.dirname(p), exist_ok=True)
                 with f.open(m) as a, open(p, "wb") as b:
                     shutil.copyfileobj(a, b)
+    place(z, os.path.join(stage, "repo.zip"))  # the build unpacks it again: Windows loses the Unix modes
 
 
 def step_file(name):
@@ -338,9 +342,10 @@ def main():
     ap.add_argument("--only", help="comma-separated steps: " + ",".join(s[0] for s in STEPS))
     ap.add_argument("--cleanup", action="store_true", help="delete the work folder and exit")
     ap.add_argument("--prebuilt", help="development: take our binaries from this local folder")
+    ap.add_argument("--move", action="store_true", help="move downloads into stage/ (no cache kept in dl/)")
     a = ap.parse_args()
-    global LOCAL_PREBUILT
-    LOCAL_PREBUILT = a.prebuilt
+    global LOCAL_PREBUILT, MOVE
+    LOCAL_PREBUILT, MOVE = a.prebuilt, a.move
     if a.cleanup:
         shutil.rmtree(a.workdir, ignore_errors=True)
         log("removed", a.workdir)

@@ -27,6 +27,7 @@
   .group { color:var(--dim); font-size:12px; text-transform:uppercase; letter-spacing:.06em; margin:16px 0 4px; }
   pre { background:#0d0f12; color:#b8bec7; font-size:12px; padding:12px; border-radius:8px; max-height:220px; overflow:auto; white-space:pre-wrap; }
   .page { display:none; } .page.on { display:block; }
+  select { background:#2a2f37; color:var(--text); border:1px solid #3a404a; border-radius:6px; padding:6px 8px; font:inherit; margin-top:6px; }
 </style>
 </head>
 <body>
@@ -41,13 +42,15 @@
       <li>An <b>unlocked bootloader</b> (unlocking it wipes the headset):
         <a onclick="q1Open('https://github.com/nicolas-riera/Quest1-SteamOS')">see the project page</a>.</li>
       <li>A USB data cable, the headset charged to 50 % or more.</li>
-      <li>About 15 GB free on this PC and an internet connection (about 7 GB to download).</li>
+      <li>About 30 GB free on this PC while installing (another drive can be picked) and an internet connection
+        (about 7 GB to download). Everything is deleted at the end.</li>
     </ul>
   </div>
   <div class="card">
     <h2 style="margin-top:0">What happens</h2>
     <p style="margin:0">The installer checks the headset, then downloads SteamOS and Steam from Valve, Meta's tracking
-    software from Meta's last update and this project's files, builds the system on the headset and installs it.
+    software from Meta's last update and this project's files, builds the system on the headset (it works on
+    files kept on this PC: nothing is written to the headset until the very end) and installs it.
     Nothing from Valve or Meta is shipped with this program. It takes about an hour; keep the headset plugged in.</p>
   </div>
   <div class="row"><button onclick="show('checks'); q1Check()">Start</button></div>
@@ -96,11 +99,18 @@ const GROUPS = [
     ["build:native","Quest 1 support"],["build:ours","Project files"],["build:finish","Checking"],["build:sparse","Packing"]]],
   ["Installing", [["download","Copying the system to this PC"],["flash","Writing the system to the headset"],["cleanup","Cleaning up"]]]];
 const $ = id => document.getElementById(id);
+const states = {};
+function checksDone() { return CHECKS.every(([id]) => states[id] === 'ok'); }
+function pickDrive(root) {
+  if (!root) return;
+  q1SetDrive(root).then(ok => { if (ok) { $('next').disabled = !checksDone(); } });
+}
 function show(p) { document.querySelectorAll('.page').forEach(e => e.classList.toggle('on', e.id === p)); }
 function resetChecks() {
   $('checklist').innerHTML = CHECKS.map(([id, t]) => `<div class="check" id="c-${id}"><span class="ico">·</span>
     <div><div>${t}</div><div class="detail"></div></div></div>`).join('');
   $('next').disabled = $('retry').disabled = true;
+  for (const k in states) delete states[k];
 }
 function buildBars() {
   $('bars').innerHTML = GROUPS.map(([g, items]) => `<div class="group">${g}</div>` + items.map(([id, t]) =>
@@ -115,8 +125,20 @@ const q1 = { on(e) {
     c.querySelector('.ico').className = 'ico ' + e.state;
     c.querySelector('.ico').textContent = {ok:'✓', fail:'✕', run:'…'}[e.state];
     c.querySelector('.detail').textContent = e.detail || '';
+    states[e.id] = e.state;
+    if (e.drives && e.drives.length) {
+      const sel = document.createElement('select');
+      sel.innerHTML = '<option value="">Choose a drive</option>' + e.drives.map(d =>
+        `<option value="${d.root}">${d.root}  (${(d.free/1e9).toFixed(0)} GB free)</option>`).join('');
+      sel.onchange = () => pickDrive(sel.value);
+      c.querySelector('.detail').appendChild(document.createElement('br'));
+      c.querySelector('.detail').appendChild(sel);
+    } else if (e.drives) {
+      c.querySelector('.detail').textContent += ' No other drive has enough room: free some space and check again.';
+    }
+    if ($('retry') && !$('retry').disabled) $('next').disabled = !checksDone();
   } else if (e.type === 'checks') {
-    $('next').disabled = !e.ok; $('retry').disabled = false;
+    $('next').disabled = !checksDone(); $('retry').disabled = false;
   } else if (e.type === 'step') {
     const b = bar(e.step); if (!b) return;
     if (e.status === 'done') b.classList.add('done'); else b.querySelector('.fill').style.width = '2%';

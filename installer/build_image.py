@@ -142,6 +142,17 @@ class Build:
                 unzip(z, self._repo, strip=1)
         return self._repo
 
+    CONSUMES = {"holo": ["holo"], "pkgs": ["pkgs"], "frame": ["frame"], "steam": ["steam"], "meta": ["meta"],
+                "native": ["prebuilt/native-arm64.tar.zst"]}
+
+    def consume(self, step):
+        for rel in self.CONSUMES.get(step, []):
+            p = os.path.join(self.stage, rel)
+            if os.path.isdir(p):
+                shutil.rmtree(p, ignore_errors=True)
+            elif os.path.exists(p):
+                os.remove(p)
+
     def mounted(self):
         return os.path.ismount(self.mnt)
 
@@ -231,10 +242,15 @@ class Build:
                     out, pos = head, 0
                 s, e = max(rng[0], pos), min(rng[1], pos + len(out))
                 if s < e:
-                    o.write(out[s - pos:e - pos])
+                    piece = out[s - pos:e - pos]
+                    if piece.count(0) == len(piece):
+                        o.seek(len(piece), 1)  # empty space of the partition: a hole
+                    else:
+                        o.write(piece)
                 pos += len(out)
                 if pos >= rng[1]:
                     break
+            o.truncate()
         m = os.path.join(self.a.scratch, "frame")
         os.makedirs(m, exist_ok=True)
         local = os.path.join(self.mnt, "usr", "local", "lib")
@@ -397,8 +413,9 @@ def data_extents(path):
         os.close(fd)
 
 
-def write_sparse(raw, out, prog, blk=4096, chunk=64 << 20):
-    """Android sparse image: RAW chunks for the data regions, DONT_CARE for the holes."""
+def sparse_plan(raw, blk=4096, chunk=64 << 20):
+    """The chunks of an Android sparse image of raw: RAW for the data regions, DONT_CARE for the holes.
+    Returns (chunks, length of the sparse image, bytes of data)."""
     size = os.path.getsize(raw)
     assert size % blk == 0
     regions = []
@@ -408,7 +425,6 @@ def write_sparse(raw, out, prog, blk=4096, chunk=64 << 20):
             regions[-1][1] = max(regions[-1][1], e)
         else:
             regions.append([s, e])
-    prog.total = sum(e - s for s, e in regions)
     chunks, pos = [], 0
     for s, e in regions:
         if s > pos:
@@ -418,22 +434,37 @@ def write_sparse(raw, out, prog, blk=4096, chunk=64 << 20):
         pos = e
     if pos < size:
         chunks.append(("skip", pos, size))
-    with open(raw, "rb") as r, open(out, "wb") as o:
-        o.write(struct.pack("<IHHHHIIII", 0xED26FF3A, 1, 0, 28, 12, blk, size // blk, len(chunks), 0))
+    data = sum(e - s for k, s, e in chunks if k == "raw")
+    return chunks, 28 + 12 * len(chunks) + data, data
+
+
+def sparse_stream(raw, chunks, write, prog=None, blk=4096):
+    """Write the sparse image of raw through write(bytes): to a file, or straight to the PC (agent.py)."""
+    size = os.path.getsize(raw)
+    write(struct.pack("<IHHHHIIII", 0xED26FF3A, 1, 0, 28, 12, blk, size // blk, len(chunks), 0))
+    with open(raw, "rb") as r:
         for kind, s, e in chunks:
             nblk = (e - s) // blk
             if kind == "skip":
-                o.write(struct.pack("<HHII", 0xCAC3, 0, nblk, 12))
-            else:
-                o.write(struct.pack("<HHII", 0xCAC1, 0, nblk, 12 + (e - s)))
-                r.seek(s)
-                left = e - s
-                while left:
-                    b = r.read(min(left, 8 << 20))
-                    o.write(b)
-                    left -= len(b)
+                write(struct.pack("<HHII", 0xCAC3, 0, nblk, 12))
+                continue
+            write(struct.pack("<HHII", 0xCAC1, 0, nblk, 12 + (e - s)))
+            r.seek(s)
+            left = e - s
+            while left:
+                b = r.read(min(left, 8 << 20))
+                write(b)
+                left -= len(b)
+                if prog:
                     prog.add(len(b))
-    log("sparse image: %s, %.2f GB of data in %d chunks" % (out, prog.total / GB, len(chunks)))
+
+
+def write_sparse(raw, out, prog):
+    chunks, length, data = sparse_plan(raw)
+    prog.total = data
+    with open(out, "wb") as o:
+        sparse_stream(raw, chunks, o.write, prog)
+    log("sparse image: %s, %.2f GB of data in %d chunks" % (out, data / GB, len(chunks)))
 
 
 STEPS = ["format", "holo", "setup", "pkgs", "frame", "steam", "meta", "native", "ours", "finish", "sparse"]
@@ -446,6 +477,7 @@ def main():
     ap.add_argument("--scratch", default=tempfile.gettempdir())
     ap.add_argument("--size", type=int, default=USERDATA_BYTES)
     ap.add_argument("--only", help="comma-separated steps: " + ",".join(STEPS))
+    ap.add_argument("--consume", action="store_true", help="delete each staged input once its step used it")
     a = ap.parse_args()
     if os.geteuid() != 0:
         sys.exit("run as root")
@@ -461,6 +493,8 @@ def main():
             log("==", name)
             getattr(b, name)(Progress(name, 1))
             event("step", step=name, status="done")
+            if a.consume:
+                b.consume(name)
     finally:
         if b.mounted():
             subprocess.run(["umount", b.mnt])

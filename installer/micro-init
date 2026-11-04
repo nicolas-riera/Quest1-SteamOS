@@ -15,6 +15,15 @@ mount -t configfs configfs /sys/kernel/config
 exec >/dev/kmsg 2>&1
 log() { echo "q1-installer: $*"; }
 
+# panels off at once: the bootloader's last frame (Meta's logo) must not stay lit for the whole install
+# (burn-in); black frame first, then blank, as holo-panel-off.service does on the installed system
+for i in 1 2 3 4 5 6 7 8 9 10; do [ -e /dev/fb0 ] && break; sleep 0.3; done
+if [ -e /dev/fb0 ]; then
+	echo 0 > /sys/class/graphics/fb0/blank
+	dd if=/dev/zero of=/dev/fb0 bs=1M count=35 2>/dev/null
+	echo 4 > /sys/class/graphics/fb0/blank && log "panels off"
+fi
+
 G=/sys/kernel/config/usb_gadget/g1
 mkdir -p $G && cd $G
 echo 0x1d6b > idVendor; echo 0x0104 > idProduct; echo 0x0200 > bcdUSB

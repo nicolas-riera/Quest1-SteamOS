@@ -13,6 +13,12 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unsafe"
+)
+
+var (
+	getLogicalDrives = kernel32.NewProc("GetLogicalDrives")
+	getDriveType     = kernel32.NewProc("GetDriveTypeW")
 )
 
 // Google's platform-tools for Windows (adb, fastboot and their DLLs), fetched by build.sh, never committed.
@@ -124,6 +130,39 @@ func (d *Device) Getvar(serial, name string) string {
 	return strings.TrimSpace(m[1])
 }
 
+// Drives: the fixed drives other than the system one with enough room (for the drive list).
+func (a *App) Drives() []map[string]any {
+	var out []map[string]any
+	sys := strings.ToUpper(filepath.VolumeName(a.work))
+	mask, _, _ := getLogicalDrives.Call()
+	for i := 0; i < 26; i++ {
+		if mask&(1<<i) == 0 {
+			continue
+		}
+		root := string(rune('A'+i)) + ":\\"
+		p, _ := syscall.UTF16PtrFromString(root)
+		if t, _, _ := getDriveType.Call(uintptr(unsafe.Pointer(p))); t != 3 || root[:2] == sys { // DRIVE_FIXED
+			continue
+		}
+		if free, err := freeSpace(root); err == nil && free >= needBytes {
+			out = append(out, map[string]any{"root": root, "free": free})
+		}
+	}
+	return out
+}
+
+// SetDrive: work in X:\TEMP-STEAMOS-QUEST1 (deleted at the end); false if the drive is unfit.
+func (a *App) SetDrive(root string) bool {
+	for _, d := range a.Drives() {
+		if d["root"] == root {
+			a.big = filepath.Join(root, "TEMP-STEAMOS-QUEST1")
+			a.check("space", "ok", fmt.Sprintf("Working on %s (%.0f GB free).", root, float64(d["free"].(uint64))/1e9))
+			return true
+		}
+	}
+	return false
+}
+
 // --- the checks page --------------------------------------------------------------------------------------
 
 func (a *App) check(id, state, detail string) {
@@ -187,11 +226,14 @@ func (a *App) Check() error {
 	}
 
 	a.check("space", "run", "")
-	free, err := freeSpace(a.work)
-	if need := uint64(imageBytes * 115 / 100); err != nil || free < need {
-		fail("space", fmt.Sprintf("Not enough free space on the drive of %s: %.1f GB needed, %.1f GB free.",
-			a.work, float64(need)/1e9, float64(free)/1e9))
+	if free, err := freeSpace(a.work); err != nil || free < needBytes {
+		// the system drive is too full: the user may pick another drive (page: a drive list, no folders)
+		a.emit(map[string]any{"type": "check", "id": "space", "state": "fail", "drives": a.Drives(),
+			"detail": fmt.Sprintf("%.0f GB are needed while installing and only %.1f GB are free on %s. "+
+				"Pick another drive:", float64(needBytes)/1e9, float64(free)/1e9, filepath.VolumeName(a.work))})
+		ok = false
 	} else {
+		a.big = filepath.Join(a.work, "work")
 		a.check("space", "ok", fmt.Sprintf("%.0f GB free on the PC.", float64(free)/1e9))
 	}
 
