@@ -87,8 +87,17 @@ class Progress:
             event("progress", step=self.step, done=self.done, total=self.total)
 
 
-def upload(ag, stage):
+# the stage directories each build step reads (the build deletes them as it goes: --consume)
+STEP_INPUTS = {"holo": "holo", "pkgs": "pkgs", "frame": "frame", "steam": "steam", "meta": "meta", "native": "prebuilt"}
+
+
+def upload(ag, stage, only=None):
+    """The stage to the headset; with only (build steps), what those steps read and the top-level files (repo
+    zip, report): a build resumed from a step does not get back what earlier steps used up."""
     files = stage_files(stage)
+    if only:
+        tops = {STEP_INPUTS[s] for s in only.split(",") if s in STEP_INPUTS}
+        files = [f for f in files if "/" not in f or f.split("/")[0] in tops]
     prog = Progress("upload", sum(os.path.getsize(os.path.join(stage, f)) for f in files))
     event("step", step="upload", status="start")
     for rel in files:
@@ -346,7 +355,7 @@ def main():
     start_tunnels(ag)
     ag.ok("POST", "/scratch", {"time": time.time()}, timeout=600)
     if a.stage:
-        upload(ag, a.stage)
+        upload(ag, a.stage, a.only)
     else:  # the app's way: the headset downloads everything itself, through the tunnels
         follow(ag, "/prepare", {"only": a.prepare_only})
     follow(ag, "/build", {"only": a.only} if a.only else {})

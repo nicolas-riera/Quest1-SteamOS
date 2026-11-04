@@ -24,7 +24,7 @@ Steps:
     finish  unmount, e2fsck
     sparse  Android sparse image
 """
-import argparse, bz2, json, os, re, shutil, stat, struct, subprocess, sys, tempfile, time, zipfile
+import argparse, bz2, json, os, re, shutil, signal, stat, struct, subprocess, sys, tempfile, time, zipfile
 
 import btrfsread  # noqa: E402 (next to this file)
 
@@ -214,8 +214,21 @@ class Build:
             if p.wait():
                 sys.exit("%s failed (%d)" % (" ".join(cmd), p.returncode))
         finally:
+            self.kill_chrooted()
             for d in reversed(done):
                 subprocess.run(["umount", "-l", d])
+
+    def kill_chrooted(self):
+        """Processes a chroot command left running (gpg-agent, from pacman-key --init): they keep the image busy
+        and its final unmount fails."""
+        root = os.path.realpath(self.mnt)
+        for pid in filter(str.isdigit, os.listdir("/proc")):
+            try:
+                if os.readlink("/proc/%s/root" % pid) == root:
+                    log("killing %s left in the image: %s" % (pid, open("/proc/%s/comm" % pid).read().strip()))
+                    os.kill(int(pid), signal.SIGKILL)
+            except OSError:
+                pass
 
     def setup(self, prog):
         repo = self.repo

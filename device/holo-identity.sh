@@ -19,7 +19,11 @@ LOGO=steamos
 VERSION_ID=$VERSION_ID
 BUILD_ID=$BUILD_ID
 EOF2
-hostnamectl set-hostname oculus-quest
-hostnamectl set-hostname --pretty "Oculus Quest"
+# the files hostnamectl writes, written here: this also runs in the image's chroot, where no systemd answers
+echo oculus-quest > /etc/hostname
+touch /etc/machine-info
+sed -i '/^PRETTY_HOSTNAME=/d' /etc/machine-info
+echo 'PRETTY_HOSTNAME="Oculus Quest"' >> /etc/machine-info
+[ -d /run/systemd/system ] && hostname oculus-quest || true
 sed -i 's/\bholo-quest\b/oculus-quest/g' /etc/hosts
 
