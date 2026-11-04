@@ -7,7 +7,8 @@ Nothing is ever written to the headset's storage: the scratch space (/scratch: d
 is a disk on the PC, a sparse file the app serves as a network block device (NBD) through one of its tunnels.
 The headset only computes; the app flashes the result at the end.
 
-    GET  /info                 {"agent", "userdata": bytes, "mem": bytes, "scratch": bool, "job", "state", "rc"}
+    GET  /info                 {"agent", "userdata": bytes, "mem": bytes, "battery": %, "scratch": bool, "job",
+                                "state", "rc"}
     POST /scratch              attach the PC's disk (NBD export "scratch" through a tunnel), format it the
                                first time (it keeps its contents between attempts), mount it on /scratch;
                                body {"time": the PC's Unix time}: the headset has no clock at boot (1970)
@@ -51,6 +52,15 @@ def userdata_dev():
 def size_of(path):
     with open(path, "rb") as f:
         return f.seek(0, 2)
+
+
+def battery():
+    """The headset's charge in % (None elsewhere): the app waits for 50 % before it flashes."""
+    try:
+        with open("/sys/class/power_supply/battery/capacity") as f:
+            return int(f.read())
+    except (OSError, ValueError):
+        return None
 
 
 def mem_total():
@@ -317,7 +327,7 @@ class H(BaseHTTPRequestHandler):
             return
         if u.path == "/info":
             return self.reply(200, {"agent": VERSION, "userdata": size_of(A.userdata), "mem": mem_total(),
-                                    "scratch": scratch_ready(), **state})
+                                    "battery": battery(), "scratch": scratch_ready(), **state})
         if u.path == "/events":
             n = int(parse_qs(u.query).get("from", ["0"])[0])
             with lock:

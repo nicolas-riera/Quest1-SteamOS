@@ -97,7 +97,7 @@ const GROUPS = [
   ["Building the system", [["build:format","File system"],["build:holo","SteamOS base"],["build:setup","Base setup"],
     ["build:pkgs","Packages"],["build:frame","SteamVR"],["build:steam","Steam"],["build:meta","Tracking software"],
     ["build:native","Quest 1 support"],["build:ours","Project files"],["build:finish","Checking"],["build:sparse","Packing"]]],
-  ["Installing", [["download","Copying the system to this PC"],["flash","Writing the system to the headset"],["cleanup","Cleaning up"]]]];
+  ["Installing", [["download","Copying the system to this PC"],["charge","Battery at 50 % or more"],["flash","Writing the system to the headset"],["cleanup","Cleaning up"]]]];
 const $ = id => document.getElementById(id);
 const states = {};
 function checksDone() { return CHECKS.every(([id]) => states[id] === 'ok'); }

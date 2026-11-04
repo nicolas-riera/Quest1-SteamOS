@@ -105,6 +105,20 @@ func (a *App) Install() error {
 	}
 	step("download", "done")
 
+	// the flash must not run out of battery: at least minBattery %, as at the start (the install is long);
+	// the headset charges on the cable meanwhile
+	step("charge", "start")
+	for {
+		var info struct{ Battery *int }
+		if err := ag.Get("/info", &info); err != nil || info.Battery == nil || *info.Battery >= minBattery {
+			break
+		}
+		a.progress("charge", int64(*info.Battery), minBattery)
+		a.log("battery at %d %%: charging to %d %% before writing to the headset", *info.Battery, minBattery)
+		time.Sleep(30 * time.Second)
+	}
+	step("charge", "done")
+
 	// flash: back to the bootloader (the agent unmounts and detaches the scratch disk first), the scratch
 	// file goes, then only these partitions are written
 	step("flash", "start")
