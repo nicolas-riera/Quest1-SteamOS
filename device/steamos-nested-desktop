@@ -31,7 +31,12 @@ function cleanup()
     for p in "${pids[@]}"; do kill "$p" 2>/dev/null || true; done
     # Flush fuse mounts beneath here
     umount --recursive $NEW_XDG_RUNTIME_DIR 2>/dev/null || true
-    rm -Rf $NEW_XDG_RUNTIME_DIR
+    # Quest 1: as a user, umount can't take the document portal's FUSE mount (doc/), whose portal may still be
+    # exiting: unmount it lazily. A failed rm used to end the next launch at once (set -e), nothing shown.
+    awk -v d="$NEW_XDG_RUNTIME_DIR/" 'index($2, d) == 1 {print $2}' /proc/mounts | while read -r m; do
+        fusermount3 -u -z "$m" 2>/dev/null || true
+    done
+    rm -Rf $NEW_XDG_RUNTIME_DIR || true
 }
 
 # Quest 1: one desktop at a time. Plasma takes a while to come up here, and a second launch (a second click
@@ -49,18 +54,18 @@ NEW_XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR/nested_plasma
 trap cleanup EXIT
 
 cleanup
-mkdir $NEW_XDG_RUNTIME_DIR --mode 0700
+mkdir -p $NEW_XDG_RUNTIME_DIR --mode 0700
 
 # Some things are (currently) shared, pulseaudio socket needs to be connected to the main session
-mkdir $NEW_XDG_RUNTIME_DIR/pulse --mode 0700
-ln -s $XDG_RUNTIME_DIR/pulse/native $NEW_XDG_RUNTIME_DIR/pulse/native
-ln -s $XDG_RUNTIME_DIR/pipewire* $NEW_XDG_RUNTIME_DIR/.
+mkdir -p $NEW_XDG_RUNTIME_DIR/pulse --mode 0700
+ln -sfn $XDG_RUNTIME_DIR/pulse/native $NEW_XDG_RUNTIME_DIR/pulse/native
+ln -sf $XDG_RUNTIME_DIR/pipewire* $NEW_XDG_RUNTIME_DIR/.
 
 # Quest 1: gamescope's part. An X server for kwin's window (the first free display from :2), its
 # framebuffer exported for q1desktop, which runs on the Adreno like SteamVR's own clients.
 n=2
 while [ -e /tmp/.X11-unix/X$n ] || [ -e /tmp/.X$n-lock ]; do n=$((n + 1)); done
-mkdir $NEW_XDG_RUNTIME_DIR/xvfb
+mkdir -p $NEW_XDG_RUNTIME_DIR/xvfb
 Xvfb :$n -screen 0 ${W}x${H}x24 -fbdir $NEW_XDG_RUNTIME_DIR/xvfb -nolisten tcp -noreset &
 pids+=($!)
 for i in $(seq 50); do [ -e /tmp/.X11-unix/X$n ] && break; sleep 0.1; done
@@ -75,7 +80,7 @@ pids+=($q1d)
 
 ## Shadow kwin_wayland_wrapper so that we can pass args to kwin wrapper
 ## whilst being launched by plasma-session
-mkdir $NEW_XDG_RUNTIME_DIR/bin
+mkdir -p $NEW_XDG_RUNTIME_DIR/bin
 cat <<EOF > $NEW_XDG_RUNTIME_DIR/bin/kwin_wayland_wrapper
 #!/bin/sh
 /usr/bin/kwin_wayland_wrapper --width $W --height $H --no-lockscreen \$@
