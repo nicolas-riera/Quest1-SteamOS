@@ -4,9 +4,10 @@ The Quest 1's Bluetooth is the Bluetooth side of its Qualcomm WCN3990 (Wi-Fi is 
 Meta's HAL (`android.hardware.bluetooth@1.0-impl-qti.so`) drives it from userspace over `/dev/ttyHS0`. The Steam
 Frame uses BlueZ on a kernel driver: so do we, with BlueZ and the kernel's `hci_uart` QCA protocol.
 
-Status (2026-11-05): working. hci0 comes up powered (BR/EDR and LE) with the headset's own address about 13 s after
-`quest1-bluetooth.service` starts, and scans find the devices around. Pairing a keyboard, mouse, gamepad or headphones
-is still to try.
+Status (2026-11-05): unreliable, to be reworked. hci0 comes up powered (BR/EDR and LE) with the headset's own
+address about 13 s after `quest1-bluetooth.service` starts, and LE scans find the devices around, but pairing a
+DualSense failed: some events from the chip are lost (no Disconnection Complete, no Inquiry Complete, so BR/EDR
+discovery hangs), see docs/todo.md.
 
 ## The chip (probed from userspace, 2026-11-05)
 
