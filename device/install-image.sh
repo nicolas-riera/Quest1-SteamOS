@@ -38,6 +38,10 @@ if ! getent passwd steamos >/dev/null; then
 fi
 
 # --- pieces installed by hand on the development headset ----------------------------------------------------
+# our prebuilt libraries (libvncserver for x11vnc, the GTK2 libs for SteamVR) live in /usr/local/lib, which
+# Arch's loader does not search by default
+echo /usr/local/lib > /etc/ld.so.conf.d/usr-local.conf
+ldconfig
 install -Dm755 "$D/holo-android-blobs.sh" /usr/local/sbin/holo-android-blobs
 install -Dm755 "$D/holo-android-modem.sh" /usr/local/sbin/holo-android-modem
 install -Dm644 "$T/mkproparea.py" /usr/local/lib/holo/mkproparea.py
