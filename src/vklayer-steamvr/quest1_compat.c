@@ -18,7 +18,9 @@
 #include <vulkan/vulkan.h>
 #include <vulkan/vk_layer.h>
 
+#include <dlfcn.h>
 #include <errno.h>
+#include <execinfo.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <linux/futex.h>
@@ -30,6 +32,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -1385,10 +1388,59 @@ static VKAPI_ATTR void VKAPI_CALL FreeMemory(VkDevice device, VkDeviceMemory m, 
 	device_of(device)->FreeMemory(device, m, alloc);
 }
 
+/*
+ * vrclient's Vulkan transfer ring (CVulkanVRRenderer, "Initialized Vulkan transfer ring buffer"): 256 MB of
+ * host-visible memory in every OpenVR process that uses Vulkan (vrcompositor has its own copy of that
+ * renderer). On KGSL that is pinned memory, allocated in full up front, and mostly never touched: 0 MB in the
+ * dashboard's vrwebhelper and in overlay apps (q1desktop), ~50 MB in vrcompositor; only Steam's webhelper,
+ * which uploads its CPU-drawn pages through it, fills it. A large allocation made from vrclient.so or
+ * vrcompositor (the ring is their only one of 64 MB or more) asks the kernel to back it page by page at the
+ * first CPU touch (kernel/kgsl-lazy.patch, IOCTL_KGSL_LAZY_NEXT): the ring is written by the CPU before the
+ * GPU reads it. Without that kernel patch the ioctl fails and nothing changes.
+ */
+#define LAZY_MIN_SIZE (64ull << 20)
+
+static bool called_from_vrclient(void)
+{
+	void *bt[16];
+	int n = backtrace(bt, 16);
+	for (int i = 1; i < n; i++) {
+		Dl_info di;
+		if (!dladdr(bt[i], &di) || !di.dli_fname)
+			continue;
+		const char *base = strrchr(di.dli_fname, '/');
+		base = base ? base + 1 : di.dli_fname;
+		if (!strcmp(base, "vrclient.so") || !strcmp(base, "vrcompositor"))
+			return true;
+	}
+	return false;
+}
+
+static void lazy_hint(VkDeviceSize size)
+{
+	static atomic_int kgsl_fd = -2;
+	struct { uint64_t size; } a = { size };
+	int fd = atomic_load(&kgsl_fd);
+	if (fd == -2) {
+		int nfd = open("/dev/kgsl-3d0", O_RDWR | O_CLOEXEC), expected = -2;
+		if (atomic_compare_exchange_strong(&kgsl_fd, &expected, nfd))
+			fd = nfd;
+		else {
+			if (nfd >= 0)
+				close(nfd);
+			fd = expected;
+		}
+	}
+	if (fd >= 0 && ioctl(fd, _IOW(0x09, 0x58, a), &a) == 0)
+		LOG("vrclient's %llu MB ring backed on first touch\n", (unsigned long long)(size >> 20));
+}
+
 static VKAPI_ATTR VkResult VKAPI_CALL AllocateMemory(VkDevice device, const VkMemoryAllocateInfo *ai,
                                                      const VkAllocationCallbacks *alloc, VkDeviceMemory *out)
 {
 	struct device *d = device_of(device);
+	if (ai->allocationSize >= LAZY_MIN_SIZE && called_from_vrclient())
+		lazy_hint(ai->allocationSize);
 	VkResult r = d->AllocateMemory(device, ai, alloc, out);
 	if (r != VK_SUCCESS && fail_logs < 40) {
 		fail_logs++;

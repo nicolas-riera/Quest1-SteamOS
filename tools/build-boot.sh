@@ -2,7 +2,7 @@
 # Build the native boot image (kernel + initramfs) from public sources only:
 #   - Meta's GPL Quest kernel (facebookincubator/oculus-linux-kernel) + kernel/quest1-kernel.patch
 #     + kernel/loop-no-discard-on-ext4.patch + kernel/cgroup-events-frozen.patch
-#     + kernel/lse_emul.c, config = recon/kernel.config + kernel/steamos.config;
+#     + kernel/bt-wcn3990.patch + kernel/kgsl-lazy.patch + kernel/lse_emul.c, config = recon/kernel.config + kernel/steamos.config;
 #   - Android's gcc 4.9 prebuilt toolchains (the ones Meta's tree builds with);
 #   - Debian's static busybox, initrd/ from this repo.
 # Nothing comes from a device dump: no Meta blob ends up in the image. Same result as
@@ -48,6 +48,8 @@ kernel() {
 	git -C kernel apply "$P/kernel/cgroup-events-frozen.patch"
 	# Bluetooth: the WCN3990 on hci_uart's QCA protocol (firmware download, 3 Mbit/s, the address in the NVM)
 	git -C kernel apply "$P/kernel/bt-wcn3990.patch"
+	# KGSL: allocations backed on first CPU touch, for vrclient's 256 MB upload rings (IOCTL_KGSL_LAZY_NEXT)
+	git -C kernel apply "$P/kernel/kgsl-lazy.patch"
 	cp "$P/kernel/lse_emul.c" kernel/arch/arm64/kernel/lse_emul.c
 	# Kconfig sources Meta's unpublished internal/ drivers: empty stand-ins (ignored by git)
 	mkdir -p kernel/drivers/staging/oculus/internal

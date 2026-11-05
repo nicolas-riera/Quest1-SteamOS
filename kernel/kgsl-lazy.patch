@@ -1,0 +1,326 @@
+diff --git a/drivers/gpu/msm/kgsl.c b/drivers/gpu/msm/kgsl.c
+index aadae6dd..c3cd3916 100644
+--- a/drivers/gpu/msm/kgsl.c
++++ b/drivers/gpu/msm/kgsl.c
+@@ -3330,6 +3330,18 @@ static uint64_t kgsl_filter_cachemode(uint64_t flags)
+ /* The largest allowable alignment for a GPU object is 32MB */
+ #define KGSL_MAX_ALIGN (32 * SZ_1M)
+ 
++long kgsl_ioctl_lazy_next(struct kgsl_device_private *dev_priv,
++		unsigned int cmd, void *data)
++{
++	struct kgsl_lazy_next *param = data;
++
++	if (param->size > UINT_MAX)
++		return -EINVAL;
++
++	WRITE_ONCE(dev_priv->process_priv->lazy_next, PAGE_ALIGN(param->size));
++	return 0;
++}
++
+ static struct kgsl_mem_entry *gpumem_alloc_entry(
+ 		struct kgsl_device_private *dev_priv,
+ 		uint64_t size, uint64_t flags)
+@@ -3389,6 +3401,11 @@ static struct kgsl_mem_entry *gpumem_alloc_entry(
+ 
+ 	if (flags & KGSL_MEMFLAGS_SECURE)
+ 		entry->memdesc.priv |= KGSL_MEMDESC_SECURE;
++	else if (READ_ONCE(private->lazy_next) == PAGE_ALIGN(size) &&
++		kgsl_mmu_get_mmutype(dev_priv->device) == KGSL_MMU_TYPE_IOMMU &&
++		cmpxchg(&private->lazy_next, PAGE_ALIGN(size), 0) ==
++			PAGE_ALIGN(size))
++		entry->memdesc.priv |= KGSL_MEMDESC_LAZY;
+ 
+ 	ret = kgsl_allocate_user(dev_priv->device, &entry->memdesc,
+ 		size, flags);
+diff --git a/drivers/gpu/msm/kgsl.h b/drivers/gpu/msm/kgsl.h
+index 05d9e3aa..f0760a13 100644
+--- a/drivers/gpu/msm/kgsl.h
++++ b/drivers/gpu/msm/kgsl.h
+@@ -194,6 +194,8 @@ struct kgsl_memdesc_ops {
+ #define KGSL_MEMDESC_CONTIG BIT(8)
+ /* For global buffers, randomly assign an address from the region */
+ #define KGSL_MEMDESC_RANDOM BIT(9)
++/* Pages backed on first CPU touch (IOCTL_KGSL_LAZY_NEXT) */
++#define KGSL_MEMDESC_LAZY BIT(20)
+ 
+ /**
+  * struct kgsl_memdesc - GPU memory object descriptor
+@@ -454,6 +456,8 @@ long kgsl_ioctl_gpu_sparse_command(struct kgsl_device_private *dev_priv,
+ long kgsl_ioctl_allow_uid_high_priority(
+ 					struct kgsl_device_private *dev_priv,
+ 					unsigned int cmd, void *data);
++long kgsl_ioctl_lazy_next(struct kgsl_device_private *dev_priv,
++				unsigned int cmd, void *data);
+ long kgsl_ioctl_allow_tid_maximum_priority(
+ 					struct kgsl_device_private *dev_priv,
+ 					unsigned int cmd, void *data);
+diff --git a/drivers/gpu/msm/kgsl_device.h b/drivers/gpu/msm/kgsl_device.h
+index 13605285..176ed1aa 100644
+--- a/drivers/gpu/msm/kgsl_device.h
++++ b/drivers/gpu/msm/kgsl_device.h
+@@ -469,6 +469,7 @@ struct kgsl_process_private {
+ 	int fd_count;
+ 	atomic_t ctxt_count;
+ 	spinlock_t ctxt_count_lock;
++	uint64_t lazy_next;
+ };
+ 
+ struct kgsl_thread_private {
+diff --git a/drivers/gpu/msm/kgsl_ioctl.c b/drivers/gpu/msm/kgsl_ioctl.c
+index 9e42b2d4..2cd90c59 100644
+--- a/drivers/gpu/msm/kgsl_ioctl.c
++++ b/drivers/gpu/msm/kgsl_ioctl.c
+@@ -106,6 +106,8 @@ static const struct kgsl_ioctl kgsl_ioctl_funcs[] = {
+ 			kgsl_ioctl_allow_uid_high_priority),
+ 	KGSL_IOCTL_FUNC(IOCTL_KGSL_ALLOW_TID_MAXIMUM_PRIORITY,
+ 			kgsl_ioctl_allow_tid_maximum_priority),
++	KGSL_IOCTL_FUNC(IOCTL_KGSL_LAZY_NEXT,
++			kgsl_ioctl_lazy_next),
+ };
+ 
+ long kgsl_ioctl_copy_in(unsigned int kernel_cmd, unsigned int user_cmd,
+diff --git a/drivers/gpu/msm/kgsl_iommu.c b/drivers/gpu/msm/kgsl_iommu.c
+index d40f1cba..3d5e9a86 100644
+--- a/drivers/gpu/msm/kgsl_iommu.c
++++ b/drivers/gpu/msm/kgsl_iommu.c
+@@ -1838,6 +1838,21 @@ done:
+ 	return ret;
+ }
+ 
++/* A lazy memdesc's page got its own memory: the GPU sees it from now on */
++int kgsl_iommu_lazy_remap(struct kgsl_pagetable *pt,
++		struct kgsl_memdesc *memdesc, uint64_t offset, struct page *page)
++{
++	uint64_t addr = memdesc->gpuaddr + offset;
++	int ret;
++
++	ret = _iommu_unmap_sync_pc(pt, memdesc, addr, PAGE_SIZE);
++	if (ret)
++		return ret;
++
++	return _iommu_map_sync_pc(pt, memdesc, addr, page_to_phys(page),
++			PAGE_SIZE, _get_protection_flags(memdesc));
++}
++
+ static int kgsl_iommu_sparse_dummy_map(struct kgsl_pagetable *pt,
+ 		struct kgsl_memdesc *memdesc, uint64_t offset, uint64_t size)
+ {
+diff --git a/drivers/gpu/msm/kgsl_mmu.h b/drivers/gpu/msm/kgsl_mmu.h
+index fcf3b188..a2ad8d8b 100644
+--- a/drivers/gpu/msm/kgsl_mmu.h
++++ b/drivers/gpu/msm/kgsl_mmu.h
+@@ -229,6 +229,8 @@ int kgsl_mmu_map_offset(struct kgsl_pagetable *pagetable,
+ 		uint64_t virtaddr, uint64_t virtoffset,
+ 		struct kgsl_memdesc *memdesc, uint64_t physoffset,
+ 		uint64_t size, uint64_t flags);
++int kgsl_iommu_lazy_remap(struct kgsl_pagetable *pt,
++		struct kgsl_memdesc *memdesc, uint64_t offset, struct page *page);
+ int kgsl_mmu_unmap_offset(struct kgsl_pagetable *pagetable,
+ 		struct kgsl_memdesc *memdesc, uint64_t addr, uint64_t offset,
+ 		uint64_t size);
+diff --git a/drivers/gpu/msm/kgsl_sharedmem.c b/drivers/gpu/msm/kgsl_sharedmem.c
+index cfdec19d..ce0fbeca 100644
+--- a/drivers/gpu/msm/kgsl_sharedmem.c
++++ b/drivers/gpu/msm/kgsl_sharedmem.c
+@@ -439,6 +439,9 @@ static int kgsl_allocate_secure(struct kgsl_device *device,
+ 	return ret;
+ }
+ 
++static int kgsl_sharedmem_page_alloc_lazy(struct kgsl_memdesc *memdesc,
++		uint64_t size);
++
+ int kgsl_allocate_user(struct kgsl_device *device,
+ 		struct kgsl_memdesc *memdesc,
+ 		uint64_t size, uint64_t flags)
+@@ -450,6 +453,8 @@ int kgsl_allocate_user(struct kgsl_device *device,
+ 
+ 	if (kgsl_mmu_get_mmutype(device) == KGSL_MMU_TYPE_NONE)
+ 		ret = kgsl_sharedmem_alloc_contig(device, memdesc, size);
++	else if (memdesc->priv & KGSL_MEMDESC_LAZY)
++		ret = kgsl_sharedmem_page_alloc_lazy(memdesc, size);
+ 	else if (flags & KGSL_MEMFLAGS_SECURE)
+ 		ret = kgsl_allocate_secure(device, memdesc, size);
+ 	else
+@@ -458,6 +463,85 @@ int kgsl_allocate_user(struct kgsl_device *device,
+ 	return ret;
+ }
+ 
++/*
++ * Lazy memdescs (IOCTL_KGSL_LAZY_NEXT): every page starts as this shared
++ * scratch page, in the pages array and in the GPU pagetable, and gets its own
++ * zeroed page at the first CPU fault on it.
++ */
++static struct page *kgsl_lazy_scratch;
++static DEFINE_MUTEX(kgsl_lazy_mutex);
++static struct kgsl_memdesc_ops kgsl_page_alloc_ops;
++
++static int kgsl_sharedmem_page_alloc_lazy(struct kgsl_memdesc *memdesc,
++		uint64_t size)
++{
++	unsigned int i, count;
++
++	size = PAGE_ALIGN(size);
++	if (size == 0 || size > UINT_MAX)
++		return -EINVAL;
++
++	mutex_lock(&kgsl_lazy_mutex);
++	if (kgsl_lazy_scratch == NULL)
++		kgsl_lazy_scratch = alloc_page(GFP_KERNEL | __GFP_ZERO);
++	mutex_unlock(&kgsl_lazy_mutex);
++	if (kgsl_lazy_scratch == NULL)
++		return -ENOMEM;
++
++	count = size >> PAGE_SHIFT;
++	memdesc->pages = kgsl_malloc(count * sizeof(struct page *));
++	if (memdesc->pages == NULL)
++		return -ENOMEM;
++	for (i = 0; i < count; i++)
++		memdesc->pages[i] = kgsl_lazy_scratch;
++
++	/* 4 KiB GPU pages, so that each one can be pointed elsewhere */
++	kgsl_memdesc_set_align(memdesc, PAGE_SHIFT);
++	memdesc->ops = &kgsl_page_alloc_ops;
++	memdesc->page_count = count;
++	memdesc->size = size;
++	return 0;
++}
++
++static struct page *kgsl_lazy_populate(struct kgsl_memdesc *memdesc,
++		unsigned int pgoff)
++{
++	struct page *page;
++	void *addr;
++	int ret;
++
++	mutex_lock(&kgsl_lazy_mutex);
++	page = memdesc->pages[pgoff];
++	if (page != kgsl_lazy_scratch)
++		goto out;
++
++	page = alloc_page(GFP_KERNEL | __GFP_ZERO);
++	if (page == NULL) {
++		page = ERR_PTR(-ENOMEM);
++		goto out;
++	}
++	/* zeroed through the CPU cache: clean it for the GPU */
++	addr = kmap_atomic(page);
++	dmac_flush_range(addr, addr + PAGE_SIZE);
++	kunmap_atomic(addr);
++
++	if ((memdesc->priv & KGSL_MEMDESC_MAPPED) && memdesc->pagetable) {
++		ret = kgsl_iommu_lazy_remap(memdesc->pagetable, memdesc,
++				(uint64_t) pgoff << PAGE_SHIFT, page);
++		if (ret) {
++			__free_page(page);
++			page = ERR_PTR(ret);
++			goto out;
++		}
++	}
++	memdesc->pages[pgoff] = page;
++	KGSL_STATS_ADD(PAGE_SIZE, &kgsl_driver.stats.page_alloc,
++		&kgsl_driver.stats.page_alloc_max);
++out:
++	mutex_unlock(&kgsl_lazy_mutex);
++	return page;
++}
++
+ static int kgsl_page_alloc_vmfault(struct kgsl_memdesc *memdesc,
+ 				struct vm_area_struct *vma,
+ 				struct vm_fault *vmf)
+@@ -475,6 +559,13 @@ static int kgsl_page_alloc_vmfault(struct kgsl_memdesc *memdesc,
+ 	if (pgoff < memdesc->page_count) {
+ 		struct page *page = memdesc->pages[pgoff];
+ 
++		if ((memdesc->priv & KGSL_MEMDESC_LAZY) &&
++				page == kgsl_lazy_scratch) {
++			page = kgsl_lazy_populate(memdesc, pgoff);
++			if (IS_ERR(page))
++				return VM_FAULT_OOM;
++		}
++
+ 		get_page(page);
+ 		vmf->page = page;
+ 
+@@ -531,7 +622,7 @@ static void kgsl_page_alloc_free(struct kgsl_memdesc *memdesc)
+ 		}
+ 
+ 		atomic_long_sub(memdesc->size, &kgsl_driver.stats.secure);
+-	} else {
++	} else if (!(memdesc->priv & KGSL_MEMDESC_LAZY)) {
+ 		atomic_long_sub(memdesc->size, &kgsl_driver.stats.page_alloc);
+ 	}
+ 
+@@ -544,6 +635,20 @@ static void kgsl_page_alloc_free(struct kgsl_memdesc *memdesc)
+ 
+ 	}
+ 
++	/* Lazy memdescs: only the pages that got their own memory */
++	if (memdesc->priv & KGSL_MEMDESC_LAZY) {
++		unsigned int i;
++
++		for (i = 0; i < memdesc->page_count; i++) {
++			if (memdesc->pages[i] == kgsl_lazy_scratch)
++				continue;
++			__free_page(memdesc->pages[i]);
++			atomic_long_sub(PAGE_SIZE,
++				&kgsl_driver.stats.page_alloc);
++		}
++		return;
++	}
++
+ 	/* Free pages using the pages array for non secure paged memory */
+ 	if (memdesc->pages != NULL)
+ 		kgsl_pool_free_pages(memdesc->pages, memdesc->page_count);
+@@ -746,6 +851,23 @@ int kgsl_cache_range_op(struct kgsl_memdesc *memdesc, uint64_t offset,
+ 	if (offset + size > memdesc->size)
+ 		return -ERANGE;
+ 
++	/* Lazy memdescs: page by page, skipping the scratch page */
++	if (memdesc->priv & KGSL_MEMDESC_LAZY) {
++		uint64_t end = offset + size;
++
++		while (offset < end) {
++			unsigned int in = offset & ~PAGE_MASK;
++			uint64_t len = min_t(uint64_t, end - offset,
++					PAGE_SIZE - in);
++			struct page *page = memdesc->pages[offset >> PAGE_SHIFT];
++
++			if (page != kgsl_lazy_scratch)
++				ret = kgsl_do_cache_op(page, NULL, in, len, op);
++			offset += len;
++		}
++		return ret;
++	}
++
+ 	if (memdesc->hostptr) {
+ 		addr = memdesc->hostptr;
+ 		/* Make sure the offset + size do not overflow the address */
+diff --git a/include/uapi/linux/msm_kgsl.h b/include/uapi/linux/msm_kgsl.h
+index 4a88598f..5bd0c84c 100644
+--- a/include/uapi/linux/msm_kgsl.h
++++ b/include/uapi/linux/msm_kgsl.h
+@@ -1655,6 +1655,23 @@ struct kgsl_allow_tid_maximum_priority {
+ 	pid_t tid;
+ };
+ 
++/**
++ * struct kgsl_lazy_next - back an allocation on first CPU touch (Quest 1)
++ * @size: size of the next allocation of the calling process to treat so
++ *
++ * The next KGSL allocation of exactly @size bytes by the calling process gets
++ * no memory up front: every GPU page points at a scratch page, and each page
++ * gets its own memory the first time the CPU touches it, then the GPU sees
++ * that page in place. For upload rings: the CPU writes before the GPU reads.
++ * What the GPU writes to a page the CPU never touched is lost.
++ */
++struct kgsl_lazy_next {
++	uint64_t size;
++};
++
++#define IOCTL_KGSL_LAZY_NEXT \
++	_IOW(KGSL_IOC_TYPE, 0x58, struct kgsl_lazy_next)
++
+ #define IOCTL_KGSL_ALLOW_TID_MAXIMUM_PRIORITY \
+ 	_IOW(KGSL_IOC_TYPE, 0x57, struct kgsl_allow_tid_maximum_priority)
+ 
