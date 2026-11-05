@@ -3,14 +3,16 @@
 # protocol (kernel/bt-wcn3990.patch) and BlueZ, like the Steam Frame (BlueZ, no Android stack).
 #
 # quest1-bluetooth.service (quest1-bt):
-#  - powers the chip through the bt_power rfkill (Meta's bluetooth-power driver: regulators only, no pulse
-#    needed, the chip answers at 115200 right away);
+#  - powers the chip through the bt_power rfkill (Meta's bluetooth-power driver: regulators only; the
+#    kernel then turns the Bluetooth core off and on with the WCN3990's power pulses, since the supplies
+#    are shared with Wi-Fi and the core keeps its state, speed included, across power cycles and reboots);
 #  - gives the kernel the headset's own address: Meta keeps it in persist bluetooth/.bt_nv.bin (9 bytes:
 #    01 01 06, then the 6 address bytes in NVM order), read only, and written into the NVM's BD_ADDR tag by
 #    btqca (parameter nvm_bdaddr) before the NVM is downloaded. The stock NVM's address is all zeros;
 #  - runs btattach (QCA protocol), which keeps the tty open: hci0 exists while the unit runs. The firmware
 #    (qca/crbtfw21.tlv, qca/crnv21.bin = WCN3990 2.1) comes from Meta's vendor/firmware through /run/fw
-#    (holo-android-blobs), loaded at hci0's first power-on by bluetoothd (~2 s: patch at 3 Mbit/s).
+#    (holo-android-blobs), downloaded by the kernel when btattach registers hci0 (~11 s), then bluetoothd
+#    powers it on.
 #
 # Run as root: sh holo-bluetooth.sh install
 set -e
@@ -34,7 +36,7 @@ start)
 	fi
 	# a fresh chip: firmware and NVM are downloaded at hci0's first power-on
 	echo 0 > $R/state; sleep 0.2
-	echo 1 > $R/state; sleep 1.5  # the chip ignores commands for about a second after power-on
+	echo 1 > $R/state; sleep 0.2
 	exec btattach -B /dev/ttyHS0 -P qca -S 115200
 	;;
 stop)
@@ -64,5 +66,4 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-# quest1-bluetooth is enabled once the firmware download works (docs/bluetooth.md, Status)
-systemctl enable bluetooth.service
+systemctl enable quest1-bluetooth.service bluetooth.service

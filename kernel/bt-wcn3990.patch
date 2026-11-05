@@ -1,5 +1,5 @@
 diff --git a/drivers/bluetooth/btqca.c b/drivers/bluetooth/btqca.c
-index adcc8f5d..dc66dfef 100644
+index adcc8f5d..dad11bdd 100644
 --- a/drivers/bluetooth/btqca.c
 +++ b/drivers/bluetooth/btqca.c
 @@ -16,9 +16,12 @@
@@ -130,7 +130,7 @@ index adcc8f5d..dc66dfef 100644
  		return err;
  	}
  
-@@ -111,62 +120,107 @@ static int rome_reset(struct hci_dev *hdev)
+@@ -111,67 +120,116 @@ static int rome_reset(struct hci_dev *hdev)
  	return 0;
  }
  
@@ -258,8 +258,19 @@ index adcc8f5d..dc66dfef 100644
 +					break;
  				/* HCI transport layer parameters
  				 * enabling software inband sleep
- 				 * onto controller side.
-@@ -179,6 +233,8 @@ static void rome_tlv_check_data(struct rome_config *config,
+-				 * onto controller side.
++				 * onto controller side (not on the Quest 1,
++				 * see qca_uart_setup).
+ 				 */
+-				tlv_nvm->data[0] |= 0x80;
++				if (config->no_sleep)
++					tlv_nvm->data[0] &= ~0x80;
++				else
++					tlv_nvm->data[0] |= 0x80;
+ 
+ 				/* UART Baud Rate */
+ 				tlv_nvm->data[2] = config->user_baud_rate;
+@@ -179,10 +237,15 @@ static void rome_tlv_check_data(struct rome_config *config,
  				break;
  
  			case EDL_TAG_ID_DEEP_SLEEP:
@@ -268,7 +279,15 @@ index adcc8f5d..dc66dfef 100644
  				/* Sleep enable mask
  				 * enabling deep sleep feature on controller.
  				 */
-@@ -193,12 +249,14 @@ static void rome_tlv_check_data(struct rome_config *config,
+-				tlv_nvm->data[0] |= 0x01;
++				if (config->no_sleep)
++					tlv_nvm->data[0] &= ~0x01;
++				else
++					tlv_nvm->data[0] |= 0x01;
+ 
+ 				break;
+ 			}
+@@ -193,12 +256,14 @@ static void rome_tlv_check_data(struct rome_config *config,
  
  	default:
  		BT_ERR("Unknown TLV type %d", config->type);
@@ -286,7 +305,7 @@ index adcc8f5d..dc66dfef 100644
  {
  	struct sk_buff *skb;
  	struct edl_event_hdr *edl;
-@@ -206,39 +264,35 @@ static int rome_tlv_send_segment(struct hci_dev *hdev, int idx, int seg_size,
+@@ -206,39 +271,35 @@ static int rome_tlv_send_segment(struct hci_dev *hdev, int idx, int seg_size,
  	u8 cmd[MAX_SIZE_PER_TLV_SEGMENT + 2];
  	int err = 0;
  
@@ -334,7 +353,7 @@ index adcc8f5d..dc66dfef 100644
  		err = -EIO;
  	}
  
-@@ -248,99 +302,113 @@ out:
+@@ -248,99 +309,120 @@ out:
  	return err;
  }
  
@@ -480,14 +499,21 @@ index adcc8f5d..dc66dfef 100644
 +		BT_DBG("%s: Send segment %d, size %d", hdev->name, i++, segsize);
 +
 +		remain -= segsize;
-+		/* The last segment is always acked regardless download mode */
-+		if (!remain || segsize < MAX_SIZE_PER_TLV_SEGMENT)
++		/* The last segment is always acked regardless download mode
++		 * (not by the Quest 1's WCN3990, see qca_uart_setup) */
++		if ((!remain || segsize < MAX_SIZE_PER_TLV_SEGMENT) &&
++		    !config->no_last_ack)
 +			config->dnld_mode = ROME_SKIP_EVT_NONE;
 +
 +		ret = qca_tlv_send_segment(hdev, segsize, segment,
 +					   config->dnld_mode);
 +		if (ret)
 +			goto out;
++
++		/* Quest 1: segments nobody waits an event for go out one at a
++		 * time: queued back to back, the WCN3990 loses data */
++		if (config->dnld_mode != ROME_SKIP_EVT_NONE && config->seg_sent)
++			config->seg_sent(hdev);
 +
 +		segment += segsize;
  	}
@@ -511,7 +537,7 @@ index adcc8f5d..dc66dfef 100644
  	return ret;
  }
  
-@@ -370,32 +438,53 @@ int qca_set_bdaddr_rome(struct hci_dev *hdev, const bdaddr_t *bdaddr)
+@@ -370,60 +452,108 @@ int qca_set_bdaddr_rome(struct hci_dev *hdev, const bdaddr_t *bdaddr)
  }
  EXPORT_SYMBOL_GPL(qca_set_bdaddr_rome);
  
@@ -546,7 +572,8 @@ index adcc8f5d..dc66dfef 100644
 +}
 +EXPORT_SYMBOL_GPL(qca_set_bdaddr);
 +
-+int qca_uart_setup(struct hci_dev *hdev, uint8_t baudrate, u32 soc_ver, bool wcn399x)
++int qca_uart_setup(struct hci_dev *hdev, uint8_t baudrate, u32 soc_ver, bool wcn399x,
++		   void (*seg_sent)(struct hci_dev *hdev))
 +{
 +	struct rome_config config;
 +	int err;
@@ -561,6 +588,13 @@ index adcc8f5d..dc66dfef 100644
 -	snprintf(config.fwname, sizeof(config.fwname), "qca/rampatch_%08x.bin",
 -		 rome_ver);
 -	err = rome_download_firmware(hdev, &config);
++	/* Quest 1: the WCN3990 2.1 acks no segment of its patch (download mode
++	 * 3), not even the last one: it applies the patch (the version then
++	 * reports it) and starts in-band sleep, sending wake indications that
++	 * hci_qca acknowledges, but never sends the vendor event for the last
++	 * segment. Sent like the others, then the injected Command Complete. */
++	config.no_last_ack = wcn399x;
++	config.seg_sent = seg_sent;
 +	if (wcn399x) {
 +		/* Firmware files to download are based on ROM version.
 +		 * ROM version is derived from last two bytes of soc_ver.
@@ -581,13 +615,25 @@ index adcc8f5d..dc66dfef 100644
  		return err;
  	}
  
-@@ -404,26 +493,31 @@ int qca_uart_setup_rome(struct hci_dev *hdev, uint8_t baudrate)
+-	/* Give the controller some time to get ready to receive the NVM */
+-	msleep(10);
++	/* Give the controller some time to get ready to receive the NVM. The
++	 * WCN3990 applies its patch, then wakes the host up (in-band sleep
++	 * wake indication ~150 ms after the last segment, acknowledged by
++	 * hci_qca) before it takes commands again. */
++	msleep(wcn399x ? 300 : 10);
  
  	/* Download NVM configuration */
  	config.type = TLV_TYPE_NVM;
 -	snprintf(config.fwname, sizeof(config.fwname), "qca/nvm_%08x.bin",
 -		 rome_ver);
 -	err = rome_download_firmware(hdev, &config);
++	config.no_last_ack = false;
++	/* Quest 1: no in-band sleep. With it (and deep sleep) on, the WCN3990
++	 * answered the host's wake indication after the NVM but never the HCI
++	 * reset that followed. Qualcomm's HAL clears both bits too when its
++	 * low-power mode is off: a plain H4 UART. */
++	config.no_sleep = wcn399x;
 +	if (wcn399x)
 +		snprintf(config.fwname, sizeof(config.fwname),
 +			 "qca/crnv%02x.bin", rom_ver);
@@ -612,6 +658,11 @@ index adcc8f5d..dc66dfef 100644
  	}
  
 -	BT_INFO("%s: ROME setup on UART is completed", hdev->name);
++	/* Quest 1: the WCN3990 answers this reset, then restarts with its new
++	 * NVM; a command sent right after the answer is lost */
++	if (wcn399x)
++		msleep(200);
++
 +	bt_dev_info(hdev, "QCA setup on UART is completed");
  
  	return 0;
@@ -622,7 +673,7 @@ index adcc8f5d..dc66dfef 100644
  MODULE_AUTHOR("Ben Young Tae Kim <ytkim@qca.qualcomm.com>");
  MODULE_DESCRIPTION("Bluetooth support for Qualcomm Atheros family ver " VERSION);
 diff --git a/drivers/bluetooth/btqca.h b/drivers/bluetooth/btqca.h
-index 65e994b9..442c2ff7 100644
+index 65e994b9..122b70fb 100644
 --- a/drivers/bluetooth/btqca.h
 +++ b/drivers/bluetooth/btqca.h
 @@ -20,6 +20,9 @@
@@ -643,7 +694,7 @@ index 65e994b9..442c2ff7 100644
  #define EDL_TAG_ID_HCI			(17)
  #define EDL_TAG_ID_DEEP_SLEEP		(27)
  
-@@ -63,13 +67,25 @@ enum qca_bardrate {
+@@ -63,13 +67,28 @@ enum qca_bardrate {
  
  enum rome_tlv_type {
  	TLV_TYPE_PATCH = 1,
@@ -667,10 +718,13 @@ index 65e994b9..442c2ff7 100644
  	uint8_t user_baud_rate;
 +	enum rome_tlv_dnld_mode dnld_mode;
 +	enum rome_tlv_dnld_mode dnld_type;
++	bool no_last_ack;
++	bool no_sleep;
++	void (*seg_sent)(struct hci_dev *hdev);
  };
  
  struct edl_event_hdr {
-@@ -94,7 +110,8 @@ struct tlv_type_patch {
+@@ -94,7 +113,8 @@ struct tlv_type_patch {
  	__le32 data_length;
  	__u8   format_version;
  	__u8   signature;
@@ -680,18 +734,19 @@ index 65e994b9..442c2ff7 100644
  	__le16 product_id;
  	__le16 rom_build;
  	__le16 patch_version;
-@@ -118,7 +135,9 @@ struct tlv_type_hdr {
+@@ -118,7 +138,10 @@ struct tlv_type_hdr {
  #if IS_ENABLED(CONFIG_BT_QCA)
  
  int qca_set_bdaddr_rome(struct hci_dev *hdev, const bdaddr_t *bdaddr);
 -int qca_uart_setup_rome(struct hci_dev *hdev, uint8_t baudrate);
 +int qca_set_bdaddr(struct hci_dev *hdev, const bdaddr_t *bdaddr);
 +int qca_read_soc_version(struct hci_dev *hdev, u32 *soc_version, bool *wcn399x);
-+int qca_uart_setup(struct hci_dev *hdev, uint8_t baudrate, u32 soc_ver, bool wcn399x);
++int qca_uart_setup(struct hci_dev *hdev, uint8_t baudrate, u32 soc_ver, bool wcn399x,
++		   void (*seg_sent)(struct hci_dev *hdev));
  
  #else
  
-@@ -127,7 +146,17 @@ static inline int qca_set_bdaddr_rome(struct hci_dev *hdev, const bdaddr_t *bdad
+@@ -127,7 +150,18 @@ static inline int qca_set_bdaddr_rome(struct hci_dev *hdev, const bdaddr_t *bdad
  	return -EOPNOTSUPP;
  }
  
@@ -706,7 +761,8 @@ index 65e994b9..442c2ff7 100644
 +	return -EOPNOTSUPP;
 +}
 +
-+static inline int qca_uart_setup(struct hci_dev *hdev, uint8_t baudrate, u32 soc_ver, bool wcn399x)
++static inline int qca_uart_setup(struct hci_dev *hdev, uint8_t baudrate, u32 soc_ver, bool wcn399x,
++				 void (*seg_sent)(struct hci_dev *hdev))
  {
  	return -EOPNOTSUPP;
  }
@@ -753,7 +809,7 @@ index 116255ad..8bfc82ca 100644
  	kfree(hu);
  }
 diff --git a/drivers/bluetooth/hci_qca.c b/drivers/bluetooth/hci_qca.c
-index e24de668..33f5ed17 100644
+index e24de668..70299287 100644
 --- a/drivers/bluetooth/hci_qca.c
 +++ b/drivers/bluetooth/hci_qca.c
 @@ -29,6 +29,7 @@
@@ -829,14 +885,36 @@ index e24de668..33f5ed17 100644
  	{ QCA_IBS_WAKE_IND_EVENT,  .recv = qca_ibs_wake_ind  },
  	{ QCA_IBS_WAKE_ACK_EVENT,  .recv = qca_ibs_wake_ack  },
  	{ QCA_IBS_SLEEP_IND_EVENT, .recv = qca_ibs_sleep_ind },
-@@ -891,6 +924,18 @@ static int qca_set_baudrate(struct hci_dev *hdev, uint8_t baudrate)
+@@ -866,6 +899,23 @@ static uint8_t qca_get_baudrate_value(int speed)
+ 	}
+ }
+ 
++/* Wait until what was queued for the controller has left the UART */
++static void qca_wait_tx_done(struct hci_uart *hu)
++{
++	struct qca_data *qca = hu->priv;
++	int i;
++
++	for (i = 0; i < 2000 && (!skb_queue_empty(&qca->txq) ||
++				 test_bit(HCI_UART_SENDING, &hu->tx_state)); i++)
++		usleep_range(100, 200);
++	tty_wait_until_sent(hu->tty, msecs_to_jiffies(100));
++}
++
++static void qca_seg_sent(struct hci_dev *hdev)
++{
++	qca_wait_tx_done(hci_get_drvdata(hdev));
++}
++
+ static int qca_set_baudrate(struct hci_dev *hdev, uint8_t baudrate)
+ {
+ 	struct hci_uart *hu = hci_get_drvdata(hdev);
+@@ -891,6 +941,16 @@ static int qca_set_baudrate(struct hci_dev *hdev, uint8_t baudrate)
  	skb_queue_tail(&qca->txq, skb);
  	hci_uart_tx_wakeup(hu);
  
 +	/* Wait for the baudrate change request to be sent */
-+	while (!skb_queue_empty(&qca->txq))
-+		usleep_range(100, 200);
-+	tty_wait_until_sent(hu->tty, msecs_to_jiffies(100));
++	qca_wait_tx_done(hu);
 +
 +	/* The WCN3990 answers at the new speed right away (the Quest 1's
 +	 * UART does not hold it back with RTS): the host switches at once,
@@ -848,7 +926,7 @@ index e24de668..33f5ed17 100644
  	/* wait 300ms to change new baudrate on controller side
  	 * controller will come back after they receive this HCI command
  	 * then host can communicate with new baudrate to controller
-@@ -902,14 +947,50 @@ static int qca_set_baudrate(struct hci_dev *hdev, uint8_t baudrate)
+@@ -902,14 +962,86 @@ static int qca_set_baudrate(struct hci_dev *hdev, uint8_t baudrate)
  	return 0;
  }
  
@@ -886,6 +964,42 @@ index e24de668..33f5ed17 100644
 +	return ret;
 +}
 +
++/* WCN399x power pulses (Linux 5.x, qca_wcn3990_init): a circuit on the
++ * controller's receive line decodes one byte at a given speed, 0xC0 at 2400
++ * baud turning the Bluetooth core off and 0xFC at 115200 turning it on, with
++ * flow control off. The WCN3990's supplies are shared with Wi-Fi, so the
++ * bt_power rfkill alone doesn't reset it: on the Quest 1 a controller left at
++ * 3 Mbit/s by an earlier run stays there across power cycles and reboots.
++ */
++static void qca_set_line(struct hci_uart *hu, unsigned int speed, bool flow)
++{
++	struct tty_struct *tty = hu->tty;
++	struct ktermios kt = tty->termios;
++
++	kt.c_cflag &= ~CBAUD;
++	if (flow)
++		kt.c_cflag |= CRTSCTS;
++	else
++		kt.c_cflag &= ~CRTSCTS;
++	tty_termios_encode_baud_rate(&kt, speed, speed);
++	tty_set_termios(tty, &kt);
++}
++
++static void qca_send_power_pulse(struct hci_uart *hu, bool on)
++{
++	struct tty_struct *tty = hu->tty;
++	u8 pulse = on ? 0xfc : 0xc0;
++
++	qca_set_line(hu, on ? 115200 : 2400, false);
++	tty->ops->write(tty, &pulse, 1);
++	tty_wait_until_sent(tty, msecs_to_jiffies(100));
++	/* time for the core to shut down or boot */
++	if (on)
++		msleep(100);
++	else
++		usleep_range(10000, 11000);
++}
++
  static int qca_setup(struct hci_uart *hu)
  {
  	struct hci_dev *hdev = hu->hdev;
@@ -900,12 +1014,18 @@ index e24de668..33f5ed17 100644
  
  	/* Patch downloading has to be done without IBS mode */
  	clear_bit(STATE_IN_BAND_SLEEP_ENABLED, &qca->flags);
-@@ -924,6 +1005,22 @@ static int qca_setup(struct hci_uart *hu)
+@@ -924,6 +1056,28 @@ static int qca_setup(struct hci_uart *hu)
  	if (speed)
  		hci_uart_set_baudrate(hu, speed);
  
-+	/* Quest 1: right after power-on the WCN3990 ignores the version
-+	 * request until an HCI_Reset has been answered */
++	/* Quest 1's WCN3990: off and on again, at 115200 whatever speed it was
++	 * left at (on other controllers: two stray bytes before the reset) */
++	qca_send_power_pulse(hu, false);
++	qca_send_power_pulse(hu, true);
++	qca_set_line(hu, 115200, true);
++
++	/* Quest 1: the WCN3990 ignores the version request until an HCI_Reset
++	 * has been answered */
 +	skb = __hci_cmd_sync(hdev, HCI_OP_RESET, 0, NULL, HCI_INIT_TIMEOUT);
 +	if (IS_ERR(skb))
 +		BT_ERR("%s: HCI_Reset before setup failed (%ld)", hdev->name, PTR_ERR(skb));
@@ -923,7 +1043,7 @@ index e24de668..33f5ed17 100644
  	/* Setup user speed if needed */
  	speed = 0;
  	if (hu->oper_speed)
-@@ -934,18 +1031,16 @@ static int qca_setup(struct hci_uart *hu)
+@@ -934,20 +1088,21 @@ static int qca_setup(struct hci_uart *hu)
  	if (speed) {
  		qca_baudrate = qca_get_baudrate_value(speed);
  
@@ -940,11 +1060,17 @@ index e24de668..33f5ed17 100644
  
  	/* Setup patch / NVM configurations */
 -	ret = qca_uart_setup_rome(hdev, qca_baudrate);
-+	ret = qca_uart_setup(hdev, qca_baudrate, soc_ver, qca->wcn399x);
++	ret = qca_uart_setup(hdev, qca_baudrate, soc_ver, qca->wcn399x,
++			     qca_seg_sent);
  	if (!ret) {
- 		set_bit(STATE_IN_BAND_SLEEP_ENABLED, &qca->flags);
+-		set_bit(STATE_IN_BAND_SLEEP_ENABLED, &qca->flags);
++		/* no in-band sleep on a WCN399x, see qca_uart_setup */
++		if (!qca->wcn399x)
++			set_bit(STATE_IN_BAND_SLEEP_ENABLED, &qca->flags);
  		qca_debugfs_init(hdev);
-@@ -961,7 +1056,7 @@ static int qca_setup(struct hci_uart *hu)
+ 	} else if (ret == -ENOENT) {
+ 		/* No patch/nvm-config found, run with original fw/config */
+@@ -961,7 +1116,7 @@ static int qca_setup(struct hci_uart *hu)
  	}
  
  	/* Setup bdaddr */
