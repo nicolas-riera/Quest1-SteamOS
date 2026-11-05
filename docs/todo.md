@@ -117,6 +117,11 @@ Open items, roughly by priority. Done items move to the commit log.
   matching the menu button's look (user, 2026-11-03, low priority).
 
 ## Passthrough
+- Regression (user, 2026-11-05 night): passthrough shakes a lot and tends to tilt when the head moves.
+  Broken by that night's memory work; suspects, in order: the KGSL lazy rings (first-touch page faults in
+  vrcompositor's 256 MB ring, kernel/kgsl-lazy.patch and the compat layer's hint), zram zstd (slower
+  readback of swapped pages), loop0 direct I/O, the fakelogd filter (something reading Meta's logs?).
+  Bisect by booting without each (an image without kgsl-lazy first).
 - Goal (user, 2026-11-03): the cameras seen by SteamVR as a real camera, like on the Steam Frame:
   its settings adjustable in SteamVR, usable as normal passthrough and as the passthrough used to
   draw the boundary.
