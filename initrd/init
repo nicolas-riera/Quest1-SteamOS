@@ -67,7 +67,7 @@ if [ "$MODE" = holo ]; then
 			# full install (the PC installer): userdata is the SteamOS root file system itself
 			mount --move /data /newroot && ROOT=userdata
 		elif LOOP=$(losetup -f) && losetup $LOOP /data/steamos/holo.img \
-			&& mount -t ext4 -o rw,noatime $LOOP /newroot; then
+			&& { log "$(loopdio $LOOP 2>&1)"; mount -t ext4 -o rw,noatime $LOOP /newroot; }; then
 			# dual boot: the system image in Android's userdata, which stays reachable as /userdata
 			mkdir -p /newroot/userdata
 			mount --move /data /newroot/userdata && ROOT=holo.img

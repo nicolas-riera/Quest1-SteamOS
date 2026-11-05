@@ -78,6 +78,7 @@ image() {
 	busybox_static
 	aarch64-linux-gnu-gcc -static -O2 -Wall -o fbtest "$P/initrd/fbtest.c"
 	aarch64-linux-gnu-gcc -static -O2 -Wall -o rb "$P/initrd/rb.c"
+	aarch64-linux-gnu-gcc -static -O2 -Wall -o loopdio "$P/initrd/loopdio.c"
 	echo holo > holo-mode
 	tr -d '\r' < "$P/initrd/init" > init
 	cat > spec <<-EOF
@@ -96,6 +97,7 @@ image() {
 	slink /bin/sh busybox 777 0 0
 	file /bin/fbtest $I/fbtest 755 0 0
 	file /bin/rb $I/rb 755 0 0
+	file /bin/loopdio $I/loopdio 755 0 0
 	file /etc/holo-mode $I/holo-mode 644 0 0
 	file /init $I/init 755 0 0
 	EOF
