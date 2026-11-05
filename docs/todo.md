@@ -176,9 +176,9 @@ Open items, roughly by priority. Done items move to the commit log.
   - check the Vapor look (wallpaper, dark theme, Steam Deck logo) on a fresh user, and that the "+" menu shows
     only Desktop and user-installed apps;
   - mouse orientation, scroll and keyboard typing in the headset;
-  - the compositor showed q1desktop's Vulkan texture turned by 180 degrees (Steam's own overlays, also Vulkan
-    textures, come out right; seen in snapshots 2026-11-05): q1desktop turns it back with its texture bounds.
-    Find the cause (vrclient's copy into the compositor's image, a blit the Adreno blob gets wrong?).
+  - snapshots (/root/snap.sh) show q1desktop's overlay turned by 180 degrees while it is right in the headset
+    (user, 2026-11-05; Steam's overlays are right in both): don't trust snapshots for that overlay's
+    orientation, find why they differ.
 - Steam crashed while the desktop was used (user, 2026-11-05 ~18:07) and its VR UI did not come back:
   vrdashboard asserts "stalled cross-thread pipe (pipe is disconnected)" (/tmp/dumps), the headset deep in swap.
   The dashboard's vrwebhelper (started by vrdashboard) died with it and vrdashboard never restarted it. The
