@@ -123,6 +123,8 @@ install_units() {
 	echo 'u aid_nobody 9999 "Android nobody (ashmemd)" / -' > /etc/sysusers.d/android-tracking.conf
 	systemd-sysusers /etc/sysusers.d/android-tracking.conf
 	U=/etc/systemd/system
+	# fakelogd writes the controller list now (ctlwatch read it from the journal, where the line no longer goes)
+	rm -f $U/android-ctlwatch.service
 	cat > $U/android-tracking-setup.service <<'EOF'
 [Unit]
 Description=Quest 1 tracking stack: /persist calibration copy, data dirs, device permissions
@@ -248,10 +250,6 @@ PartOf=android-sensors-hal.service"
 Wants=android-trackingservice.service
 After=android-trackingservice.service
 PartOf=android-sensors-hal.service"
-	# ctlwatch: controller ids (from the sensors HAL log) for ovrstub's OVRRemoteService stand-in
-	unit ctlwatch "controller id list for ovrstub (/run/q1track/controllers)" root "" 		"/usr/local/sbin/holo-android-tracking ctlwatch" "Wants=android-sensors-hal.service
-After=android-sensors-hal.service
-PartOf=android-sensors-hal.service"
 	# Meta mode survives reboots: when /etc/quest1-tracking says "meta", start Meta's stack at boot,
 	# before Monado (which then leaves SyncBoss to the sensors HAL)
 	cat > $U/android-tracking-boot.service <<'EOF'
@@ -277,18 +275,8 @@ EOF
 }
 
 BASE="android-ovrstub android-ashmemd android-adsprpcd android-settingsserver android-vrfocus android-iad android-telemetry-hal android-power-hal"
-SB="android-ctlwatch android-q1anchord android-q1trackd android-trackingservice android-runtimeipcbroker android-calibration android-cameramuxmode android-sensors-hal"
+SB="android-q1anchord android-q1trackd android-trackingservice android-runtimeipcbroker android-calibration android-cameramuxmode android-sensors-hal"
 TE=/sys/bus/spi/devices/spi12.0/control/te_timestamp
-ctlwatch() { # paired controller ids -> /run/q1track/controllers ("<id> <1 left|2 right>"), for ovrstub
-	since=$(systemctl show -p ActiveEnterTimestamp --value android-sensors-hal.service)
-	while :; do
-		journalctl -b --no-pager -o cat --since "$since" 2>/dev/null |
-			sed -n 's/.*Syncboss input \([0-9a-f]\{16\}\) hardware type [0-9]*, subtype \([12]\).*/\1 \2/p' |
-			sort -u > /run/q1track/controllers.tmp
-		[ -s /run/q1track/controllers.tmp ] && mv -f /run/q1track/controllers.tmp /run/q1track/controllers
-		sleep 2
-	done
-}
 cli() { # trackinginterface_cli as root (vrfocus grants uid 0) with the stack's property area
 	unshare -m sh -c 'mount --bind /run/q1track/__properties__ /dev/__properties__ && exec env '"$E"' /system/bin/trackinginterface_cli "$@"' cli "$@"
 }
@@ -384,7 +372,7 @@ monado_trial() {
 meta_start() { # Meta's stack, in order (the sensors HAL first: it takes SyncBoss)
 	systemctl start $BASE
 	systemctl start android-sensors-hal
-	systemctl start android-cameramuxmode android-calibration android-trackingservice android-ctlwatch android-q1trackd android-q1anchord
+	systemctl start android-cameramuxmode android-calibration android-trackingservice android-q1trackd android-q1anchord
 }
 # meta-on: Monado without SyncBoss + Meta's stack. Restarts Monado: through /root/q1restart.sh.
 meta_on() {
@@ -414,7 +402,6 @@ setup) setup ;;
 install) install_units ;;
 base) systemctl start $BASE ;;
 trial) trial ;;
-ctlwatch) ctlwatch ;;
 monado-trial) shift; monado_trial "$@" ;;
 meta-on) meta_on ;;
 meta-off) meta_off ;;

@@ -7,6 +7,10 @@
 # ("Controller <8 hex>xxxxxxxx battery level changed: 50% -> 40%"). They go to
 # /run/q1track/ctlbattery, "<first 8 hex of the device id> <percent>" per line, for q1trackd.
 #
+# And the paired controllers: the sensors HAL logs "Syncboss input <16 hex> hardware type N, subtype
+# 1|2" (an info line) for each; they go to /run/q1track/controllers, "<id> <1 left|2 right>" per line,
+# for ovrstub's OVRRemoteService stand-in, without which trackingservice reports no controller.
+#
 # The journal gets warnings and errors only, at most BURST lines per tag every 10 s (then a count of
 # what was dropped): Meta's tracking logs ~300 lines/s (CONSTELLATION, VioInit...), which cost
 # journald and this script CPU and pushed everything else out of the journal within minutes.
@@ -29,6 +33,27 @@ change_re = re.compile(r'Controller ([0-9a-f]{8})\w* battery level changed: \d+%
 dead_re = re.compile(r'\[[lr]con \(\s*\w+\) ([0-9a-f]{8})\w*\].*-> paired_dead_battery')
 levels = {}
 
+CTL = '/run/q1track/controllers'
+input_re = re.compile(r'Syncboss input ([0-9a-f]{16}) hardware type \d+, subtype ([12])')
+ctls = set()
+
+
+def write_atomic(path, lines):
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path + '.tmp', 'w') as f:
+            f.writelines(lines)
+        os.rename(path + '.tmp', path)
+    except OSError:
+        pass
+
+
+def controller(msg):
+    m = input_re.search(msg)
+    if m and m.groups() not in ctls:
+        ctls.add(m.groups())
+        write_atomic(CTL, sorted('%s %s\n' % c for c in ctls))
+
 
 def battery(msg):
     m = cache_re.search(msg) or change_re.search(msg) or dead_re.search(msg)
@@ -38,13 +63,7 @@ def battery(msg):
     if levels.get(m.group(1)) == pct:
         return
     levels[m.group(1)] = pct
-    try:
-        os.makedirs(os.path.dirname(BAT), exist_ok=True)
-        with open(BAT + '.tmp', 'w') as f:
-            f.writelines('%s %d\n' % kv for kv in levels.items())
-        os.rename(BAT + '.tmp', BAT)
-    except OSError:
-        pass
+    write_atomic(BAT, ['%s %d\n' % kv for kv in levels.items()])
 
 
 while True:
@@ -56,6 +75,8 @@ while True:
     tag = rest[0].decode(errors='replace'); msg = rest[1].decode(errors='replace') if len(rest) > 1 else ''
     if tag.startswith('SyncBoss') and 'batter' in msg:
         battery(msg)
+    if 'Syncboss input' in msg:
+        controller(msg)
     if pr < min_pr:
         continue
     now = time.monotonic()

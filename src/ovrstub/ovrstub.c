@@ -449,8 +449,8 @@ static void set_thread_policy(pid_t caller, struct rd *r)
  * Without it libossdk reports "None connected" although the sensors HAL sees both controllers.
  * Transaction codes and the RemoteStatus layout are from libremoteservice.so (Bp proxies and
  * RemoteStatus::writeToParcel). The controller ids come from /run/q1track/controllers, one
- * "<16 hex id> <subtype 1 left | 2 right>" line per controller, written by holo-android-tracking's
- * ctlwatch from the sensors HAL log (ids are never baked into the repo). The idea of answering
+ * "<16 hex id> <subtype 1 left | 2 right>" line per controller, written by fakelogd from the
+ * sensors HAL log (ids are never baked into the repo). The idea of answering
  * these calls and announcing controllers through the status callback comes from the Quest 2 port
  * (github.com/URFAVF3MBOY/quest2-steamos); this is an independent implementation. */
 #define CTL_FILE "/run/q1track/controllers"
