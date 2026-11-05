@@ -183,6 +183,8 @@ struct device
 	PFN_vkResetFences ResetFences;
 	PFN_vkGetSemaphoreFdKHR GetSemaphoreFdKHR;
 	PFN_vkImportSemaphoreFdKHR ImportSemaphoreFdKHR;
+	PFN_vkCmdUpdateBuffer CmdUpdateBuffer;
+	PFN_vkCmdBindIndexBuffer CmdBindIndexBuffer;
 	void *fx;              //!< Facet emulation state (quest1_facet.c)
 	bool has_q0;           //!< first queue family of vkCreateDevice, for one-shot submissions
 	uint32_t q0_family;
@@ -1207,6 +1209,70 @@ static uint32_t *rewrite_layer_builtins(const uint32_t *w, uint32_t words, uint3
 // allocate memory".
 static unsigned fail_logs;
 
+// --- 32-bit indices bound as 16-bit ----------------------------------------------------------------
+// vrcompositor uploads the room setup's meshes (boundary circle, drawn outline, drawing area) with vkCmdUpdateBuffer,
+// their indices as 32-bit values, then binds those buffers with VK_INDEX_TYPE_UINT16 and the 32-bit index count. Read
+// as 16-bit, every other index is 0: half the triangles ran to the mesh's first vertex (a fan of rays from one floor
+// point). The buffers last filled at offset 0 with 32-bit shaped indices (every odd 16-bit word 0) are bound as
+// VK_INDEX_TYPE_UINT32 instead. A real 16-bit index list with every second index 0 is not a mesh anyone draws.
+#define U32_IBS 256
+static uint64_t u32_ibs[U32_IBS];
+static pthread_mutex_t u32_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static bool u32_shaped(const uint16_t *w, size_t n)
+{
+	if (n < 6)
+		return false;
+	bool nonzero = false;
+	for (size_t i = 0; i + 1 < n; i += 2) {
+		if (w[i + 1])
+			return false;
+		nonzero |= w[i] != 0;
+	}
+	return nonzero;
+}
+
+static VKAPI_ATTR void VKAPI_CALL CmdUpdateBuffer(VkCommandBuffer cb, VkBuffer b, VkDeviceSize off, VkDeviceSize size,
+                                                  const void *data)
+{
+	if (off == 0) {
+		bool u32 = size % 4 == 0 && u32_shaped(data, size / 2);
+		pthread_mutex_lock(&u32_lock);
+		int at = -1, free_at = -1;
+		for (int i = 0; i < U32_IBS; i++) {
+			if (u32_ibs[i] == (uint64_t)b)
+				at = i;
+			else if (!u32_ibs[i] && free_at < 0)
+				free_at = i;
+		}
+		if (u32 && at < 0 && free_at >= 0)
+			u32_ibs[free_at] = (uint64_t)b;
+		else if (!u32 && at >= 0)
+			u32_ibs[at] = 0;
+		pthread_mutex_unlock(&u32_lock);
+	}
+	device_of(cb)->CmdUpdateBuffer(cb, b, off, size, data);
+}
+
+static VKAPI_ATTR void VKAPI_CALL CmdBindIndexBuffer(VkCommandBuffer cb, VkBuffer b, VkDeviceSize off, VkIndexType t)
+{
+	if (t == VK_INDEX_TYPE_UINT16) {
+		static unsigned logs;
+		pthread_mutex_lock(&u32_lock);
+		for (int i = 0; i < U32_IBS; i++)
+			if (u32_ibs[i] == (uint64_t)b) {
+				t = VK_INDEX_TYPE_UINT32;
+				if (logs < 10) {
+					logs++;
+					LOG("index buffer %p holds 32-bit indices: bound as UINT32, not UINT16\n", (void *)b);
+				}
+				break;
+			}
+		pthread_mutex_unlock(&u32_lock);
+	}
+	device_of(cb)->CmdBindIndexBuffer(cb, b, off, t);
+}
+
 static VKAPI_ATTR VkResult VKAPI_CALL AllocateMemory(VkDevice device, const VkMemoryAllocateInfo *ai,
                                                      const VkAllocationCallbacks *alloc, VkDeviceMemory *out)
 {
@@ -1919,6 +1985,8 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice pd, const Vk
 	GET(ResetFences);
 	GET(GetSemaphoreFdKHR);
 	GET(ImportSemaphoreFdKHR);
+	GET(CmdUpdateBuffer);
+	GET(CmdBindIndexBuffer);
 #undef GET
 	pthread_mutex_init(&d->mutex, NULL);
 	pthread_mutex_init(&d->queue_mutex, NULL);
@@ -2012,6 +2080,8 @@ static PFN_vkVoidFunction device_intercept(const char *name)
 	I("vkCreateRenderPass", CreateRenderPass)
 	I("vkCreateComputePipelines", CreateComputePipelines)
 	I("vkDeviceWaitIdle", DeviceWaitIdle)
+	I("vkCmdUpdateBuffer", CmdUpdateBuffer)
+	I("vkCmdBindIndexBuffer", CmdBindIndexBuffer)
 #undef I
 	return NULL;
 }
