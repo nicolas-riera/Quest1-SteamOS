@@ -93,6 +93,8 @@ sh holo-frame-mode.sh install
 sh holo-passthrough.sh install
 sh holo-perf.sh
 sh holo-battery.sh install
+sh holo-bluetooth.sh install
+sh holo-desktop.sh install
 sh holo-bootsplash.sh install
 
 # --- the SteamVR driver: registered for steamos like `vrpathreg adddriver` does ------------------------------

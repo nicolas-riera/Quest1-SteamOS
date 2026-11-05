@@ -19,3 +19,7 @@ libdrm libglvnd mesa-utils vulkan-icd-loader vulkan-tools openxr hidapi wayland 
 xorg-server-xvfb xorg-xauth xorg-xdpyinfo xorg-xset xorg-xwd xorg-xwininfo
 libxcursor libxdamage libxrandr libjpeg-turbo libcups libva libvdpau sdl2-compat ibus at-spi2-core
 gdk-pixbuf2 gamescope
+# desktop mode (holo-desktop.sh): nested Plasma and the Frame's desktop apps
+plasma-desktop plasma-workspace kwin dolphin konsole discover flatpak systemsettings plasma-pa plasma-nm
+bluedevil xdg-desktop-portal-kde polkit-kde-agent kio-extras breeze breeze-icons kde-gtk-config
+kdeplasma-addons vlc qt6-virtualkeyboard libxtst

@@ -293,11 +293,42 @@ class Build:
                 if os.path.lexists(os.path.join(local, f)):
                     os.remove(os.path.join(local, f))
                 im.copy(child, os.path.join(local, f))
+        self.frame_kde_presets(im)
         im.f.close()
         os.remove(part)
         # our SteamVR edits and steamvr-q1 (device/holo-steamvr.sh), from outside (Holo core has no python3)
         run("sh", os.path.join(self.repo, "device", "holo-steamvr.sh"), "install",
             env=dict(os.environ, ROOT=self.mnt))
+
+    # the Frame's own copy is replaced by ours (device/steamos-nested-desktop in /usr/local/bin), it has no sddm,
+    # and the theme service only tells the Frame apart from the Deck: device/holo-desktop.sh does its job
+    FRAME_KDE_SKIP = ("usr/bin/steamos-nested-desktop", "etc/sddm.conf.d/", "usr/lib/systemd/",
+                      "usr/lib/steamos/steamos-set-plasma-theme")
+
+    def frame_kde_presets(self, im):
+        """The Frame's desktop mode look and entries, package steamdeck-kde-presets (not in Holo's repositories),
+        file by file from its pacman file list: the Vapor look-and-feel (dark, SteamOS wallpaper, Steam Deck logo
+        on the launcher), the Steam desktop entries, and the NoDisplay entries in /usr/local/share/applications
+        that keep developer tools (Qt Designer, qv4l2...) out of Steam's "+" menu."""
+        db = im.lookup("/usr/lib/holo/pacmandb/local")
+        pkg = [(os.fsdecode(n), c) for n, c in im.children(db) if os.fsdecode(n).startswith("steamdeck-kde-presets-")]
+        if not pkg:
+            raise RuntimeError("steamdeck-kde-presets not in the Frame image")
+        name, pkg = pkg[0]
+        files = [c for f, c in im.children(pkg) if f == b"files"][0]
+        text = b"".join(d for _, d in im.extents(files)).decode()
+        listed = text.split("%FILES%\n", 1)[1].split("\n\n", 1)[0].split("\n")
+        n = 0
+        for rel in listed:
+            if not rel or rel.endswith("/") or rel.startswith(self.FRAME_KDE_SKIP):
+                continue
+            dst = os.path.join(self.mnt, rel)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            if os.path.lexists(dst):
+                os.remove(dst)
+            im.copy(im.lookup("/" + rel), dst)
+            n += 1
+        log("frame: %d files of %s" % (n, name))
 
     def steam(self, prog):
         """Valve's client packages (zips + manifest, as prepare.py staged them) unpacked into ~steamos: a few big

@@ -17,7 +17,7 @@
 #   /usr/local/lib/quest1-vk, quest1-vk-steam   the Vulkan shim (vrcompositor; Steam's webhelper + vkredirect)
 #   /usr/local/lib/q1track/q1trackd, /data/local/tmp/libq1camtap.so   bionic tools (src/q1track, src/camtap)
 #   /usr/local/lib/q1splash/q1splash, /usr/local/bin/{ovrstub,q1black,xscreen,x11vnc,q1-camoverlay,
-#   q1-ptprovider,vrdash}
+#   q1-ptprovider,vrdash,q1desktop}
 # To check against the development headset (built by hand there, recipe not recorded until now):
 #   the libhybris commit, Monado's CMake options, the vrcompositor shim (here the same build as Steam's).
 set -eo pipefail
@@ -122,6 +122,9 @@ g++ -std=c++17 -O2 -o $D/usr/local/bin/vrdash vrdash.cpp $OVR
 cd "$R/src/camtap"
 g++ -std=c++17 -O2 -o $D/usr/local/bin/q1-camoverlay camoverlay.cpp $OVR
 g++ -std=c++17 -O2 -o $D/usr/local/bin/q1-ptprovider ptprovider.cpp $OVR
+# desktop mode: a nested Plasma's Xvfb as the SteamVR overlay gamescope would make (device/holo-desktop.sh)
+cd "$R/src/q1desktop"
+g++ -std=c++17 -O2 -Wall -o $D/usr/local/bin/q1desktop q1desktop.cpp $OVR -ldl -lX11 -lXdamage -lXtst
 
 step monado
 fetch $MONADO $MONADO_COMMIT $S/monado

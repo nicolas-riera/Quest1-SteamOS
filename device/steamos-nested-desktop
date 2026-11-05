@@ -1,0 +1,96 @@
+#!/bin/bash
+# steamos-nested-desktop: the Steam Frame's desktop mode (a nested KDE Plasma) on the Quest 1.
+# The Frame's own script (/usr/bin/steamos-nested-desktop, run by Steam for its "Desktop" entry, "+" menu)
+# with one difference, marked "Quest 1": on the Frame this runs inside gamescope, whose OpenVR backend shows
+# the app's window as a SteamVR overlay. gamescope can't run on the Adreno 540's Vulkan 1.1 blob (no DRM
+# format modifiers, no dma-buf import), so kwin draws into an Xvfb of its own size and q1desktop shows that
+# Xvfb as the overlay gamescope would create, with the laser, scroll and SteamVR keyboard as input
+# (docs/desktop.md).
+
+set -eu
+
+# Remove the performance overlay, it meddles with some tasks
+unset LD_PRELOAD
+
+# Undo gamescope's session startup script that sets XDG_DESKTOP_PORTAL_DIR
+# to ensure xdg-desktop-portal doesn't try to start desktop portals
+unset XDG_DESKTOP_PORTAL_DIR
+
+# Quest 1: Steam runs on the Adreno's Vulkan (steam-q1: our Vulkan shim first in LD_LIBRARY_PATH, Steam's
+# runtime after it) and passes that on. The desktop is the system's: Qt probes Vulkan, and the shim without
+# libhybris' TLS preload crashes it (ksplash, kded6, the portals, plasmashell never up: a black desktop).
+unset LD_LIBRARY_PATH QUEST1_VK_REDIRECT QUEST1_VKSHIM_WSI QUEST1_STEAMVR_COMPAT QUEST1_STEAM_VR MESA_EXTENSION_OVERRIDE
+
+W=1280 H=800
+pids=()
+
+function cleanup()
+{
+    # Quest 1: our Xvfb and overlay
+    [ -n "${plasma:-}" ] && kill -TERM -- -$plasma 2>/dev/null || true
+    for p in "${pids[@]}"; do kill "$p" 2>/dev/null || true; done
+    # Flush fuse mounts beneath here
+    umount --recursive $NEW_XDG_RUNTIME_DIR 2>/dev/null || true
+    rm -Rf $NEW_XDG_RUNTIME_DIR
+}
+
+# Quest 1: one desktop at a time. Plasma takes a while to come up here, and a second launch (a second click
+# on "Desktop") would clean up the running one's XDG_RUNTIME_DIR: it shows the running one instead.
+exec 9>"$XDG_RUNTIME_DIR/nested_plasma.lock"
+if ! flock -n 9; then
+    pkill -USR1 -x q1desktop || true
+    exit 0
+fi
+# Steam starts apps with the C locale here: the system's
+[ -r /etc/locale.conf ] && . /etc/locale.conf && export LANG
+
+# Create a new XDG_RUNTIME_DIR
+NEW_XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR/nested_plasma
+trap cleanup EXIT
+
+cleanup
+mkdir $NEW_XDG_RUNTIME_DIR --mode 0700
+
+# Some things are (currently) shared, pulseaudio socket needs to be connected to the main session
+mkdir $NEW_XDG_RUNTIME_DIR/pulse --mode 0700
+ln -s $XDG_RUNTIME_DIR/pulse/native $NEW_XDG_RUNTIME_DIR/pulse/native
+ln -s $XDG_RUNTIME_DIR/pipewire* $NEW_XDG_RUNTIME_DIR/.
+
+# Quest 1: gamescope's part. An X server for kwin's window (the first free display from :2), its
+# framebuffer exported for q1desktop, which runs on the Adreno like SteamVR's own clients.
+n=2
+while [ -e /tmp/.X11-unix/X$n ] || [ -e /tmp/.X$n-lock ]; do n=$((n + 1)); done
+mkdir $NEW_XDG_RUNTIME_DIR/xvfb
+Xvfb :$n -screen 0 ${W}x${H}x24 -fbdir $NEW_XDG_RUNTIME_DIR/xvfb -nolisten tcp -noreset &
+pids+=($!)
+for i in $(seq 50); do [ -e /tmp/.X11-unix/X$n ] && break; sleep 0.1; done
+export DISPLAY=:$n
+LD_PRELOAD=/opt/hybris/lib/libbionictls.so \
+LD_LIBRARY_PATH=/usr/local/lib/quest1-vk-steam:/opt/hybris/lib \
+QUEST1_STEAMVR_COMPAT=1 \
+Q1D_ICON=${Q1D_ICON:-/usr/share/applications/steam/steamos-nested-desktop/icon.png} \
+    /usr/local/bin/q1desktop $NEW_XDG_RUNTIME_DIR/xvfb/Xvfb_screen0 &
+q1d=$!
+pids+=($q1d)
+
+## Shadow kwin_wayland_wrapper so that we can pass args to kwin wrapper
+## whilst being launched by plasma-session
+mkdir $NEW_XDG_RUNTIME_DIR/bin
+cat <<EOF > $NEW_XDG_RUNTIME_DIR/bin/kwin_wayland_wrapper
+#!/bin/sh
+/usr/bin/kwin_wayland_wrapper --width $W --height $H --no-lockscreen \$@
+EOF
+chmod a+x $NEW_XDG_RUNTIME_DIR/bin/kwin_wayland_wrapper
+export PATH=$NEW_XDG_RUNTIME_DIR/bin:$PATH
+
+export XDG_RUNTIME_DIR=$NEW_XDG_RUNTIME_DIR
+
+# Quest 1: in its own process group, ended when the overlay is closed from its control bar (on the Frame,
+# closing the app's window ends it)
+setsid dbus-run-session startplasma-wayland &
+plasma=$!
+while kill -0 $plasma 2>/dev/null; do
+    kill -0 $q1d 2>/dev/null || { kill -TERM -- -$plasma 2>/dev/null || true; break; }
+    sleep 1
+done
+wait $plasma || true
