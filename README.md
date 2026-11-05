@@ -37,6 +37,7 @@ from Valve's servers and from Meta's last Quest 1 update image.
 | IPD | The physical IPD slider is read live and sets SteamVR's eye separation |
 | Audio | Speakers and microphone through PipeWire, with the volume buttons |
 | Sensors | The proximity sensor turns the panels off when the headset is removed. The fan keeps running |
+| Playspace | The Steam Frame's room setup: floor height and drawing the boundary |
 | Passthrough | The Steam Frame's room view with the tracking cameras: 3D view, tint colour, double click on the Steam or Oculus button to toggle it |
 | Power | Power button to Steam (sleep, power menu), shutdown and restart from Steam, battery levels, power LED |
 | Identity | The system reports itself as SteamOS on an Oculus Quest (os-release, host name) |
@@ -48,13 +49,14 @@ from Valve's servers and from Meta's last Quest 1 update image.
 - **Performance.** SteamVR renders at about 25 to 40 fps (GPU bound); Monado fills the 72 Hz
   with re-projection. The goal is to get as close to 72 as possible; an open Vulkan driver
   (Mesa Turnip) is to be evaluated.
-- **Playspace.** The Steam Frame's room setup works (floor height, drawing the boundary), but
-  its floor geometry is drawn wrong.
+- **Memory.** Steam, SteamVR and its dashboard fill most of the 4 GB: the system swaps from the
+  start, which costs frame rate.
 - **Passthrough.** The depth is a fixed sphere, so near objects are not at their true distance.
 - **Sleep.** Suspend to RAM loses Meta's tracking and the sound on resume.
 - **Streaming** from a PC (Steam Link), **x86 games** (FEX, Proton), the audio crackle, and the
   remaining distortion and chromatic aberration.
-- **The installer** (see above): downloads work, building and flashing are to do.
+- **The installer** (see above): downloads and the image build work end to end; flashing the
+  built image is to do.
 
 ## How it works
 

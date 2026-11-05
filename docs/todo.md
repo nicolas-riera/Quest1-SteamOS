@@ -125,35 +125,15 @@ Open items, roughly by priority. Done items move to the commit log.
   objects sit at their true depth (the fixed 3 m sphere and the 11 cm camera baseline make them wrong).
 
 ## Boundary
-- Frame room setup (step 7) ran at ~3 fps: vrcompositor's "Playspace area SDF" texture (R8, linear) is 0x0
-  until a boundary exists; the Adreno driver gives it 0 bytes of memory, whose allocation fails, so
-  CreateTexture failed on every frame. Fixed 2026-11-03 in the compat layer (empty images made 1x1); to
-  check in the headset: frame rate in step 7, floor and laser drawing, Accept.
-  Also seen: its floor/boundary vertex shader samples bindings 10/26 and 11/27 that the pipeline layout
-  lacks (Adreno: "Bind group info mismatches"); the layer's retry turns those reads into 0 (displacement
-  offsets of the grid), created once per setup start, not per frame.
-- 2026-11-04: with no chaperone_info.vrchap (e.g. after Clear playspace) vrserver had no universe, so no
-  standing pose ("Cannot query GetRawZeroPoseToStandingAbsoluteTrackingPose"): no floor, no brush, Accept
-  committed nothing. driver_quest1 now provides a default universe 2 (Prop_DriverProvidedChaperoneJson_String,
-  standing = raw). Floor height adjust and drawing then work (user-tested).
-  2026-11-05: the fan of rays (circle, drawn outline and area all running to one floor point) is fixed:
-  vrcompositor uploads those meshes with 32-bit indices and binds them as UINT16 with the 32-bit count; the
-  compat layer now binds such buffers as UINT32 (user-confirmed: everything draws correctly). Why the Frame
-  does not need this is not known.
-  Left:
-  - A purple zone shows during the setup and looks like a debug view (user). Not
-    `playspace-floordetection-geo` (hiding it changed nothing). Next: the user's description of it, then the
-    drawing area (`playspace-area-drawing`, its fragment shader samples the CPU-written R8 "Playspace area
-    SDF" texture: check its upload/row pitch on the Adreno).
+- The Steam Frame's room setup works (user, 2026-11-05; the Adreno fixes are in docs/boundary.md). Left:
   - Leaving the setup, Steam showed a "something went wrong" popup (Refresh cleared it); maybe memory.
   - Frame rate in step 7: ~30 fps after a clean boot, as outside the setup (see Performance).
   - ComputeInverseDistortion returns identity while direct scanout distorts (distort_geom_* shaders place
     geometry with the inverse LUT).
   - steamvr-q1 exports QUEST1_COMPAT_SPIRV empty, and the layer checks getenv() != NULL, so the pipeline
     logging is always on (log noise).
-- Test in the headset (after passthrough, needed to draw the boundary): the playspace buttons
-  (fixed with Prop 11004), and relocalization after a reboot in the persisted map (`q1anchord`,
-  docs/boundary.md), then Clear playspace.
+  - Test in the headset: Recenter and Clear playspace, and relocalization after a reboot in the persisted
+    map (`q1anchord`, docs/boundary.md).
 - Pairing Quest controllers from the headset (Steam's UI). Pairing goes through SyncBoss
   (`syncboss_input_pair`): never call it without the user's explicit go.
 - Controller connection state: a powered-off controller now turns disconnected within 0.3 s

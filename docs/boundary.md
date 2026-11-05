@@ -23,9 +23,31 @@ the laser/brush and the boundary, through `IVRChaperoneSetup`.
 - No depth or camera is needed: the floor comes from the controller touching it, the boundary from the
   controller's laser projected on the floor.
 
-- vrcompositor keeps a "Playspace area SDF" texture (R8, linear, CPU-written) sized from the boundary: 0x0
-  before one exists. The compat layer makes such empty images 1x1 (the Adreno driver cannot allocate 0
-  bytes; without it room setup ran at ~3 fps).
+## What the Adreno 540 needs (compat layer, `src/vklayer-steamvr/quest1_compat.c`)
+
+The room setup works on the Quest 1 (user-tested 2026-11-05) with these fixes:
+
+- **Default universe.** With no `chaperone_info.vrchap` (first start, or after Clear playspace) vrserver had
+  no standing pose: no floor, no brush, Accept committed nothing. `driver_quest1` provides a default
+  universe (`Prop_DriverProvidedChaperoneJson_String`, standing = raw).
+- **Empty SDF texture.** vrcompositor sizes its "Playspace area SDF" texture from the boundary: 0x0 before
+  one exists. The Adreno driver cannot allocate 0 bytes, CreateTexture failed every frame (~3 fps): empty
+  images are made 1x1.
+- **32-bit indices bound as 16-bit.** The setup's meshes (circle, drawn outline, drawing area) are uploaded
+  with 32-bit indices (vkCmdUpdateBuffer for small ones, vkCmdCopyBuffer from a mapped staging buffer for
+  big ones) and bound with `VK_INDEX_TYPE_UINT16` and the 32-bit count: every other index read as 0, a fan
+  of rays from one floor point. Buffers filled with 32-bit shaped indices are bound as `UINT32`.
+- **SDF texture without SAMPLED usage.** The drawing area is a grid of 64x64 blocks (`CBlockedSDFGrid`)
+  whose signed distances vrcompositor writes into a 512x512 linear R8 image through a mapping and samples,
+  but creates with TRANSFER usage only. The Adreno driver then samples 0 ("inside") everywhere: whole purple
+  squares instead of the drawn shape. Linear R8 images get SAMPLED usage. `src/vklayer-steamvr/sdftest.c`
+  reproduces it outside SteamVR (without SAMPLED 261120 of 262144 texels read wrong, with it none).
+- The floor/boundary vertex shader samples bindings its pipeline layout lacks; the layer's pipeline retry
+  turns those reads into 0 (once per setup start).
+
+Debug notes: SPIR-V/pipeline logs in `/tmp/quest1-compat-vrcompositor.log`; `tools/headset-dev/sg-hide.sh`
+removes one scene graph node live. Adding hooks for vkCreateImageView and vkCmdCopyImage to the layer made
+vrcompositor's whole output black (not investigated): keep debug hooks off those.
 
 ## Raw space and persistence (`chaperone_frame.cpp`)
 
