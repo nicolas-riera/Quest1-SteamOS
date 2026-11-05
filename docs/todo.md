@@ -205,11 +205,10 @@ Open items, roughly by priority. Done items move to the commit log.
 ## Hardware
 - Power LED: Meta's battery colours since 2026-11-03 (`device/holo-battery.sh`). Later (low
   priority): let the user control it, e.g. from the quick menu.
-- Bluetooth (docs/bluetooth.md): not working yet (user, 2026-11-05). The chip answers and switches to
-  3 Mbit/s, but the patch download (crbtfw21.tlv) gets no acknowledgement for its last segment;
-  quest1-bluetooth.service is disabled on the dev headset meanwhile. Then: pairing, a keyboard/mouse, a
-  gamepad, audio (A2DP). `rfkill block bluetooth` cuts the chip's power (bt_power rfkill) under the
-  attached hci0: check what Plasma's Bluetooth toggle does.
+- Bluetooth (docs/bluetooth.md): working since 2026-11-05 evening (hci0 up, scans find devices). Left: pairing
+  a keyboard/mouse, a gamepad, audio (A2DP); Steam's and Plasma's Bluetooth settings; `rfkill block bluetooth`
+  cuts the chip's power (bt_power rfkill) under the attached hci0: check what Plasma's toggle does; a faster
+  patch download (~11 s).
 - USB OTG (low priority): keyboards, storage and other USB devices on the headset's port.
 
 ## Steam Frame features (from a video walkthrough, user 2026-11-03)

@@ -43,14 +43,18 @@ from Valve's servers and from Meta's last Quest 1 update image.
 | Identity | The system reports itself as SteamOS on an Oculus Quest (os-release, host name) |
 | GPU | The Adreno 540 Vulkan driver runs natively through libhybris |
 | Access | USB network (`ssh root@192.168.77.1`), a serial console over USB, native Wi-Fi |
+| Bluetooth | The WCN3990's Bluetooth with BlueZ, like the Steam Frame: the controller comes up with the headset's own address and finds devices (pairing to test). See [docs/bluetooth.md](docs/bluetooth.md) |
+| Desktop mode | The Steam Frame's desktop (nested KDE Plasma with Dolphin, Konsole, Discover...) from Steam's "+" menu, shown as a SteamVR overlay with the laser, scroll and keyboard. See [docs/desktop.md](docs/desktop.md) |
 
 ## Work in progress
 
 - **Performance.** SteamVR renders at about 25 to 40 fps (GPU bound); Monado fills the 72 Hz
   with re-projection. The goal is to get as close to 72 as possible; an open Vulkan driver
   (Mesa Turnip) is to be evaluated.
-- **Memory.** Steam, SteamVR and its dashboard fill most of the 4 GB: the system swaps from the
-  start, which costs frame rate.
+- **Memory.** Steam, SteamVR and its dashboard fill most of the 4 GB. Already saved: the root
+  image's double page cache (direct I/O, ~335 MB), SteamVR's 256 MB GPU upload rings allocated
+  on first use (~500 MB, ~250 MB more with the desktop), zstd swap compression. Steam's web
+  processes are next.
 - **Passthrough.** The depth is a fixed sphere, so near objects are not at their true distance.
 - **Sleep.** Suspend to RAM loses Meta's tracking and the sound on resume.
 - **Streaming** from a PC (Steam Link), **x86 games** (FEX, Proton), the audio crackle, and the
