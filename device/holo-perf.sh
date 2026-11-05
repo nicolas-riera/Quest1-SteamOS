@@ -3,21 +3,23 @@
 # The 3.8 GB RAM is shared by the CPU and the GPU; Steam + SteamVR + the dashboard's CEF
 # processes push it into swap. The 4 GB swap file on userdata thrashes so hard that the whole
 # system stalls (load 20+, sshd no longer answers). So:
-#   - zram (compressed RAM swap, lz4) with a higher priority than the swap file;
+#   - zram (compressed RAM swap, zstd) with a higher priority than the swap file;
 #   - sshd protected from the OOM killer and scheduled ahead of the desktop/VR processes.
 set -e
 
 cat > /usr/local/sbin/quest1-zram <<'EOF'
 #!/bin/sh
-# quest1-zram start|stop: 3 GB zram swap (lz4), used before the swap file. SteamVR + Steam fill 1.5 GB
-# (2026-11-02: full, then the slow swap file on the loop device, and vrcompositor's pages swapped out);
-# its pages compress ~5:1, so 3 GB of zram costs ~600 MB of RAM at most
+# quest1-zram start|stop: 3 GB zram swap (zstd), used before the swap file. SteamVR + Steam fill 1.5 GB
+# (2026-11-02: full, then the slow swap file on the loop device, and vrcompositor's pages swapped out).
+# zstd: 256 MB of the headset's swapped pages (zero pages left out) took 60 MB against 94 MB with lz4
+# (2026-11-05), for 19 us per 4 KiB page read back instead of 7 (the swap file: milliseconds) and
+# compression ~3x slower, paid by kswapd during bursts only (~1 page/s swapped at rest)
 Z=/sys/block/zram0
 case "$1" in
 start)
 	grep -q /dev/zram0 /proc/swaps && exit 0
 	echo 1 > $Z/reset 2>/dev/null || true
-	echo lz4 > $Z/comp_algorithm
+	echo zstd > $Z/comp_algorithm 2>/dev/null || echo lz4 > $Z/comp_algorithm
 	echo 4 > $Z/max_comp_streams 2>/dev/null || true
 	echo 3072M > $Z/disksize
 	mkswap /dev/zram0 >/dev/null
@@ -33,7 +35,7 @@ chmod 755 /usr/local/sbin/quest1-zram
 
 cat > /etc/systemd/system/quest1-zram.service <<'EOF'
 [Unit]
-Description=Quest 1 compressed RAM swap (zram, lz4)
+Description=Quest 1 compressed RAM swap (zram, zstd)
 DefaultDependencies=no
 Before=swap.target
 After=systemd-modules-load.service
