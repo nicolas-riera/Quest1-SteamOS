@@ -27,6 +27,7 @@ IPv6AcceptRA=no
 IPv6SendRA=no
 EOF2
 networkctl reload
-systemctl enable android-modem.service NetworkManager.service
+# android-modem.service is enabled by holo-android-modem.sh install, which runs after this script
+systemctl enable NetworkManager.service
 # no 30 s boot stall when no Wi-Fi network is around
 systemctl disable NetworkManager-wait-online.service

@@ -222,13 +222,20 @@ class Build:
         """Processes a chroot command left running (gpg-agent, from pacman-key --init): they keep the image busy
         and its final unmount fails."""
         root = os.path.realpath(self.mnt)
+        killed = []
         for pid in filter(str.isdigit, os.listdir("/proc")):
             try:
                 if os.readlink("/proc/%s/root" % pid) == root:
                     log("killing %s left in the image: %s" % (pid, open("/proc/%s/comm" % pid).read().strip()))
                     os.kill(int(pid), signal.SIGKILL)
+                    killed.append(pid)
             except OSError:
                 pass
+        # SIGKILL is asynchronous: the image stays busy until they are gone
+        for _ in range(50):
+            if not any(os.path.exists("/proc/" + pid) for pid in killed):
+                break
+            time.sleep(0.1)
 
     def setup(self, prog):
         repo = self.repo
