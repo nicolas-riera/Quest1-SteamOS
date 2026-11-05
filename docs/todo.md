@@ -13,6 +13,11 @@ Open items, roughly by priority. Done items move to the commit log.
   buffer allocation failing): reboot rather than restart the stack many times. Leads: Steam's
   gamepadui window rendered in Xvfb for nobody, CEF memory flags, vrcompositor's textures,
   extra_free_kbytes so kswapd starts before allocations stall.
+  2026-11-05 evening: holo.img's loop device now uses direct I/O (335 MB of double page cache gone), and
+  vrclient's 256 MB transfer ring (one per OpenVR Vulkan process: vrcompositor, the dashboard, Steam's
+  webhelper, q1desktop, every game) is backed on first CPU touch (kernel/kgsl-lazy.patch). Next: zram
+  with zstd/lz4 instead of lzo, Steam's webhelper ring (fully used: its CPU-drawn pages), the dashboard's
+  and Steam's CEF processes.
 - vrcompositor, head still, panels on (2026-11-02): 22-28 fps in the morning, 36 with Monado's "early"
   ack, 45 with the layer's present waits returning at once. The limit is GPU time: the kgsl trace
   (adreno_cmdbatch_retired start/retire ticks) shows vrcompositor's one batch per frame running
@@ -71,6 +76,12 @@ Open items, roughly by priority. Done items move to the commit log.
   like Meta's TimeWarp. Geometry right since Meta's lens centre (2026-11-03), but vrcompositor's
   distortion pass costs the same as a copy (3.6 ms per eye, bandwidth) and the warp then runs at
   every vsync with 3 samples: more GPU in total. Compare sharpness with the user once perf allows.
+
+## Tracking
+- When the headset loses tracking it jumps to the floor at (0, 0, 0) instead of holding its last pose
+  (user, 2026-11-05). Expected: keep the last position (rotation from the IMU only), like Meta's OS.
+- When tracking comes back the controllers are drawn at once even while the cameras haven't seen them
+  yet, instead of showing as "searching" until they are found (user, 2026-11-05).
 
 ## Steam settings
 - The timezone dropdown (Settings, next to the 24-hour clock) is hidden: Steam shows it only when
@@ -156,10 +167,23 @@ Open items, roughly by priority. Done items move to the commit log.
   `device/holo-perf.sh`.
 
 ## Steam and desktop
-- Next after passthrough and the boundary (user, 2026-11-03): the Steam Frame's desktop mode (the
-  Frame's KDE Plasma) from the "+" menu, also to load the headset hard and see what really needs
-  optimizing. It works in the Quest 2 port (github.com/URFAVF3MBOY/quest2-steamos), whose author
-  allows us to use its code: base it on how that port does it.
+- Desktop mode (docs/desktop.md): the nested Plasma runs and shows in the dashboard (user, 2026-11-05: Dolphin
+  started, the headset struggling). Open:
+  - lag, and the whole dashboard freezing while the desktop is used (memory: ~2 GB swapped with Plasma and
+    an app; llvmpipe threads competing with vrcompositor and the tracking);
+  - start it from Steam's "+" menu (the Frame's entry is installed) and check the overlay key the dashboard
+    ties to the running app (`valve.steam.desktopgame.<appid>`), the control bar's keyboard and close;
+  - check the Vapor look (wallpaper, dark theme, Steam Deck logo) on a fresh user, and that the "+" menu shows
+    only Desktop and user-installed apps;
+  - mouse orientation, scroll and keyboard typing in the headset;
+  - the compositor showed q1desktop's Vulkan texture turned by 180 degrees (Steam's own overlays, also Vulkan
+    textures, come out right; seen in snapshots 2026-11-05): q1desktop turns it back with its texture bounds.
+    Find the cause (vrclient's copy into the compositor's image, a blit the Adreno blob gets wrong?).
+- Steam crashed while the desktop was used (user, 2026-11-05 ~18:07) and its VR UI did not come back:
+  vrdashboard asserts "stalled cross-thread pipe (pipe is disconnected)" (/tmp/dumps), the headset deep in swap.
+  The dashboard's vrwebhelper (started by vrdashboard) died with it and vrdashboard never restarted it. The
+  next OpenVR client to start (here q1desktop) started a new one in its own cgroup, so stopping that client
+  killed the dashboard again. The stack must restart vrwebhelper (or the dashboard unit) when it dies.
 
 ## System
 - SteamOS and SteamVR updates must keep working without undoing our changes (after the
@@ -181,8 +205,11 @@ Open items, roughly by priority. Done items move to the commit log.
 ## Hardware
 - Power LED: Meta's battery colours since 2026-11-03 (`device/holo-battery.sh`). Later (low
   priority): let the user control it, e.g. from the quick menu.
-- Bluetooth: wanted (user, 2026-11-03), likely not hard, and easy to test (plenty of devices
-  around the user).
+- Bluetooth (docs/bluetooth.md): not working yet (user, 2026-11-05). The chip answers and switches to
+  3 Mbit/s, but the patch download (crbtfw21.tlv) gets no acknowledgement for its last segment;
+  quest1-bluetooth.service is disabled on the dev headset meanwhile. Then: pairing, a keyboard/mouse, a
+  gamepad, audio (A2DP). `rfkill block bluetooth` cuts the chip's power (bt_power rfkill) under the
+  attached hci0: check what Plasma's Bluetooth toggle does.
 - USB OTG (low priority): keyboards, storage and other USB devices on the headset's port.
 
 ## Steam Frame features (from a video walkthrough, user 2026-11-03)
