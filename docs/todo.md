@@ -3,6 +3,16 @@
 Open items, roughly by priority. Done items move to the commit log.
 
 ## Performance
+- Target (user, 2026-11-05): 72 fps with a usable Steam (the dashboard is very slow), with headroom left
+  for streaming and desktop mode. Fewer translation/emulation layers is an avenue to weigh.
+- Memory (user, 2026-11-05: "faut bien gérer ce problème de saturation"): right after boot, with
+  SteamVR up, only ~500 MB is available and ~550 MB is already swapped (zram). Per process (Pss + swap
+  + KGSL): Steam's webhelpers ~1.65 GB (two of them with 270 + 185 MB of GPU memory), vrcompositor
+  ~610 MB (470 MB GPU), vrwebhelper (dashboard) ~560 MB (274 MB GPU), steam ~130 MB; KGSL total
+  1.26 GB. After ~12 stack restarts in one boot the headset fell to 12-15 fps (kswapd 35 %, GPU trace
+  buffer allocation failing): reboot rather than restart the stack many times. Leads: Steam's
+  gamepadui window rendered in Xvfb for nobody, CEF memory flags, vrcompositor's textures,
+  extra_free_kbytes so kswapd starts before allocations stall.
 - vrcompositor, head still, panels on (2026-11-02): 22-28 fps in the morning, 36 with Monado's "early"
   ack, 45 with the layer's present waits returning at once. The limit is GPU time: the kgsl trace
   (adreno_cmdbatch_retired start/retire ticks) shows vrcompositor's one batch per frame running
@@ -122,24 +132,21 @@ Open items, roughly by priority. Done items move to the commit log.
   standing pose ("Cannot query GetRawZeroPoseToStandingAbsoluteTrackingPose"): no floor, no brush, Accept
   committed nothing. driver_quest1 now provides a default universe 2 (Prop_DriverProvidedChaperoneJson_String,
   standing = raw). Floor height adjust and drawing then work (user-tested).
-  Left: the floor "circle" is a fan of lines converging on one floor point (photo by the user). Suspects:
-  `playspace-floordetection-geo` (draw_range .4-10 m) fed by the Frame's depth/floor detection, which we do
-  not provide (CTrackedCamera "Depth mesh block queues"), or the default play_area [0,0]. distort_tri_floor_gs
-  (a geometry shader) samples bindings 11/27 like the passthrough reprojection VS. Accept not tried yet.
-  2026-11-04 later: the user confirms huge graphical glitches: the setup geometry's lines do not behave (fan of
-  rays from one floor point, varying lengths). Ruled out: the distortion LUT (the area uses geom_playspace_
-  drawing_area_vs, no LUT) and the depth sphere (step 7 only adds the geom_bounds_color pipeline). Pipelines
-  in use mapped to /opt/steamvr shader files by md5 of the compat layer's SPIR-V dumps. Next: with the user
-  looking at the fan, remove the step 7 nodes one by one (tools/headset-dev/sg-hide.sh) and snapshot, then
-  look at that node's vertex data / shader on the Adreno.
-  Also wrong: ComputeInverseDistortion returns identity while direct scanout distorts (distort_geom_* shaders
-  place geometry with the inverse LUT).
-  LEFT ON THE HEADSET (2026-11-04, it rebooted into Android before cleanup): /etc/quest1-spirv-dump (remove
-  it, logs and /tmp dumps every module) and the /root helpers.
-  Lag: the compat layer's "display:" line shows vrcompositor at 23-35 fps with the room view (28-42 ms per
-  frame, present-to-rendered 24-41 ms: GPU bound); Monado fills to 72 Hz by reprojection.
-  Side note: steamvr-q1 exports QUEST1_COMPAT_SPIRV empty, and the layer checks getenv() != NULL, so the
-  pipeline logging is always on (log noise).
+  2026-11-05: the fan of rays (circle, drawn outline and area all running to one floor point) is fixed:
+  vrcompositor uploads those meshes with 32-bit indices and binds them as UINT16 with the 32-bit count; the
+  compat layer now binds such buffers as UINT32 (user-confirmed: everything draws correctly). Why the Frame
+  does not need this is not known.
+  Left:
+  - A purple zone shows during the setup and looks like a debug view (user). Not
+    `playspace-floordetection-geo` (hiding it changed nothing). Next: the user's description of it, then the
+    drawing area (`playspace-area-drawing`, its fragment shader samples the CPU-written R8 "Playspace area
+    SDF" texture: check its upload/row pitch on the Adreno).
+  - Leaving the setup, Steam showed a "something went wrong" popup (Refresh cleared it); maybe memory.
+  - Frame rate in step 7: ~30 fps after a clean boot, as outside the setup (see Performance).
+  - ComputeInverseDistortion returns identity while direct scanout distorts (distort_geom_* shaders place
+    geometry with the inverse LUT).
+  - steamvr-q1 exports QUEST1_COMPAT_SPIRV empty, and the layer checks getenv() != NULL, so the pipeline
+    logging is always on (log noise).
 - Test in the headset (after passthrough, needed to draw the boundary): the playspace buttons
   (fixed with Prop 11004), and relocalization after a reboot in the persisted map (`q1anchord`,
   docs/boundary.md), then Clear playspace.
