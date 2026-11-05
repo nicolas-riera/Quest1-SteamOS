@@ -1,0 +1,12 @@
+#version 450
+// sdftest's compute shader: samples every texel of the 512x512 R8 image at its centre, linear filter
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0) uniform texture2D tex;
+layout(set = 0, binding = 1) uniform sampler smp;
+layout(set = 0, binding = 2) buffer Out { uint v[]; } o;
+void main()
+{
+	uint i = gl_GlobalInvocationID.x;
+	vec2 uv = (vec2(i % 512u, i / 512u) + 0.5) / 512.0;
+	o.v[i] = uint(textureLod(sampler2D(tex, smp), uv, 0.0).x * 255.0 + 0.5);
+}

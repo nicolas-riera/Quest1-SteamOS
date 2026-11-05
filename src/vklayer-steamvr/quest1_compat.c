@@ -1418,6 +1418,20 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateImage(VkDevice device, const VkImage
 			one.extent.depth = one.extent.depth ? one.extent.depth : 1;
 			ci = &one;
 		}
+		// The room setup's "Playspace area SDF" texture is a linear R8 image written through a mapping and
+		// sampled, but created with TRANSFER usage only. The Adreno blob then samples 0 everywhere (sdftest:
+		// 261120 of 262144 texels wrong), i.e. "inside": the drawn area showed as whole purple squares. Linear
+		// R8 images get SAMPLED usage (sdftest: all texels right).
+		VkImageCreateInfo samp;
+		if (ci->format == VK_FORMAT_R8_UNORM && ci->tiling == VK_IMAGE_TILING_LINEAR &&
+		    !(ci->usage & VK_IMAGE_USAGE_SAMPLED_BIT)) {
+			static int logged;
+			if (!logged++)
+				LOG("linear R8 image %ux%u: SAMPLED usage added (logged once)\n", ci->extent.width, ci->extent.height);
+			samp = *ci;
+			samp.usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
+			ci = &samp;
+		}
 		VkResult r = d->CreateImage(device, ci, alloc, out);
 		if (r != VK_SUCCESS && fail_logs < 40) {
 			fail_logs++;
