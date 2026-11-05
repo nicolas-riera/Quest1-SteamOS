@@ -530,6 +530,11 @@ int main(int argc, char **argv)
 
 	std::vector<uint8_t> shadow; // the frame last uploaded
 	upload(g, fb, shadow, 0, fb.height);
+	// The compositor shows this Vulkan texture turned by 180 degrees here (Steam's own overlays come out
+	// right; cause not found yet, docs/todo.md): the bounds turn it back. Mouse events are in the quad's
+	// space, which the bounds don't change.
+	VRTextureBounds_t bounds = {1, 1, 0, 0};
+	VROverlay()->SetOverlayTextureBounds(ov, &bounds);
 	VROverlay()->SetOverlayTexture(ov, &tex);
 	if (!getenv("Q1D_SHOW") || *getenv("Q1D_SHOW") != '0')
 		VROverlay()->ShowDashboard(key);
