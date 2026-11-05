@@ -185,6 +185,12 @@ struct device
 	PFN_vkImportSemaphoreFdKHR ImportSemaphoreFdKHR;
 	PFN_vkCmdUpdateBuffer CmdUpdateBuffer;
 	PFN_vkCmdBindIndexBuffer CmdBindIndexBuffer;
+	PFN_vkCmdCopyBuffer CmdCopyBuffer;
+	PFN_vkBindBufferMemory BindBufferMemory;
+	PFN_vkBindBufferMemory2 BindBufferMemory2;
+	PFN_vkMapMemory MapMemory;
+	PFN_vkUnmapMemory UnmapMemory;
+	PFN_vkFreeMemory FreeMemory;
 	void *fx;              //!< Facet emulation state (quest1_facet.c)
 	bool has_q0;           //!< first queue family of vkCreateDevice, for one-shot submissions
 	uint32_t q0_family;
@@ -1210,14 +1216,21 @@ static uint32_t *rewrite_layer_builtins(const uint32_t *w, uint32_t words, uint3
 static unsigned fail_logs;
 
 // --- 32-bit indices bound as 16-bit ----------------------------------------------------------------
-// vrcompositor uploads the room setup's meshes (boundary circle, drawn outline, drawing area) with vkCmdUpdateBuffer,
-// their indices as 32-bit values, then binds those buffers with VK_INDEX_TYPE_UINT16 and the 32-bit index count. Read
-// as 16-bit, every other index is 0: half the triangles ran to the mesh's first vertex (a fan of rays from one floor
-// point). The buffers last filled at offset 0 with 32-bit shaped indices (every odd 16-bit word 0) are bound as
+// vrcompositor uploads the room setup's meshes (boundary circle, drawn outline, drawing area) with their indices as
+// 32-bit values, then binds those buffers with VK_INDEX_TYPE_UINT16 and the 32-bit index count. Read as 16-bit, every
+// other index is 0: half the triangles ran to the mesh's first vertex (a fan of rays from one floor point). Small
+// meshes come with vkCmdUpdateBuffer, big ones (a large drawn area) with vkCmdCopyBuffer from a mapped staging
+// buffer. The (buffer, offset) ranges last filled with 32-bit shaped indices (every odd 16-bit word 0) are bound as
 // VK_INDEX_TYPE_UINT32 instead. A real 16-bit index list with every second index 0 is not a mesh anyone draws.
 #define U32_IBS 256
-static uint64_t u32_ibs[U32_IBS];
+static struct { uint64_t buf, off; } u32_ibs[U32_IBS];
 static pthread_mutex_t u32_lock = PTHREAD_MUTEX_INITIALIZER;
+// where buffers are bound and memory is mapped, to read a copy's source
+#define U32_BUFS 4096
+static struct { uint64_t buf, mem, off; } u32_bufs[U32_BUFS];
+static unsigned u32_buf_next;
+#define U32_MAPS 1024
+static struct { uint64_t mem; char *ptr; uint64_t off; } u32_maps[U32_MAPS];
 
 static bool u32_shaped(const uint16_t *w, size_t n)
 {
@@ -1232,26 +1245,51 @@ static bool u32_shaped(const uint16_t *w, size_t n)
 	return nonzero;
 }
 
+//! Under u32_lock: records whether (b, off) now holds 32-bit shaped indices.
+static void u32_note(uint64_t b, uint64_t off, bool u32)
+{
+	int at = -1, free_at = -1;
+	for (int i = 0; i < U32_IBS; i++) {
+		if (u32_ibs[i].buf == b && u32_ibs[i].off == off)
+			at = i;
+		else if (!u32_ibs[i].buf && free_at < 0)
+			free_at = i;
+	}
+	if (u32 && at < 0 && free_at >= 0) {
+		u32_ibs[free_at].buf = b;
+		u32_ibs[free_at].off = off;
+	} else if (!u32 && at >= 0) {
+		u32_ibs[at].buf = 0;
+	}
+}
+
 static VKAPI_ATTR void VKAPI_CALL CmdUpdateBuffer(VkCommandBuffer cb, VkBuffer b, VkDeviceSize off, VkDeviceSize size,
                                                   const void *data)
 {
-	if (off == 0) {
-		bool u32 = size % 4 == 0 && u32_shaped(data, size / 2);
-		pthread_mutex_lock(&u32_lock);
-		int at = -1, free_at = -1;
-		for (int i = 0; i < U32_IBS; i++) {
-			if (u32_ibs[i] == (uint64_t)b)
-				at = i;
-			else if (!u32_ibs[i] && free_at < 0)
-				free_at = i;
-		}
-		if (u32 && at < 0 && free_at >= 0)
-			u32_ibs[free_at] = (uint64_t)b;
-		else if (!u32 && at >= 0)
-			u32_ibs[at] = 0;
-		pthread_mutex_unlock(&u32_lock);
-	}
+	bool u32 = size % 4 == 0 && u32_shaped(data, size / 2);
+	pthread_mutex_lock(&u32_lock);
+	u32_note((uint64_t)b, off, u32);
+	pthread_mutex_unlock(&u32_lock);
 	device_of(cb)->CmdUpdateBuffer(cb, b, off, size, data);
+}
+
+static VKAPI_ATTR void VKAPI_CALL CmdCopyBuffer(VkCommandBuffer cb, VkBuffer src, VkBuffer dst, uint32_t n,
+                                                const VkBufferCopy *r)
+{
+	pthread_mutex_lock(&u32_lock);
+	const char *sp = NULL;
+	for (unsigned i = 0; i < U32_BUFS && !sp; i++)
+		if (u32_bufs[i].buf == (uint64_t)src)
+			for (unsigned k = 0; k < U32_MAPS; k++)
+				if (u32_maps[k].mem == u32_bufs[i].mem && u32_maps[k].ptr) {
+					sp = u32_maps[k].ptr + u32_bufs[i].off - u32_maps[k].off;
+					break;
+				}
+	for (uint32_t k = 0; k < n; k++)
+		u32_note((uint64_t)dst, r[k].dstOffset,
+		         sp && r[k].size % 4 == 0 && u32_shaped((const uint16_t *)(sp + r[k].srcOffset), r[k].size / 2));
+	pthread_mutex_unlock(&u32_lock);
+	device_of(cb)->CmdCopyBuffer(cb, src, dst, n, r);
 }
 
 static VKAPI_ATTR void VKAPI_CALL CmdBindIndexBuffer(VkCommandBuffer cb, VkBuffer b, VkDeviceSize off, VkIndexType t)
@@ -1260,17 +1298,91 @@ static VKAPI_ATTR void VKAPI_CALL CmdBindIndexBuffer(VkCommandBuffer cb, VkBuffe
 		static unsigned logs;
 		pthread_mutex_lock(&u32_lock);
 		for (int i = 0; i < U32_IBS; i++)
-			if (u32_ibs[i] == (uint64_t)b) {
+			if (u32_ibs[i].buf == (uint64_t)b && u32_ibs[i].off == off) {
 				t = VK_INDEX_TYPE_UINT32;
 				if (logs < 10) {
 					logs++;
-					LOG("index buffer %p holds 32-bit indices: bound as UINT32, not UINT16\n", (void *)b);
+					LOG("index buffer %p+%llu holds 32-bit indices: bound as UINT32, not UINT16\n", (void *)b,
+					    (unsigned long long)off);
 				}
 				break;
 			}
 		pthread_mutex_unlock(&u32_lock);
 	}
 	device_of(cb)->CmdBindIndexBuffer(cb, b, off, t);
+}
+
+static void u32_bind(VkBuffer b, VkDeviceMemory m, VkDeviceSize off)
+{
+	pthread_mutex_lock(&u32_lock);
+	int at = -1;
+	for (unsigned i = 0; i < U32_BUFS && at < 0; i++)
+		if (u32_bufs[i].buf == (uint64_t)b)
+			at = (int)i;
+	if (at < 0)
+		at = (int)(u32_buf_next++ % U32_BUFS);
+	u32_bufs[at].buf = (uint64_t)b;
+	u32_bufs[at].mem = (uint64_t)m;
+	u32_bufs[at].off = off;
+	pthread_mutex_unlock(&u32_lock);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL BindBufferMemory(VkDevice device, VkBuffer b, VkDeviceMemory m, VkDeviceSize off)
+{
+	VkResult r = device_of(device)->BindBufferMemory(device, b, m, off);
+	if (r == VK_SUCCESS)
+		u32_bind(b, m, off);
+	return r;
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL BindBufferMemory2(VkDevice device, uint32_t n, const VkBindBufferMemoryInfo *bi)
+{
+	VkResult r = device_of(device)->BindBufferMemory2(device, n, bi);
+	if (r == VK_SUCCESS)
+		for (uint32_t i = 0; i < n; i++)
+			u32_bind(bi[i].buffer, bi[i].memory, bi[i].memoryOffset);
+	return r;
+}
+
+static void u32_map(VkDeviceMemory m, void *ptr, VkDeviceSize off)
+{
+	pthread_mutex_lock(&u32_lock);
+	int at = -1, free_at = -1;
+	for (int i = 0; i < U32_MAPS; i++) {
+		if (u32_maps[i].mem == (uint64_t)m)
+			at = i;
+		else if (!u32_maps[i].mem && free_at < 0)
+			free_at = i;
+	}
+	if (at < 0)
+		at = free_at;
+	if (at >= 0) {
+		u32_maps[at].mem = ptr ? (uint64_t)m : 0;
+		u32_maps[at].ptr = ptr;
+		u32_maps[at].off = off;
+	}
+	pthread_mutex_unlock(&u32_lock);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL MapMemory(VkDevice device, VkDeviceMemory m, VkDeviceSize off, VkDeviceSize size,
+                                                VkMemoryMapFlags f, void **pp)
+{
+	VkResult r = device_of(device)->MapMemory(device, m, off, size, f, pp);
+	if (r == VK_SUCCESS)
+		u32_map(m, *pp, off);
+	return r;
+}
+
+static VKAPI_ATTR void VKAPI_CALL UnmapMemory(VkDevice device, VkDeviceMemory m)
+{
+	u32_map(m, NULL, 0);
+	device_of(device)->UnmapMemory(device, m);
+}
+
+static VKAPI_ATTR void VKAPI_CALL FreeMemory(VkDevice device, VkDeviceMemory m, const VkAllocationCallbacks *alloc)
+{
+	u32_map(m, NULL, 0);
+	device_of(device)->FreeMemory(device, m, alloc);
 }
 
 static VKAPI_ATTR VkResult VKAPI_CALL AllocateMemory(VkDevice device, const VkMemoryAllocateInfo *ai,
@@ -1987,6 +2099,14 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice pd, const Vk
 	GET(ImportSemaphoreFdKHR);
 	GET(CmdUpdateBuffer);
 	GET(CmdBindIndexBuffer);
+	GET(CmdCopyBuffer);
+	GET(BindBufferMemory);
+	GET(BindBufferMemory2);
+	if (!d->BindBufferMemory2)
+		d->BindBufferMemory2 = (PFN_vkBindBufferMemory2)gdpa(*out, "vkBindBufferMemory2KHR");
+	GET(MapMemory);
+	GET(UnmapMemory);
+	GET(FreeMemory);
 #undef GET
 	pthread_mutex_init(&d->mutex, NULL);
 	pthread_mutex_init(&d->queue_mutex, NULL);
@@ -2082,6 +2202,13 @@ static PFN_vkVoidFunction device_intercept(const char *name)
 	I("vkDeviceWaitIdle", DeviceWaitIdle)
 	I("vkCmdUpdateBuffer", CmdUpdateBuffer)
 	I("vkCmdBindIndexBuffer", CmdBindIndexBuffer)
+	I("vkCmdCopyBuffer", CmdCopyBuffer)
+	I("vkBindBufferMemory", BindBufferMemory)
+	I("vkBindBufferMemory2", BindBufferMemory2)
+	I("vkBindBufferMemory2KHR", BindBufferMemory2)
+	I("vkMapMemory", MapMemory)
+	I("vkUnmapMemory", UnmapMemory)
+	I("vkFreeMemory", FreeMemory)
 #undef I
 	return NULL;
 }
