@@ -46,6 +46,8 @@ kernel() {
 	git -C kernel apply "$P/kernel/loop-no-discard-on-ext4.patch"
 	# systemd needs a "frozen" key in cgroup.events to notice that a cgroup became empty
 	git -C kernel apply "$P/kernel/cgroup-events-frozen.patch"
+	# Bluetooth: the WCN3990 on hci_uart's QCA protocol (firmware download, 3 Mbit/s, the address in the NVM)
+	git -C kernel apply "$P/kernel/bt-wcn3990.patch"
 	cp "$P/kernel/lse_emul.c" kernel/arch/arm64/kernel/lse_emul.c
 	# Kconfig sources Meta's unpublished internal/ drivers: empty stand-ins (ignored by git)
 	mkdir -p kernel/drivers/staging/oculus/internal
