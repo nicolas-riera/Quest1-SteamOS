@@ -24,6 +24,13 @@ ln -sTfn $S/linux32 ~/.steam/sdk32; ln -sTfn $S/linux64 ~/.steam/sdk64
 ln -sTfn $S/linuxarm64 ~/.steam/sdkarm64; ln -sTfn $S/steamrtarm64 ~/.steam/binarm64
 ln -sTfn $S/ubuntu12_32 ~/.steam/bin32; ln -sTfn $S/ubuntu12_64 ~/.steam/bin64
 export LD_LIBRARY_PATH=$S/steamrtarm64 STEAM_RUNTIME=$S/ubuntu12_32/steam-runtime
+# Steam plays its startup movie at every start: unseen in Xvfb, but heard. Empty overrides in
+# config/uioverrides (not one of Steam's verified files) fail to play, which Steam takes as the movie's end.
+mkdir -p $S/config/uioverrides/movies
+for m in $S/steamui/movies/*startup*.webm; do
+	o=$S/config/uioverrides/movies/${m##*/}
+	[ -e "$m" ] && [ ! -e "$o" ] && : > "$o"
+done
 # webhelper GPU process on the Adreno (ANGLE Vulkan via libhybris, docs/steam-gpu.md);
 # QUEST1_STEAM_GPU=0 goes back to Mesa llvmpipe. Steam's xcomposite workaround re-composites
 # every CEF window with GLX on llvmpipe (~2 cores while the UI animates): off by default here,
