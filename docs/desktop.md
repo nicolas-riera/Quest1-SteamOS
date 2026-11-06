@@ -55,3 +55,6 @@ Everything above is the same, except gamescope:
   desktop and the dashboard then stall (see the Performance section of docs/todo.md).
 - Everything in the desktop is drawn by llvmpipe (no GL driver for the Adreno outside libhybris).
 - The keyboard types through the X keymap: characters missing from kwin's layout can't be typed.
+- Discover installs Flatpaks system-wide, through flatpak's system helper and polkit. SteamOS's rule allows it to wheel
+  members in an active local session; here steamos has no seat session and is not in wheel, so our polkit rule
+  (device/holo-frame-mode.sh) grants it Flatpak's actions (except overriding parental controls).

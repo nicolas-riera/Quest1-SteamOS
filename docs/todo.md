@@ -181,8 +181,10 @@ Open items, roughly by priority. Done items move to the commit log.
   is connected, not after; the click never calls `Apps.LaunchNonSteamApp`, the launch itself works). On the Frame its
   controllers are a gamepad for Steam by default and the grip brings the laser (user). Expose the Touch controllers to
   Steam the same way (a Steam Input gamepad, grip = laser).
-- Discover: the user saw a message about flatpak to install with pacman, though flatpak and flathub are there and the
-  Flatpak backend loads; its PackageKit backend lacks `libpackagekitqt6` (package `packagekit-qt6`). Get the exact message.
+- Discover showed no apps and asked for flatpak (user, 2026-11-06): polkit refused Flatpak's system actions to steamos
+  (SteamOS's rule wants wheel and an active seat session), so the Flathub catalogue was never deployed ("DeployAppstream
+  not allowed"). Fixed in holo-frame-mode.sh's polkit rule; Discover lists Flathub's apps (checked on the desktop's
+  screen). Left: install an app from it in the headset (user).
 - Desktop mode launcher (user, 2026-11-05 night: failed to start again): kcminit outlived the desktop and held
   the launcher's lock; fixed 2026-11-06 (docs/desktop.md), 9 launch/close cycles and a double launch OK from a
   shell with Steam's environment. Left: confirm from Steam's "+" menu in the headset; once, the first launch
