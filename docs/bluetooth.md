@@ -4,10 +4,10 @@ The Quest 1's Bluetooth is the Bluetooth side of its Qualcomm WCN3990 (Wi-Fi is 
 Meta's HAL (`android.hardware.bluetooth@1.0-impl-qti.so`) drives it from userspace over `/dev/ttyHS0`. The Steam
 Frame uses BlueZ on a kernel driver: so do we, with BlueZ and the kernel's `hci_uart` QCA protocol.
 
-Status (2026-11-05): unreliable, to be reworked. hci0 comes up powered (BR/EDR and LE) with the headset's own
-address about 13 s after `quest1-bluetooth.service` starts, and LE scans find the devices around, but pairing a
-DualSense failed: some events from the chip are lost (no Disconnection Complete, no Inquiry Complete, so BR/EDR
-discovery hangs), see docs/todo.md.
+Status (2026-11-06): hci0 comes up powered (BR/EDR and LE) with the headset's own address about 13 s after
+`quest1-bluetooth.service` starts; LE scans and BR/EDR inquiries find the devices around. Pairing a pad: to check.
+On 2026-11-05 events from the chip were lost (no Disconnection Complete, no Inquiry Complete, so BR/EDR discovery
+hung and a DualSense could not pair): the UART slept between transfers (Userspace, below).
 
 ## The chip (probed from userspace, 2026-11-05)
 
@@ -65,6 +65,13 @@ per ~20 ms.
 ## Userspace (`device/holo-bluetooth.sh`)
 
 `quest1-bluetooth.service` runs `quest1-bt start`: link `/run/fw/qca` to `/run/fw`, set `btqca.nvm_bdaddr` from
-`.bt_nv.bin`, power the chip through `bt_power`, then `btattach -B /dev/ttyHS0 -P qca -S 115200`, which keeps the
+`.bt_nv.bin`, keep the UART awake, power the chip through `bt_power`, then `btattach -B /dev/ttyHS0 -P qca -S 115200`, which keeps the
 line discipline (and hci0) while it runs; the kernel downloads the firmware when hci0 registers and bluetoothd
 (BlueZ) powers it on. Stopping the unit cuts the chip's power (restart tested).
+
+The UART's clock: msm_serial_hs uses runtime PM (`/sys/class/tty/ttyHS0/device/power`, autosuspend 100 ms) and
+turns its clock off once a transfer is done; bytes the chip sends while it is off are lost. Replies right after a
+command arrived (the UART was still awake), events that come later did not: an inquiry ended without its Inquiry
+Complete and found 1 device instead of 6-7, disconnections and incoming connections were missed. Qualcomm's HAL
+uses in-band sleep, whose wake bytes the host can afford to lose; with it off here, `quest1-bt` sets the UART's
+`power/control` to `on` while the unit runs (`auto` again when it stops).

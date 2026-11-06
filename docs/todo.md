@@ -216,12 +216,11 @@ Open items, roughly by priority. Done items move to the commit log.
 ## Hardware
 - Power LED: Meta's battery colours since 2026-11-03 (`device/holo-battery.sh`). Later (low
   priority): let the user control it, e.g. from the quick menu.
-- Bluetooth: unreliable, to be reworked (user, 2026-11-05). A DualSense paired from Steam showed "paired" but
-  BlueZ kept no bond; it later connected by itself and dropped. The HCI capture shows events from the chip
-  lost: no Disconnection Complete after a Disconnect, no Inquiry Complete after an Inquiry (BR/EDR discovery
-  stuck "Discovering: yes", the pad in pairing mode never found), while LE advertising reports and later
-  command replies arrive. Suspect the UART receive path (msm_serial_hs at 3 Mbit/s with hci_uart, bursts of
-  255-byte events), like the lost back-to-back segments on transmit; try a lower speed first.
+- Bluetooth lost events (user, 2026-11-05: DualSense pairing failed, discovery hung): the UART's runtime PM
+  suspended it 100 ms after each transfer and bytes the chip sent later were lost (no Inquiry Complete,
+  Disconnection Complete or incoming connection). Fixed 2026-11-06 (quest1-bt keeps it on, docs/bluetooth.md):
+  BR/EDR inquiries complete and find several times more devices. Left: pair a DualSense (user), the power cost
+  (in-band sleep would let the UART sleep).
 - Bluetooth (docs/bluetooth.md): up since 2026-11-05 evening (hci0 up, LE scans find devices). Left: pairing
   a keyboard/mouse, a gamepad, audio (A2DP); Steam's and Plasma's Bluetooth settings; `rfkill block bluetooth`
   cuts the chip's power (bt_power rfkill) under the attached hci0: check what Plasma's toggle does; a faster

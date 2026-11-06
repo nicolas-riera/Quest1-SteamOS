@@ -24,6 +24,7 @@ cat > /usr/local/sbin/quest1-bt <<'EOF'
 R=
 for d in /sys/class/rfkill/rfkill*; do [ "$(cat $d/name 2>/dev/null)" = bt_power ] && R=$d; done
 [ -n "$R" ] || { echo "quest1-bt: no bt_power rfkill" >&2; exit 1; }
+U=/sys/class/tty/ttyHS0/device
 case "$1" in
 start)
 	# the kernel asks for qca/<name>: /run/fw has Meta's firmware files flat
@@ -34,6 +35,11 @@ start)
 	else
 		echo "quest1-bt: no address in $N, the controller keeps the NVM's" >&2
 	fi
+	# the UART's clock stays on: msm_serial_hs suspends 100 ms after the last transfer, and bytes the chip
+	# sends meanwhile are lost (no Inquiry Complete, Disconnection Complete or incoming connection: discovery
+	# hung and pads could not pair). Qualcomm's HAL wakes it with in-band sleep, which this WCN3990 doesn't
+	# do here (docs/bluetooth.md).
+	echo on > $U/power/control
 	# a fresh chip: firmware and NVM are downloaded at hci0's first power-on
 	echo 0 > $R/state; sleep 0.2
 	echo 1 > $R/state; sleep 0.2
@@ -41,6 +47,7 @@ start)
 	;;
 stop)
 	echo 0 > $R/state
+	echo auto > $U/power/control
 	;;
 *) echo "usage: $0 start|stop" >&2; exit 2 ;;
 esac
