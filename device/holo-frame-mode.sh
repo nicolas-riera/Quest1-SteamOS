@@ -228,13 +228,17 @@ cat > /etc/polkit-1/rules.d/50-quest1-power.rules <<'EOF'
 // Frame mode: Steam and SteamVR (user steamos, no seat session) may power off, reboot and "suspend"
 // (suspend is replaced by quest1-standby, see systemd-suspend.service.d/quest1-standby.conf).
 // Steam's network settings need NetworkManager's actions too (Wi-Fi scan, connect, forget), its
-// first-run setup the time zone and hostname ones.
+// first-run setup the time zone and hostname ones. Discover needs Flatpak's system actions (on SteamOS the
+// user is in wheel with an active seat session, which flatpak's own rule asks for): without them the
+// Flathub catalogue is never deployed ("DeployAppstream not allowed") and Discover finds no apps.
 polkit.addRule(function(action, subject) {
 	if (subject.user != "steamos")
 		return polkit.Result.NOT_HANDLED;
 	if (/^org\.freedesktop\.login1\.(power-off|reboot|suspend)(-multiple-sessions|-ignore-inhibit)?$/.test(action.id))
 		return polkit.Result.YES;
 	if (/^org\.freedesktop\.(NetworkManager\.|timedate1\.|hostname1\.|locale1\.)/.test(action.id))
+		return polkit.Result.YES;
+	if (/^org\.freedesktop\.Flatpak\./.test(action.id) && action.id != "org.freedesktop.Flatpak.override-parental-controls")
 		return polkit.Result.YES;
 	return polkit.Result.NOT_HANDLED;
 });

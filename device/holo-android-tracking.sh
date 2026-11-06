@@ -242,9 +242,23 @@ $H"
 		"BindReadOnlyPaths=/usr/local/lib/q1track/q1trackd:/data/local/tmp/q1trackd
 TemporaryFileSystem=/data/local/tmp" \
 		"/data/local/tmp/q1trackd serve 500" "$W
-Wants=android-trackingservice.service
+Wants=android-trackingservice.service q1pad.service
 After=android-trackingservice.service
 PartOf=android-sensors-hal.service"
+	# q1pad: the Touch controllers as a virtual Xbox pad for Steam Input (src/q1pad); steamos owns /dev/uinput
+	cat > $U/q1pad.service <<EOF
+[Unit]
+Description=Quest 1: Touch controllers as a virtual gamepad for Steam (from q1trackd's shared memory)
+After=android-q1trackd.service
+PartOf=android-q1trackd.service
+
+[Service]
+User=steamos
+ExecStart=/usr/local/bin/q1pad
+Restart=always
+RestartSec=2
+Nice=-2
+EOF
 	# q1anchord: persists Meta's map (spatial anchor) and tells driver_quest1 whether its frame is the persisted one
 	unit q1anchord "q1anchord (persisted tracking map, /run/q1track/frame-state)" root "" /usr/local/sbin/q1anchord "$W
 Wants=android-trackingservice.service
