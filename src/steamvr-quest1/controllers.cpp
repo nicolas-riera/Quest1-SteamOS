@@ -3,8 +3,9 @@
 // Monado (drivers/quest1) already exposes both Touch controllers as /interaction_profiles/oculus/
 // touch_controller: orientation from each controller's IMU, position from an arm model hung off the
 // head, buttons, trigger, squeeze, thumbstick and haptics. This file reads them through OpenXR
-// actions on the driver's session and publishes them to SteamVR as two oculus_touch controllers
-// with the Quest render models, so the game bindings written for Touch apply as is.
+// actions on the driver's session and publishes them to SteamVR as the Steam Frame's controllers
+// (frame_controller, with the Quest render models): SteamVR then uses the Frame's dashboard and game
+// bindings, and Steam turns them into its "Steam Frame Controllers" gamepad, as on the Frame.
 //
 // Orientation: Monado's controller orientation is the IMU frame. The aim pose is
 //   aim = yaw * imu * imuToAim
@@ -200,8 +201,10 @@ enum Comp
 	C_SECONDARY_CLICK,
 	C_SECONDARY_TOUCH,
 	C_TRIGGER_VALUE,
+	C_TRIGGER_CLICK,
 	C_TRIGGER_TOUCH,
 	C_GRIP_VALUE,
+	C_GRIP_CLICK,
 	C_GRIP_TOUCH,
 	C_STICK_X,
 	C_STICK_Y,
@@ -238,8 +241,11 @@ public:
 		                     noModel ? "" : left ? "oculus_quest_controller_left" : "oculus_quest_controller_right");
 		p->SetStringProperty(container, Prop_RegisteredDeviceType_String,
 		                     left ? "quest1/QUEST1-Touch-Left" : "quest1/QUEST1-Touch-Right");
-		p->SetStringProperty(container, Prop_InputProfilePath_String, "{quest1}/input/quest1_touch_profile.json");
-		p->SetStringProperty(container, Prop_ControllerType_String, "oculus_touch");
+		// The Steam Frame's controllers, as SteamVR and Steam see them: Steam turns SteamVR controllers of this type
+		// into its "Steam Frame Controllers" gamepad (Steam Input, the dashboard's laser/gamepad modes with the grips),
+		// and games get their Frame bindings. Our components below follow that profile.
+		p->SetStringProperty(container, Prop_InputProfilePath_String, "{frame_controller}/input/frame_controller_profile.json");
+		p->SetStringProperty(container, Prop_ControllerType_String, "frame_controller");
 		p->SetInt32Property(container, Prop_ControllerRoleHint_Int32,
 		                    left ? TrackedControllerRole_LeftHand : TrackedControllerRole_RightHand);
 		p->SetBoolProperty(container, Prop_DeviceProvidesBatteryStatus_Bool, false);
@@ -256,7 +262,8 @@ public:
 		                         ButtonMaskFromId(k_EButton_SteamVR_Trigger));
 
 		IVRDriverInput *in = VRDriverInput();
-		const char *ab = left ? "x" : "a", *by = left ? "y" : "b";
+		// The Frame's right controller has the face buttons, its left one a d-pad: Touch X/Y are the d-pad's down/up
+		const char *ab = left ? "dpad_down" : "a", *by = left ? "dpad_up" : "b";
 		char path[64];
 		in->CreateBooleanComponent(container, "/input/system/click", &comp[C_SYSTEM_CLICK]);
 		in->CreateBooleanComponent(container, "/input/system/touch", &comp[C_SYSTEM_TOUCH]);
@@ -270,16 +277,18 @@ public:
 		in->CreateBooleanComponent(container, path, &comp[C_SECONDARY_TOUCH]);
 		in->CreateScalarComponent(container, "/input/trigger/value", &comp[C_TRIGGER_VALUE], VRScalarType_Absolute,
 		                          VRScalarUnits_NormalizedOneSided);
+		in->CreateBooleanComponent(container, "/input/trigger/click", &comp[C_TRIGGER_CLICK]);
 		in->CreateBooleanComponent(container, "/input/trigger/touch", &comp[C_TRIGGER_TOUCH]);
 		in->CreateScalarComponent(container, "/input/grip/value", &comp[C_GRIP_VALUE], VRScalarType_Absolute,
 		                          VRScalarUnits_NormalizedOneSided);
+		in->CreateBooleanComponent(container, "/input/grip/click", &comp[C_GRIP_CLICK]);
 		in->CreateBooleanComponent(container, "/input/grip/touch", &comp[C_GRIP_TOUCH]);
-		in->CreateScalarComponent(container, "/input/joystick/x", &comp[C_STICK_X], VRScalarType_Absolute,
+		in->CreateScalarComponent(container, "/input/thumbstick/x", &comp[C_STICK_X], VRScalarType_Absolute,
 		                          VRScalarUnits_NormalizedTwoSided);
-		in->CreateScalarComponent(container, "/input/joystick/y", &comp[C_STICK_Y], VRScalarType_Absolute,
+		in->CreateScalarComponent(container, "/input/thumbstick/y", &comp[C_STICK_Y], VRScalarType_Absolute,
 		                          VRScalarUnits_NormalizedTwoSided);
-		in->CreateBooleanComponent(container, "/input/joystick/click", &comp[C_STICK_CLICK]);
-		in->CreateBooleanComponent(container, "/input/joystick/touch", &comp[C_STICK_TOUCH]);
+		in->CreateBooleanComponent(container, "/input/thumbstick/click", &comp[C_STICK_CLICK]);
+		in->CreateBooleanComponent(container, "/input/thumbstick/touch", &comp[C_STICK_TOUCH]);
 		in->CreateBooleanComponent(container, "/input/thumbrest/touch", &comp[C_THUMBREST_TOUCH]);
 		in->CreateHapticComponent(container, "/output/haptic", &haptic);
 		for (float &v : last)
@@ -654,10 +663,13 @@ void State::UpdateHand(int h, double now, const XrPosef &headPose, bool headVali
 	d->Set(C_PRIMARY_TOUCH, boolean(ACT_PRIMARY_TOUCH));
 	d->Set(C_SECONDARY_CLICK, boolean(ACT_SECONDARY));
 	d->Set(C_SECONDARY_TOUCH, boolean(ACT_SECONDARY_TOUCH));
-	d->Set(C_TRIGGER_VALUE, scalar(ACT_TRIGGER));
+	float trigger = scalar(ACT_TRIGGER);
+	d->Set(C_TRIGGER_VALUE, trigger);
+	d->Set(C_TRIGGER_CLICK, trigger > 0.75f ? 1.f : 0.f); // the Touch trigger is analog only
 	d->Set(C_TRIGGER_TOUCH, boolean(ACT_TRIGGER_TOUCH));
 	float squeeze = scalar(ACT_SQUEEZE);
 	d->Set(C_GRIP_VALUE, squeeze);
+	d->Set(C_GRIP_CLICK, squeeze > 0.75f ? 1.f : 0.f);
 	d->Set(C_GRIP_TOUCH, squeeze > 0.05f ? 1.f : 0.f); // no capacitive sensor on the grip
 	{
 		gi.action = act[ACT_STICK];

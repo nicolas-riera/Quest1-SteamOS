@@ -1765,7 +1765,6 @@ public:
 			xr.Shutdown();
 			return VRInitError_Driver_Failed;
 		}
-		SelectDashboardBindings();
 		hmd = new Quest1Hmd(xr);
 		if (!VRServerDriverHost()->TrackedDeviceAdded("QUEST1-SteamOS", TrackedDeviceClass_HMD, hmd))
 			return VRInitError_Driver_Failed;
@@ -1793,32 +1792,6 @@ public:
 	void LeaveStandby() override {}
 
 private:
-	//! SteamVR takes the oculus_touch controller type's dashboard bindings from its own Oculus driver, so the
-	//! default_bindings of our input profile are never used: no right Oculus button, no double click for the
-	//! camera view. Select ours as the bindings UI would (it saves this key), unless the user picked another.
-	static void SelectDashboardBindings()
-	{
-		Dl_info info{};
-		if (!dladdr((void *)&SelectDashboardBindings, &info) || !info.dli_fname)
-			return;
-		std::string root = info.dli_fname; // <root>/bin/linuxarm64/driver_quest1.so
-		for (int up = 0; up < 3; up++) {
-			size_t slash = root.rfind('/');
-			if (slash == std::string::npos)
-				return;
-			root.resize(slash);
-		}
-		const std::string url = "file://" + root + "/resources/input/quest1_touch_vrcompositor_bindings.json";
-		const char *section = "openvr.component.vrcompositor", *key = "oculus_touch_250820_CurrentURL_steamvrinput";
-		char cur[1024] = "";
-		EVRSettingsError err = VRSettingsError_None;
-		VRSettings()->GetString(section, key, cur, sizeof(cur), &err);
-		if (url == cur || (cur[0] && !strstr(cur, "/drivers/oculus/")))
-			return;
-		VRSettings()->SetString(section, key, url.c_str(), &err);
-		Log("quest1: dashboard bindings: %s (%d)\n", url.c_str(), (int)err);
-	}
-
 	XrBackend xr;
 	Quest1Hmd *hmd = nullptr;
 	Quest1Controllers controllers;

@@ -1,5 +1,5 @@
 // Touch controllers for driver_quest1: read from Monado through OpenXR actions, exposed to SteamVR
-// as two oculus_touch controllers (input profile {quest1}/input/quest1_touch_profile.json).
+// as the Steam Frame's two controllers (input profile {frame_controller}/input/frame_controller_profile.json).
 #pragma once
 
 #include <openvr_driver.h>
