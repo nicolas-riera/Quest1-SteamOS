@@ -82,6 +82,8 @@ Open items, roughly by priority. Done items move to the commit log.
   (user, 2026-11-05). Expected: keep the last position (rotation from the IMU only), like Meta's OS.
 - When tracking comes back the controllers are drawn at once even while the cameras haven't seen them
   yet, instead of showing as "searching" until they are found (user, 2026-11-05).
+- Spatial anchors work very badly (user, 2026-11-05 night): after a tracking loss the headset has a hard
+  time finding where it was (relocalizing in the persisted map; q1anchord, /run/q1track/frame-state).
 
 ## Steam settings
 - The timezone dropdown (Settings, next to the 24-hour clock) is hidden: Steam shows it only when
@@ -172,6 +174,8 @@ Open items, roughly by priority. Done items move to the commit log.
   `device/holo-perf.sh`.
 
 ## Steam and desktop
+- Desktop mode launcher unreliable (user, 2026-11-05 night): the desktop failed to start again after the
+  flock/cleanup fixes (device/steamos-nested-desktop). Find out why from the logs of a failed launch.
 - Desktop mode (docs/desktop.md): the nested Plasma runs and shows in the dashboard (user, 2026-11-05: Dolphin
   started, the headset struggling). Open:
   - lag, and the whole dashboard freezing while the desktop is used (memory: ~2 GB swapped with Plasma and
