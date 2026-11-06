@@ -219,8 +219,8 @@ Open items, roughly by priority. Done items move to the commit log.
 - Bluetooth lost events (user, 2026-11-05: DualSense pairing failed, discovery hung): the UART's runtime PM
   suspended it 100 ms after each transfer and bytes the chip sent later were lost (no Inquiry Complete,
   Disconnection Complete or incoming connection). Fixed 2026-11-06 (quest1-bt keeps it on, docs/bluetooth.md):
-  BR/EDR inquiries complete and find several times more devices. Left: pair a DualSense (user), the power cost
-  (in-band sleep would let the UART sleep).
+  BR/EDR inquiries complete and find several times more devices. A DualSense pairs and works since AlwaysPairable (user, 2026-11-06). Left: the
+  power cost (in-band sleep would let the UART sleep).
 - Bluetooth (docs/bluetooth.md): up since 2026-11-05 evening (hci0 up, LE scans find devices). Left: pairing
   a keyboard/mouse, a gamepad, audio (A2DP); Steam's and Plasma's Bluetooth settings; `rfkill block bluetooth`
   cuts the chip's power (bt_power rfkill) under the attached hci0: check what Plasma's toggle does; a faster

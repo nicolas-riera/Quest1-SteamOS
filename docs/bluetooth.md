@@ -5,7 +5,7 @@ Meta's HAL (`android.hardware.bluetooth@1.0-impl-qti.so`) drives it from userspa
 Frame uses BlueZ on a kernel driver: so do we, with BlueZ and the kernel's `hci_uart` QCA protocol.
 
 Status (2026-11-06): hci0 comes up powered (BR/EDR and LE) with the headset's own address about 13 s after
-`quest1-bluetooth.service` starts; LE scans and BR/EDR inquiries find the devices around. Pairing a pad: to check.
+`quest1-bluetooth.service` starts; LE scans and BR/EDR inquiries find the devices around; a DualSense pairs from Steam and works (user, 2026-11-06).
 On 2026-11-05 events from the chip were lost (no Disconnection Complete, no Inquiry Complete, so BR/EDR discovery
 hung and a DualSense could not pair): the UART slept between transfers (Userspace, below).
 
@@ -75,3 +75,9 @@ command arrived (the UART was still awake), events that come later did not: an i
 Complete and found 1 device instead of 6-7, disconnections and incoming connections were missed. Qualcomm's HAL
 uses in-band sleep, whose wake bytes the host can afford to lose; with it off here, `quest1-bt` sets the UART's
 `power/control` to `on` while the unit runs (`auto` again when it stops).
+
+Pairing: BlueZ starts with Pairable off, so the kernel isn't bondable and answers a pad's pairing with "No Bonding":
+the link key is thrown away, BlueZ shows the pad "Paired: no / Bonded: no" and rejects its next connection
+(`hidp_add_connection() Rejected connection from !bonded device`; the pad turns off). `holo-bluetooth.sh` sets
+`AlwaysPairable = true` in `/etc/bluetooth/main.conf`. Restarting bluetoothd under a running Steam leaves Steam with
+stale D-Bus proxies (its Bluetooth page then finds nothing): restart Steam after it.

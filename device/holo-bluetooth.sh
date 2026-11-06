@@ -72,5 +72,10 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
+# BlueZ starts with Pairable off, so the kernel isn't "bondable": a pad paired from Steam answered "No
+# Bonding", BlueZ kept no key and rejected the pad when it reconnected ("!bonded device", the pad turned off)
+sed -i '/^#* *AlwaysPairable *=/d' /etc/bluetooth/main.conf
+sed -i 's/^\[General\]$/[General]\nAlwaysPairable = true/' /etc/bluetooth/main.conf
+
 systemctl daemon-reload
 systemctl enable quest1-bluetooth.service bluetooth.service
