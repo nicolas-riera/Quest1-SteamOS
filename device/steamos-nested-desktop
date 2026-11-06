@@ -24,11 +24,40 @@ unset LD_LIBRARY_PATH QUEST1_VK_REDIRECT QUEST1_VKSHIM_WSI QUEST1_STEAMVR_COMPAT
 W=1280 H=800
 pids=()
 
+# Quest 1: the processes of the nested session, found by their XDG_RUNTIME_DIR. Some leave Plasma's process
+# group for sessions of their own (kcminit, stuck once kwin is gone) and outlived the desktop, holding memory
+# and, before children stopped inheriting it, the lock below: every later launch then saw a desktop running
+# and showed nothing. Builtins only, so the scan finds none of its own commands.
+function nested_pids()
+{
+    local p v
+    npids=()
+    for p in /proc/[0-9]*; do
+        [ "${p#/proc/}" = "$$" ] && continue
+        while IFS= read -r -d '' v; do
+            [ "$v" = "XDG_RUNTIME_DIR=$NEW_XDG_RUNTIME_DIR" ] && { npids+=("${p#/proc/}"); break; }
+        done 2>/dev/null < "$p/environ"
+    done
+}
+
+function end_nested()
+{
+    local i
+    for i in $(seq 15); do
+        nested_pids
+        [ ${#npids[@]} -eq 0 ] && return
+        if [ $i -eq 1 ]; then kill -TERM "${npids[@]}" 2>/dev/null; fi
+        if [ $i -eq 15 ]; then kill -KILL "${npids[@]}" 2>/dev/null; fi
+        sleep 0.2
+    done
+}
+
 function cleanup()
 {
     # Quest 1: our Xvfb and overlay
     [ -n "${plasma:-}" ] && kill -TERM -- -$plasma 2>/dev/null || true
     for p in "${pids[@]}"; do kill "$p" 2>/dev/null || true; done
+    end_nested || true
     # Flush fuse mounts beneath here
     umount --recursive $NEW_XDG_RUNTIME_DIR 2>/dev/null || true
     # Quest 1: as a user, umount can't take the document portal's FUSE mount (doc/), whose portal may still be
@@ -40,7 +69,8 @@ function cleanup()
 }
 
 # Quest 1: one desktop at a time. Plasma takes a while to come up here, and a second launch (a second click
-# on "Desktop") would clean up the running one's XDG_RUNTIME_DIR: it shows the running one instead.
+# on "Desktop") would clean up the running one's XDG_RUNTIME_DIR: it shows the running one instead. The lock is
+# this script's alone (9>&- below): a child left behind must not keep it.
 exec 9>"$XDG_RUNTIME_DIR/nested_plasma.lock"
 if ! flock -n 9; then
     pkill -USR1 -x q1desktop || true
@@ -66,7 +96,7 @@ ln -sf $XDG_RUNTIME_DIR/pipewire* $NEW_XDG_RUNTIME_DIR/.
 n=2
 while [ -e /tmp/.X11-unix/X$n ] || [ -e /tmp/.X$n-lock ]; do n=$((n + 1)); done
 mkdir -p $NEW_XDG_RUNTIME_DIR/xvfb
-Xvfb :$n -screen 0 ${W}x${H}x24 -fbdir $NEW_XDG_RUNTIME_DIR/xvfb -nolisten tcp -noreset &
+Xvfb :$n -screen 0 ${W}x${H}x24 -fbdir $NEW_XDG_RUNTIME_DIR/xvfb -nolisten tcp -noreset 9>&- &
 pids+=($!)
 for i in $(seq 50); do [ -e /tmp/.X11-unix/X$n ] && break; sleep 0.1; done
 export DISPLAY=:$n
@@ -74,7 +104,7 @@ LD_PRELOAD=/opt/hybris/lib/libbionictls.so \
 LD_LIBRARY_PATH=/usr/local/lib/quest1-vk-steam:/opt/hybris/lib \
 QUEST1_STEAMVR_COMPAT=1 \
 Q1D_ICON=${Q1D_ICON:-/usr/share/applications/steam/steamos-nested-desktop/icon.png} \
-    /usr/local/bin/q1desktop $NEW_XDG_RUNTIME_DIR/xvfb/Xvfb_screen0 &
+    /usr/local/bin/q1desktop $NEW_XDG_RUNTIME_DIR/xvfb/Xvfb_screen0 9>&- &
 q1d=$!
 pids+=($q1d)
 
@@ -92,7 +122,7 @@ export XDG_RUNTIME_DIR=$NEW_XDG_RUNTIME_DIR
 
 # Quest 1: in its own process group, ended when the overlay is closed from its control bar (on the Frame,
 # closing the app's window ends it)
-setsid dbus-run-session startplasma-wayland &
+setsid dbus-run-session startplasma-wayland 9>&- &
 plasma=$!
 while kill -0 $plasma 2>/dev/null; do
     kill -0 $q1d 2>/dev/null || { kill -TERM -- -$plasma 2>/dev/null || true; break; }

@@ -36,7 +36,10 @@ Everything above is the same, except gamescope:
 - One desktop at a time: Plasma takes a while to come up here and the headset reacts slowly meanwhile, so the
   "Desktop" entry gets clicked again and again. A second run of the script used to clean up the first one's
   `XDG_RUNTIME_DIR` (kwin: "Could not create wayland socket", a black overlay); a lock now makes it signal
-  `q1desktop` (SIGUSR1: show the dashboard on the desktop's overlay) and exit.
+  `q1desktop` (SIGUSR1: show the dashboard on the desktop's overlay) and exit. Only the script holds the lock
+  (its children get `9>&-`), and closing the desktop ends every process of the nested session, found by its
+  `XDG_RUNTIME_DIR`: `kcminit` leaves Plasma's process group, outlived the desktop (stuck once kwin is gone)
+  and kept the lock, so every later launch showed nothing (user, 2026-11-05).
 - Steam passes its own environment on: our Vulkan shim first in `LD_LIBRARY_PATH` and Steam's runtime after it.
   Every Qt program probes Vulkan, and the shim without libhybris' TLS preload crashed them (ksplash, kded6, the
   portals; plasmashell never came up, a black desktop). The script starts Plasma with the system's environment

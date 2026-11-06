@@ -174,8 +174,10 @@ Open items, roughly by priority. Done items move to the commit log.
   `device/holo-perf.sh`.
 
 ## Steam and desktop
-- Desktop mode launcher unreliable (user, 2026-11-05 night): the desktop failed to start again after the
-  flock/cleanup fixes (device/steamos-nested-desktop). Find out why from the logs of a failed launch.
+- Desktop mode launcher (user, 2026-11-05 night: failed to start again): kcminit outlived the desktop and held
+  the launcher's lock; fixed 2026-11-06 (docs/desktop.md), 9 launch/close cycles and a double launch OK from a
+  shell with Steam's environment. Left: confirm from Steam's "+" menu in the headset; once, the first launch
+  after killing old leftovers hung 48 s (plasma_session up, kwin silent) and closed fine.
 - Desktop mode (docs/desktop.md): the nested Plasma runs and shows in the dashboard (user, 2026-11-05: Dolphin
   started, the headset struggling). Open:
   - lag, and the whole dashboard freezing while the desktop is used (memory: ~2 GB swapped with Plasma and
