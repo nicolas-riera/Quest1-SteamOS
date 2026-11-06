@@ -323,5 +323,21 @@ while `camera.enableCamera` and `camera.roomView` > 0. So the 3D mode is the one
   run mrsystemservice from the user's own system partition like trackingservice (nothing of Meta's in the repo), read the
   PassthroughMesh it publishes, and feed it to vrcompositor instead of ptprovider's fixed sphere. First: what it needs to
   start (binder services, gatekeeper, cameramuxmodemonitor), then the capability registry's IPC to get the mesh out.
+- How a client drives it (strings of libmrengine/mrsystemservice, 2026-11-06): `initGraphicBuffers` and the frame callbacks
+  only run inside mrsystemservice (it streams the cameras into MrEngine itself). Clients talk to the engine's RuntimeIPC
+  server `MrSystemServiceIPCServer` (Meta's RuntimeIPC, the protocol of the RuntimeIpcBroker we already run for
+  trackingservice's anchors). RPCs: `MrPassthroughPowerMode` (bool), `PassthroughMode` (`None`, `ImagesAndMesh`...),
+  `IsMrCapabilitySupported`, `ChangeMrCapabilityStatus`/`Fidelity`, `MrGetGatekeeperValue`, a `MrSharedMemoryResponse`
+  (the outputs' shared memory) and `getCapabilityOutputBuffer` (depthservice); also the guardian's playspace scan
+  (`MrGuardianData`, `MrGuardianStatus`). Meta's own client is MrServiceMonterey's `libmrservice.so` (an OpenXR app,
+  `libopenxr_loader.so` in its APK, that draws the passthrough layer). Started from the shell like trackingservice
+  (`mrsystemservice`, uid 1000, cpuset CPU 4) it registers `MrSystemService` (ovrstub had a stand-in) and waits for a client.
+  Next: the RuntimeIPC wire format (from the broker and a client library), power it on, read the mesh.
+- The shake/tilt of our roomview (user, 2026-11-05/06; "only the camera, the panels are steady"), what it is not: the kernel
+  and initramfs (same on the pre-memory-work image #7), the KGSL lazy rings, the capture poses (each frame has its pose; image
+  motion and pose motion line up within 4 ms, r = 0.87), the record order (the compositor takes the newest frames, 29 ms old,
+  never an older one), the cameras' extrinsics (camera 0's image motion axes match DeviceFromCamera within a few degrees), the
+  head being off the sphere's centre (0.02 m). A 50 m sphere instead of 3 m only lessened it slightly. Left: how vrcompositor
+  reprojects our fixed head-space mesh; replaced by a real per-frame depth mesh (above) rather than tuned.
 - Next for us: a depth mesh (at least a floor plane + a far sphere in tracking space, then stereo depth like Meta), so near objects
   line up; ptprovider as a service; the roomview following the dashboard switch instead of being forced on.

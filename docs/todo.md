@@ -119,6 +119,9 @@ Open items, roughly by priority. Done items move to the commit log.
   matching the menu button's look (user, 2026-11-03, low priority).
 
 ## Passthrough
+- Shake/tilt (user, 2026-11-06: only the camera image, "almost nauseating"): not the kernel, the KGSL lazy rings, the capture
+  poses or the frame order (docs/passthrough.md, what it is not); next: Meta's depth engine through MrSystemServiceIPCServer
+  instead of our fixed mesh (user's call).
 - Regression (user, 2026-11-05 night): passthrough shakes a lot and tends to tilt when the head moves.
   Broken by that night's memory work; suspects, in order: the KGSL lazy rings (first-touch page faults in
   vrcompositor's 256 MB ring, kernel/kgsl-lazy.patch and the compat layer's hint), zram zstd (slower
@@ -174,6 +177,12 @@ Open items, roughly by priority. Done items move to the commit log.
   `device/holo-perf.sh`.
 
 ## Steam and desktop
+- The "+" menu's Desktop entry ignores laser clicks unless Steam sees a gamepad (user, 2026-11-06: works while a DualSense
+  is connected, not after; the click never calls `Apps.LaunchNonSteamApp`, the launch itself works). On the Frame its
+  controllers are a gamepad for Steam by default and the grip brings the laser (user). Expose the Touch controllers to
+  Steam the same way (a Steam Input gamepad, grip = laser).
+- Discover: the user saw a message about flatpak to install with pacman, though flatpak and flathub are there and the
+  Flatpak backend loads; its PackageKit backend lacks `libpackagekitqt6` (package `packagekit-qt6`). Get the exact message.
 - Desktop mode launcher (user, 2026-11-05 night: failed to start again): kcminit outlived the desktop and held
   the launcher's lock; fixed 2026-11-06 (docs/desktop.md), 9 launch/close cycles and a double launch OK from a
   shell with Steam's environment. Left: confirm from Steam's "+" menu in the headset; once, the first launch
