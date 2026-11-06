@@ -26,22 +26,3 @@ Revert: put the old args back (`/etc/systemd/system/steam.service.d/vr.conf.bak-
   Call sites seen: 13 in steamclient.so, 10 in steamui.so, 1 in chromehtml.so (offsets are for the 2026-10-21 build). Not required by default.
 - The log line "IClientVR::BServeVRGamepadUIOverlay took too long" appears only when the call is slow: not a reliable signal.
   Check the dashboard instead: `runuser -u steamos -- touch /tmp/quest1-snap` writes /tmp/quest1-snap.ppm.
-
-## Touch controllers as a gamepad (q1pad)
-
-Steam's VR UI (the dashboard "+" menu's Desktop entry, probably other gamepad-UI widgets) ignores
-laser-pointer clicks unless Steam Input sees a gamepad (observed with a Bluetooth DualSense). On the
-Frame the controllers are a Steam Input device; ours are only visible to SteamVR (through
-driver_quest1), so `src/q1pad` (unit `q1pad.service`, started with `android-q1trackd`) republishes
-q1trackd's shared memory (`q1track_shm.h`) as a uinput "Microsoft X-Box 360 pad" (045e:028e, which
-Steam maps without configuration). Mapping: right A/B -> South/East, left X/Y -> West/North, sticks,
-index triggers -> LT/RT, grips -> LB/RB (click at half squeeze), stick clicks -> L3/R3, left menu ->
-Start; the Oculus button is not mapped. It runs as `steamos` (owner of `/dev/uinput`), reads at
-125 Hz and releases everything if q1trackd stalls. SteamVR's laser keeps working: it reads the
-controllers through its own driver.
-
-What Steam's UI does on the Frame (steamui JS): localisation key `GuidedTour_Frame_LaserMouseToggleTitle`
-("Laser Mouse & Gamepad Mode Toggle"), dashboard actions `#VRDashboard_ShowLaserMouse` /
-`#VRDashboard_HideLaserMouse` bound to the REAR_LEFT_LOWER / REAR_RIGHT_LOWER buttons, i.e. the Frame's
-grip buttons toggle laser-mouse versus gamepad mode. Our pad has no such rear buttons; the grips are
-mapped to the shoulders instead.

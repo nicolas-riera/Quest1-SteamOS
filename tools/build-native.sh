@@ -16,7 +16,7 @@
 #   /usr/local/lib     libVkLayer_quest1_steamvr_compat.so (src/vklayer-steamvr), libvncserver
 #   /usr/local/lib/quest1-vk, quest1-vk-steam   the Vulkan shim (vrcompositor; Steam's webhelper + vkredirect)
 #   /usr/local/lib/q1track/q1trackd, /data/local/tmp/libq1camtap.so   bionic tools (src/q1track, src/camtap)
-#   /usr/local/lib/q1splash/q1splash, /usr/local/bin/{ovrstub,q1black,xscreen,q1pad,x11vnc,q1-camoverlay,
+#   /usr/local/lib/q1splash/q1splash, /usr/local/bin/{ovrstub,q1black,xscreen,x11vnc,q1-camoverlay,
 #   q1-ptprovider,vrdash,q1desktop}
 # To check against the development headset (built by hand there, recipe not recorded until now):
 #   the libhybris commit, Monado's CMake options, the vrcompositor shim (here the same build as Steam's).
@@ -89,7 +89,6 @@ cc -Wextra -o $D/usr/local/bin/ovrstub ovrstub/ovrstub.c
 gcc -O2 -Wall -o $D/usr/local/bin/q1black q1black/q1black.c $HY
 gcc -O2 -Wall -o $D/usr/local/lib/q1splash/q1splash q1splash/q1splash.c $HY
 gcc -O2 -o $D/usr/local/bin/xscreen xscreen/xscreen.c xscreen/gamepad.c -lopenxr_loader -lvulkan -lm
-gcc -O2 -Wall -o $D/usr/local/bin/q1pad q1pad/q1pad.c -lm
 
 # bionic tools: linked against stubs of bionic's libc.so/libdl.so (the symbols they import; data objects are
 # FILE pointers, 8 bytes as in bionic), resolved by Meta's real ones at run time
