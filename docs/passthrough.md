@@ -333,6 +333,23 @@ while `camera.enableCamera` and `camera.roomView` > 0. So the 3D mode is the one
   `libopenxr_loader.so` in its APK, that draws the passthrough layer). Started from the shell like trackingservice
   (`mrsystemservice`, uid 1000, cpuset CPU 4) it registers `MrSystemService` (ovrstub had a stand-in) and waits for a client.
   Next: the RuntimeIPC wire format (from the broker and a client library), power it on, read the mesh.
+- RuntimeIPC, as found on 2026-11-06 (a test client on the headset):
+  - Client side: `/system/lib64/libripcclient.oculus.so`, a plain C API (`ipc_Initialize`, `ipc_ConnectToServer`,
+    `ipc_CallServerRPC`/`2`, `ipc_PollClientEvent`, `ipc_GetServerState*`), usable from a small bionic program run
+    like q1trackd, with a binder thread pool (`ABinderProcess_startThreadPool`). The broker (`RuntimeIpcBroker`) is a
+    binder service; once connected, RPCs go over pipes, and shared memory (ashmem) is handed out through binder.
+  - `ipc_ConnectToServer("native_process.system", "/system/bin/mrsystemservice", "MrSystemServiceIPCServer")` connects
+    (a wrong tuple blocks 10 s and fails). The server stops a client's capabilities when it disconnects.
+  - Request: `u16 version (2) | u32 rpc hash | u8 flags | arguments`, little endian; on the pipe an 8-byte length
+    first. Hash V1 = djb2 of the RPC name, V2 = a second hash per name (read from the server). Response:
+    `u16 2 | u32 0xf8e376d1 | u32 status (1 handled, 0 unknown) | payload`. A request too short for its arguments
+    gets no answer at all.
+  - Blockers: mrsystemservice reads its killswitches from the binder `GatekeeperService` (ovrstub answers false):
+    `oculus_mr_capability_passthrough` must be true for the passthrough capability to exist. That capability then
+    connects to a second RuntimeIPC server, `com.oculus.systemdriver:com.oculus.vrruntimeservice`
+    (RuntimeServiceServer), looked up through a `runtimeipchelper` binder service we don't have (not fatal).
+  - Left: the `PassthroughMode` / `ChangeMrCapabilityStatus` argument layouts, and how the mesh's shared memory is
+    handed to the client.
 - The shake/tilt of our roomview (user, 2026-11-05/06; "only the camera, the panels are steady"), what it is not: the kernel
   and initramfs (same on the pre-memory-work image #7), the KGSL lazy rings, the capture poses (each frame has its pose; image
   motion and pose motion line up within 4 ms, r = 0.87), the record order (the compositor takes the newest frames, 29 ms old,
