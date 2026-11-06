@@ -311,5 +311,17 @@ while `camera.enableCamera` and `camera.roomView` > 0. So the 3D mode is the one
 - Where the stereo is not valid (top middle) the mesh is extrapolated (favor_foreground, temporal fg/bg filtering): the stretch.
 - Brightness: frames arrive gamma-encoded and the shader undoes it (pow 1.4 after the grayscale gamma): about linear light out, no
   extra brightness or contrast stage. Exposure is the tracking's (shared histogram auto exposure), no separate passthrough exposure.
+- The pieces (read on the headset, 2026-11-06): `/system/bin/mrsystemservice` (init: `class late_start`, user system, group
+  camera, cpuset `mrsystem` = CPU 4) takes the camera framesets from the sensors HAL's camera stream service (the HAL our
+  tracking already runs), copies them into AHardwareBuffers and drives `/system/lib64/libmrengine.so` through a small C ABI:
+  `MrEngine_start`, `MrEngine_setAHardwareBuffers`, `MrEngine_onFramesetBegin/End`, `MrEngine_setGammaCoefficients`,
+  `MrEngine_powerState`, `capabilityRegistryCreate`. libmrengine needs only liblog, libdl, libandroid, libm and libc; inside,
+  "BoltDepth" (a stereo/motion-vector depth pipeline, `/dev/ion`) builds the PassthroughMesh, which the Java app
+  MrServiceMonterey (libmrservice) draws; the mesh leaves through a capability registry and shared memory
+  (`ASharedMemory_create`, "DepthRuntimeIpcClient").
+- Plan for depth like Meta (the Frame's roomview takes a depth mesh in its block queues, `/xrservice/roomview3d/meshData`):
+  run mrsystemservice from the user's own system partition like trackingservice (nothing of Meta's in the repo), read the
+  PassthroughMesh it publishes, and feed it to vrcompositor instead of ptprovider's fixed sphere. First: what it needs to
+  start (binder services, gatekeeper, cameramuxmodemonitor), then the capability registry's IPC to get the mesh out.
 - Next for us: a depth mesh (at least a floor plane + a far sphere in tracking space, then stereo depth like Meta), so near objects
   line up; ptprovider as a service; the roomview following the dashboard switch instead of being forced on.
