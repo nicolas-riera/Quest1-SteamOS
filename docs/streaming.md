@@ -44,6 +44,16 @@ Plan (hardware decode only: software decode is not an option, user decision 2026
 2. **`/dev/video-dec0` for Steam** (1-3 days): the Frame's own node name (`steam-video-codec-setup.service` makes it), then see how
    `CV4L2Accel` copes with msm_vidc (UBWC capture formats, buffer counts, events, DISPLAY_DELAY controls). If the gaps are small, a
    V4L2 shim (LD_PRELOAD on streaming_client) translates; else patch the kernel driver toward the mainline stateful decoder API.
+   [H] 2026-11-07, from `steamrtarm64/streaming_client` (2.17.10, not stripped, strings and imports only): `CV4L2Accel`
+   (`/data/src/streaming/client/v4l2accel.cpp`) opens `/dev/video-dec%d`, **mmaps its OUTPUT buffers** ("Couldn't memory map
+   output buffer"), takes CAPTURE buffers as **dma-buf fds** ("capture planes has invalid m_fd"), expects mainline behaviour
+   (`V4L2_BUF_FLAG_LAST`, "Resetting capture buffers because we had last buffer flagged"), rewrites the SPS ("Couldn't rewrite
+   SPS packet": low-latency VUI), reads `STEAMLINK_V4L2_BUFFER_COUNT` / `STEAMLINK_V4L2_RESET_AFTER_LAST_BUF`, and hands the
+   frames to DRM, EGL or Vulkan (`CDRMFrames`/`CEGLFrames`/`CVulkanFrames<V4L2FrameContext_t>`). It calls libc's `open`,
+   `ioctl`, `mmap` and `poll`, so an LD_PRELOAD shim can sit between it and msm_vidc: MMAP -> ION-backed USERPTR,
+   EXPBUF/dma-buf -> the ION fds, the msm_vidc events -> `V4L2_EVENT_SOURCE_CHANGE`, EOS flag -> `V4L2_BUF_FLAG_LAST`,
+   the coded-size and reconfiguration rules of `src/vdectest`. The frame output (EGL dma-buf import or Vulkan modifiers on
+   libhybris) is step 3's problem.
 3. **Decoded frames to the compositor** (3-5 days): the decoder's dma-buf/ION buffers as AHBs (Monado's `comp_window_mdp.c` already
    imports gralloc AHBs), so the frames reach vrcompositor without a CPU copy; `GL_EXT_memory_object` is missing on libhybris GL,
    so the Vulkan path (streaming_client's `CVulkanAccel`) or an overlay from AHB-backed images.
