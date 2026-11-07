@@ -109,6 +109,25 @@ went into it; that error has the same direction for a whole head turn, and the 5
 53 ms prediction makes it larger). Now o only learns from frames rendered while the head turns slower than
 15 deg/s (Monado's head pose 50 ms apart), where the prediction error is small.
 
+The distortion was still there (user). Three checks on the table (panels on, warp outputs made linear with
+`QUEST1_WARP_USAGE=0` for Monado's snapshot, `thr=0`), with temporary driver_quest1 builds, image shifts measured
+by block matching on the dashboard (40 px patches, normalised correlation):
+
+- Geometry, yaw: SteamVR rendering with the head pose turned by 5 degrees moves the dashboard +78..+82 px; Monado's
+  warp of the straight frame by the opposite 5 degrees (`yaw=5`) moves it -76..-82 px, the same profile over the
+  whole panel (and the same small vertical components, mirrored). The lens model matches SteamVR's distortion.
+- Pose to frame association: frames rendered with the pose turned by +-3 degrees by frame parity (and recorded
+  so) come out of the warp within 0-1 px of the untagged frame: each frame is warped from the pose it was really
+  rendered with. Pitch and roll the same way: within 0-6 px, the same residual in both, i.e. the slow drift of o
+  the tagged frames cause (keep tags under the 4 degrees at which o is seeded again, or o jumps).
+- Outside the rendered image the warp samples black (CLAMP_TO_BORDER), no smeared edges.
+
+So the warp itself is right for a still head; what is left happens only while the head moves: the size of the
+corrections (worn: 4 degrees average, 16 max during fast turns) and the latency behind them. The prediction the
+driver settles on swings between 50 and 77 ms: SteamVR's frames take ~65 ms from the pose's publication to the
+panels. Next: an A/B with the user wearing the headset, switched live (warp off, a fixed prediction), to tell the
+warp's corrections from the rendering's own latency.
+
 ## Plan: Monado presents vrcompositor's frames and re-projects them
 
 Monado already has everything a 72 Hz re-projection needs: the head pose at any time, a

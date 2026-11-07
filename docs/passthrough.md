@@ -358,3 +358,26 @@ while `camera.enableCamera` and `camera.roomView` > 0. So the 3D mode is the one
   reprojects our fixed head-space mesh; replaced by a real per-frame depth mesh (above) rather than tuned.
 - Next for us: a depth mesh (at least a floor plane + a far sphere in tracking space, then stereo depth like Meta), so near objects
   line up; ptprovider as a service; the roomview following the dashboard switch instead of being forced on.
+
+## The shake: how vrcompositor uses the capture pose (2026-11-07, measured with the head still)
+
+Test: ptprovider wrote its record's capture pose (+144) as the true pose times a known head-frame rotation, and the
+roomview's uniform buffer was read from vrcompositor (a few short debugger attaches) next to layer snapshots.
+
+- With the true pose, the extra transform X is the identity (1e-5 rad) and `_m3` (the inverse of +48) is unchanged.
+- A rotation shows up in `_m1` (head to eye, = eye * X), not in `_m3`: X's rotation is R_G^T * R_P (G our +144, P the
+  compositor's current pose): +20 degrees of pitch gave Rx(-20 degrees).
+- X's translation is p - X_rot * p, with p the head's absolute raw position (~(0, 1.65, 0)): the rotation pivots
+  about the raw origin (the floor), not about the head; 20 degrees of pitch moved it 0.56 m. With 6DoF anchoring p
+  grows as the user walks, so any capture-to-display rotation shifts the view by |theta x p| on the 3 m sphere. That
+  fits the shake coming back after the 2026-11-05 room setup (6DoF anchor), and the tilts (pitch and roll act even
+  at p = (0, 1.65, 0)).
+- Sign, unconfirmed: +10 degrees of yaw in +144 (capture pose further left than the display pose) moved the camera
+  image 148 px to the right (~14.8 px/degree); physically it should go left, if +144 is the capture pose. Read so, the
+  compositor's correction is inverted for our feed and the error doubles: 2 * omega * (age + prediction). The other
+  reading: +144 is meant as the display-side pose and vrcompositor looks the capture pose up in its own pose history
+  from the record's time (+8).
+
+Next: settle the sign physically (driver-only head pose offset plus a world-locked overlay marker, compare the
+marker's shift with the camera image's), then feed +144 so X is right (head-relative, or the mirrored rotation
+R_P * R_G^T * R_P from the latest raw pose), A/B with the user; depth after that.
