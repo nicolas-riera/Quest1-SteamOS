@@ -211,12 +211,40 @@ Restart=no
 WantedBy=quest1-steamvr.service
 EOF
 
+# vrdashboard does not restart its vrwebhelper (the dashboard's web UI) when that dies: it asserts "stalled cross-thread
+# pipe" and the dashboard stayed gone (user, 2026-11-05). vrserver starts a new vrdashboard when it is missing (seen
+# 2026-11-07, in its own cgroup), so the unit runs this watcher: it starts vrdashboard, and ends any vrdashboard left
+# without a vrwebhelper, then opens the new dashboard.
+mkdir -p /usr/local/lib/holo
+cat > /usr/local/lib/holo/vrdashboard-run <<'EOW'
+#!/bin/sh
+/usr/local/bin/steamvr-q1 vrdashboard &
+seen=
+while :; do
+	sleep 5
+	d=$(pgrep -u steamos -x vrdashboard | head -1)
+	if [ -z "$d" ]; then
+		seen=
+	elif pgrep -u steamos -x vrwebhelper >/dev/null; then
+		seen=$d
+	elif [ "$seen" = "$d" ]; then
+		echo "vrdashboard-run: the dashboard's vrwebhelper is gone: ending vrdashboard $d (vrserver starts a new one)"
+		kill $d; sleep 3; kill -9 $d 2>/dev/null
+		seen=
+		(sleep 30; LD_LIBRARY_PATH=/opt/steamvr/bin/linuxarm64 timeout 20 /usr/local/bin/vrdash show) &
+	fi
+done
+EOW
+chmod 755 /usr/local/lib/holo/vrdashboard-run
+
 cat > /etc/systemd/system/quest1-frame-dashboard.service <<EOF
 [Unit]
 Description=SteamVR dashboard process (Steam's VR UI as main panel), opened at start
 Requires=quest1-steamvr.service
 After=quest1-steamvr.service quest1-vrsession.service
 PartOf=quest1-steamvr.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 User=steamos
@@ -225,9 +253,10 @@ Nice=5
 # vrcompositor must be up first
 ExecStartPre=/bin/sh -c 'for i in \$(seq 1 30); do pgrep -u steamos -x vrcompositor >/dev/null && exit 0; sleep 2; done; exit 1'
 ExecStartPre=/bin/sleep 5
-ExecStart=/usr/local/bin/steamvr-q1 vrdashboard
+ExecStart=/usr/local/lib/holo/vrdashboard-run
 ExecStartPost=-/bin/sh -c 'sleep 25; LD_LIBRARY_PATH=/opt/steamvr/bin/linuxarm64 timeout 20 /usr/local/bin/vrdash show'
-Restart=no
+Restart=on-failure
+RestartSec=3
 
 [Install]
 WantedBy=quest1-steamvr.service

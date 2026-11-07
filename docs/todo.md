@@ -85,8 +85,6 @@ Open items, roughly by priority. Done items move to the commit log.
   against ~20 ns native: ~10-15 % of one core. Make the emulation itself faster (trap path, hook
   lookup, decode). Not binary rewriting: patched Valve binaries break with Steam updates and
   can't be shipped (user, 2026-11-03).
-- systemd-journald spends ~8 % of a core on trackingservice's log spam ("failed to extrapolate
-  controller tracking state" every 2 s, CONSTELLATION status), and kswapd up to ~40 %.
 - The kernel logs "SPI transaction rejected by SyncBoss" / "Bad magic number 0xcacacaca" several
   times a minute (2026-11-03): check against Android, and whether IMU or controller data is lost.
 - Lens distortion in Monado's warp (`/etc/quest1-warp-lens` = 1, off by default): vrcompositor hands
@@ -109,6 +107,8 @@ Open items, roughly by priority. Done items move to the commit log.
   wants it (2026-11-03); meanwhile the system timezone is set with timedatectl (Europe/Paris). Find what sets
   IN_GAMESCOPE and whether it can be set without gamescope's other paths; check IS_STEAMOS too (os-release is now
   ID=steamos, device/holo-identity.sh).
+  2026-11-07: `IN_GAMESCOPE=true` is set by steamui.so itself (native), along with its gamescope controller
+  (CGamescopeControllerLinux, gamescope-control Wayland protocol): not a flag to set alone.
 
 ## Audio
 - Audio randomly turns crackly for a while, then recovers by itself, sometimes stays stuck crackly
@@ -236,7 +236,8 @@ Open items, roughly by priority. Done items move to the commit log.
   vrdashboard asserts "stalled cross-thread pipe (pipe is disconnected)" (/tmp/dumps), the headset deep in swap.
   The dashboard's vrwebhelper (started by vrdashboard) died with it and vrdashboard never restarted it. The
   next OpenVR client to start (here q1desktop) started a new one in its own cgroup, so stopping that client
-  killed the dashboard again. The stack must restart vrwebhelper (or the dashboard unit) when it dies.
+  killed the dashboard again. Fixed 2026-11-07: quest1-frame-dashboard runs a watcher that ends a vrdashboard left
+  without vrwebhelper; vrserver starts a new one (tested: all vrwebhelpers killed, the dashboard back in ~35 s).
 
 ## System
 - SteamOS and SteamVR updates must keep working without undoing our changes (after the
