@@ -207,10 +207,10 @@ index eb41c3c..5214613 100644
  
 diff --git a/src/xrt/compositor/main/comp_window_mdp.c b/src/xrt/compositor/main/comp_window_mdp.c
 new file mode 100644
-index 0000000..07400df
+index 0000000..8bdc658
 --- /dev/null
 +++ b/src/xrt/compositor/main/comp_window_mdp.c
-@@ -0,0 +1,2636 @@
+@@ -0,0 +1,2650 @@
 +// Copyright 2026, Quest1-SteamOS contributors
 +// SPDX-License-Identifier: BSL-1.0
 +/*!
@@ -2042,11 +2042,25 @@ index 0000000..07400df
 +			memcpy(qr, D->latest_frame.q, sizeof(qr));
 +			float qt[4];
 +			if (head_orientation(t, display_ns, qd) && head_orientation(t, D->latest_frame.time_ns, qt)) {
-+				if (D->latest_frame.frame != D->calibrated_frame) {
-+					// o: Monado's device space = o * LOCAL (a constant), averaged over the frames since the
-+					// prediction error of each one is random. A plain mean for the first frames, then a slow
-+					// average; estimates far from it on several frames in a row mean LOCAL moved: seed again (a
-+					// stale o made the warped frames sit off and swing slowly into place, 2026-11-03).
++				// the head's speed around the frame's pose time: o is only learnt while the head is (nearly) still
++				float qp[4];
++				float speed = 1e9f;
++				if (head_orientation(t, D->latest_frame.time_ns - 50 * (int64_t)U_TIME_1MS_IN_NS, qp)) {
++					float cp[4], dq[4];
++					quat_conj(qp, cp);
++					quat_mul(cp, qt, dq);
++					float ang = quat_angle_deg(dq);
++					speed = (ang > 180.0f ? 360.0f - ang : ang) / 0.05f;
++				}
++				bool still = speed < 15.0f;
++				if (D->latest_frame.frame != D->calibrated_frame && (still || !D->o_valid)) {
++					// o: Monado's device space = o * LOCAL (a constant). Each frame gives an estimate off by its
++					// pose's prediction error, small while the head is still but large and in the same direction
++					// for a whole head turn: averaging those dragged o along and the warp put the image off,
++					// seen as distortion while turning (user, 2026-11-07). So only frames rendered while the head
++					// is still (under 15 deg/s) are used: a plain mean for the first ones, then a slow average;
++					// estimates far from it on several such frames in a row mean LOCAL moved: seed again (a stale
++					// o made the warped frames sit off and swing slowly into place, 2026-11-03).
 +					float cr[4], oe[4];
 +					quat_conj(qr, cr);
 +					quat_mul(qt, cr, oe);

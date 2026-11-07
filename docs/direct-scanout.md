@@ -102,6 +102,13 @@ path is ~53 ms at 72 fps. Monado writes the 2-second average to `/run/monado/que
 (`ReadPoseAge`) adds half of it to its prediction (20-90 ms; fixed when `QUEST1_POSE_PREDICT_MS` or
 `/tmp/quest1-pose-mode` sets one). The age then averages about 0 (-10 to +10 ms per frame).
 
+That did not remove the distortion (user): during head turns the warp's delta stayed 1.5-2.2 degrees and so did
+the "o jitter". o, the constant rotation between Monado's device space and driver_quest1's LOCAL, was estimated
+from every frame (its render pose against Monado's head pose at the same time), so each frame's prediction error
+went into it; that error has the same direction for a whole head turn, and the 5 % average followed it (the
+53 ms prediction makes it larger). Now o only learns from frames rendered while the head turns slower than
+15 deg/s (Monado's head pose 50 ms apart), where the prediction error is small.
+
 ## Plan: Monado presents vrcompositor's frames and re-projects them
 
 Monado already has everything a 72 Hz re-projection needs: the head pose at any time, a

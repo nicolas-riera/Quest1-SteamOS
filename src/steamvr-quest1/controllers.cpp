@@ -6,7 +6,7 @@
 // actions on the driver's session and publishes them to SteamVR as two oculus_touch controllers with the
 // Quest render models, so games see Touch controllers and their Touch bindings apply as is (user, 2026-11-07:
 // they must stay Touch controllers). The dashboard uses our bindings (quest1_touch_vrcompositor_bindings.json),
-// which follow the Frame's: laser, grips for the quick mouse and the gamepad mode, recentre, screenshot.
+// with the laser always shown (no gamepad mode: user, 2026-11-07, it does not suit these controllers).
 //
 // Orientation: Monado's controller orientation is the IMU frame. The aim pose is
 //   aim = yaw * imu * imuToAim
@@ -248,10 +248,6 @@ public:
 		                     left ? "quest1/QUEST1-Touch-Left" : "quest1/QUEST1-Touch-Right");
 		p->SetStringProperty(container, Prop_InputProfilePath_String, "{quest1}/input/quest1_touch_profile.json");
 		p->SetStringProperty(container, Prop_ControllerType_String, "oculus_touch");
-		// Read by vrcompositor for each hand (UpdateInputFocus): unless it is true, the dashboard never hands the
-		// controllers' buttons to Steam (the VR_InputFocusState masks stay 0) and the gamepad mode does nothing.
-		// The public header only calls it Prop_Reserved_2117.
-		p->SetBoolProperty(container, (ETrackedDeviceProperty)2117, true);
 		p->SetInt32Property(container, Prop_ControllerRoleHint_Int32,
 		                    left ? TrackedControllerRole_LeftHand : TrackedControllerRole_RightHand);
 		p->SetBoolProperty(container, Prop_DeviceProvidesBatteryStatus_Bool, false);

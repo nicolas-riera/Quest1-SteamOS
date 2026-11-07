@@ -5,7 +5,7 @@
 	"category": "steamvr_input",
 	"controller_type": "oculus_touch",
 	"name": "Quest 1 Touch: SteamVR dashboard",
-	"description": "Menu (left) or Oculus (right) button toggles the dashboard, a double click the camera view (passthrough); trigger clicks; stick scrolls; A/X home, B/Y back; grips: quick mouse, laser hand and the gamepad mode (as the Frame's bindings)",
+	"description": "Menu (left) or Oculus (right) button toggles the dashboard, a double click the camera view (passthrough); trigger clicks; stick scrolls; A/X home, B/Y back; the laser is always shown (no gamepad mode)",
 	"options": {},
 	"simulated_actions": [],
 	"bindings": {
@@ -253,38 +253,6 @@
 					"mode": "button",
 					"inputs": {
 						"click": { "output": "/actions/dualanalog/in/rightclick" }
-					}
-				},
-				{
-					"path": "/user/hand/left/input/grip",
-					"mode": "button",
-					"inputs": {
-						"click": { "output": "/actions/dualanalog/in/modeswitch1" }
-					}
-				},
-				{
-					"path": "/user/hand/right/input/grip",
-					"mode": "button",
-					"inputs": {
-						"click": { "output": "/actions/dualanalog/in/modeswitch2" }
-					}
-				}
-			]
-		},
-		"/actions/quickmouse": {
-			"sources": [
-				{
-					"path": "/user/hand/left/input/grip",
-					"mode": "trigger",
-					"inputs": {
-						"click": { "output": "/actions/quickmouse/in/ActivateQuickMouse" }
-					}
-				},
-				{
-					"path": "/user/hand/right/input/grip",
-					"mode": "trigger",
-					"inputs": {
-						"click": { "output": "/actions/quickmouse/in/ActivateQuickMouse" }
 					}
 				}
 			]

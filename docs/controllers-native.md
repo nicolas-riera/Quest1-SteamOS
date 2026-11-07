@@ -258,15 +258,15 @@ SteamVR controllers:
   animations: the Quest models move `/input/joystick` and the left `/input/x`, `/input/y`). SteamVR takes the
   dashboard bindings of `oculus_touch` from its own Oculus driver, so the driver selects ours
   (`quest1_touch_vrcompositor_bindings.json`, setting `oculus_touch_250820_CurrentURL_steamvrinput`) unless the
-  user picked another. They follow the Frame's dashboard bindings: laser and trigger (click, lock), grips for the
-  quick mouse, the laser hand and the gamepad mode (`modeswitch1/2`), Menu (left) or Oculus (right) = system
-  (dashboard, double click = room view), A/X home, B/Y back, sticks scroll, locomotion and room setup (floor
-  adjust, A/X accept, B/Y back). Render models: the Quest's (`oculus_quest_controller_left`, and the right one
+  user picked another. Laser always shown, trigger clicks, Menu (left) or Oculus (right) = system (dashboard,
+  double click = room view), A/X home, B/Y back, grips middle click and laser hand, sticks scroll, locomotion and
+  room setup (floor adjust, A/X accept, B/Y back). No gamepad mode (user, 2026-11-07: it does not suit these
+  controllers): no property 2117, no grip mode switch.
+  Render models: the Quest's (`oculus_quest_controller_left`, and the right one
   with the Oculus logo on its button, `src/steamvr-quest1/mkrendermodel.py`).
-* Gamepad mode: vrcompositor (`UpdateInputFocus`) hands a controller's buttons to Steam only if the
-  controller has property 2117 (`Prop_Reserved_2117` in the public header, Bool) set to true; without it the
-  `VR_InputFocusState` masks (shared memory, left buttons in bits 0-23, right in 32-55) stay 0 and nothing
-  reaches the gamepad. The driver sets it on both controllers.
+* Gamepad mode (not used, see above): vrcompositor (`UpdateInputFocus`) hands a controller's buttons to Steam only
+  if the controller has property 2117 (`Prop_Reserved_2117` in the public header, Bool) set to true; without it
+  the `VR_InputFocusState` masks (shared memory, left buttons in bits 0-23, right in 32-55) stay 0.
 * Components, the Touch profile's: `system` click+touch (left Menu, right Oculus button), `x`, `y` (left) and
   `a`, `b` (right) click+touch, `trigger` value+touch, `grip` value (+touch = value > 0.05, the Touch grip has no
   capacitive sensor), `joystick` x/y/click/touch, `thumbrest/touch`, `/output/haptic`
