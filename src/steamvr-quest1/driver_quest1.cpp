@@ -1862,6 +1862,20 @@ private:
 			return;
 		nextSettingsPoll = now + std::chrono::milliseconds(500);
 		EVRSettingsError err = VRSettingsError_None;
+		// the re-projection's display time (Monado's warp, comp_window_mdp.c MDP_DISPLAY_DELAY_FILE): milliseconds
+		// from the vsync before a commit to the head pose it is warped to
+		float delay = VRSettings()->GetFloat("driver_quest1", "displayDelayMs", &err);
+		if (err == VRSettingsError_None && delay >= 0.0f && delay <= 40.0f && delay != writtenDisplayDelay) {
+			if (FILE *f = fopen("/tmp/quest1-display-delay-ms.tmp", "w")) {
+				fprintf(f, "%.1f\n", delay);
+				fclose(f);
+				if (rename("/tmp/quest1-display-delay-ms.tmp", "/tmp/quest1-display-delay-ms") == 0) {
+					writtenDisplayDelay = delay;
+					Log("quest1: settings: re-projection display time %.1f ms after the vsync\n", delay);
+				}
+			}
+		}
+		err = VRSettingsError_None;
 		if (!VRSettings()->GetBool("driver_quest1", "clearSpatialAnchors", &err) || err != VRSettingsError_None)
 			return;
 		// q1anchord (root, the tracking stack) removes the trigger and forgets every map (docs/boundary.md)
@@ -1902,6 +1916,7 @@ private:
 	Quest1Hmd *hmd = nullptr;
 	Quest1Controllers controllers;
 	std::chrono::steady_clock::time_point nextSettingsPoll{};
+	float writtenDisplayDelay = -1.0f;
 };
 
 static Quest1Provider g_provider;

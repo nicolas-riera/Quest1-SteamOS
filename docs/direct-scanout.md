@@ -146,6 +146,30 @@ net motion over 50 ms, the largest prediction error) and o took estimates 0.7 de
 head turned less than 5 deg/s over each of the two 50 ms spans before the frame's pose time. What remains is the
 warp's own limit: it turns the image, it does not move the eyes (tilting moves them sideways by centimetres).
 
+### 2026-11-07 evening: the warp ticks just before the vsync, display time 18 ms
+
+Worn with the 3 ms display time the user found the re-projection laggy when turning the head. Two findings:
+- The 20 ms old IMU samples libossdk extrapolates from (its state's sample time against the time asked) only
+  happen while the panels are off: with them on (the cameras and the display's TE running) the samples are 4.3 ms
+  old (p95 5.0) and Meta's "Delayed IMU" warnings stop. So Meta's head pose is not ahead of its stamp, and 3 ms
+  showed every turn ~15 ms late. The deformation that led to 3 ms predates the o fix above.
+- Monado warped right after the vsync, for a commit latched at the next one: 13.9 ms of extrapolation for
+  nothing. Its vsync thread now sleeps until 8 ms before that next vsync (`MDP_TICK_LEAD_DEFAULT_MS`), then picks
+  the newest frame, warps and commits it. Measured with a warp every vsync (head still, `yaw=0.3`): late
+  commits per 2 s with a 3 ms lead 51-143, 4 ms 60-99, 6 ms 0-9, 7 and 8 ms none; vrcompositor at 70-72 fps in
+  every case. The warp's pose is ~6 ms fresher, and a frame done early in the period reaches the panels a vsync
+  sooner.
+
+The display time is now 18 ms after the vsync before the commit (the middle of the panel's scan is ~21 ms on
+paper) and a setting: SteamVR's settings, "Oculus Quest" page, "Re-projection timing (ms)" (0-30), which
+driver_quest1 writes to `/tmp/quest1-display-delay-ms` for Monado (the pose age the driver's prediction follows
+uses it too). `delay=` in `/tmp/quest1-reproj` still overrides it for tests, `lead=` sets the tick lead.
+A frame whose render-to-display rotation exceeds 45 degrees is shown unwarped (worn, two such frames, 112 and 142
+degrees, while Meta's tracking had lost the position: a render pose from another frame of reference).
+
+Left: for ~10 s after each put-on every commit blocks ~10.7 ms in `MSMFB_ATOMIC_COMMIT` (until the next vsync), so
+every frame is a vsync late until it stops (seen three times worn, not with the panels forced on).
+
 ## Plan: Monado presents vrcompositor's frames and re-projects them
 
 Monado already has everything a 72 Hz re-projection needs: the head pose at any time, a

@@ -4,6 +4,17 @@
 	"driver": "quest1",
 	"values": [
 		{
+			"name": "/settings/driver_quest1/displayDelayMs",
+			"type": "float",
+			"control": "slider",
+			"label": "Re-projection timing (ms)",
+			"text": "When the head turns, each image is turned to where the head will be when the panels show it, this many milliseconds after the vsync. Raise it if the world lags behind your head, lower it if it overshoots. Default 18.",
+			"min": 0,
+			"max": 30,
+			"step": 1,
+			"decimals": 0
+		},
+		{
 			"name": "/settings/driver_quest1/clearSpatialAnchors",
 			"control": "toggle",
 			"label": "Clear the spatial anchor map",
