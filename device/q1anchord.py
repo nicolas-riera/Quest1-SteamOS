@@ -10,9 +10,21 @@
 #  * writes /run/q1track/frame-state for driver_quest1 (chaperone_frame.cpp):
 #      static  the world frame is the persisted one (or no map is saved yet): use it as is
 #      anchor  a map is saved but the current one is another (relocalization failed): the driver
-#              anchors the raw space on the head at put-on instead
+#              anchors the raw space on the head at put-on instead. Only until the saved map has been
+#              found once in this run: after that, another current map is the engine's temporary one
+#              after a tracking loss, and switching to "anchor" re-anchored the room on the head (the
+#              whole room turned and moved) and again when the engine found the saved map back. It stays
+#              "static" then: the engine snaps back into the saved frame when it relocalizes.
 #  * `touch /tmp/quest1-clear-map` (or the Playspace menu's "Clear playspace" through the chaperone
 #    file watch below) forgets everything: removeAllMaps, saved uuids deleted.
+#  * the engine's MapDB checks its entries (CRC) and deletes the ones it finds corrupted: on 2026-11-07
+#    ("MapDB: Deleting 3 corrupted entrees", most likely writes cut by a reboot) that emptied mapdb, while
+#    the saved uuid stayed, so the frame stayed "anchor" for good and no map was ever saved again. Now:
+#      - once the persisted map is the current one and mapdb has not changed for a minute, mapdb is copied
+#        to /data/misc/tracking/mapdb.bak (same device, never off it);
+#      - `q1anchord restore` (trackingservice's ExecStartPre) puts that copy back when mapdb is empty;
+#      - an empty mapdb with a saved uuid (nothing to restore) is a lost map: the uuids are forgotten and a
+#        new map is persisted after the next 45 s worn.
 #
 # Map files hold camera-derived data: they stay under /vision and /data, never in the repo.
 import os, re, struct, subprocess, sys, time
@@ -28,6 +40,9 @@ CLEAR = '/tmp/quest1-clear-map'
 PANELS_OFF = '/tmp/quest1-panels-off'
 CHAP = '/home/steamos/.local/share/Steam/config/chaperone_info.vrchap'
 WORN_BEFORE_PERSIST = 45.0
+MAPDB = '/vision/insideout/mapdb'
+MAPBAK = '/data/misc/tracking/mapdb.bak'
+BACKUP_QUIET = 60.0  # mapdb unchanged this long before it is copied
 
 
 def svc(*a):
@@ -79,18 +94,54 @@ def write_atomic(p, s):
     os.replace(t, p)
 
 
+def mapdb_sig(d=MAPDB):  # (name, size, mtime) of every file, or () when there is none
+    out = []
+    for root, _, files in os.walk(d):
+        for f in files:
+            try:
+                st = os.stat(os.path.join(root, f))
+            except OSError:
+                continue
+            out.append((os.path.relpath(os.path.join(root, f), d), st.st_size, int(st.st_mtime)))
+    return tuple(sorted(out))
+
+
+def backup():
+    tmp = MAPBAK + '.tmp'
+    subprocess.run(['rm', '-rf', tmp], check=False)
+    if subprocess.run(['cp', '-a', MAPDB, tmp]).returncode != 0:
+        return False
+    subprocess.run(['sync'], check=False)
+    subprocess.run(['rm', '-rf', MAPBAK], check=False)
+    os.rename(tmp, MAPBAK)
+    print('q1anchord: map database copied (%d files)' % len(mapdb_sig(MAPBAK)), flush=True)
+    return True
+
+
+def restore():  # before trackingservice starts
+    if read(MAPUUID) and not mapdb_sig() and mapdb_sig(MAPBAK):
+        subprocess.run(['cp', '-a', MAPBAK + '/.', MAPDB + '/'], check=False)
+        subprocess.run(['sync'], check=False)
+        print('q1anchord: mapdb was empty: restored the copy of map %s' % read(MAPUUID), flush=True)
+
+
 def configured():  # chaperone data with a universe (playspace set up)
     return '"standing"' in read(CHAP)
 
 
 def forget():
     svc('call', 'TrackingEnvironment', '6')  # removeAllMaps
+    drop_saved()
+    print('q1anchord: all maps removed', flush=True)
+
+
+def drop_saved():
     for p in (MAPUUID, ANCHORUUID):
         try:
             os.unlink(p)
         except OSError:
             pass
-    print('q1anchord: all maps removed', flush=True)
+    subprocess.run(['rm', '-rf', MAPBAK], check=False)
 
 
 def persist():
@@ -119,6 +170,8 @@ def main():
     worn_since = None
     chap_seen = configured()
     last = ''
+    sig, sig_since, backed = None, 0.0, None
+    found, lost_logged = '', ''  # the saved map was the current one in this run; the map logged as temporary
     while True:
         try:
             if os.path.exists(CLEAR):
@@ -133,15 +186,31 @@ def main():
             cur = string16(svc('call', 'TrackingEnvironment', '4'))
             if cur.startswith('00000000-0000'):
                 cur = ''
-            if saved and cur and cur != saved:
+            now = time.time()
+            s = mapdb_sig()
+            if saved and not s:
+                print('q1anchord: map %s is gone from mapdb (deleted by the engine?): a new one will be saved' % saved,
+                      flush=True)
+                drop_saved()
+                saved = ''
+            if s != sig:
+                sig, sig_since = s, now
+            elif saved and cur == saved and s and s != backed and now - sig_since > BACKUP_QUIET:
+                if backup():
+                    backed = s
+            if saved and cur == saved:
+                found = saved
+            if saved and cur and cur != saved and found != saved:
                 state = 'anchor'
             else:
                 state = 'static'
+            if saved and cur and cur != saved and found == saved and lost_logged != cur:
+                print('q1anchord: current map %s is not the saved one (tracking lost?): staying static' % cur, flush=True)
+                lost_logged = cur
             if state != last:
                 write_atomic(STATE, state)
                 print('q1anchord: frame state %s (current map %s, saved %s)' % (state, cur or '-', saved or '-'), flush=True)
                 last = state
-            now = time.time()
             if not os.path.exists(PANELS_OFF):
                 worn_since = worn_since or now
             else:
@@ -154,4 +223,7 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    if sys.argv[1:] == ['restore']:
+        restore()
+    else:
+        main()

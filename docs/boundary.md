@@ -99,4 +99,17 @@ AnchorUuid = 16 bytes in text order; Parcelables are preceded by an int32 non-nu
   in `chaperone_info.vrchap` stay valid because the frame is persistent) and falls back to the head anchoring above
   in `anchor` state or when `frame-state` is missing.
 
-Not yet verified: relocalization after a real reboot with the headset worn and moved around the room.
+- Map lost (2026-11-07): the engine's MapDB is a key-value store with CRC-checked entries (`ad_<anchor>.mapdata`,
+  `nd_<node>_<n>.mapdata` in mapdb). On 2026-11-07 it logged "MapDB: Deleting 3 corrupted entrees" (most likely writes
+  cut by a reboot) and mapdb was empty, while `world-map.uuid` stayed: the frame stayed `anchor` (head anchoring) for
+  every later boot and no map was ever saved again. Now q1anchord copies mapdb to `/data/misc/tracking/mapdb.bak` once
+  the saved map is the current one and mapdb has been unchanged for a minute, `android-q1anchord-restore.service`
+  (before trackingservice) puts the copy back when mapdb is empty, and an empty mapdb with nothing to restore makes
+  q1anchord forget the uuids and save a new map. Tested: mapdb emptied by hand, stack restarted: restored, and the
+  engine relocalized in it (current map = saved).
+- Tracking lost mid-session: the engine runs a temporary map until it relocalizes. q1anchord used to switch to `anchor`,
+  so driver_quest1 re-anchored the room on the head (the room turned and moved), and switched back when the saved map
+  was found (a second jump). Once the saved map has been found in a run, q1anchord now stays `static`.
+
+Not yet verified: relocalization after a real reboot with the headset worn and moved around the room; whether the
+persisted map keeps growing (mapdb rewritten) while used.

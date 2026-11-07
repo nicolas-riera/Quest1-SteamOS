@@ -233,8 +233,8 @@ InaccessiblePaths=-/system/vendor/firmware/lcon_archive.bin -/system/vendor/firm
 		/system/bin/trackingservice "$W android-settingsserver.service android-vrfocus.service android-iad.service android-telemetry-hal.service android-power-hal.service android-ashmemd.service
 Wants=android-settingsserver.service android-vrfocus.service android-iad.service android-telemetry-hal.service android-power-hal.service android-ashmemd.service
 Wants=android-cameramuxmode.service android-calibration.service
-Wants=android-runtimeipcbroker.service
-After=android-runtimeipcbroker.service
+Wants=android-runtimeipcbroker.service android-q1anchord-restore.service
+After=android-runtimeipcbroker.service android-q1anchord-restore.service
 $H"
 	# q1trackd: libossdk client (root: vrfocusserver grants uid 0 background tracking focus),
 	# started from /data/local/tmp for the linker's [unrestricted] namespace section
@@ -250,6 +250,18 @@ PartOf=android-sensors-hal.service"
 Wants=android-trackingservice.service
 After=android-trackingservice.service
 PartOf=android-sensors-hal.service"
+	# the engine loads the persisted map when trackingservice starts: q1anchord first puts its copy back if
+	# the engine emptied mapdb (a unit of its own: trackingservice's LD_PRELOAD, a bionic library, breaks
+	# glibc programs started from its unit)
+	cat > $U/android-q1anchord-restore.service <<'EOF'
+[Unit]
+Description=q1anchord: restore the persisted tracking map if mapdb was emptied
+Before=android-trackingservice.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/q1anchord restore
+EOF
 	# Meta mode survives reboots: when /etc/quest1-tracking says "meta", start Meta's stack at boot,
 	# before Monado (which then leaves SyncBoss to the sensors HAL)
 	cat > $U/android-tracking-boot.service <<'EOF'

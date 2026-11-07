@@ -100,6 +100,10 @@ Open items, roughly by priority. Done items move to the commit log.
   working, not drawn) until its first tracked position. To confirm in the headset with a real loss (user).
 - Spatial anchors work very badly (user, 2026-11-05 night): after a tracking loss the headset has a hard
   time finding where it was (relocalizing in the persisted map; q1anchord, /run/q1track/frame-state).
+  2026-11-07: the saved map had been deleted by the engine (corrupted entries) and q1anchord kept "anchor" mode for
+  good; a tracking loss also re-anchored the room on the head twice. Fixed (docs/boundary.md: map copy and restore,
+  lost-map detection, no "anchor" once found). The playspace must be set up again once (the old map is gone). To
+  confirm worn: reboot, walk around, lose tracking (cover the cameras) and see the room come back in place (user).
 
 ## Steam settings
 - The timezone dropdown (Settings, next to the 24-hour clock) is hidden: Steam shows it only when
