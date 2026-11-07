@@ -207,10 +207,10 @@ index eb41c3c..5214613 100644
  
 diff --git a/src/xrt/compositor/main/comp_window_mdp.c b/src/xrt/compositor/main/comp_window_mdp.c
 new file mode 100644
-index 0000000..68cf39f
+index 0000000..77a2d39
 --- /dev/null
 +++ b/src/xrt/compositor/main/comp_window_mdp.c
-@@ -0,0 +1,2667 @@
+@@ -0,0 +1,2722 @@
 +// Copyright 2026, Quest1-SteamOS contributors
 +// SPDX-License-Identifier: BSL-1.0
 +/*!
@@ -265,6 +265,7 @@ index 0000000..68cf39f
 +#include <stdlib.h>
 +#include <string.h>
 +#include <sys/ioctl.h>
++#include <time.h>
 +#include <unistd.h>
 +#include <linux/fb.h>
 +
@@ -287,13 +288,25 @@ index 0000000..68cf39f
 +#define MDP_H 1600
 +#define MDP_HALF (MDP_W / 2)
 +#define MDP_PERIOD_NS (U_TIME_1S_IN_NS / 72)
-+//! The head pose a commit made at a vsync tick is shown for, on Monado's pose clock: that vsync + this. A video
-+//! mode panel latches the commit at the next vsync and scans it out over the period after, i.e. 1.5 periods
-+//! (21 ms) on paper; but the warp aimed there turned the image too far, more so the larger the correction:
-+//! the dashboard deformed while the head turned, worse with a shorter pose prediction (user, 2026-11-07).
-+//! Tried worn: 21 ms deformed, 10 better, 3 "no more deformation". The pose and the vsync clocks are both
-+//! CLOCK_MONOTONIC, so Meta's head pose (libossdk, asked for "now") is most likely ~18 ms ahead of its stamp.
-+#define MDP_DISPLAY_DELAY_NS (3 * U_TIME_1MS_IN_NS)
++//! The head pose a commit is shown for, on Monado's pose clock: the vsync before the commit + this (the commit is
++//! latched at the next vsync, 13.9 ms later, and scanned out over the period after that: 21 ms to the middle of
++//! the panel on paper). History: worn on 2026-11-07, 21 ms deformed the dashboard while the head turned, 10 was
++//! better and 3 "no more deformation", but that was before o (the LOCAL to device rotation) stopped learning
++//! from moving frames, and with the warp computed right after the vsync (a 13.9 ms extrapolation on top). With 3
++//! the user then found the re-projection laggy (2026-11-07 evening): the pose is not ahead of its stamp (Meta's
++//! own log puts IMU samples 7-8 ms after capture; libossdk extrapolates its ~20 ms old samples to the time asked).
++//! Default 18 ms; the user's value comes from SteamVR's settings ("Oculus Quest" page, driver_quest1 writes it
++//! to MDP_DISPLAY_DELAY_FILE), "delay=" in /tmp/quest1-reproj overrides both.
++#define MDP_DISPLAY_DELAY_DEFAULT_MS 18.0f
++#define MDP_DISPLAY_DELAY_FILE "/tmp/quest1-display-delay-ms"
++//! The vsync thread ticks (picks the newest frame, warps and commits it) this long before the vsync that latches
++//! the commit, instead of right after the vsync before: the warp's pose is ~8 ms fresher (less extrapolation)
++//! and a frame finished in the first part of the period reaches the panels a vsync sooner. The warp takes 3-4 ms
++//! (mesh 1.1-1.4, GPU wait 1.6-2.2 with vrcompositor's work preempted, commit 0.1). Measured with a warp every
++//! vsync, head still, 2026-11-07: commits after the latching vsync per 2 s: lead 3 ms 51-143, 4 ms 60-99, 6 ms
++//! 0-9, 7 and 8 ms none; vrcompositor at 70-72 fps in each case. 8 leaves room for heavier GPU work worn.
++//! "lead=<ms>" in /tmp/quest1-reproj sets it, 0 = right after the vsync (as before).
++#define MDP_TICK_LEAD_DEFAULT_MS 8.0f
 +//! Exists while the panels are (going) off: an external scanout must not commit then.
 +#define MDP_PANELS_OFF "/tmp/quest1-panels-off"
 +//! Exists while the headset sleeps (quest1-standby): panels off as if the headset was removed.
@@ -350,6 +363,8 @@ index 0000000..68cf39f
 +#define WARP_OUT_SETS 4
 +//! A stale frame is not warped again while its delta moved less than this since the last warp (0.4 px)
 +#define WARP_SKIP_DEG 0.03f
++//! Larger render-to-display rotations are not head motion (see direct_tick): such frames are shown unwarped
++#define WARP_MAX_DEG 45.0f
 +
 +//! Objects of the warp pass (see warp_init).
 +struct direct_vk
@@ -375,6 +390,7 @@ index 0000000..68cf39f
 +{
 +	int64_t since_ns;
 +	uint32_t warp_commits, fresh_warped, raw_commits, no_set, angle_n, skipped;
++	uint32_t wild; //!< frames not warped: delta above WARP_MAX_DEG
 +	double gpu_ms_sum, gpu_ms_max, cpu_ms_sum, angle_sum, angle_max;
 +	double mesh_ms_sum, wait_ms_sum, commit_ms_sum;
 +	double ax_sum, ay_sum, az_sum; //!< |delta| about the head's x / y / z axes (deg)
@@ -437,6 +453,8 @@ index 0000000..68cf39f
 +	{
 +		bool off;
 +		float yaw_deg, thr_deg, delay_ms;
++		float display_delay_ms; //!< the effective display delay (setting, or the delay= knob)
++		float lead_ms;          //!< tick lead before the latching vsync (MDP_TICK_LEAD_DEFAULT_MS)
 +		float rx_deg, ry_deg, rz_deg; //!< constant frame rotation R: delta' = conj(R) * delta * R
 +		int ack_mode;                 //!< perf: when a frame is reported displayed: 0 retire, 1 commit (default), 2 next vsync
 +		uint32_t sign;
@@ -464,6 +482,7 @@ index 0000000..68cf39f
 +
 +	struct mdp_direct_stats stats;
 +	int64_t prev_vsync; //!< the last vsync direct_tick saw (gap detection)
++	int64_t tick_offset_ns; //!< how long after its vsync the vsync thread meant to tick (the lead's sleep)
 +
 +	int (*recv_handle)(int, AHardwareBuffer **);
 +};
@@ -1089,8 +1108,9 @@ index 0000000..68cf39f
 +
 +//! Test and tuning knobs, from the file /tmp/quest1-reproj (read twice a second): "off" shows the layer's frames
 +//! as they are, "yaw=<deg>" adds a fixed yaw to the re-projection, "thr=<deg>" is the angle under which a fresh
-+//! frame is shown as it is (default 0.2), "delay=<ms>" the time from the vsync that commits a frame to the
-+//! pose it is warped to (default MDP_DISPLAY_DELAY_NS), "sign=<mask>" negates the delta's x/y/z axes (1/2/4),
++//! frame is shown as it is (default 0.2), "delay=<ms>" the time from the vsync before a commit to the pose it is
++//! warped to (default: the setting, MDP_DISPLAY_DELAY_DEFAULT_MS), "lead=<ms>" the tick lead
++//! (MDP_TICK_LEAD_DEFAULT_MS), "sign=<mask>" negates the delta's x/y/z axes (1/2/4),
 +//! "rx=/ry=/rz=<deg>" a constant rotation R of the head frame against the eye frame (delta' = conj(R) delta R,
 +//! applied in that order x, y, z), "vel=0" (read by the head tracker, quest1_hmd.c) stops extrapolating Meta's
 +//! poses with their angular velocity.
@@ -1105,6 +1125,16 @@ index 0000000..68cf39f
 +	D->knobs.yaw_deg = 0;
 +	D->knobs.thr_deg = 0.2f;
 +	D->knobs.delay_ms = 0;
++	D->knobs.lead_ms = MDP_TICK_LEAD_DEFAULT_MS;
++	D->knobs.display_delay_ms = MDP_DISPLAY_DELAY_DEFAULT_MS;
++	FILE *df = fopen(MDP_DISPLAY_DELAY_FILE, "r");
++	if (df != NULL) {
++		float v = 0;
++		if (fscanf(df, "%f", &v) == 1 && v >= 0.0f && v <= 40.0f) {
++			D->knobs.display_delay_ms = v;
++		}
++		fclose(df);
++	}
 +	D->knobs.sign = 0;
 +	D->knobs.rx_deg = D->knobs.ry_deg = D->knobs.rz_deg = 0;
 +	// perf knobs (not the re-projection ones): "early" answers the layer's present wait as soon as the frame is
@@ -1147,6 +1177,10 @@ index 0000000..68cf39f
 +	}
 +	if ((p = strstr(buf, "delay=")) != NULL) {
 +		D->knobs.delay_ms = (float)atof(p + 6);
++		D->knobs.display_delay_ms = D->knobs.delay_ms;
++	}
++	if ((p = strstr(buf, "lead=")) != NULL) {
++		D->knobs.lead_ms = (float)atof(p + 5);
 +	}
 +	if ((p = strstr(buf, "sign=")) != NULL) {
 +		D->knobs.sign = (uint32_t)atoi(p + 5);
@@ -1993,7 +2027,7 @@ index 0000000..68cf39f
 +		if (D->prev_vsync > 0 && vsync - D->prev_vsync > MDP_PERIOD_NS * 3 / 2) {
 +			D->stats.gaps += (uint32_t)((vsync - D->prev_vsync + MDP_PERIOD_NS / 2) / MDP_PERIOD_NS) - 1;
 +		}
-+		double wake = (double)(now - vsync) / 1e6;
++		double wake = (double)(now - vsync - D->tick_offset_ns) / 1e6;
 +		D->stats.wake_ms_max = wake > D->stats.wake_ms_max ? wake : D->stats.wake_ms_max;
 +	}
 +	if (vsync > 0) {
@@ -2020,7 +2054,7 @@ index 0000000..68cf39f
 +		if (D->fresh && D->latest_frame.pose_valid) {
 +			// how late each new frame reaches the panels against the time its pose was predicted for (the same
 +			// display time as the warp's below): what the warp has to make up for
-+			double age = (double)(vsync + MDP_DISPLAY_DELAY_NS - D->latest_frame.time_ns) / 1e6;
++			double age = (double)(vsync + (int64_t)(D->knobs.display_delay_ms * 1e6) - D->latest_frame.time_ns) / 1e6;
 +			struct mdp_direct_stats *st = &D->stats;
 +			st->age_ms_min = st->age_n == 0 || age < st->age_ms_min ? age : st->age_ms_min;
 +			st->age_ms_max = st->age_n == 0 || age > st->age_ms_max ? age : st->age_ms_max;
@@ -2044,7 +2078,7 @@ index 0000000..68cf39f
 +			}
 +		} else if (want_warp) {
 +			// the pose the frame is shown for: the commit is latched at the next vsync, scanned out from then on
-+			int64_t display_ns = vsync + (D->knobs.delay_ms > 0 ? (int64_t)(D->knobs.delay_ms * 1e6) : MDP_DISPLAY_DELAY_NS);
++			int64_t display_ns = vsync + (int64_t)(D->knobs.display_delay_ms * 1e6);
 +			float qd[4], qr[4];
 +			memcpy(qr, D->latest_frame.q, sizeof(qr));
 +			float qt[4];
@@ -2158,6 +2192,11 @@ index 0000000..68cf39f
 +					commit_raw = false;
 +				} else if (!D->lens && D->fresh && angle < D->knobs.thr_deg && D->knobs.yaw_deg == 0) {
 +					commit_raw = true; // close enough: no GPU work
++				} else if (!D->lens && angle > WARP_MAX_DEG) {
++					// not a head motion between render and display (a frame lasts tens of ms): the frame's pose is
++					// from another LOCAL or the tracking jumped (seen worn: 112 and 142 deg while Meta's tracking had
++					// lost the position, 2026-11-07). Warped that far the panels show mostly black: show it as is
++					D->stats.wild++;
 +				} else if (warp_init(t)) {
 +					int o = warp_free_set(D);
 +					double gpu_ms = 0;
@@ -2215,7 +2254,8 @@ index 0000000..68cf39f
 +		U_LOG_W("mdp: direct: %.1f/s warped (%.1f/s of them fresh), %.1f/s raw, %.1f/s kept; warp gpu %.2f ms avg (max %.2f), "
 +		        "cpu %.2f ms (mesh %.2f, gpu wait %.2f, commit %.2f); delta %.2f deg avg (max %.2f), "
 +		        "per axis x %.2f y %.2f z %.2f; o jitter %.2f deg avg (max %.2f); no free set %u; "
-+		        "late %u, vsyncs missed %u, wake max %.2f ms; pose age %.1f ms avg (%.1f..%.1f)",
++		        "late %u, vsyncs missed %u, wake max %.2f ms; not warped (over %.0f deg) %u; pose age %.1f ms avg (%.1f..%.1f); tick %.1f ms before the "
++		        "vsync, display at vsync + %.1f ms",
 +		        s->warp_commits / el, s->fresh_warped / el, s->raw_commits / el, s->skipped / el,
 +		        s->warp_commits ? s->gpu_ms_sum / s->warp_commits : 0.0, s->gpu_ms_max,
 +		        s->warp_commits ? s->cpu_ms_sum / s->warp_commits : 0.0,
@@ -2225,8 +2265,9 @@ index 0000000..68cf39f
 +		        s->angle_max,
 +		        s->angle_n ? s->ax_sum / s->angle_n : 0.0, s->angle_n ? s->ay_sum / s->angle_n : 0.0,
 +		        s->angle_n ? s->az_sum / s->angle_n : 0.0, s->oe_n ? s->oe_sum / s->oe_n : 0.0, s->oe_max,
-+		        s->no_set, s->late, s->gaps, s->wake_ms_max, s->age_n ? s->age_ms_sum / s->age_n : 0.0, s->age_ms_min,
-+		        s->age_ms_max);
++		        s->no_set, s->late, s->gaps, s->wake_ms_max, (double)WARP_MAX_DEG, s->wild, s->age_n ? s->age_ms_sum / s->age_n : 0.0, s->age_ms_min,
++		        s->age_ms_max, D->tick_offset_ns > 0 ? (double)(MDP_PERIOD_NS - D->tick_offset_ns) / 1e6 : 0.0,
++		        D->knobs.display_delay_ms);
 +		if (s->age_n > 0) {
 +			// for driver_quest1's pose prediction (ReadPoseAge): "<sequence> <ms>", replaced atomically
 +			static unsigned long age_seq;
@@ -2297,6 +2338,20 @@ index 0000000..68cf39f
 +			set_panels_locked(t, false);
 +		}
 +		os_thread_helper_unlock(&t->vsync_thread);
++		// tick a lead before the vsync that latches what is committed now (MDP_TICK_LEAD_DEFAULT_MS)
++		t->direct.tick_offset_ns = 0;
++		if (ts > 0 && t->direct.client_fd >= 0 && t->unblanked) {
++			float lead = t->direct.knobs.lead_ms;
++			if (lead > 0.0f && lead < 13.0f) {
++				int64_t wake = ts + MDP_PERIOD_NS - (int64_t)(lead * 1e6);
++				if (wake > os_monotonic_get_ns()) {
++					struct timespec w = {(time_t)(wake / U_TIME_1S_IN_NS), (long)(wake % U_TIME_1S_IN_NS)};
++					while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &w, NULL) == EINTR) {
++					}
++				}
++				t->direct.tick_offset_ns = wake - ts;
++			}
++		}
 +		direct_tick(t, ts);
 +		os_thread_helper_lock(&t->vsync_thread);
 +	}
