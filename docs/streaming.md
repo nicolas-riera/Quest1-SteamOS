@@ -7,8 +7,13 @@ Status 2026-11-06: feasibility survey with read-only probes. Nothing here was ma
 
 - Video block (probed): `/dev/video32` = `msm_vdec_8974`, `/dev/video33` = `msm_venc_8974` (downstream msm_vidc on `cc00000.qcom,vidc`, multiplanar M2M).
   [H] Decoder OUTPUT formats: H264, MVC, **HEVC**, HEVC hybrid, VP8, VP9, MPEG-2/4, H263, VC-1, DivX. CAPTURE: NV12, NV12 UBWC (Q128), TP10 UBWC.
-  Frame sizes 16x16 to 5760x5760. Encoder CAPTURE: H264, HEVC, VP8. Opening and closing instances works (dmesg `msm_vidc: Opening video instance`).
-  No actual decode has been completed yet.
+  Frame sizes 16x16 to 5760x5760. Encoder CAPTURE: H264, HEVC, VP8.
+- [H] **Hardware decode works** (2026-11-07, `src/vdectest`): 1920x1080 H.264 and HEVC decode **bit-exact** against ffmpeg's software decode
+  (300/300 frames each, linear NV12 in both primary and split mode). UBWC output flat out: 127 fps H.264, 104 fps HEVC. Fed as a live
+  60 fps stream: **9.2 ms (H.264) / 10.8 ms (HEVC)** from QBUF to the decoded frame, 28-31 ms for the first one. What msm_vidc wants
+  (USERPTR + ION, one access unit per buffer, the reconfiguration order, the coded size on CAPTURE) is in the header of `src/vdectest/vdectest.c`.
+  Two traps: a capture STREAMOFF while the firmware holds buffers kills the firmware (Err_Fatal, SYS_ERROR; the driver recovers on the
+  next open), and split mode scales its linear output to the CAPTURE size (1920x1080 squeezes H.264's 1088 decoded lines).
 - [H] No `/dev/video-dec0` / `/dev/video-enc0` (the Frame's `steam-video-codec-setup.service` makes them from `vrdevice_path`; it does not exist here).
   Steam's `streaming_client` logs `CGameStreamVideoStageV4L2::BInitEncoder: Failed to open device: /dev/video-enc0`.
 - [H] ffmpeg has `h264/hevc/vp9_v4l2m2m` wrappers, but `ffmpeg -c:v hevc_v4l2m2m` fails here (`Could not find a valid device`, EBUSY). It probes every
@@ -35,9 +40,7 @@ Here today (from `/root/stream-crash-20261101`, `-20261102` and the live `stream
   (b) the V4L2 decoder node and msm_vidc quirks; (c) the crash in the SteamVR tree.
 
 Plan (hardware decode only: software decode is not an option, user decision 2026-11-07):
-1. **Standalone V4L2 test on venus** (1-2 days): open `/dev/video32`, H.264 then HEVC on the OUTPUT queue (one frame per buffer, as
-   downstream msm_vidc wants), NV12 on CAPTURE, the msm_vidc port-settings events, decode a known stream and compare it with a
-   software reference. Tells which formats, buffer counts and controls the downstream driver needs.
+1. ~~Standalone V4L2 test on venus~~ **done 2026-11-07** (`src/vdectest`, `run-tests.sh`): bit-exact, 9-11 ms per 1080p60 frame (above).
 2. **`/dev/video-dec0` for Steam** (1-3 days): the Frame's own node name (`steam-video-codec-setup.service` makes it), then see how
    `CV4L2Accel` copes with msm_vidc (UBWC capture formats, buffer counts, events, DISPLAY_DELAY controls). If the gaps are small, a
    V4L2 shim (LD_PRELOAD on streaming_client) translates; else patch the kernel driver toward the mainline stateful decoder API.
@@ -79,7 +82,7 @@ So it is solved by plans 1-3 of section 1 (hardware decode, then the frames to t
 
 | # | Item | Effort | Gain |
 |---|---|---|---|
-| 1 | venus hardware decode: standalone V4L2 test (formats, buffers, events) | 1-2 days | the base of every path |
+| 1 | ~~venus hardware decode: standalone V4L2 test~~ done: bit-exact, 9-11 ms per 1080p60 frame | - | the base of every path |
 | 2 | vrlink's stdout and exit reason, plus the `/dev/video-dec0` symlink test | 1-2 days | decides the VR path |
 | 3 | `/dev/video-dec0` and `CV4L2Accel` on msm_vidc, then zero-copy frames to the compositor | 1-2 weeks | 2D games and the PC desktop in VR |
 | 4 | Vulkan dma-buf import shim | 1-2 weeks | proper VR streaming and compositor sharing |

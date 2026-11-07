@@ -1,8 +1,8 @@
 // vdectest: decode an H.264 or HEVC Annex-B stream on the Quest 1's venus decoder (downstream msm_vidc, /dev/video32)
 // through V4L2, write the decoded NV12 frames (cropped) and report speed and latency.
 //
-//   vdectest [-d /dev/video32] [-c h264|hevc] -s WxH [-f nv12|ubwc] [-m primary|split] [-O display|decode] [-L]
-//            [-n frames] [-o out.nv12] stream.264
+//   vdectest [-d /dev/video32] [-c h264|hevc] -s WxH [-f nv12|ubwc] [-m primary|split] [-O display|decode] [-R]
+//            [-r fps] [-n frames] [-o out.nv12] stream.264
 //
 // What the downstream driver wants (drivers/media/platform/msm/vidc, read 2026-11-07), unlike the mainline
 // stateful decoder API:
@@ -14,7 +14,14 @@
 //  - Private events (V4L2_EVENT_MSM_VIDC_*): port settings changed (sufficient or not: u.data u32 [0] height,
 //    [1] width), flush done, system error. End of stream is the buffer flag V4L2_QCOM_BUF_FLAG_EOS.
 //  - Linear NV12 out of a UBWC DPB is "split" mode: STREAM_OUTPUT_MODE secondary + DPB_COLOR_FORMAT UBWC
-//    (what the driver itself switches to while sizing its scratch buffers).
+//    (what the driver itself switches to while sizing its scratch buffers). That secondary output is scaled to
+//    the CAPTURE size, so CAPTURE gets the decoded size (H.264 1920x1088, HEVC 1920x1080), not the picture's.
+//  - The first sequence header always raises "insufficient" (CONTINUE_DATA_TRANSFER is off). Reconfiguring:
+//    DECODER_CMD flush capture, wait for the flush-done event, take every CAPTURE buffer back, free them,
+//    S_FMT/REQBUFS/QBUF the new ones, STREAMON (the driver sends the firmware "continue" there). A STREAMOFF
+//    with the buffers still in the firmware kills it (Err_Fatal in video_decoder_utils.c, then a SYS_ERROR).
+// Measured 2026-11-07 (1080p, no B-frames): bit-exact against ffmpeg for H.264 and HEVC in both modes; UBWC
+// 127 fps (H.264) / 104 fps (HEVC) flat out; paced at 60 fps, 9.2 / 10.8 ms from QBUF to the decoded frame.
 // Only ioctls on the decoder node and ION allocations: nothing is written anywhere but the -o file.
 #define _GNU_SOURCE
 #include <errno.h>
@@ -34,10 +41,12 @@
 // --- msm_vidc's private V4L2 additions (values from the kernel's include/uapi/linux/{videodev2,v4l2-controls}.h)
 #define FMT_NV12_UBWC v4l2_fourcc('Q', '1', '2', '8')
 #define VIDC_CID(n) ((V4L2_CTRL_CLASS_MPEG | 0x2000) + (n))
+#define CID_CONTINUE_DATA_TRANSFER VIDC_CID(5) // 1: keep decoding on a sufficient port change
 #define CID_OUTPUT_ORDER VIDC_CID(7)       // 0 display, 1 decode
 #define CID_STREAM_OUTPUT_MODE VIDC_CID(38) // 0 primary, 1 secondary
 #define CID_DPB_COLOR_FORMAT VIDC_CID(73)   // 0 none, 1 UBWC
-#define CID_LOWLATENCY_MODE VIDC_CID(88)    // 0 off, 1 on
+#define CID_PRIORITY VIDC_CID(83)          // 0 realtime, 1 not (the firmware's values are inverted)
+#define CID_OPERATING_RATE VIDC_CID(84)    // frames per second, Q16
 #define EV_VIDC(n) (V4L2_EVENT_PRIVATE_START + 0x1000 + (n))
 #define EV_FLUSH_DONE EV_VIDC(1)
 #define EV_SETTINGS_SUFFICIENT EV_VIDC(2)
@@ -48,6 +57,8 @@
 #define EV_HW_OVERLOAD EV_VIDC(8)
 #define EV_HW_UNSUPPORTED EV_VIDC(10)
 #define QCOM_BUF_FLAG_EOS 0x02000000
+#define DEC_QCOM_CMD_FLUSH 4
+#define QCOM_CMD_FLUSH_CAPTURE (1 << 1)
 
 // --- legacy ION (kernel 4.4 staging: handles, then a dma-buf fd)
 struct ion_allocation_data {
@@ -78,7 +89,8 @@ struct buf {
 static int dev = -1, ion = -1;
 static uint32_t cap_planes, out_planes;
 static uint32_t stride, scanlines;
-static uint32_t width, height;
+static uint32_t width, height; // the capture buffers' picture (coded size, 16-aligned)
+static uint32_t crop_w, crop_h; // the stream's picture (-s): what is written out
 static struct buf obuf[32], cbuf[32][2];
 static uint32_t nobuf, ncbuf;
 
@@ -259,19 +271,27 @@ static int set_ctrl(uint32_t id, int32_t v, const char *what)
 	return xioctl(VIDIOC_S_CTRL, &c, what);
 }
 
+// The firmware's capture buffer count, plus two for us to hold.
+static uint32_t min_capture_buffers(void)
+{
+	struct v4l2_control mc = {.id = V4L2_CID_MIN_BUFFERS_FOR_CAPTURE};
+	return xioctl(VIDIOC_G_CTRL, &mc, NULL) == 0 && mc.value > 0 ? (uint32_t)mc.value + 2 : 8;
+}
+
 static void usage(void)
 {
 	fprintf(stderr, "usage: vdectest [-d dev] [-c h264|hevc] -s WxH [-f nv12|ubwc] [-m primary|split] "
-	                "[-O display|decode] [-L] [-n frames] [-o out.nv12] stream\n");
+	                "[-O display|decode] [-R] [-r fps] [-n frames] [-o out.nv12] stream\n");
 	exit(2);
 }
 
 int main(int argc, char **argv)
 {
 	const char *devpath = "/dev/video32", *outpath = NULL, *mode = NULL;
-	int hevc = 0, ubwc = 0, decode_order = 0, lowlat = 0, maxframes = 0, opt;
+	int hevc = 0, ubwc = 0, decode_order = 0, realtime = 0, maxframes = 0, opt;
+	double fps = 0; // 0: feed as fast as the decoder takes it; else one access unit every 1/fps (a live stream)
 	uint32_t w = 0, h = 0;
-	while ((opt = getopt(argc, argv, "d:c:s:f:m:O:Ln:o:")) != -1) {
+	while ((opt = getopt(argc, argv, "d:c:s:f:m:O:Rr:n:o:")) != -1) {
 		switch (opt) {
 		case 'd': devpath = optarg; break;
 		case 'c': hevc = !strcmp(optarg, "hevc"); break;
@@ -279,7 +299,8 @@ int main(int argc, char **argv)
 		case 'f': ubwc = !strcmp(optarg, "ubwc"); break;
 		case 'm': mode = optarg; break;
 		case 'O': decode_order = !strcmp(optarg, "decode"); break;
-		case 'L': lowlat = 1; break;
+		case 'R': realtime = 1; break;
+		case 'r': fps = atof(optarg); break;
 		case 'n': maxframes = atoi(optarg); break;
 		case 'o': outpath = optarg; break;
 		default: usage();
@@ -333,8 +354,12 @@ int main(int argc, char **argv)
 	if (xioctl(VIDIOC_S_FMT, &f, "S_FMT output") < 0)
 		return 1;
 	struct v4l2_format fc = {.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE};
-	fc.fmt.pix_mp.width = w;
-	fc.fmt.pix_mp.height = h;
+	// The coded size, not the picture's: in split mode the secondary output is scaled to the capture size, so
+	// 1920x1080 there squeezes the 1088 decoded lines into 1080 (seen as a growing vertical shift).
+	crop_w = w;
+	crop_h = h;
+	fc.fmt.pix_mp.width = (w + 15) & ~15u;
+	fc.fmt.pix_mp.height = (h + 15) & ~15u;
 	fc.fmt.pix_mp.pixelformat = ubwc ? FMT_NV12_UBWC : V4L2_PIX_FMT_NV12;
 	if (xioctl(VIDIOC_S_FMT, &fc, "S_FMT capture") < 0)
 		return 1;
@@ -346,8 +371,10 @@ int main(int argc, char **argv)
 	}
 	if (decode_order)
 		set_ctrl(CID_OUTPUT_ORDER, 1, "OUTPUT_ORDER decode");
-	if (lowlat)
-		set_ctrl(CID_LOWLATENCY_MODE, 1, "LOWLATENCY_MODE");
+	if (realtime) { // the decoder's own LOWLATENCY_MODE control is the encoder's only
+		set_ctrl(CID_PRIORITY, 0, "PRIORITY realtime");
+		set_ctrl(CID_OPERATING_RATE, (int32_t)((fps > 0 ? fps : 60) * 65536), "OPERATING_RATE");
+	}
 
 	// input buffers
 	f = (struct v4l2_format){.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE};
@@ -366,8 +393,7 @@ int main(int argc, char **argv)
 		if (ion_buf(insz, &obuf[i]) < 0)
 			return 1;
 
-	struct v4l2_control mc = {.id = V4L2_CID_MIN_BUFFERS_FOR_CAPTURE};
-	uint32_t capcount = xioctl(VIDIOC_G_CTRL, &mc, NULL) == 0 && mc.value > 0 ? (uint32_t)mc.value + 2 : 8;
+	uint32_t capcount = min_capture_buffers();
 	if (cap_setup(capcount) < 0)
 		return 1;
 
@@ -378,10 +404,11 @@ int main(int argc, char **argv)
 	uint32_t free_in[32], nfree = 0;
 	for (uint32_t i = 0; i < nobuf; i++)
 		free_in[nfree++] = i;
-	int streaming_out = 0, eos_sent = 0, done = 0;
+	int streaming_out = 0, eos_sent = 0, done = 0, reconfig = 0;
+	uint32_t rc_w = 0, rc_h = 0;
 	while (!done) {
 		// feed every free input buffer
-		while (nfree > 0 && !eos_sent) {
+		while (nfree > 0 && !eos_sent && (fps <= 0 || next >= naus || now_ms() >= t0 + next * 1000.0 / fps)) {
 			uint32_t i = free_in[--nfree];
 			struct v4l2_plane pl = {0};
 			pl.m.userptr = (unsigned long)obuf[i].map;
@@ -411,7 +438,14 @@ int main(int argc, char **argv)
 			}
 		}
 		struct pollfd p = {.fd = dev, .events = POLLIN | POLLOUT | POLLPRI | POLLRDNORM | POLLWRNORM};
-		int r = poll(&p, 1, 3000);
+		int wait = 3000;
+		if (fps > 0 && next < naus) {
+			double due = t0 + next * 1000.0 / fps - now_ms();
+			wait = nfree == 0 ? 3000 : due < 0 ? 0 : (int)due + 1;
+		}
+		int r = poll(&p, 1, wait);
+		if (r == 0 && wait < 3000)
+			continue;
 		if (r == 0) {
 			fprintf(stderr, "vdectest: nothing for 3 s (fed %zu, decoded %zu): stuck\n", next, decoded);
 			break;
@@ -423,17 +457,42 @@ int main(int argc, char **argv)
 			while (xioctl(VIDIOC_DQEVENT, &ev, NULL) == 0) {
 				uint32_t *d = (uint32_t *)ev.u.data;
 				if (ev.type == EV_SETTINGS_INSUFFICIENT || ev.type == EV_BITDEPTH_INSUFFICIENT) {
+					// The driver's order (msm_vdec.c): flush the capture queue so the firmware gives every
+					// buffer back, then free them, size the new ones from G_FMT and STREAMON (which sends
+					// the firmware its "continue").
 					fprintf(stderr, "vdectest: port settings changed, insufficient: %ux%u (flags 0x%x): reconfiguring\n",
 					        d[1], d[0], d[2]);
+					struct v4l2_decoder_cmd dc = {.cmd = DEC_QCOM_CMD_FLUSH, .flags = QCOM_CMD_FLUSH_CAPTURE};
+					if (xioctl(VIDIOC_DECODER_CMD, &dc, "DECODER_CMD flush capture") < 0)
+						return 1;
+					reconfig = 1;
+					rc_w = d[1];
+					rc_h = d[0];
+				} else if (ev.type == EV_FLUSH_DONE && reconfig) {
+					struct v4l2_plane pl[2];
+					struct v4l2_buffer b;
+					do {
+						memset(pl, 0, sizeof(pl));
+						b = (struct v4l2_buffer){.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
+						                         .memory = V4L2_MEMORY_USERPTR, .m.planes = pl, .length = cap_planes};
+					} while (xioctl(VIDIOC_DQBUF, &b, NULL) == 0);
 					cap_teardown();
+					struct v4l2_format nf = {.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE};
+					nf.fmt.pix_mp.width = rc_w; // as decoded (H.264 1088, HEVC 1080): no scaling in split mode
+					nf.fmt.pix_mp.height = rc_h;
+					nf.fmt.pix_mp.pixelformat = ubwc ? FMT_NV12_UBWC : V4L2_PIX_FMT_NV12;
+					if (xioctl(VIDIOC_S_FMT, &nf, "S_FMT capture (reconfiguration)") < 0)
+						return 1;
+					capcount = min_capture_buffers();
 					if (cap_setup(capcount) < 0)
 						return 1;
+					reconfig = 0;
 				} else if (ev.type == EV_SETTINGS_SUFFICIENT) {
 					fprintf(stderr, "vdectest: port settings changed, sufficient\n");
 				} else if (ev.type == EV_SYS_ERROR || ev.type == EV_HW_UNSUPPORTED) {
 					fprintf(stderr, "vdectest: decoder error event 0x%x\n", ev.type);
 					return 1;
-				} else {
+				} else if (ev.type != EV_RELEASE_BUFFER_REF) { // primary mode: the DPB let go of a buffer
 					fprintf(stderr, "vdectest: event 0x%x\n", ev.type);
 				}
 			}
@@ -471,11 +530,11 @@ int main(int argc, char **argv)
 						if (ubwc) {
 							fwrite(y, 1, pl[0].bytesused, out);
 						} else {
-							for (uint32_t row = 0; row < height; row++)
-								fwrite(y + (size_t)row * stride, 1, width, out);
+							for (uint32_t row = 0; row < crop_h; row++)
+								fwrite(y + (size_t)row * stride, 1, crop_w, out);
 							const uint8_t *uv = y + (size_t)stride * scanlines;
-							for (uint32_t row = 0; row < height / 2; row++)
-								fwrite(uv + (size_t)row * stride, 1, width, out);
+							for (uint32_t row = 0; row < crop_h / 2; row++)
+								fwrite(uv + (size_t)row * stride, 1, crop_w, out);
 						}
 					}
 				}
@@ -483,6 +542,8 @@ int main(int argc, char **argv)
 					done = 1;
 					break;
 				}
+				if (reconfig) // flushed for a reconfiguration: the buffer is freed with the others
+					continue;
 				// back to the decoder
 				for (uint32_t k = 0; k < cap_planes && k < 2; k++) {
 					pl[k].m.userptr = (unsigned long)cbuf[b.index][k].map;

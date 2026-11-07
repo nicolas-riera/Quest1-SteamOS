@@ -3,7 +3,8 @@
 #   t1080.264 / t1080.265  1920x1080 60 fps, no B-frames (ffmpeg -f lavfi -i testsrc2=size=1920x1080:rate=60 -t 5
 #                          -c:v libx264 -bf 0 -g 60 -bsf:v h264_mp4toannexb -f h264, and libx265 bframes=0:keyint=60)
 #   ref264.md5 / ref265.md5  one md5 per frame of ffmpeg's software decode as NV12 (the frames, cropped)
-# Linear NV12 runs are checked frame by frame against them; UBWC runs only for speed and latency.
+# Linear NV12 runs are checked frame by frame against them; UBWC runs only for speed and latency. The linear runs'
+# speed is mostly the CPU reading uncached ION memory to write the file.
 set -u
 D=${1:?usage: run-tests.sh DIR}
 V=$(dirname "$0")/vdectest
@@ -32,6 +33,6 @@ for c in 264:h264 265:hevc; do
 	done
 	echo "== $codec, UBWC (speed only)"
 	$V -c $codec -s 1920x1080 -f ubwc "$D/t1080.$ext"
-	echo "== $codec, UBWC, decode order + low latency"
-	$V -c $codec -s 1920x1080 -f ubwc -O decode -L "$D/t1080.$ext"
+	echo "== $codec, UBWC, paced at 60 fps (a live stream: the latency that counts), decode order, realtime"
+	$V -c $codec -s 1920x1080 -f ubwc -O decode -R -r 60 "$D/t1080.$ext"
 done
