@@ -3,11 +3,10 @@
 // Monado (drivers/quest1) already exposes both Touch controllers as /interaction_profiles/oculus/
 // touch_controller: orientation from each controller's IMU, position from an arm model hung off the
 // head, buttons, trigger, squeeze, thumbstick and haptics. This file reads them through OpenXR
-// actions on the driver's session and publishes them to SteamVR as the Steam Frame's controllers
-// (frame_controller, with the Quest render models): SteamVR then uses the Frame's dashboard and game
-// bindings, and Steam turns them into its "Steam Frame Controllers" gamepad, as on the Frame.
-// Buttons: A, B, X, Y are the Frame's a, b, x, y (right controller), the left Menu is Start on a short press
-// and View while held, the right Oculus button is "system" (Activate, UpdateHand).
+// actions on the driver's session and publishes them to SteamVR as two oculus_touch controllers with the
+// Quest render models, so games see Touch controllers and their Touch bindings apply as is (user, 2026-11-07:
+// they must stay Touch controllers). The dashboard uses our bindings (quest1_touch_vrcompositor_bindings.json),
+// which follow the Frame's: laser, grips for the quick mouse and the gamepad mode, recentre, screenshot.
 //
 // Orientation: Monado's controller orientation is the IMU frame. The aim pose is
 //   aim = yaw * imu * imuToAim
@@ -198,22 +197,13 @@ enum Comp
 {
 	C_SYSTEM_CLICK,
 	C_SYSTEM_TOUCH,
-	// right controller only: the Frame's face buttons and Start, the left Touch's X, Y and Menu included
-	C_PRIMARY_CLICK, // a
+	C_PRIMARY_CLICK, // a (right), x (left)
 	C_PRIMARY_TOUCH,
-	C_SECONDARY_CLICK, // b
+	C_SECONDARY_CLICK, // b (right), y (left)
 	C_SECONDARY_TOUCH,
-	C_X_CLICK,
-	C_X_TOUCH,
-	C_Y_CLICK,
-	C_Y_TOUCH,
-	C_MENU_CLICK,
-	C_VIEW_CLICK, // left controller
 	C_TRIGGER_VALUE,
-	C_TRIGGER_CLICK,
 	C_TRIGGER_TOUCH,
 	C_GRIP_VALUE,
-	C_GRIP_CLICK,
 	C_GRIP_TOUCH,
 	C_STICK_X,
 	C_STICK_Y,
@@ -256,11 +246,8 @@ public:
 		                     : ours ? "{quest1}quest1_controller_right" : "oculus_quest_controller_right");
 		p->SetStringProperty(container, Prop_RegisteredDeviceType_String,
 		                     left ? "quest1/QUEST1-Touch-Left" : "quest1/QUEST1-Touch-Right");
-		// The Steam Frame's controllers, as SteamVR and Steam see them: Steam turns SteamVR controllers of this type
-		// into its "Steam Frame Controllers" gamepad (Steam Input, the dashboard's laser/gamepad modes with the grips),
-		// and games get their Frame bindings. Our components below follow that profile.
-		p->SetStringProperty(container, Prop_InputProfilePath_String, "{frame_controller}/input/frame_controller_profile.json");
-		p->SetStringProperty(container, Prop_ControllerType_String, "frame_controller");
+		p->SetStringProperty(container, Prop_InputProfilePath_String, "{quest1}/input/quest1_touch_profile.json");
+		p->SetStringProperty(container, Prop_ControllerType_String, "oculus_touch");
 		// Read by vrcompositor for each hand (UpdateInputFocus): unless it is true, the dashboard never hands the
 		// controllers' buttons to Steam (the VR_InputFocusState masks stay 0) and the gamepad mode does nothing.
 		// The public header only calls it Prop_Reserved_2117.
@@ -281,50 +268,31 @@ public:
 		                         ButtonMaskFromId(k_EButton_SteamVR_Trigger));
 
 		IVRDriverInput *in = VRDriverInput();
-		// The Frame's right controller has the four face buttons and Start ("menu"), its left one a d-pad and Select
-		// ("view", which also changes the dashboard's panel). The Touch have fewer buttons: A, B, X, Y are the Frame's
-		// a, b, x, y, all on the right controller here as on the Frame; the left Menu is Start when pressed, view when
-		// held; the right Oculus button is "system". The d-pad and bumpers exist, unpressed.
+		// The Touch profile's components: system (left Menu, right Oculus button), X/Y on the left, A/B on the right
+		const char *ab = left ? "x" : "a", *by = left ? "y" : "b";
+		char path[64];
 		in->CreateBooleanComponent(container, "/input/system/click", &comp[C_SYSTEM_CLICK]);
 		in->CreateBooleanComponent(container, "/input/system/touch", &comp[C_SYSTEM_TOUCH]);
-		if (!left) {
-			in->CreateBooleanComponent(container, "/input/a/click", &comp[C_PRIMARY_CLICK]);
-			in->CreateBooleanComponent(container, "/input/a/touch", &comp[C_PRIMARY_TOUCH]);
-			in->CreateBooleanComponent(container, "/input/b/click", &comp[C_SECONDARY_CLICK]);
-			in->CreateBooleanComponent(container, "/input/b/touch", &comp[C_SECONDARY_TOUCH]);
-			in->CreateBooleanComponent(container, "/input/x/click", &comp[C_X_CLICK]);
-			in->CreateBooleanComponent(container, "/input/x/touch", &comp[C_X_TOUCH]);
-			in->CreateBooleanComponent(container, "/input/y/click", &comp[C_Y_CLICK]);
-			in->CreateBooleanComponent(container, "/input/y/touch", &comp[C_Y_TOUCH]);
-			in->CreateBooleanComponent(container, "/input/menu/click", &comp[C_MENU_CLICK]);
-		}
-		static const char *const kUnpressedRight[] = {"menu/touch", "bumper/click", "bumper/touch", nullptr};
-		if (left)
-			in->CreateBooleanComponent(container, "/input/view/click", &comp[C_VIEW_CLICK]);
-		static const char *const kUnpressedLeft[] = {
-		    "view/touch",      "dpad_up/click",    "dpad_up/touch",    "dpad_down/click",
-		    "dpad_down/touch", "dpad_left/click",  "dpad_left/touch",  "dpad_right/click", "dpad_right/touch",
-		    "bumper/click",    "bumper/touch",     nullptr};
-		for (const char *const *b = left ? kUnpressedLeft : kUnpressedRight; *b; b++) {
-			char path[64];
-			VRInputComponentHandle_t unused;
-			snprintf(path, sizeof(path), "/input/%s", *b);
-			in->CreateBooleanComponent(container, path, &unused);
-		}
+		snprintf(path, sizeof(path), "/input/%s/click", ab);
+		in->CreateBooleanComponent(container, path, &comp[C_PRIMARY_CLICK]);
+		snprintf(path, sizeof(path), "/input/%s/touch", ab);
+		in->CreateBooleanComponent(container, path, &comp[C_PRIMARY_TOUCH]);
+		snprintf(path, sizeof(path), "/input/%s/click", by);
+		in->CreateBooleanComponent(container, path, &comp[C_SECONDARY_CLICK]);
+		snprintf(path, sizeof(path), "/input/%s/touch", by);
+		in->CreateBooleanComponent(container, path, &comp[C_SECONDARY_TOUCH]);
 		in->CreateScalarComponent(container, "/input/trigger/value", &comp[C_TRIGGER_VALUE], VRScalarType_Absolute,
 		                          VRScalarUnits_NormalizedOneSided);
-		in->CreateBooleanComponent(container, "/input/trigger/click", &comp[C_TRIGGER_CLICK]);
 		in->CreateBooleanComponent(container, "/input/trigger/touch", &comp[C_TRIGGER_TOUCH]);
 		in->CreateScalarComponent(container, "/input/grip/value", &comp[C_GRIP_VALUE], VRScalarType_Absolute,
 		                          VRScalarUnits_NormalizedOneSided);
-		in->CreateBooleanComponent(container, "/input/grip/click", &comp[C_GRIP_CLICK]);
 		in->CreateBooleanComponent(container, "/input/grip/touch", &comp[C_GRIP_TOUCH]);
-		in->CreateScalarComponent(container, "/input/thumbstick/x", &comp[C_STICK_X], VRScalarType_Absolute,
+		in->CreateScalarComponent(container, "/input/joystick/x", &comp[C_STICK_X], VRScalarType_Absolute,
 		                          VRScalarUnits_NormalizedTwoSided);
-		in->CreateScalarComponent(container, "/input/thumbstick/y", &comp[C_STICK_Y], VRScalarType_Absolute,
+		in->CreateScalarComponent(container, "/input/joystick/y", &comp[C_STICK_Y], VRScalarType_Absolute,
 		                          VRScalarUnits_NormalizedTwoSided);
-		in->CreateBooleanComponent(container, "/input/thumbstick/click", &comp[C_STICK_CLICK]);
-		in->CreateBooleanComponent(container, "/input/thumbstick/touch", &comp[C_STICK_TOUCH]);
+		in->CreateBooleanComponent(container, "/input/joystick/click", &comp[C_STICK_CLICK]);
+		in->CreateBooleanComponent(container, "/input/joystick/touch", &comp[C_STICK_TOUCH]);
 		in->CreateBooleanComponent(container, "/input/thumbrest/touch", &comp[C_THUMBREST_TOUCH]);
 		in->CreateHapticComponent(container, "/output/haptic", &haptic);
 		for (float &v : last)
@@ -404,8 +372,6 @@ struct Hand
 	Quat yaw;
 	bool aligned = false;
 	double systemDownSince = 0;
-	double menuDownSince = 0; //!< left Menu: Start on a short press, view while held (UpdateHand)
-	double startUntil = 0;
 	bool recenteredThisHold = false;
 	double lastValid = -10;
 	bool wasValid = false;
@@ -693,40 +659,18 @@ void State::UpdateHand(int h, double now, const XrPosef &headPose, bool headVali
 		return XR_SUCCEEDED(cxrGetActionStateFloat(xr.session, &gi, &s)) && s.isActive ? s.currentState : 0.f;
 	};
 	d->forced = pressHand == h && now < pressUntil ? (int)pressComp : -1;
-	// the face buttons and Start are the right controller's (see Activate): the left Touch's X, Y and Menu
-	// go there; the right Oculus button is "system"
+	// each hand's own button (left Menu, right Oculus) is its "system": both are bound in our dashboard bindings
 	float system = boolean(ACT_SYSTEM);
-	TouchController *r = dev[1];
-	if (d->left) {
-		r->Set(C_X_CLICK, boolean(ACT_PRIMARY));
-		r->Set(C_X_TOUCH, boolean(ACT_PRIMARY_TOUCH));
-		r->Set(C_Y_CLICK, boolean(ACT_SECONDARY));
-		r->Set(C_Y_TOUCH, boolean(ACT_SECONDARY_TOUCH));
-		// Start: a 100 ms press when Menu is let go within kViewHold; view: from kViewHold until it is let go
-		constexpr double kViewHold = 0.5;
-		if (system != 0 && hd.menuDownSince == 0)
-			hd.menuDownSince = now;
-		if (system == 0 && hd.menuDownSince != 0) {
-			if (now - hd.menuDownSince < kViewHold)
-				hd.startUntil = now + 0.1;
-			hd.menuDownSince = 0;
-		}
-		r->Set(C_MENU_CLICK, now < hd.startUntil ? 1.f : 0.f);
-		d->Set(C_VIEW_CLICK, hd.menuDownSince != 0 && now - hd.menuDownSince >= kViewHold ? 1.f : 0.f);
-	} else {
-		d->Set(C_SYSTEM_CLICK, system);
-		d->Set(C_PRIMARY_CLICK, boolean(ACT_PRIMARY));
-		d->Set(C_PRIMARY_TOUCH, boolean(ACT_PRIMARY_TOUCH));
-		d->Set(C_SECONDARY_CLICK, boolean(ACT_SECONDARY));
-		d->Set(C_SECONDARY_TOUCH, boolean(ACT_SECONDARY_TOUCH));
-	}
+	d->Set(C_SYSTEM_CLICK, system);
+	d->Set(C_PRIMARY_CLICK, boolean(ACT_PRIMARY));
+	d->Set(C_PRIMARY_TOUCH, boolean(ACT_PRIMARY_TOUCH));
+	d->Set(C_SECONDARY_CLICK, boolean(ACT_SECONDARY));
+	d->Set(C_SECONDARY_TOUCH, boolean(ACT_SECONDARY_TOUCH));
 	float trigger = scalar(ACT_TRIGGER);
 	d->Set(C_TRIGGER_VALUE, trigger);
-	d->Set(C_TRIGGER_CLICK, trigger > 0.75f ? 1.f : 0.f); // the Touch trigger is analog only
 	d->Set(C_TRIGGER_TOUCH, boolean(ACT_TRIGGER_TOUCH));
 	float squeeze = scalar(ACT_SQUEEZE);
 	d->Set(C_GRIP_VALUE, squeeze);
-	d->Set(C_GRIP_CLICK, squeeze > 0.75f ? 1.f : 0.f);
 	d->Set(C_GRIP_TOUCH, squeeze > 0.05f ? 1.f : 0.f); // no capacitive sensor on the grip
 	{
 		gi.action = act[ACT_STICK];

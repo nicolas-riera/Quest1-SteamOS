@@ -252,28 +252,25 @@ firmware path set, and the property area. No Android daemon is needed for this p
 the driver's own session (profile `/interaction_profiles/oculus/touch_controller`) and adds two
 SteamVR controllers:
 
-* `controller_type` **frame_controller** with the Frame's own input profile
-  (`{frame_controller}/input/frame_controller_profile.json`, shipped in SteamVR's `drivers/frame_controller`),
-  as on the Steam Frame: SteamVR uses the Frame's dashboard bindings (laser, grips switching laser and gamepad
-  modes, Oculus button = system: dashboard, double click = room view) and the Frame bindings games ship, and
-  Steam turns controllers of that type into its virtual "Steam Frame Controllers" gamepad (28de:11e0,
-  `/steamvr/virtual`, `CHIDDeviceListSteamVR` in steamclient.so). Render models stay the Quest's `oculus_quest_controller_{left,right}`. (Until
-  2026-11-06: `oculus_touch`; a virtual Xbox pad for Steam doubled every press, reverted.)
+* `controller_type` **oculus_touch** with our input profile (`{quest1}/input/quest1_touch_profile.json`): games
+  see Touch controllers and use their Touch bindings (user, 2026-11-07: they must stay Touch controllers; from
+  2026-11-06 22:00 to 2026-11-07 they were the Frame's `frame_controller`, which also broke the render models'
+  animations: the Quest models move `/input/joystick` and the left `/input/x`, `/input/y`). SteamVR takes the
+  dashboard bindings of `oculus_touch` from its own Oculus driver, so the driver selects ours
+  (`quest1_touch_vrcompositor_bindings.json`, setting `oculus_touch_250820_CurrentURL_steamvrinput`) unless the
+  user picked another. They follow the Frame's dashboard bindings: laser and trigger (click, lock), grips for the
+  quick mouse, the laser hand and the gamepad mode (`modeswitch1/2`), Menu (left) or Oculus (right) = system
+  (dashboard, double click = room view), A/X home, B/Y back, sticks scroll, locomotion and room setup (floor
+  adjust, A/X accept, B/Y back). Render models: the Quest's (`oculus_quest_controller_left`, and the right one
+  with the Oculus logo on its button, `src/steamvr-quest1/mkrendermodel.py`).
 * Gamepad mode: vrcompositor (`UpdateInputFocus`) hands a controller's buttons to Steam only if the
   controller has property 2117 (`Prop_Reserved_2117` in the public header, Bool) set to true; without it the
   `VR_InputFocusState` masks (shared memory, left buttons in bits 0-23, right in 32-55) stay 0 and nothing
   reaches the gamepad. The driver sets it on both controllers.
-* Components, named as the Frame's. The Frame's right controller has the four face buttons and Start
-  (`menu`), its left one a d-pad and Select (`view`, which also switches the dashboard's panels). The Touch
-  have fewer buttons, so: A, B, X, Y are the Frame's `a`, `b`, `x`, `y`, all on the right controller as on the
-  Frame (click+touch); the left Menu is Start (`menu/click` on the right controller, a 100 ms press) when let
-  go within 0.5 s and `view/click` (left) while held longer; the right Oculus button is `/input/system/click`
-  (dashboard). Valve's own Touch remapping (`frame_controller_remapping.json`: X, Y to the d-pad, B to
-  b/x/y) was not kept: X and Y stay X and Y. `trigger` value+touch+click (> 0.75), `grip` value+click
-  (> 0.75) (+touch = value > 0.05, the Touch grip has no capacitive sensor), `thumbstick` x/y/click/touch,
-  `thumbrest/touch`, `/output/haptic` (`VREvent_Input_HapticVibration` → `xrApplyHapticFeedback`). The
-  profile's `bumper`, `dpad_*` and `menu/touch`, `view/touch` exist but are never pressed (no such buttons
-  on the Touch).
+* Components, the Touch profile's: `system` click+touch (left Menu, right Oculus button), `x`, `y` (left) and
+  `a`, `b` (right) click+touch, `trigger` value+touch, `grip` value (+touch = value > 0.05, the Touch grip has no
+  capacitive sensor), `joystick` x/y/click/touch, `thumbrest/touch`, `/output/haptic`
+  (`VREvent_Input_HapticVibration` → `xrApplyHapticFeedback`).
 * Pose: Monado's orientation is the controller IMU frame. `aim = yaw * imu * imuToAim`, with
   `imuToAim` = rotX(40°) by default (Monado's `rift_s` convention for the same controllers) or a
   per-hand calibration. SteamVR's device pose is the Oculus "raw" controller frame; the Quest

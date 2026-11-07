@@ -92,6 +92,16 @@ The first ~40 s after SteamVR starts run slower (shaders, the dashboard loading)
 pinned at 710 MHz instead of the governor's 596: only +3 fps worn (the passes were memory-bound), not kept.
 The GPU clock and the DDR vote (cpubw at its maximum already) are not the limit.
 
+### 2026-11-07: the pose prediction follows the measured latency
+
+Worn, the warp's delta (render pose against display pose) was 1.5-5 degrees on average while the head turned
+(max 13), and the user saw the distortion come back. Monado now measures, for each new frame, how late it reaches
+the panels against the time its pose was predicted for ("pose age" in its `direct_tick` line): 22-25 ms with 3 or
+4 swapchain images alike, so driver_quest1's fixed 30 ms prediction (pose publication to photons) was short: the
+path is ~53 ms at 72 fps. Monado writes the 2-second average to `/run/monado/quest1-pose-age`; driver_quest1
+(`ReadPoseAge`) adds half of it to its prediction (20-90 ms; fixed when `QUEST1_POSE_PREDICT_MS` or
+`/tmp/quest1-pose-mode` sets one). The age then averages about 0 (-10 to +10 ms per frame).
+
 ## Plan: Monado presents vrcompositor's frames and re-projects them
 
 Monado already has everything a 72 Hz re-projection needs: the head pose at any time, a

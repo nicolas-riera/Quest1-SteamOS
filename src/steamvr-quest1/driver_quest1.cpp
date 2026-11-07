@@ -260,7 +260,10 @@ public:
 	std::function<void(uint64_t presentedFrame)> onPresent;
 	std::atomic<double> lastPresent{0}; //!< MonotonicSeconds of the last display present
 	float headHeight = 1.65f;    //!< a 3DoF head sits at this height above SteamVR's floor
-	std::atomic<uint64_t> predictNs{30000000}; //!< pose publication -> photons through vrcompositor, the driver, Monado
+	//! pose publication -> photons through vrcompositor, the layer and Monado: adjusted to what Monado measures
+	//! (ReadPoseAge), unless fixed by QUEST1_POSE_PREDICT_MS or /tmp/quest1-pose-mode
+	std::atomic<uint64_t> predictNs{50000000};
+	std::atomic<bool> predictFixed{false};
 	//! debug, from /tmp/quest1-pose-mode: 0 submit the render pose, 1 submit the display-time pose
 	std::atomic<int> submitMode{0};
 	//! 3DoF neck model: the eyes turn about the neck, NeckToEye above and in front of it
@@ -407,8 +410,10 @@ bool XrBackend::Init()
 		poseTag = atoi(t) != 0;
 	if (const char *n = getenv("QUEST1_NECK_MODEL"))
 		neckModel = atoi(n) != 0;
-	if (const char *ms = getenv("QUEST1_POSE_PREDICT_MS"))
+	if (const char *ms = getenv("QUEST1_POSE_PREDICT_MS")) {
 		predictNs = (uint64_t)(atof(ms) * 1e6);
+		predictFixed = true;
+	}
 	Quest1FrameInit(headHeight);
 	if (!LoadLibraries())
 		return false;
@@ -1494,6 +1499,8 @@ public:
 				std::this_thread::sleep_for(std::chrono::milliseconds(4));
 				if (tick % 128 == 0)
 					ReadDebugMode();
+				if (tick % 128 == 32)
+					ReadPoseAge();
 				if (tick % 128 == 64)
 					UpdateIpd();
 				if (MonotonicSeconds() - xr.lastPresent < 0.2)
@@ -1534,10 +1541,41 @@ public:
 				    mode ? "display-time" : "render", ms, neck ? "on" : "off");
 			xr.submitMode = mode;
 			xr.predictNs = ns;
+			xr.predictFixed = true;
 			xr.neckModel = neck != 0;
 		}
 		fclose(f);
 	}
+
+	//! Monado writes "<sequence> <ms>" to /run/monado/quest1-pose-age every 2 s: how much later than the time their
+	//! pose was predicted for the new frames reached the panels, on average. Half of it goes into the prediction
+	//! (the frames' path through vrcompositor, the layer and Monado's commit is longer than the 30 ms first assumed:
+	//! ~53 ms at 72 fps, 2026-11-07; the warp had to make up the rest, seen as distortion when the head turns).
+	void ReadPoseAge()
+	{
+		if (xr.predictFixed)
+			return;
+		FILE *f = fopen("/run/monado/quest1-pose-age", "r");
+		if (!f)
+			return;
+		unsigned long seq = 0;
+		float ms = 0;
+		int n = fscanf(f, "%lu %f", &seq, &ms);
+		fclose(f);
+		if (n != 2 || seq == poseAgeSeq)
+			return;
+		poseAgeSeq = seq;
+		double cur = (double)xr.predictNs / 1e6;
+		double next = std::min(90.0, std::max(20.0, cur + 0.5 * ms));
+		xr.predictNs = (uint64_t)(next * 1e6);
+		if (fabs(next - poseAgeLogged) >= 3) {
+			Log("pose prediction %.1f ms (frames reached the panels %.1f ms after their pose's time)\n", next,
+			    ms);
+			poseAgeLogged = next;
+		}
+	}
+	unsigned long poseAgeSeq = 0;
+	double poseAgeLogged = 0;
 
 	void Publish(const DriverPose_t &p)
 	{
@@ -1765,6 +1803,7 @@ public:
 			xr.Shutdown();
 			return VRInitError_Driver_Failed;
 		}
+		SelectDashboardBindings();
 		hmd = new Quest1Hmd(xr);
 		if (!VRServerDriverHost()->TrackedDeviceAdded("QUEST1-SteamOS", TrackedDeviceClass_HMD, hmd))
 			return VRInitError_Driver_Failed;
@@ -1792,6 +1831,33 @@ public:
 	void LeaveStandby() override {}
 
 private:
+	//! SteamVR takes the oculus_touch controller type's dashboard bindings from its own Oculus driver, so the
+	//! default_bindings of our input profile are never used: no right Oculus button, no double click for the
+	//! camera view, none of the Frame's grip actions. Select ours as the bindings UI would (it saves this key),
+	//! unless the user picked another.
+	static void SelectDashboardBindings()
+	{
+		Dl_info info{};
+		if (!dladdr((void *)&SelectDashboardBindings, &info) || !info.dli_fname)
+			return;
+		std::string root = info.dli_fname; // <root>/bin/linuxarm64/driver_quest1.so
+		for (int up = 0; up < 3; up++) {
+			size_t slash = root.rfind('/');
+			if (slash == std::string::npos)
+				return;
+			root.resize(slash);
+		}
+		const std::string url = "file://" + root + "/resources/input/quest1_touch_vrcompositor_bindings.json";
+		const char *section = "openvr.component.vrcompositor", *key = "oculus_touch_250820_CurrentURL_steamvrinput";
+		char cur[1024] = "";
+		EVRSettingsError err = VRSettingsError_None;
+		VRSettings()->GetString(section, key, cur, sizeof(cur), &err);
+		if (url == cur || (cur[0] && !strstr(cur, "/drivers/oculus/")))
+			return;
+		VRSettings()->SetString(section, key, url.c_str(), &err);
+		Log("quest1: dashboard bindings: %s (%d)\n", url.c_str(), (int)err);
+	}
+
 	XrBackend xr;
 	Quest1Hmd *hmd = nullptr;
 	Quest1Controllers controllers;

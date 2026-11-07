@@ -207,10 +207,10 @@ index eb41c3c..5214613 100644
  
 diff --git a/src/xrt/compositor/main/comp_window_mdp.c b/src/xrt/compositor/main/comp_window_mdp.c
 new file mode 100644
-index 0000000..214d975
+index 0000000..07400df
 --- /dev/null
 +++ b/src/xrt/compositor/main/comp_window_mdp.c
-@@ -0,0 +1,2612 @@
+@@ -0,0 +1,2636 @@
 +// Copyright 2026, Quest1-SteamOS contributors
 +// SPDX-License-Identifier: BSL-1.0
 +/*!
@@ -373,6 +373,8 @@ index 0000000..214d975
 +	double ax_sum, ay_sum, az_sum; //!< |delta| about the head's x / y / z axes (deg)
 +	double oe_sum, oe_max;         //!< how far each new o estimate is from the running o (deg)
 +	uint32_t oe_n;
++	double age_ms_sum, age_ms_min, age_ms_max; //!< new frames: display time - the time their pose was predicted for
++	uint32_t age_n;
 +	uint32_t late;      //!< commits that returned after the next vsync: that vsync showed the previous image again
 +	uint32_t gaps;      //!< vsync events never seen (the thread woke more than a period late)
 +	double wake_ms_max; //!< vsync event -> this thread running
@@ -2008,6 +2010,16 @@ index 0000000..214d975
 +		bool commit_raw = D->fresh || D->need_refresh;
 +		bool warped = false;
 +		bool want_warp = (D->lens || !D->knobs.off) && D->buf[D->latest][1].ahb != NULL;
++		if (D->fresh && D->latest_frame.pose_valid) {
++			// how late each new frame reaches the panels against the time its pose was predicted for (shown from
++			// the next vsync on, like the warp's display time below): what the warp has to make up for
++			double age = (double)(vsync + (int64_t)(1.5 * MDP_PERIOD_NS) - D->latest_frame.time_ns) / 1e6;
++			struct mdp_direct_stats *st = &D->stats;
++			st->age_ms_min = st->age_n == 0 || age < st->age_ms_min ? age : st->age_ms_min;
++			st->age_ms_max = st->age_n == 0 || age > st->age_ms_max ? age : st->age_ms_max;
++			st->age_ms_sum += age;
++			st->age_n++;
++		}
 +		if (want_warp && D->lens && (D->knobs.off || !D->latest_frame.pose_valid)) {
 +			// undistorted images are never shown as they are: warp by the identity
 +			static const float identity[4] = {0, 0, 0, 1};
@@ -2172,7 +2184,7 @@ index 0000000..214d975
 +		U_LOG_W("mdp: direct: %.1f/s warped (%.1f/s of them fresh), %.1f/s raw, %.1f/s kept; warp gpu %.2f ms avg (max %.2f), "
 +		        "cpu %.2f ms (mesh %.2f, gpu wait %.2f, commit %.2f); delta %.2f deg avg (max %.2f), "
 +		        "per axis x %.2f y %.2f z %.2f; o jitter %.2f deg avg (max %.2f); no free set %u; "
-+		        "late %u, vsyncs missed %u, wake max %.2f ms",
++		        "late %u, vsyncs missed %u, wake max %.2f ms; pose age %.1f ms avg (%.1f..%.1f)",
 +		        s->warp_commits / el, s->fresh_warped / el, s->raw_commits / el, s->skipped / el,
 +		        s->warp_commits ? s->gpu_ms_sum / s->warp_commits : 0.0, s->gpu_ms_max,
 +		        s->warp_commits ? s->cpu_ms_sum / s->warp_commits : 0.0,
@@ -2182,7 +2194,19 @@ index 0000000..214d975
 +		        s->angle_max,
 +		        s->angle_n ? s->ax_sum / s->angle_n : 0.0, s->angle_n ? s->ay_sum / s->angle_n : 0.0,
 +		        s->angle_n ? s->az_sum / s->angle_n : 0.0, s->oe_n ? s->oe_sum / s->oe_n : 0.0, s->oe_max,
-+		        s->no_set, s->late, s->gaps, s->wake_ms_max);
++		        s->no_set, s->late, s->gaps, s->wake_ms_max, s->age_n ? s->age_ms_sum / s->age_n : 0.0, s->age_ms_min,
++		        s->age_ms_max);
++		if (s->age_n > 0) {
++			// for driver_quest1's pose prediction (ReadPoseAge): "<sequence> <ms>", replaced atomically
++			static unsigned long age_seq;
++			FILE *af = fopen("/run/monado/quest1-pose-age.tmp", "w");
++			if (af != NULL) {
++				fprintf(af, "%lu %.2f\n", ++age_seq, s->age_ms_sum / s->age_n);
++				fclose(af);
++				chmod("/run/monado/quest1-pose-age.tmp", 0644);
++				rename("/run/monado/quest1-pose-age.tmp", "/run/monado/quest1-pose-age");
++			}
++		}
 +		*s = (struct mdp_direct_stats){.since_ns = now};
 +	}
 +	pthread_mutex_unlock(&D->lock);

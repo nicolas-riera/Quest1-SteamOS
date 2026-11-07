@@ -5,7 +5,7 @@
 	"category": "steamvr_input",
 	"controller_type": "oculus_touch",
 	"name": "Quest 1 Touch: SteamVR dashboard",
-	"description": "Menu (left) or Oculus (right) button toggles the dashboard, a double click the camera view (passthrough); trigger clicks; stick scrolls; A/X home, B/Y back",
+	"description": "Menu (left) or Oculus (right) button toggles the dashboard, a double click the camera view (passthrough); trigger clicks; stick scrolls; A/X home, B/Y back; grips: quick mouse, laser hand and the gamepad mode (as the Frame's bindings)",
 	"options": {},
 	"simulated_actions": [],
 	"bindings": {
@@ -42,14 +42,24 @@
 				{
 					"path": "/user/hand/left/input/trigger",
 					"mode": "button",
-					"parameters": { "click_activate_threshold": "0.65", "click_deactivate_threshold": "0.6" },
-					"inputs": { "click": { "output": "/actions/lasermouse/in/leftclick" } }
+					"parameters": {
+						"click_activate_threshold": "0.65",
+						"click_deactivate_threshold": "0.6"
+					},
+					"inputs": {
+						"click": { "output": "/actions/lasermouse/in/leftclick" }
+					}
 				},
 				{
 					"path": "/user/hand/right/input/trigger",
 					"mode": "button",
-					"parameters": { "click_activate_threshold": "0.65", "click_deactivate_threshold": "0.6" },
-					"inputs": { "click": { "output": "/actions/lasermouse/in/leftclick" } }
+					"parameters": {
+						"click_activate_threshold": "0.65",
+						"click_deactivate_threshold": "0.6"
+					},
+					"inputs": {
+						"click": { "output": "/actions/lasermouse/in/leftclick" }
+					}
 				},
 				{
 					"path": "/user/hand/left/input/joystick",
@@ -72,32 +82,58 @@
 				{
 					"path": "/user/hand/left/input/x",
 					"mode": "button",
-					"inputs": { "click": { "output": "/actions/lasermouse/in/home" } }
+					"inputs": {
+						"click": { "output": "/actions/lasermouse/in/home" }
+					}
 				},
 				{
 					"path": "/user/hand/left/input/y",
 					"mode": "button",
-					"inputs": { "click": { "output": "/actions/lasermouse/in/back" } }
+					"inputs": {
+						"click": { "output": "/actions/lasermouse/in/back" }
+					}
 				},
 				{
 					"path": "/user/hand/right/input/a",
 					"mode": "button",
-					"inputs": { "click": { "output": "/actions/lasermouse/in/home" } }
+					"inputs": {
+						"click": { "output": "/actions/lasermouse/in/home" }
+					}
 				},
 				{
 					"path": "/user/hand/right/input/b",
 					"mode": "button",
-					"inputs": { "click": { "output": "/actions/lasermouse/in/back" } }
+					"inputs": {
+						"click": { "output": "/actions/lasermouse/in/back" }
+					}
 				},
 				{
 					"path": "/user/hand/left/input/grip",
 					"mode": "button",
-					"inputs": { "click": { "output": "/actions/lasermouse/in/middleclick" } }
+					"inputs": {
+						"click": { "output": "/actions/lasermouse/in/middleclick" }
+					}
 				},
 				{
 					"path": "/user/hand/right/input/grip",
 					"mode": "button",
-					"inputs": { "click": { "output": "/actions/lasermouse/in/middleclick" } }
+					"inputs": {
+						"click": { "output": "/actions/lasermouse/in/middleclick" }
+					}
+				},
+				{
+					"path": "/user/hand/left/input/trigger",
+					"mode": "button",
+					"inputs": {
+						"click": { "output": "/actions/lasermouse/in/LockMousePosition" }
+					}
+				},
+				{
+					"path": "/user/hand/right/input/trigger",
+					"mode": "button",
+					"inputs": {
+						"click": { "output": "/actions/lasermouse/in/LockMousePosition" }
+					}
 				}
 			]
 		},
@@ -111,7 +147,9 @@
 						"click_deactivate_threshold": "0.65",
 						"haptic_amplitude": "0"
 					},
-					"inputs": { "click": { "output": "/actions/lasermouse_secondary/in/switchlaserhand" } }
+					"inputs": {
+						"click": { "output": "/actions/lasermouse_secondary/in/switchlaserhand" }
+					}
 				},
 				{
 					"path": "/user/hand/right/input/trigger",
@@ -121,7 +159,23 @@
 						"click_deactivate_threshold": "0.65",
 						"haptic_amplitude": "0"
 					},
-					"inputs": { "click": { "output": "/actions/lasermouse_secondary/in/switchlaserhand" } }
+					"inputs": {
+						"click": { "output": "/actions/lasermouse_secondary/in/switchlaserhand" }
+					}
+				},
+				{
+					"path": "/user/hand/left/input/grip",
+					"mode": "trigger",
+					"inputs": {
+						"click": { "output": "/actions/lasermouse_secondary/in/switchlaserhand" }
+					}
+				},
+				{
+					"path": "/user/hand/right/input/grip",
+					"mode": "trigger",
+					"inputs": {
+						"click": { "output": "/actions/lasermouse_secondary/in/switchlaserhand" }
+					}
 				}
 			]
 		},
@@ -130,12 +184,16 @@
 				{
 					"path": "/user/hand/left/input/joystick",
 					"mode": "scroll",
-					"inputs": { "scroll": { "output": "/actions/scroll_discrete/in/scroll" } }
+					"inputs": {
+						"scroll": { "output": "/actions/scroll_discrete/in/scroll" }
+					}
 				},
 				{
 					"path": "/user/hand/right/input/joystick",
 					"mode": "scroll",
-					"inputs": { "scroll": { "output": "/actions/scroll_discrete/in/scroll" } }
+					"inputs": {
+						"scroll": { "output": "/actions/scroll_discrete/in/scroll" }
+					}
 				}
 			]
 		},
@@ -144,14 +202,22 @@
 				{
 					"path": "/user/hand/left/input/joystick",
 					"mode": "scroll",
-					"parameters": { "scroll_mode": "smooth" },
-					"inputs": { "scroll": { "output": "/actions/scroll_smooth/in/scroll" } }
+					"parameters": {
+						"scroll_mode": "smooth"
+					},
+					"inputs": {
+						"scroll": { "output": "/actions/scroll_smooth/in/scroll" }
+					}
 				},
 				{
 					"path": "/user/hand/right/input/joystick",
 					"mode": "scroll",
-					"parameters": { "scroll_mode": "smooth" },
-					"inputs": { "scroll": { "output": "/actions/scroll_smooth/in/scroll" } }
+					"parameters": {
+						"scroll_mode": "smooth"
+					},
+					"inputs": {
+						"scroll": { "output": "/actions/scroll_smooth/in/scroll" }
+					}
 				}
 			]
 		},
@@ -178,22 +244,112 @@
 				{
 					"path": "/user/hand/left/input/trigger",
 					"mode": "button",
-					"inputs": { "click": { "output": "/actions/dualanalog/in/leftclick" } }
+					"inputs": {
+						"click": { "output": "/actions/dualanalog/in/leftclick" }
+					}
 				},
 				{
 					"path": "/user/hand/right/input/trigger",
 					"mode": "button",
-					"inputs": { "click": { "output": "/actions/dualanalog/in/rightclick" } }
+					"inputs": {
+						"click": { "output": "/actions/dualanalog/in/rightclick" }
+					}
 				},
 				{
 					"path": "/user/hand/left/input/grip",
 					"mode": "button",
-					"inputs": { "click": { "output": "/actions/dualanalog/in/modeswitch1" } }
+					"inputs": {
+						"click": { "output": "/actions/dualanalog/in/modeswitch1" }
+					}
 				},
 				{
 					"path": "/user/hand/right/input/grip",
 					"mode": "button",
-					"inputs": { "click": { "output": "/actions/dualanalog/in/modeswitch2" } }
+					"inputs": {
+						"click": { "output": "/actions/dualanalog/in/modeswitch2" }
+					}
+				}
+			]
+		},
+		"/actions/quickmouse": {
+			"sources": [
+				{
+					"path": "/user/hand/left/input/grip",
+					"mode": "trigger",
+					"inputs": {
+						"click": { "output": "/actions/quickmouse/in/ActivateQuickMouse" }
+					}
+				},
+				{
+					"path": "/user/hand/right/input/grip",
+					"mode": "trigger",
+					"inputs": {
+						"click": { "output": "/actions/quickmouse/in/ActivateQuickMouse" }
+					}
+				}
+			]
+		},
+		"/actions/locomotion": {
+			"sources": [
+				{
+					"path": "/user/hand/left/input/joystick",
+					"mode": "joystick",
+					"inputs": {
+						"position": { "output": "/actions/locomotion/in/movement" }
+					}
+				},
+				{
+					"path": "/user/hand/right/input/joystick",
+					"mode": "joystick",
+					"inputs": {
+						"position": { "output": "/actions/locomotion/in/rotation" }
+					}
+				}
+			]
+		},
+		"/actions/roomsetup": {
+			"sources": [
+				{
+					"path": "/user/hand/left/input/joystick",
+					"mode": "joystick",
+					"inputs": {
+						"position": { "output": "/actions/roomsetup/in/FloorFineAdjust" }
+					}
+				},
+				{
+					"path": "/user/hand/right/input/joystick",
+					"mode": "joystick",
+					"inputs": {
+						"position": { "output": "/actions/roomsetup/in/FloorFineAdjust" }
+					}
+				},
+				{
+					"path": "/user/hand/right/input/a",
+					"mode": "button",
+					"inputs": {
+						"click": { "output": "/actions/roomsetup/in/Accept" }
+					}
+				},
+				{
+					"path": "/user/hand/right/input/b",
+					"mode": "button",
+					"inputs": {
+						"click": { "output": "/actions/roomsetup/in/Back" }
+					}
+				},
+				{
+					"path": "/user/hand/left/input/x",
+					"mode": "button",
+					"inputs": {
+						"click": { "output": "/actions/roomsetup/in/Accept" }
+					}
+				},
+				{
+					"path": "/user/hand/left/input/y",
+					"mode": "button",
+					"inputs": {
+						"click": { "output": "/actions/roomsetup/in/Back" }
+					}
 				}
 			]
 		}
