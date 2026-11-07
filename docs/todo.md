@@ -68,6 +68,13 @@ Open items, roughly by priority. Done items move to the commit log.
   Home if present, etc.): less storage, memory and load time (user, 2026-11-03).
 - Steam's UI and the dashboard lag, and so does Steam's VR keyboard (it is Steam's: it types fine,
   the lag is Steam's UI). Faster Steam fixes both (user, 2026-11-03).
+  Measured 2026-11-06 (CDP, arrow keys every 150 ms on the library home): requestAnimationFrame falls from 60 to
+  ~9 fps (median frame 100 ms, max ~470 ms). The renderer's main thread runs ~80 % of a big core (libcef + V8:
+  the gamepadui's own work), the GPU process's VizCompositorThread ~70 % (half of it memcpy: the off-screen
+  frames copied for the VR overlay), the browser process uploads them with Mesa GL (libgallium). Steam itself
+  pins its webhelpers to CPUs 2-6 (two little, three big cores; `STEAM_DESKTOP_APP_AFFINITY_LIST` is read but
+  unset), though the hot threads ran on the big ones. Leads: fewer copies on the overlay path (shared textures
+  instead of the CPU fallback), less UI work (animations, blur).
 - LSE atomics emulation (kernel/lse_emul.c): ~100,000 traps/s while SteamVR runs (vrserver ~38k,
   vrcompositor ~29k, steamwebhelper ~24k), 0.8 us each on a big core and 1.6 us on a little one,
   against ~20 ns native: ~10-15 % of one core. Make the emulation itself faster (trap path, hook
