@@ -34,16 +34,17 @@ Here today (from `/root/stream-crash-20261101`, `-20261102` and the live `stream
 - Blockers, in order: (a) sharing the image with the compositor (GL memory objects missing; Vulkan has opaque fd external memory but no dma-buf or modifiers);
   (b) the V4L2 decoder node and msm_vidc quirks; (c) the crash in the SteamVR tree.
 
-Plan (cheapest first):
-1. **Software decode, picture to the compositor through a path our Vulkan supports** (3-5 days, [M]). Force streaming_client's FFmpeg path (setting name still to find in
-   its strings or the Advanced Streaming settings), then avoid GL sharing (a Vulkan layer or LD_PRELOAD that answers "no dma-buf modifiers" with a linear fallback,
-   or opaque `external_memory_fd`). Costs about one CPU core at 1080p60 H.264.
-2. **Own overlay player** (3-5 days, [M]): a small OpenVR overlay app (we already have `q1-camoverlay`) that takes decoded frames (streaming_client `--windowed` output
-   or a PipeWire stream) and sets them as an overlay texture from raw memory (`SetOverlayRaw`). Avoids all GL and dma-buf sharing.
-3. **Hardware decode via venus** (3-6 days, [L]): symlink `/dev/video-dec0` -> `/dev/video32` (the Frame's own mechanism) and see how `CV4L2Accel` copes with the
-   downstream msm_vidc (UBWC capture formats, buffer counts, event and DISPLAY_DELAY controls). Start with a standalone V4L2 test. dma-buf export from ION may not
-   fit the Vulkan import without a shim.
-4. Fallback: a Moonlight-style client (ffmpeg + V4L2) as an OpenXR or OpenVR quad app. Not Steam-integrated, so last.
+Plan (hardware decode only: software decode is not an option, user decision 2026-11-07):
+1. **Standalone V4L2 test on venus** (1-2 days): open `/dev/video32`, H.264 then HEVC on the OUTPUT queue (one frame per buffer, as
+   downstream msm_vidc wants), NV12 on CAPTURE, the msm_vidc port-settings events, decode a known stream and compare it with a
+   software reference. Tells which formats, buffer counts and controls the downstream driver needs.
+2. **`/dev/video-dec0` for Steam** (1-3 days): the Frame's own node name (`steam-video-codec-setup.service` makes it), then see how
+   `CV4L2Accel` copes with msm_vidc (UBWC capture formats, buffer counts, events, DISPLAY_DELAY controls). If the gaps are small, a
+   V4L2 shim (LD_PRELOAD on streaming_client) translates; else patch the kernel driver toward the mainline stateful decoder API.
+3. **Decoded frames to the compositor** (3-5 days): the decoder's dma-buf/ION buffers as AHBs (Monado's `comp_window_mdp.c` already
+   imports gralloc AHBs), so the frames reach vrcompositor without a CPU copy; `GL_EXT_memory_object` is missing on libhybris GL,
+   so the Vulkan path (streaming_client's `CVulkanAccel`) or an overlay from AHB-backed images.
+4. Fallback: a Moonlight-style client on the same V4L2 decode, as an OpenVR overlay. Not Steam-integrated, so last.
 
 ## 2. PC VR streaming (Steam Link VR / vrlink)
 
@@ -72,14 +73,14 @@ vrlink's `desktop_windows_remote` / `desktop_windows_tx` paths and `VRLink_Laser
 view is not started on this platform ("Not starting VRMonitor by default on this platform"). A Linux PC needs Steam with `-pipewire` for desktop capture.
 
 Here: it is the 2D streaming path plus the laser-mouse overlay, with no extra blockers of its own. The PC side already negotiates and encodes the desktop (see the logs).
-So it is solved by plans 1 and 2 of section 1. Effort: about 1 more day for the laser pointer input (controllers are Oculus Touch with the Frame's dashboard actions since 88f7fd6).
+So it is solved by plans 1-3 of section 1 (hardware decode, then the frames to the compositor). Effort: about 1 more day for the laser pointer input (controllers are Oculus Touch with the Frame's dashboard actions since 88f7fd6).
 
 ## Ranking
 
 | # | Item | Effort | Gain |
 |---|---|---|---|
-| 1 | Software decode and a raw-memory overlay path for flat streams (sections 1 and 3) | 3-5 days | 2D games and the PC desktop in VR |
+| 1 | venus hardware decode: standalone V4L2 test (formats, buffers, events) | 1-2 days | the base of every path |
 | 2 | vrlink's stdout and exit reason, plus the `/dev/video-dec0` symlink test | 1-2 days | decides the VR path |
-| 3 | venus hardware decode: standalone V4L2 test, then `CV4L2Accel` | 3-6 days | lower CPU and latency |
+| 3 | `/dev/video-dec0` and `CV4L2Accel` on msm_vidc, then zero-copy frames to the compositor | 1-2 weeks | 2D games and the PC desktop in VR |
 | 4 | Vulkan dma-buf import shim | 1-2 weeks | proper VR streaming and compositor sharing |
 | 5 | ALVR or WiVRn alternative | 1-2 weeks | fallback if vrlink stays blocked |
