@@ -74,6 +74,13 @@ android_dlsym(void *handle, const char *symbol);
 #define MDP_H 1600
 #define MDP_HALF (MDP_W / 2)
 #define MDP_PERIOD_NS (U_TIME_1S_IN_NS / 72)
+//! The head pose a commit made at a vsync tick is shown for, on Monado's pose clock: that vsync + this. A video
+//! mode panel latches the commit at the next vsync and scans it out over the period after, i.e. 1.5 periods
+//! (21 ms) on paper; but the warp aimed there turned the image too far, more so the larger the correction:
+//! the dashboard deformed while the head turned, worse with a shorter pose prediction (user, 2026-11-07).
+//! Tried worn: 21 ms deformed, 10 better, 3 "no more deformation". The pose and the vsync clocks are both
+//! CLOCK_MONOTONIC, so Meta's head pose (libossdk, asked for "now") is most likely ~18 ms ahead of its stamp.
+#define MDP_DISPLAY_DELAY_NS (3 * U_TIME_1MS_IN_NS)
 //! Exists while the panels are (going) off: an external scanout must not commit then.
 #define MDP_PANELS_OFF "/tmp/quest1-panels-off"
 //! Exists while the headset sleeps (quest1-standby): panels off as if the headset was removed.
@@ -870,7 +877,7 @@ head_orientation(struct mdp_target *t, int64_t at_ns, float *q)
 //! Test and tuning knobs, from the file /tmp/quest1-reproj (read twice a second): "off" shows the layer's frames
 //! as they are, "yaw=<deg>" adds a fixed yaw to the re-projection, "thr=<deg>" is the angle under which a fresh
 //! frame is shown as it is (default 0.2), "delay=<ms>" the time from the vsync that commits a frame to the
-//! pose it is warped to (default 1.5 periods), "sign=<mask>" negates the delta's x/y/z axes (1/2/4),
+//! pose it is warped to (default MDP_DISPLAY_DELAY_NS), "sign=<mask>" negates the delta's x/y/z axes (1/2/4),
 //! "rx=/ry=/rz=<deg>" a constant rotation R of the head frame against the eye frame (delta' = conj(R) delta R,
 //! applied in that order x, y, z), "vel=0" (read by the head tracker, quest1_hmd.c) stops extrapolating Meta's
 //! poses with their angular velocity.
@@ -1798,9 +1805,9 @@ direct_tick(struct mdp_target *t, int64_t vsync)
 		bool warped = false;
 		bool want_warp = (D->lens || !D->knobs.off) && D->buf[D->latest][1].ahb != NULL;
 		if (D->fresh && D->latest_frame.pose_valid) {
-			// how late each new frame reaches the panels against the time its pose was predicted for (shown from
-			// the next vsync on, like the warp's display time below): what the warp has to make up for
-			double age = (double)(vsync + (int64_t)(1.5 * MDP_PERIOD_NS) - D->latest_frame.time_ns) / 1e6;
+			// how late each new frame reaches the panels against the time its pose was predicted for (the same
+			// display time as the warp's below): what the warp has to make up for
+			double age = (double)(vsync + MDP_DISPLAY_DELAY_NS - D->latest_frame.time_ns) / 1e6;
 			struct mdp_direct_stats *st = &D->stats;
 			st->age_ms_min = st->age_n == 0 || age < st->age_ms_min ? age : st->age_ms_min;
 			st->age_ms_max = st->age_n == 0 || age > st->age_ms_max ? age : st->age_ms_max;
@@ -1824,28 +1831,38 @@ direct_tick(struct mdp_target *t, int64_t vsync)
 			}
 		} else if (want_warp) {
 			// the pose the frame is shown for: the commit is latched at the next vsync, scanned out from then on
-			int64_t display_ns = vsync + (int64_t)((D->knobs.delay_ms > 0 ? D->knobs.delay_ms * 1e6 : 1.5 * MDP_PERIOD_NS));
+			int64_t display_ns = vsync + (D->knobs.delay_ms > 0 ? (int64_t)(D->knobs.delay_ms * 1e6) : MDP_DISPLAY_DELAY_NS);
 			float qd[4], qr[4];
 			memcpy(qr, D->latest_frame.q, sizeof(qr));
 			float qt[4];
 			if (head_orientation(t, display_ns, qd) && head_orientation(t, D->latest_frame.time_ns, qt)) {
-				// the head's speed around the frame's pose time: o is only learnt while the head is (nearly) still
-				float qp[4];
-				float speed = 1e9f;
-				if (head_orientation(t, D->latest_frame.time_ns - 50 * (int64_t)U_TIME_1MS_IN_NS, qp)) {
-					float cp[4], dq[4];
+				// the head's speed before the frame's pose time, over the two 50 ms before it (the fastest): o is only
+				// learnt while the head is still. One 50 ms span at 15 deg/s let through the turn-arounds of a head
+				// tilted back and forth (no net motion over the span, but the largest prediction error): o took
+				// estimates 0.7 deg off and the image trembled with the tilt (user, 2026-11-07).
+				float speed = 0.0f;
+				float qa[4];
+				memcpy(qa, qt, sizeof(qa));
+				for (int s = 1; s <= 2; s++) {
+					float qp[4], cp[4], dq[4];
+					if (!head_orientation(t, D->latest_frame.time_ns - s * 50 * (int64_t)U_TIME_1MS_IN_NS, qp)) {
+						speed = 1e9f;
+						break;
+					}
 					quat_conj(qp, cp);
-					quat_mul(cp, qt, dq);
+					quat_mul(cp, qa, dq);
 					float ang = quat_angle_deg(dq);
-					speed = (ang > 180.0f ? 360.0f - ang : ang) / 0.05f;
+					ang = ang > 180.0f ? 360.0f - ang : ang;
+					speed = fmaxf(speed, ang / 0.05f);
+					memcpy(qa, qp, sizeof(qa));
 				}
-				bool still = speed < 15.0f;
+				bool still = speed < 5.0f;
 				if (D->latest_frame.frame != D->calibrated_frame && (still || !D->o_valid)) {
 					// o: Monado's device space = o * LOCAL (a constant). Each frame gives an estimate off by its
 					// pose's prediction error, small while the head is still but large and in the same direction
 					// for a whole head turn: averaging those dragged o along and the warp put the image off,
 					// seen as distortion while turning (user, 2026-11-07). So only frames rendered while the head
-					// is still (under 15 deg/s) are used: a plain mean for the first ones, then a slow average;
+					// is still (see above) are used: a plain mean for the first ones, then a slow average;
 					// estimates far from it on several such frames in a row mean LOCAL moved: seed again (a stale
 					// o made the warped frames sit off and swing slowly into place, 2026-11-03).
 					float cr[4], oe[4];
