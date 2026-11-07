@@ -146,6 +146,9 @@ Open items, roughly by priority. Done items move to the commit log.
   /dev/video1 = msm_jpegdma, scsi_id on sdb/sdd, libinput-device-group on the power key's event0), so event0 kept
   root 0600 and quest1-powerbutton/volkeys crash-looped (fixed by hand: udevadm trigger --action=add). Find what
   blocks them at boot and whether it is linked to the tracking loss (first boot of the devpts kernel).
+  That boot the cameras never powered up either (trackingservice: "Timeout: (power: SLEEP) => (power: STANDBY)"
+  every second from 09:56:20, so 3DoF only; restarting the stack did not help). The next boot, same kernel, was
+  clean (6DoF, no udev stall): a boot race in the camera drivers, to catch again with its logs.
 - Shake/tilt (user, 2026-11-06: only the camera image, "almost nauseating"): not the kernel, the KGSL lazy rings, the capture
   poses or the frame order (docs/passthrough.md, what it is not); next: Meta's depth engine through MrSystemServiceIPCServer
   instead of our fixed mesh (user's call).
