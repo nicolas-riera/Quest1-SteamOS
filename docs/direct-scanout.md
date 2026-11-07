@@ -72,6 +72,26 @@ shown, passthrough on (`/root/tmp/bench.sh`-style: average of the layer's `displ
   The app's 2880x1600 images are only handles (never rendered to or read): they share one allocation, so the
   fourth image costs only its two gralloc halves.
 
+### 2026-11-07: vrcompositor renders straight to memory (RenderMode=Direct)
+
+Worn, with the controllers in view, vrcompositor was at 37-46 fps: ~18 ms of GPU a frame in ~40 render passes
+(per eye: distortion 2.5 ms, passthrough 2.2 ms, each controller part in a pass of its own, ~0.08 ms for the
+smallest). The Adreno blob's tiled path loads and stores the 1500x1664 eye image around each pass; the Frame's
+own setup avoids it for vrcompositor (`TU_DEBUG=sysmem`, docs/steamframe-stack.md). The blob's equivalent is
+the `RenderMode` key of qgl_config.txt (`Direct`, docs/adreno-vk-extensions.md), given to SteamVR alone: its unit
+binds `/etc/quest1/qgl_config-steamvr.txt` (the system's file plus that key, written by holo-frame-mode.sh) over
+`/data/vendor/gpu/qgl_config.txt`. Same image (snapshot checked), measured head still, dashboard shown, no
+controllers:
+
+| | GPU per frame | smallest passes | distortion per eye | fps |
+|---|---|---|---|---|
+| tiled (blob's default) | 14.1 ms | 0.08-0.1 ms | 2.2 ms | 55 |
+| `RenderMode=Direct` | 9.3 ms | 0.02-0.04 ms | 1.9 ms | 72 |
+
+The first ~40 s after SteamVR starts run slower (shaders, the dashboard loading) before it settles. GPU clock
+pinned at 710 MHz instead of the governor's 596: only +3 fps worn (the passes were memory-bound), not kept.
+The GPU clock and the DDR vote (cpubw at its maximum already) are not the limit.
+
 ## Plan: Monado presents vrcompositor's frames and re-projects them
 
 Monado already has everything a 72 Hz re-projection needs: the head pose at any time, a

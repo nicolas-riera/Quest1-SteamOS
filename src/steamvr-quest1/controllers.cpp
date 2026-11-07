@@ -244,10 +244,16 @@ public:
 		p->SetStringProperty(container, Prop_ManufacturerName_String, "Oculus");
 		p->SetStringProperty(container, Prop_TrackingSystemName_String, "quest1");
 		// QUEST1_CTRL_MODEL=none: no render model (performance tests); otherwise Oculus' own
+		// The right one is our copy when mkrendermodel.py made it: SteamVR's has the menu button's glyph on the
+		// Oculus button.
 		const char *model = getenv("QUEST1_CTRL_MODEL");
 		bool noModel = model && strcmp(model, "none") == 0;
+		struct stat st;
+		bool ours = !left && stat("/opt/quest1-steamvr/quest1/resources/rendermodels/quest1_controller_right/"
+		                          "quest1_controller_right.json", &st) == 0;
 		p->SetStringProperty(container, Prop_RenderModelName_String,
-		                     noModel ? "" : left ? "oculus_quest_controller_left" : "oculus_quest_controller_right");
+		                     noModel ? "" : left ? "oculus_quest_controller_left"
+		                     : ours ? "{quest1}quest1_controller_right" : "oculus_quest_controller_right");
 		p->SetStringProperty(container, Prop_RegisteredDeviceType_String,
 		                     left ? "quest1/QUEST1-Touch-Left" : "quest1/QUEST1-Touch-Right");
 		// The Steam Frame's controllers, as SteamVR and Steam see them: Steam turns SteamVR controllers of this type

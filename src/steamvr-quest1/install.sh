@@ -12,3 +12,6 @@ scp -q driver.vrdrivermanifest "$H:$D/"
 scp -q resources/input/*.json "$H:$D/resources/input/"
 scp -q resources/settings/default.vrsettings "$H:$D/resources/settings/"
 ssh "$H" "mv $D/bin/linuxarm64/driver_quest1.so.new $D/bin/linuxarm64/driver_quest1.so && ls -la $D/bin/linuxarm64"
+# the right controller's render model (Oculus logo on the Oculus button), made from the headset's SteamVR
+scp -q ../mkrendermodel.py "$H:/usr/local/lib/holo/mkrendermodel.py"
+ssh "$H" "python3 /usr/local/lib/holo/mkrendermodel.py /opt/steamvr $D"

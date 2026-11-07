@@ -33,6 +33,7 @@ uninstall)
 		/etc/systemd/system/poweroff.target.d/quest1-timeout.conf \
 		/etc/systemd/logind.conf.d/quest1-power.conf /etc/polkit-1/rules.d/50-quest1-power.rules \
 		/usr/local/sbin/quest1-frame-settings /usr/local/sbin/quest1-standby /usr/local/sbin/quest1-frame \
+		/etc/quest1/qgl_config-steamvr.txt \
 		/usr/local/sbin/quest1-powerbutton
 	systemctl daemon-reload
 	echo "logind keeps its power key settings until restarted: systemctl restart systemd-logind"
@@ -150,6 +151,14 @@ EOF
 chmod 755 /usr/local/sbin/quest1-frame-settings
 
 # --- SteamVR at boot ------------------------------------------------------------------------------
+# The Adreno blob renders vrcompositor's passes straight to memory (RenderMode=Direct, its "sysmem"; the Frame sets
+# TU_DEBUG=sysmem for vrcompositor the same way): with ~40 small render passes a frame, the tiled path's per-pass
+# loads and stores cost a third of its GPU time (docs/direct-scanout.md). SteamVR alone sees this qgl_config.txt
+# (bound over the system's in its unit): the system's, plus that key (hashed name, docs/adreno-vk-extensions.md).
+# Written here, not when the unit starts: there the bind would make the command read the very file it writes.
+mkdir -p /etc/quest1
+{ grep -v "RenderMode" /data/vendor/gpu/qgl_config.txt 2>/dev/null
+  echo "0x1fd41fd8=direct   ; RenderMode=Direct (SteamVR only)"; } > /etc/quest1/qgl_config-steamvr.txt
 ENV='Environment=HOME=/home/steamos USER=steamos XDG_RUNTIME_DIR=/run/user/1000 DISPLAY=:1
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus'
 
@@ -169,6 +178,8 @@ Environment=QUEST1_COMPAT_SPIRV=
 ExecStartPre=+/usr/bin/install -d -o steamos -g steamos -m 700 /run/user/1000
 ExecStartPre=+/usr/local/sbin/quest1-frame-settings
 ExecStartPre=/bin/sh -c 'rm -f /home/steamos/.local/share/Steam/logs/vr*.txt'
+# SteamVR's own qgl_config.txt (written above): the Adreno blob renders vrcompositor's passes straight to memory
+BindReadOnlyPaths=-/etc/quest1/qgl_config-steamvr.txt:/data/vendor/gpu/qgl_config.txt
 ExecStart=/usr/local/bin/steamvr-q1 vrserver --keepalive
 # vrcompositor, vrwebhelpers etc. are vrserver's children: stopping the unit stops all of SteamVR
 KillMode=control-group

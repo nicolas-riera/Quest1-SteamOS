@@ -11,6 +11,11 @@ Open items, roughly by priority. Done items move to the commit log.
   moving the head (Monado's warp). Next: the LSE trap path (do_undefinstr takes a global spinlock per trap and
   emulate_atomic does two exclusive loops: ~18 % of vrcompositor's render thread), the passthrough mesh pass
   (~1.4 ms per eye), the controller models.
+- 2026-11-07: worn it was 37-46 fps (user: "un peu mieux"): ~18 ms of GPU with the controllers in view, each of
+  their parts in a render pass of its own. vrcompositor now renders straight to memory (RenderMode=Direct, SteamVR
+  only): 14.1 -> 9.3 ms a frame on the table, 72 fps with the dashboard. To measure worn again. The controller
+  models stay as they are (user: no visible change); the ovrstub log flood (~850 kernel log lines a second with the
+  controllers on) is gone.
 - Memory (user, 2026-11-05: "faut bien gérer ce problème de saturation"): right after boot, with
   SteamVR up, only ~500 MB is available and ~550 MB is already swapped (zram). Per process (Pss + swap
   + KGSL): Steam's webhelpers ~1.65 GB (two of them with 270 + 185 MB of GPU memory), vrcompositor
@@ -127,9 +132,10 @@ Open items, roughly by priority. Done items move to the commit log.
 - 90 Hz mode, selectable from the headset refresh rate setting (the Frame's quick menu / SteamVR's
   setting) (low priority). Base: github.com/TheCez/quest1-90hz-orangefox.
 
-- Steam's VR UI: the right controller's Oculus button uses the menu button's texture (SteamVR's
-  Quest render model). Fix the texture someday, e.g. from another Quest controller's Oculus button,
-  matching the menu button's look (user, 2026-11-03, low priority).
+- Steam's VR UI: the right controller's Oculus button used the menu button's texture (SteamVR's
+  Quest render model, user 2026-11-03). Fixed 2026-11-07: src/steamvr-quest1/mkrendermodel.py copies the model
+  into driver_quest1's resources with the Quest 2 controller's logo on that button (holo-steamvr.sh runs it).
+  Checked through IVRRenderModels; to look at in the headset (user).
 
 ## Passthrough
 - Shake/tilt (user, 2026-11-06: only the camera image, "almost nauseating"): not the kernel, the KGSL lazy rings, the capture

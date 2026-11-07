@@ -153,6 +153,10 @@ mixed): all 6 extensions reappeared, and a `=0` key removed `KHR_multiview`.
     (0x9e648). This is useful for checking in the journal.
 - **Recognised keys:** about 970 hashes, in the sorted compare chain of `0x15a360`.
   - Named so far: the **96 extension names themselves**, `GmemSize`, `RenderMode`.
+  - `RenderMode` (`0x1fd41fd8`) takes a name, hashed the same way, or `0x<hash>`, looked up in a 6-entry table
+    (0x18d358, {hash, mode}): `Direct` → 0 (render passes straight to memory, Turnip's "sysmem"), `Binning` → 2;
+    modes 1, 3, 4 and 5 (hashes 0x55215024, 0x16a727d8, 0x4b049807, 0x9a581972) are unnamed. SteamVR runs with
+    `Direct` (device/holo-frame-mode.sh, docs/direct-scanout.md). [V]
   - API-version keys exist: `0x7c0c0f03` → major, `0x7c2c8f03` → minor, `0x728fc3d3` → patch. Their names are
     unknown and the value parser was not checked. **Do not force 1.2**: the 1.2 core entry points and features are
     incomplete on A5xx. [I]

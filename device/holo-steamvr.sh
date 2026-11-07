@@ -10,6 +10,8 @@
 #  - resources/safe_mode_driver_whitelist.json: "quest1", so safe mode after a crash keeps our driver
 #  - /usr/local/bin/steamvr-q1 (the environment every SteamVR program runs with) and the /etc/quest1-direct-*
 #    and /etc/quest1-warp-lens defaults
+#  - the right controller's render model with the Oculus logo on its Oculus button (src/steamvr-quest1/mkrendermodel.py,
+#    into driver_quest1's resources)
 # Usage (root): holo-steamvr.sh install [steamvr dir, default $ROOT/opt/steamvr]
 # ROOT=<dir> works on a system image from outside (the installer's build): only python3 is needed on the host.
 set -e
@@ -123,3 +125,8 @@ chmod 755 "$ROOT/usr/local/bin/steamvr-q1"
 [ -f "$ROOT/etc/quest1-direct-scanout" ] || echo 1 > "$ROOT/etc/quest1-direct-scanout"
 [ -f "$ROOT/etc/quest1-direct-flip" ] || echo 19 > "$ROOT/etc/quest1-direct-flip"
 [ -f "$ROOT/etc/quest1-warp-lens" ] || echo 0 > "$ROOT/etc/quest1-warp-lens"
+# the right controller's render model, with the Oculus logo on its Oculus button instead of the menu glyph
+# (src/steamvr-quest1/mkrendermodel.py, made from this SteamVR's own models; driver_quest1 uses it when present)
+M=$(dirname "$0")/../src/steamvr-quest1/mkrendermodel.py
+[ -f "$M" ] || M=/usr/local/lib/holo/mkrendermodel.py
+if [ -f "$M" ]; then python3 "$M" "$R" "$ROOT/opt/quest1-steamvr/quest1"; else echo "no mkrendermodel.py: Oculus button glyph left as is" >&2; fi
