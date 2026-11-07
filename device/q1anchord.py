@@ -22,9 +22,11 @@
 #    the saved uuid stayed, so the frame stayed "anchor" for good and no map was ever saved again. Now:
 #      - once the persisted map is the current one and mapdb has not changed for a minute, mapdb is copied
 #        to /data/misc/tracking/mapdb.bak (same device, never off it);
-#      - `q1anchord restore` (trackingservice's ExecStartPre) puts that copy back when mapdb is empty;
-#      - an empty mapdb with a saved uuid (nothing to restore) is a lost map: the uuids are forgotten and a
-#        new map is persisted after the next 45 s worn.
+#      - `q1anchord restore` (android-q1anchord-restore.service, before trackingservice) puts that copy back when
+#        mapdb is empty;
+#      - a mapdb empty for 30 s with a saved uuid (nothing to restore) is a lost map: the uuids are forgotten and
+#        a new map is persisted after the next 45 s worn (the engine empties and rewrites mapdb within a second
+#        when it saves it: a single empty read is not a loss).
 #
 # Map files hold camera-derived data: they stay under /vision and /data, never in the repo.
 import os, re, struct, subprocess, sys, time
@@ -43,6 +45,7 @@ WORN_BEFORE_PERSIST = 45.0
 MAPDB = '/vision/insideout/mapdb'
 MAPBAK = '/data/misc/tracking/mapdb.bak'
 BACKUP_QUIET = 60.0  # mapdb unchanged this long before it is copied
+EMPTY_LOST = 30.0  # mapdb empty this long: the map is gone
 
 
 def svc(*a):
@@ -172,6 +175,7 @@ def main():
     last = ''
     sig, sig_since, backed = None, 0.0, None
     found, lost_logged = '', ''  # the saved map was the current one in this run; the map logged as temporary
+    empty_since = None  # since when mapdb has been empty
     while True:
         try:
             if os.path.exists(CLEAR):
@@ -188,7 +192,11 @@ def main():
                 cur = ''
             now = time.time()
             s = mapdb_sig()
-            if saved and not s:
+            # the engine rewrites every file of mapdb at once (deletes, then writes them again within a second): an
+            # empty mapdb is a lost map only once it has stayed empty for a while (2026-11-07: one read during such a
+            # rewrite dropped a good map and its copy)
+            empty_since = (empty_since or now) if not s else None
+            if saved and empty_since and now - empty_since > EMPTY_LOST:
                 print('q1anchord: map %s is gone from mapdb (deleted by the engine?): a new one will be saved' % saved,
                       flush=True)
                 drop_saved()
