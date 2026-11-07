@@ -42,6 +42,36 @@ samples per pixel), so ~40 fps. Monado no longer uses the GPU.
 **Problem**: nothing re-projects between vrcompositor's frames any more (Monado used to, at 72 Hz),
 so at ~36–40 fps the world judders when the head turns.
 
+### 2026-11-06: 72 fps with the dashboard shown
+
+vrcompositor's frames are serial: it records (CPU), submits, polls its fence every 100 µs until the GPU is done,
+then waits for the next vblank event. Its CPU time and its GPU time add up, and a frame that ends after the vblank
+costs a whole period. Measured with the panels on (`QUEST1_IGNORE_PROX=1` for Monado), head still, dashboard
+shown, passthrough on (`/root/tmp/bench.sh`-style: average of the layer's `display:` lines over 30 s):
+
+| Change | fps | render thread CPU per frame | GPU per frame |
+|---|---|---|---|
+| before | 53.1 | 4.04 ms | 11.5 ms |
+| `vkCmdUpdateBuffer` through the layer's staging (quest1_compat.c, `ub_*`) | 54.2 | 3.11 ms | 11.3 ms |
+| + UBWC scanout buffers (`QS_AHB_USAGE`) | 58.6 | 3.09 ms | 10.1 ms |
+| + 4 swapchain images | **71.9** | 3.04 ms | 10.2 ms |
+
+- **vkCmdUpdateBuffer**: the blob gave each one a 4 KB KGSL object of its own (alloc ioctl, mmap, IOMMU map, info
+  ioctl, and the unmap and free when the command buffer is reset): ~18 a frame, ~940 a second on the render
+  thread (`perf record -e kgsl:kgsl_mem_alloc --call-graph dwarf`). The layer copies the data into host-visible
+  buffers it keeps per command buffer and records a `vkCmdCopyBuffer` (the same transfer write).
+  `QUEST1_BLOB_UPDATEBUFFER=1` restores the blob's path.
+- **UBWC**: gralloc's `VENDOR_0` usage gives compressed buffers. vrcompositor's distortion pass writes ~2.3 ms
+  per eye into them instead of ~2.75 into linear ones, and Monado's warp reads them in ~1.2 ms instead of ~3 ms.
+  Tiled surfaces ignore the B8G8R8A8 swap (the Adreno stores them as RGBA, like Mesa's freedreno does): mdss scans
+  them as `MDP_RGBA_8888_UBWC` and Monado samples them without its red/blue swizzle (only applied when the layer
+  says `bgra`). Checked against a CDP capture of the same Steam page. Snapshots of UBWC buffers are GPU copies
+  into a linear buffer (`qs_snapshot_copy`); the linear snapshots used to have red and blue swapped.
+- **4 images**: Monado holds the image on the panels and the one queued for the next vsync, so with 3 the
+  next `vkAcquireNextImageKHR` waited for a vsync (~1.5 ms a frame on average, the margin that was missing).
+  The app's 2880x1600 images are only handles (never rendered to or read): they share one allocation, so the
+  fourth image costs only its two gralloc halves.
+
 ## Plan: Monado presents vrcompositor's frames and re-projects them
 
 Monado already has everything a 72 Hz re-projection needs: the head pose at any time, a

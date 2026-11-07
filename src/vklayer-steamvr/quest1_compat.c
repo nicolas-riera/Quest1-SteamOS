@@ -194,6 +194,14 @@ struct device
 	PFN_vkMapMemory MapMemory;
 	PFN_vkUnmapMemory UnmapMemory;
 	PFN_vkFreeMemory FreeMemory;
+	PFN_vkCreateBuffer CreateBuffer;
+	PFN_vkDestroyBuffer DestroyBuffer;
+	PFN_vkGetBufferMemoryRequirements GetBufferMemoryRequirements;
+	PFN_vkAllocateCommandBuffers AllocateCommandBuffers;
+	PFN_vkFreeCommandBuffers FreeCommandBuffers;
+	PFN_vkDestroyCommandPool DestroyCommandPool;
+	PFN_vkBeginCommandBuffer BeginCommandBuffer;
+	VkPhysicalDeviceMemoryProperties memprops; //!< for the vkCmdUpdateBuffer staging (ub_*)
 	void *fx;              //!< Facet emulation state (quest1_facet.c)
 	bool has_q0;           //!< first queue family of vkCreateDevice, for one-shot submissions
 	uint32_t q0_family;
@@ -1266,6 +1274,215 @@ static void u32_note(uint64_t b, uint64_t off, bool u32)
 	}
 }
 
+// --- vkCmdUpdateBuffer through a staging buffer of the layer ---------------------------------------
+// The blob gives every vkCmdUpdateBuffer a KGSL object of its own (4 KB, "vk_cmdbuffer") for the inline data and
+// frees it when the command buffer is reset. vrcompositor makes ~18 a frame: ~940 allocations a second on its
+// render thread, each an alloc ioctl, an mmap, an IOMMU map and an info ioctl, then the unmap and the free, while
+// its frames are serial (CPU, then GPU: its CPU time is frame time). The layer copies the data into host-visible
+// buffers of its own, kept per command buffer across resets, and records a vkCmdCopyBuffer from there: the same
+// transfer write to the same range, so the app's barriers still cover it. A command buffer is never pending when it
+// is begun again, freed or its pool destroyed (Vulkan's rules), so its staging is reused from the start at each
+// vkBeginCommandBuffer. Command buffers the layer did not see allocated (its own) keep the blob's path.
+#define UB_CHUNK (64 * 1024) // vkCmdUpdateBuffer's maximum size
+#define UB_BUCKETS 512
+
+struct ub_chunk
+{
+	VkBuffer buf;
+	VkDeviceMemory mem;
+	char *ptr;
+	struct ub_chunk *next;
+};
+
+struct ub_arena
+{
+	VkCommandBuffer cb;
+	VkCommandPool pool;
+	struct device *d;
+	struct ub_chunk *chunks, *cur; //!< cur: the chunk being filled
+	VkDeviceSize pos;
+	struct ub_arena *next;         //!< hash bucket
+};
+
+static struct ub_arena *ub_table[UB_BUCKETS];
+static pthread_mutex_t ub_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static unsigned ub_hash(const void *cb) { return (unsigned)(((uintptr_t)cb >> 4) * 2654435761u) % UB_BUCKETS; }
+
+static int ub_memory_type(struct device *d, uint32_t bits)
+{
+	const VkMemoryPropertyFlags want = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+	for (uint32_t i = 0; i < d->memprops.memoryTypeCount; i++)
+		if ((bits & (1u << i)) && (d->memprops.memoryTypes[i].propertyFlags & want) == want)
+			return (int)i;
+	return -1;
+}
+
+static struct ub_chunk *ub_chunk_new(struct device *d)
+{
+	VkDevice dev = d->handle;
+	struct ub_chunk *c = calloc(1, sizeof(*c));
+	VkBufferCreateInfo bci = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+	bci.size = UB_CHUNK;
+	bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+	bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	if (!c || d->CreateBuffer(dev, &bci, NULL, &c->buf) != VK_SUCCESS) {
+		free(c);
+		return NULL;
+	}
+	VkMemoryRequirements mr;
+	d->GetBufferMemoryRequirements(dev, c->buf, &mr);
+	int type = ub_memory_type(d, mr.memoryTypeBits);
+	VkMemoryAllocateInfo mai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+	mai.allocationSize = mr.size;
+	mai.memoryTypeIndex = type < 0 ? 0 : (uint32_t)type;
+	void *p = NULL;
+	if (type < 0 || d->AllocateMemory(dev, &mai, NULL, &c->mem) != VK_SUCCESS) {
+		d->DestroyBuffer(dev, c->buf, NULL);
+		free(c);
+		return NULL;
+	}
+	if (d->BindBufferMemory(dev, c->buf, c->mem, 0) != VK_SUCCESS || d->MapMemory(dev, c->mem, 0, VK_WHOLE_SIZE, 0, &p) != VK_SUCCESS) {
+		d->FreeMemory(dev, c->mem, NULL);
+		d->DestroyBuffer(dev, c->buf, NULL);
+		free(c);
+		return NULL;
+	}
+	c->ptr = p;
+	return c;
+}
+
+static void ub_arena_free(struct ub_arena *a)
+{
+	for (struct ub_chunk *c = a->chunks, *n; c; c = n) {
+		n = c->next;
+		a->d->UnmapMemory(a->d->handle, c->mem);
+		a->d->DestroyBuffer(a->d->handle, c->buf, NULL);
+		a->d->FreeMemory(a->d->handle, c->mem, NULL);
+		free(c);
+	}
+	free(a);
+}
+
+//! Under ub_lock.
+static struct ub_arena *ub_find(VkCommandBuffer cb)
+{
+	for (struct ub_arena *a = ub_table[ub_hash(cb)]; a; a = a->next)
+		if (a->cb == cb)
+			return a;
+	return NULL;
+}
+
+//! Takes out of the table the arenas of cb (cb != NULL), of a pool (cb == NULL) or of a device (pool and cb NULL), and
+//! frees them.
+static void ub_drop(struct device *d, VkCommandPool pool, VkCommandBuffer cb)
+{
+	struct ub_arena *gone = NULL;
+	pthread_mutex_lock(&ub_lock);
+	for (unsigned i = cb ? ub_hash(cb) : 0; i < (cb ? ub_hash(cb) + 1 : UB_BUCKETS); i++)
+		for (struct ub_arena **p = &ub_table[i]; *p;) {
+			struct ub_arena *a = *p;
+			if (a->d == d && (cb ? a->cb == cb : !pool || a->pool == pool)) {
+				*p = a->next;
+				a->next = gone;
+				gone = a;
+			} else {
+				p = &a->next;
+			}
+		}
+	pthread_mutex_unlock(&ub_lock);
+	for (struct ub_arena *n; gone; gone = n) {
+		n = gone->next;
+		ub_arena_free(gone);
+	}
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL AllocateCommandBuffers(VkDevice device, const VkCommandBufferAllocateInfo *ai,
+                                                             VkCommandBuffer *out)
+{
+	struct device *d = device_of(device);
+	VkResult r = d->AllocateCommandBuffers(device, ai, out);
+	if (r != VK_SUCCESS || getenv("QUEST1_BLOB_UPDATEBUFFER"))
+		return r;
+	for (uint32_t i = 0; i < ai->commandBufferCount; i++) {
+		struct ub_arena *a = calloc(1, sizeof(*a));
+		if (!a)
+			continue;
+		a->cb = out[i];
+		a->pool = ai->commandPool;
+		a->d = d;
+		pthread_mutex_lock(&ub_lock);
+		unsigned h = ub_hash(out[i]);
+		a->next = ub_table[h];
+		ub_table[h] = a;
+		pthread_mutex_unlock(&ub_lock);
+	}
+	return r;
+}
+
+static VKAPI_ATTR void VKAPI_CALL FreeCommandBuffers(VkDevice device, VkCommandPool pool, uint32_t n,
+                                                     const VkCommandBuffer *cbs)
+{
+	struct device *d = device_of(device);
+	for (uint32_t i = 0; i < n; i++)
+		if (cbs[i])
+			ub_drop(d, pool, cbs[i]);
+	d->FreeCommandBuffers(device, pool, n, cbs);
+}
+
+static VKAPI_ATTR void VKAPI_CALL DestroyCommandPool(VkDevice device, VkCommandPool pool, const VkAllocationCallbacks *alloc)
+{
+	struct device *d = device_of(device);
+	if (pool)
+		ub_drop(d, pool, NULL);
+	d->DestroyCommandPool(device, pool, alloc);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL BeginCommandBuffer(VkCommandBuffer cb, const VkCommandBufferBeginInfo *bi)
+{
+	pthread_mutex_lock(&ub_lock);
+	struct ub_arena *a = ub_find(cb);
+	pthread_mutex_unlock(&ub_lock);
+	if (a) {
+		a->cur = a->chunks;
+		a->pos = 0;
+	}
+	return device_of(cb)->BeginCommandBuffer(cb, bi);
+}
+
+//! Records data through the command buffer's staging, false if it has none (the caller uses the blob's path).
+static bool ub_update(struct device *d, VkCommandBuffer cb, VkBuffer b, VkDeviceSize off, VkDeviceSize size,
+                      const void *data)
+{
+	pthread_mutex_lock(&ub_lock);
+	struct ub_arena *a = ub_find(cb);
+	pthread_mutex_unlock(&ub_lock);
+	if (!a || size > UB_CHUNK)
+		return false;
+	// recording is externally synchronized: the arena is this thread's until it ends
+	if (a->cur && a->pos + size > UB_CHUNK) {
+		a->cur = a->cur->next;
+		a->pos = 0;
+	}
+	if (!a->cur) {
+		struct ub_chunk *c = ub_chunk_new(d);
+		if (!c)
+			return false;
+		// appended after the chunks in use: a later begin starts again from the first
+		struct ub_chunk **p = &a->chunks;
+		while (*p)
+			p = &(*p)->next;
+		*p = c;
+		a->cur = c;
+		a->pos = 0;
+	}
+	memcpy(a->cur->ptr + a->pos, data, size);
+	VkBufferCopy r = {a->pos, off, size};
+	d->CmdCopyBuffer(cb, a->cur->buf, b, 1, &r);
+	a->pos += (size + 15) & ~(VkDeviceSize)15;
+	return true;
+}
+
 static VKAPI_ATTR void VKAPI_CALL CmdUpdateBuffer(VkCommandBuffer cb, VkBuffer b, VkDeviceSize off, VkDeviceSize size,
                                                   const void *data)
 {
@@ -1273,7 +1490,9 @@ static VKAPI_ATTR void VKAPI_CALL CmdUpdateBuffer(VkCommandBuffer cb, VkBuffer b
 	pthread_mutex_lock(&u32_lock);
 	u32_note((uint64_t)b, off, u32);
 	pthread_mutex_unlock(&u32_lock);
-	device_of(cb)->CmdUpdateBuffer(cb, b, off, size, data);
+	struct device *d = device_of(cb);
+	if (!ub_update(d, cb, b, off, size, data))
+		d->CmdUpdateBuffer(cb, b, off, size, data);
 }
 
 static VKAPI_ATTR void VKAPI_CALL CmdCopyBuffer(VkCommandBuffer cb, VkBuffer src, VkBuffer dst, uint32_t n,
@@ -2173,7 +2392,15 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice pd, const Vk
 	GET(MapMemory);
 	GET(UnmapMemory);
 	GET(FreeMemory);
+	GET(CreateBuffer);
+	GET(DestroyBuffer);
+	GET(GetBufferMemoryRequirements);
+	GET(AllocateCommandBuffers);
+	GET(FreeCommandBuffers);
+	GET(DestroyCommandPool);
+	GET(BeginCommandBuffer);
 #undef GET
+	((PFN_vkGetPhysicalDeviceMemoryProperties)gipa(in->handle, "vkGetPhysicalDeviceMemoryProperties"))(pd, &d->memprops);
 	pthread_mutex_init(&d->mutex, NULL);
 	pthread_mutex_init(&d->queue_mutex, NULL);
 	pthread_cond_init(&d->cond, NULL);
@@ -2195,6 +2422,7 @@ static VKAPI_ATTR void VKAPI_CALL DestroyDevice(VkDevice device, const VkAllocat
 	struct device *d = device_of(device);
 	drain(d);
 	fx_destroy(d);
+	ub_drop(d, VK_NULL_HANDLE, NULL);
 	pthread_mutex_lock(&d->mutex);
 	d->stop = true;
 	pthread_cond_broadcast(&d->cond);
@@ -2275,6 +2503,10 @@ static PFN_vkVoidFunction device_intercept(const char *name)
 	I("vkMapMemory", MapMemory)
 	I("vkUnmapMemory", UnmapMemory)
 	I("vkFreeMemory", FreeMemory)
+	I("vkAllocateCommandBuffers", AllocateCommandBuffers)
+	I("vkFreeCommandBuffers", FreeCommandBuffers)
+	I("vkDestroyCommandPool", DestroyCommandPool)
+	I("vkBeginCommandBuffer", BeginCommandBuffer)
 #undef I
 	return NULL;
 }

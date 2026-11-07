@@ -704,6 +704,10 @@ static VKAPI_ATTR VkResult VKAPI_CALL qd_CreateSwapchainKHR(VkDevice device, con
 	sc->sock = -1;
 	sc->mon_sock = -1;
 	sc->count = ci->minImageCount < 3 ? 3 : ci->minImageCount;
+	// direct scanout: Monado holds the image on the panels and the one queued for the next vsync, so with 3 the
+	// next acquire waited for a vsync (~1.5 ms a frame on average, 2026-11-06)
+	if (qs_enabled() && sc->count < 4)
+		sc->count = 4;
 	if (sc->count > QD_MAX_IMAGES)
 		sc->count = QD_MAX_IMAGES;
 	pthread_mutex_init(&sc->mutex, NULL);

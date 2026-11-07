@@ -1166,9 +1166,11 @@ warp_import(struct mdp_target *t, struct direct_buf *b, bool output)
 	    .format = VK_FORMAT_R8G8B8A8_UNORM,
 	    .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
 	};
-	// mdss scans MDP_RGBA_8888_UBWC out with red and blue swapped (blue shows orange): with UBWC
-	// outputs, the warp samples its (linear) inputs swapped back
-	if (!output && D->out[0][0].ubwc) {
+	// The layer's linear buffers hold BGRA bytes (vrcompositor's B8G8R8A8 views): read through this R8G8B8A8
+	// view, red and blue come swapped. A linear output is committed as BGRA again, but a UBWC output only
+	// exists as MDP_RGBA_8888_UBWC: the warp then samples such inputs swapped back. The layer's UBWC buffers
+	// are RGBA already (tiled surfaces ignore the BGRA swap) and say so (bgra 0).
+	if (!output && D->out[0][0].ubwc && D->bgra) {
 		vci.components = (VkComponentMapping){VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_G,
 		                                      VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_A};
 	}

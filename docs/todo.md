@@ -5,6 +5,12 @@ Open items, roughly by priority. Done items move to the commit log.
 ## Performance
 - Target (user, 2026-11-05): 72 fps with a usable Steam (the dashboard is very slow), with headroom left
   for streaming and desktop mode. Fewer translation/emulation layers is an avenue to weigh.
+- 2026-11-06 night: 72 fps with the dashboard shown, head still, passthrough on (was 53): vkCmdUpdateBuffer
+  staging, UBWC scanout buffers, 4 swapchain images (docs/direct-scanout.md). Measured on a table with the panels
+  forced on; to confirm worn, with the controllers in view (they cost ~5 ms of GPU a frame, see below) and
+  moving the head (Monado's warp). Next: the LSE trap path (do_undefinstr takes a global spinlock per trap and
+  emulate_atomic does two exclusive loops: ~18 % of vrcompositor's render thread), the passthrough mesh pass
+  (~1.4 ms per eye), the controller models.
 - Memory (user, 2026-11-05: "faut bien gérer ce problème de saturation"): right after boot, with
   SteamVR up, only ~500 MB is available and ~550 MB is already swapped (zram). Per process (Pss + swap
   + KGSL): Steam's webhelpers ~1.65 GB (two of them with 270 + 185 MB of GPU memory), vrcompositor
