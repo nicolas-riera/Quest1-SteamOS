@@ -177,10 +177,10 @@ Open items, roughly by priority. Done items move to the commit log.
   `device/holo-perf.sh`.
 
 ## Steam and desktop
-- The "+" menu's Desktop entry ignores laser clicks unless Steam sees a gamepad (user, 2026-11-06: works while a DualSense
-  is connected, not after; the click never calls `Apps.LaunchNonSteamApp`, the launch itself works). On the Frame its
-  controllers are a gamepad for Steam by default and the grip brings the laser (user). Expose the Touch controllers to
-  Steam the same way (a Steam Input gamepad, grip = laser).
+- The "+" menu's Desktop entry took several clicks (user, 2026-11-06). Found: a click during the first seconds of a
+  launch signalled `q1desktop` before it had its SIGUSR1 handler and ended the desktop; a click while the last desktop
+  was ending was dropped. Both fixed (docs/desktop.md); a click on the entry (DOM events) launches it once, and four
+  launches 1 s apart give one desktop. Left: confirm with the laser in the headset (user).
 - Discover showed no apps and asked for flatpak (user, 2026-11-06): polkit refused Flatpak's system actions to steamos
   (SteamOS's rule wants wheel and an active seat session), so the Flathub catalogue was never deployed ("DeployAppstream
   not allowed"). Fixed in holo-frame-mode.sh's polkit rule; Discover lists Flathub's apps (checked on the desktop's
