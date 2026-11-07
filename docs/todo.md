@@ -182,8 +182,6 @@ Open items, roughly by priority. Done items move to the commit log.
   - Frame rate in step 7: ~30 fps after a clean boot, as outside the setup (see Performance).
   - ComputeInverseDistortion returns identity while direct scanout distorts (distort_geom_* shaders place
     geometry with the inverse LUT).
-  - steamvr-q1 exports QUEST1_COMPAT_SPIRV empty, and the layer checks getenv() != NULL, so the pipeline
-    logging is always on (log noise).
   - Test in the headset: Recenter and Clear playspace, and relocalization after a reboot in the persisted
     map (`q1anchord`, docs/boundary.md).
 - Pairing Quest controllers from the headset (Steam's UI). Pairing goes through SyncBoss

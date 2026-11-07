@@ -1074,6 +1074,13 @@ static VKAPI_ATTR VkResult VKAPI_CALL WaitForFences(VkDevice device, uint32_t n,
 }
 
 // --- shader modules -------------------------------------------------------------------------------------
+//! QUEST1_COMPAT_SPIRV set and not empty or "0" (steamvr-q1 and the frame-mode unit export it empty).
+static bool spirv_debug(void)
+{
+	const char *e = getenv("QUEST1_COMPAT_SPIRV");
+	return e && *e && strcmp(e, "0") != 0;
+}
+
 // QUEST1_COMPAT_SPIRV=1 logs the capabilities of every module (the Adreno compiler crashes on some),
 // =2 also writes them to /tmp/quest1-spirv/<n>.spv
 
@@ -1799,7 +1806,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateShaderModule(VkDevice device, const 
 		ci = &rewritten;
 		LOG("shader module: gl_Layer/gl_ViewportIndex turned into private variables\n");
 	}
-	const char *dbg = getenv("QUEST1_COMPAT_SPIRV");
+	const char *dbg = spirv_debug() ? getenv("QUEST1_COMPAT_SPIRV") : NULL;
 	if (dbg && ci->codeSize >= 20 && ci->pCode[0] == 0x07230203) {
 		unsigned n = atomic_fetch_add(&counter, 1);
 		char caps[512] = "";
@@ -2249,11 +2256,11 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateGraphicsPipelines(VkDevice device, V
                                                               const VkGraphicsPipelineCreateInfo *ci,
                                                               const VkAllocationCallbacks *alloc, VkPipeline *out)
 {
-	if (getenv("QUEST1_COMPAT_SPIRV"))
+	if (spirv_debug())
 		for (uint32_t i = 0; i < n; i++)
 			log_stages("graphics pipeline", ci[i].pStages, ci[i].stageCount);
 	VkResult r = device_of(device)->CreateGraphicsPipelines(device, cache, n, ci, alloc, out);
-	if (getenv("QUEST1_COMPAT_SPIRV"))
+	if (spirv_debug())
 		LOG("  -> %d, pipeline %p\n", r, n ? (void *)out[0] : NULL);
 	if (r != VK_SUCCESS) {
 		bool all = true;
@@ -2273,11 +2280,11 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateComputePipelines(VkDevice device, Vk
                                                              const VkComputePipelineCreateInfo *ci,
                                                              const VkAllocationCallbacks *alloc, VkPipeline *out)
 {
-	if (getenv("QUEST1_COMPAT_SPIRV"))
+	if (spirv_debug())
 		for (uint32_t i = 0; i < n; i++)
 			log_stages("compute pipeline", &ci[i].stage, 1);
 	VkResult r = device_of(device)->CreateComputePipelines(device, cache, n, ci, alloc, out);
-	if (getenv("QUEST1_COMPAT_SPIRV"))
+	if (spirv_debug())
 		LOG("  -> %d\n", r);
 	return r;
 }
