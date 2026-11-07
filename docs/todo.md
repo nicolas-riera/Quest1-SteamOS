@@ -138,6 +138,14 @@ Open items, roughly by priority. Done items move to the commit log.
   Checked through IVRRenderModels; to look at in the headset (user).
 
 ## Passthrough
+- 2026-11-07 (user: view frozen, camera LEDs off): Meta's tracking stopped at 09:58:39, ~3 min after boot
+  (q1trackd 0 valid samples, status 85 -> 0), right after "ProcessMaybeDead vrguardianservice/vrruntimeservice" and
+  "MapDB: Deleting 3 corrupted entrees". Restarting the stack failed at first: sb-free's per-descriptor readlink
+  loop outlasted the sensors HAL's start timeout (fixed: one find). `holo-android-tracking meta-on` (Monado after
+  the stack, as at boot) brought it back. Same boot: udev helpers hung ~3 min and were killed (v4l_id on
+  /dev/video1 = msm_jpegdma, scsi_id on sdb/sdd, libinput-device-group on the power key's event0), so event0 kept
+  root 0600 and quest1-powerbutton/volkeys crash-looped (fixed by hand: udevadm trigger --action=add). Find what
+  blocks them at boot and whether it is linked to the tracking loss (first boot of the devpts kernel).
 - Shake/tilt (user, 2026-11-06: only the camera image, "almost nauseating"): not the kernel, the KGSL lazy rings, the capture
   poses or the frame order (docs/passthrough.md, what it is not); next: Meta's depth engine through MrSystemServiceIPCServer
   instead of our fixed mesh (user's call).

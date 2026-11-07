@@ -286,19 +286,18 @@ fb_users() { # processes holding /dev/fb0 open
 	done | sort -u | while read -r p; do echo "$p $(cat /proc/$p/comm 2>/dev/null)"; done
 }
 sb_free() { # ExecStartPre of the sensors HAL: nobody else may drive SyncBoss (powerstate is shared)
-	busy=$(for f in /proc/[0-9]*/fd/*; do
-		case "$(readlink "$f" 2>/dev/null)" in
-		/dev/syncboss0|/dev/syncboss_control0|/dev/syncboss_stream0) p=${f#/proc/}; echo "${p%%/*}" ;;
-		esac
-	done | sort -u | while read -r p; do echo "$p $(cat /proc/$p/comm 2>/dev/null)"; done)
+	# one find, not a readlink per descriptor: with Steam up there are thousands, and the per-fd forks outlasted
+	# the unit's start timeout (2026-11-07: the stack could not be restarted)
+	busy=$(find /proc/[0-9]*/fd -maxdepth 1 \( -lname /dev/syncboss0 -o -lname /dev/syncboss_control0 \
+		-o -lname /dev/syncboss_stream0 \) 2>/dev/null | cut -d/ -f3 | sort -u |
+		while read -r p; do echo "$p $(cat /proc/$p/comm 2>/dev/null)"; done)
 	[ -z "$busy" ] && return 0
 	echo "SyncBoss is in use (Monado in IMU mode? holo-android-tracking meta-on): $busy"
 	return 1
 }
 sb_users() { # processes holding /dev/syncboss* open
-	for f in /proc/[0-9]*/fd/*; do
-		case "$(readlink "$f" 2>/dev/null)" in /dev/syncboss*) p=${f#/proc/}; echo "${p%%/*}" ;; esac
-	done | sort -u | while read -r p; do echo "$p $(cat /proc/$p/comm 2>/dev/null)"; done
+	find /proc/[0-9]*/fd -maxdepth 1 -lname "/dev/syncboss*" 2>/dev/null | cut -d/ -f3 | sort -u |
+		while read -r p; do echo "$p $(cat /proc/$p/comm 2>/dev/null)"; done
 }
 pids_of() { systemctl show -p MainPID --value "$@" | grep -v '^0$'; }
 snapshot() { # $1 = output file: thread states and pending binder transactions of the stack
