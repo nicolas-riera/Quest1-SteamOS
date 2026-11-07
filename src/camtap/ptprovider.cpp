@@ -208,7 +208,7 @@ static void FillDesc(uint8_t *desc, double captureS, const Calib &cal, const Hmd
 	// into the shader's _m3, which projects head-space points (the depth mesh's frame) into the camera.
 	// +96: the same pose: vrcompositor (0x160a80) draws each eye with the camera nearest to it, comparing these with the eye
 	// positions (when params byte 1, state[3], is set: SetShow).
-	// +144: the head pose at capture (raw tracking space, like the depth mesh)
+	// +144: the head pose at capture (raw tracking space, rotation only: see below)
 	float m1[12];
 	for (int r = 0; r < 3; r++)
 		for (int c = 0; c < 4; c++)
@@ -573,6 +573,13 @@ int main()
 				VRSystem()->GetDeviceToAbsoluteTrackingPose(TrackingUniverseRawAndUncalibrated, 0, &hp, 1);
 				head = hp.bPoseIsValid ? hp.mDeviceToAbsoluteTracking : HmdMatrix34_t{{{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}}};
 			}
+			// Rotation only: vrcompositor turns the capture-to-display rotation about +144's position, so with the head's raw
+			// position (1.65 m above the floor, metres away once walking) every pitch or roll between capture and display also
+			// moved the image (the shake and tilt). Measured 2026-11-07 with the head still and SteamVR's pose turned by
+			// +-10 degrees: with the position the camera image moved -134/+114 px against the room's -162/+163, without it
+			// -157/+150 against -168/+157 (yaw: -152 against -164; the rest is the lens). The static image is the same.
+			for (int r = 0; r < 3; r++)
+				head.m[r][3] = 0;
 			for (int c = 0; c < 2; c++) {
 				FillDesc((uint8_t *)Rec(c, slot[c]) + 4, capS, calib[c], head);
 				__atomic_store_n(Rec(c, slot[c]), 1u, __ATOMIC_RELEASE); // frame ready

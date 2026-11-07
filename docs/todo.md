@@ -149,9 +149,10 @@ Open items, roughly by priority. Done items move to the commit log.
   That boot the cameras never powered up either (trackingservice: "Timeout: (power: SLEEP) => (power: STANDBY)"
   every second from 09:56:20, so 3DoF only; restarting the stack did not help). The next boot, same kernel, was
   clean (6DoF, no udev stall): a boot race in the camera drivers, to catch again with its logs.
-- Shake/tilt (user, 2026-11-06: only the camera image, "almost nauseating"): not the kernel, the KGSL lazy rings, the capture
-  poses or the frame order (docs/passthrough.md, what it is not); next: Meta's depth engine through MrSystemServiceIPCServer
-  instead of our fixed mesh (user's call).
+- Shake/tilt (user, 2026-11-06: only the camera image, "almost nauseating"): vrcompositor turned the capture-to-display
+  rotation about the capture pose's position (the head 1.65 m above the floor), so every pitch or roll also moved the image.
+  Fixed 2026-11-07 (ptprovider gives +144 as a rotation only; measured, docs/passthrough.md). To confirm worn (user). Then
+  Meta's depth engine through MrSystemServiceIPCServer instead of our fixed mesh (user's call).
 - Regression (user, 2026-11-05 night): passthrough shakes a lot and tends to tilt when the head moves.
   Broken by that night's memory work; suspects, in order: the KGSL lazy rings (first-touch page faults in
   vrcompositor's 256 MB ring, kernel/kgsl-lazy.patch and the compat layer's hint), zram zstd (slower

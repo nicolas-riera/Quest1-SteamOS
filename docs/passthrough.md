@@ -372,12 +372,22 @@ roomview's uniform buffer was read from vrcompositor (a few short debugger attac
   grows as the user walks, so any capture-to-display rotation shifts the view by |theta x p| on the 3 m sphere. That
   fits the shake coming back after the 2026-11-05 room setup (6DoF anchor), and the tilts (pitch and roll act even
   at p = (0, 1.65, 0)).
-- Sign, unconfirmed: +10 degrees of yaw in +144 (capture pose further left than the display pose) moved the camera
-  image 148 px to the right (~14.8 px/degree); physically it should go left, if +144 is the capture pose. Read so, the
-  compositor's correction is inverted for our feed and the error doubles: 2 * omega * (age + prediction). The other
-  reading: +144 is meant as the display-side pose and vrcompositor looks the capture pose up in its own pose history
-  from the record's time (+8).
+- Sign: settled 2026-11-07 (below), the compositor's rotation is right. The "+10 degrees of yaw in +144 moved the image
+  right" reading was wrong: that is what a capture pose further left must do.
 
-Next: settle the sign physically (driver-only head pose offset plus a world-locked overlay marker, compare the
-marker's shift with the camera image's), then feed +144 so X is right (head-relative, or the mirrored rotation
-R_P * R_G^T * R_P from the latest raw pose), A/B with the user; depth after that.
+### Measured and fixed (2026-11-07, head still on a table)
+
+Test rig: a temporary knob in driver_quest1 turned the HMD pose SteamVR gets (not Monado's, not the capture poses) by a
+head-frame yaw or pitch, as if the head had turned between capture and display; the dashboard (world-locked) is the
+reference; shifts from layer snapshots by profile correlation, a band of the dashboard and a band of camera image only.
+- Yaw +10 degrees: dashboard -164 px, camera image -152 px. Same direction: the compositor's correction has the right sign
+  (the 7 % less is the lens: the camera band sits lower, where there are fewer pixels per degree).
+- Pitch +-10 degrees: dashboard -162/+163 px, camera image -134/+114 px. The asymmetry is the pivot above (a pitch about
+  the floor also translates the view).
+- `rawFromMeshPose` (the mesh's own pose, given as the head's raw position) changes nothing. +144 with its translation
+  zeroed: the static image is unchanged and pitch gives -157/+150 against -168/+157 (yaw as before): the pivot is
+  +144's position.
+- Fix: ptprovider writes +144 as the capture **rotation only** (translation 0). Pitch +-10 after: camera -156/+150,
+  dashboard -156/+169. The compositor so corrects rotation only between capture and display (like Monado's warp); a
+  head translation in those ~60 ms (a few cm walking) is not corrected, below a degree on the 3 m sphere.
+- To confirm worn (user): the shake and tilt when the head moves. Depth (a real mesh) after that.
