@@ -371,6 +371,8 @@ struct Hand
 	bool recenteredThisHold = false;
 	double lastValid = -10;
 	bool wasValid = false;
+	//! Meta mode: the cameras have tracked it since the head's position was last lost (else it is searching)
+	bool seenTracked = false;
 	Vec lastUp{0, 1, 0}; //!< world up in the IMU frame, for the calibration
 	bool haveUp = false;
 	Vec calForward, calDown; //!< calibration samples: up while pointing forward / down
@@ -405,7 +407,7 @@ struct State
 	void PollPress();
 
 	void Loop();
-	void UpdateHand(int h, double now, const XrPosef &head, bool headValid);
+	void UpdateHand(int h, double now, const XrPosef &head, bool headValid, bool headTracked);
 	void ReadKnobs();
 	void PollCalibration();
 	void LoadCalibration();
@@ -638,7 +640,7 @@ void State::ReadKnobs()
 //! Hold the system button (menu / Oculus) this long to point the controller where the head looks.
 constexpr double kRecenterHold = 1.2; // Monado recenters the IMU heading at 1 s, this comes after
 
-void State::UpdateHand(int h, double now, const XrPosef &headPose, bool headValid)
+void State::UpdateHand(int h, double now, const XrPosef &headPose, bool headValid, bool headTracked)
 {
 	TouchController *d = dev[h];
 	Hand &hd = hands[h];
@@ -803,6 +805,20 @@ void State::UpdateHand(int h, double now, const XrPosef &headPose, bool headVali
 		}
 		p.poseIsValid = true;
 		p.result = TrackingResult_Running_OK;
+		// Meta mode: after the head's tracking comes back (and at start), a controller its cameras have not seen
+		// yet has only an IMU-predicted position, often far off: shown as searching (connected, buttons working,
+		// not drawn) until its first tracked position, as Meta's OS does (user, 2026-11-05). While the head itself
+		// is lost the controllers stay as they are.
+		if (MetaTracking()) {
+			if (!headTracked)
+				hd.seenTracked = false;
+			else if (loc.locationFlags & XR_SPACE_LOCATION_POSITION_TRACKED_BIT)
+				hd.seenTracked = true;
+			if (headTracked && !hd.seenTracked) {
+				p.poseIsValid = false;
+				p.result = TrackingResult_Running_OutOfRange;
+			}
+		}
 
 		if (debug) {
 			static double lastDbg[2];
@@ -819,6 +835,7 @@ void State::UpdateHand(int h, double now, const XrPosef &headPose, bool headVali
 	} else {
 		p.poseIsValid = false;
 		p.result = TrackingResult_Running_OutOfRange;
+		hd.seenTracked = false;
 	}
 	p.willDriftInYaw = !MetaTracking();
 	// asleep controllers stop reporting: show them as off after a second without a pose
@@ -879,8 +896,9 @@ void State::Loop()
 		XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
 		bool headValid = XR_SUCCEEDED(cxrLocateSpace(view, xr.local, xr.now(), &head)) &&
 		                 (head.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT);
+		bool headTracked = headValid && (head.locationFlags & XR_SPACE_LOCATION_POSITION_TRACKED_BIT);
 		for (int h = 0; h < 2; h++)
-			UpdateHand(h, now, head.pose, headValid);
+			UpdateHand(h, now, head.pose, headValid, headTracked);
 	}
 }
 

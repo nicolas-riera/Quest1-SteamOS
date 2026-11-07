@@ -255,6 +255,10 @@ public:
 	//! The head's pose in SteamVR's raw space (as the HMD pose: floor and anchor applied) at a CLOCK_MONOTONIC time
 	bool LocateRawAt(int64_t monoNs, HmdMatrix34_t &raw);
 	void ApplyNeckModel(XrSpaceLocation &loc);
+	void HoldPosition(XrSpaceLocation &loc);
+	std::mutex holdMutex;
+	XrVector3f lastTrackedPos = {};
+	bool haveTrackedPos = false;
 	int64_t lastWhenNs = 0; //!< CLOCK_MONOTONIC time of the last LocateAhead's prediction (same thread as its caller)
 	void RecordFramePose(uint64_t frame, const XrPosef &pose);
 	std::function<void(uint64_t presentedFrame)> onPresent;
@@ -640,6 +644,7 @@ bool XrBackend::LocateAhead(DriverPose_t &pose, XrPosef *xrPose)
 		pose.result = TrackingResult_Running_OutOfRange;
 		return false;
 	}
+	HoldPosition(loc);
 	ApplyNeckModel(loc);
 	*xrPose = loc.pose;
 	Quest1FrameUpdate(loc.pose, (loc.locationFlags & XR_SPACE_LOCATION_POSITION_TRACKED_BIT) != 0);
@@ -653,6 +658,20 @@ bool XrBackend::LocateAhead(DriverPose_t &pose, XrPosef *xrPose)
 	pose.poseIsValid = true;
 	pose.willDriftInYaw = true; // 3DoF IMU, no magnetometer
 	return true;
+}
+
+//! Tracking lost (Meta's 6DoF status falls to 0, Monado clears POSITION_TRACKED and its position goes to the origin, which
+//! put the head on the floor): keep the last tracked position, the head turning about it with the neck model, as Meta's
+//! OS does. A head never tracked since SteamVR started (3DoF, cameras off) is unchanged.
+void XrBackend::HoldPosition(XrSpaceLocation &loc)
+{
+	std::lock_guard<std::mutex> l(holdMutex);
+	if (loc.locationFlags & XR_SPACE_LOCATION_POSITION_TRACKED_BIT) {
+		lastTrackedPos = loc.pose.position;
+		haveTrackedPos = true;
+	} else if (haveTrackedPos) {
+		loc.pose.position = lastTrackedPos;
+	}
 }
 
 void XrBackend::ApplyNeckModel(XrSpaceLocation &loc)
@@ -683,6 +702,7 @@ bool XrBackend::LocateRawAt(int64_t monoNs, HmdMatrix34_t &raw)
 	XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
 	if (XR_FAILED(pxrLocateSpace(view, local, when, &loc)) || !(loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT))
 		return false;
+	HoldPosition(loc);
 	ApplyNeckModel(loc);
 	DriverPose_t p = {};
 	Quest1FrameApply(p);

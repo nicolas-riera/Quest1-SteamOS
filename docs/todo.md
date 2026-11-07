@@ -96,10 +96,10 @@ Open items, roughly by priority. Done items move to the commit log.
   every vsync with 3 samples: more GPU in total. Compare sharpness with the user once perf allows.
 
 ## Tracking
-- When the headset loses tracking it jumps to the floor at (0, 0, 0) instead of holding its last pose
-  (user, 2026-11-05). Expected: keep the last position (rotation from the IMU only), like Meta's OS.
-- When tracking comes back the controllers are drawn at once even while the cameras haven't seen them
-  yet, instead of showing as "searching" until they are found (user, 2026-11-05).
+- When the headset loses tracking it jumped to the floor (user, 2026-11-05). Since 2026-11-07 driver_quest1 keeps the
+  last tracked position while Monado reports none (rotation from the IMU, neck model), checked with a simulated loss;
+  when tracking comes back, a controller the cameras have not seen again shows as searching (connected, buttons
+  working, not drawn) until its first tracked position. To confirm in the headset with a real loss (user).
 - Spatial anchors work very badly (user, 2026-11-05 night): after a tracking loss the headset has a hard
   time finding where it was (relocalizing in the persisted map; q1anchord, /run/q1track/frame-state).
 
@@ -188,9 +188,8 @@ Open items, roughly by priority. Done items move to the commit log.
     map (`q1anchord`, docs/boundary.md).
 - Pairing Quest controllers from the headset (Steam's UI). Pairing goes through SyncBoss
   (`syncboss_input_pair`): never call it without the user's explicit go.
-- Controller connection state: a powered-off controller now turns disconnected within 0.3 s
-  (tested 2026-11-03). Left to check at the next boot: right after the tracking service starts, a
-  controller it has not seen yet should stay "searching" until its first tracked position.
+- Controller connection state: a powered-off controller turns disconnected within 0.3 s (tested 2026-11-03); one the
+  cameras have not tracked yet (start, or after the head's tracking came back) shows as searching (2026-11-07, Tracking).
 
 ## Power
 - Power button and sleep work (2026-11-02: short press = Steam's sleep, panels off and Meta's
