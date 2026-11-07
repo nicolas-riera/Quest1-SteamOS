@@ -40,6 +40,11 @@ Everything above is the same, except gamescope:
   (its children get `9>&-`), and closing the desktop ends every process of the nested session, found by its
   `XDG_RUNTIME_DIR`: `kcminit` leaves Plasma's process group, outlived the desktop (stuck once kwin is gone)
   and kept the lock, so every later launch showed nothing (user, 2026-11-05).
+  `q1desktop` starts with SIGUSR1 ignored (its handler comes after SteamVR's init, seconds later): a click in
+  that window used to end it, and the desktop with it. A launch that finds the lock taken but no `q1desktop`
+  (the last desktop was just closed and is still ending) waits for the lock (20 s) and opens a new one
+  instead of being lost. Timeline of one launch (2026-11-06, Steam's `LaunchNonSteamApp` called directly):
+  the overlay is shown, black, after 3 s, KDE's splash spinner is on it at ~5 s, Plasma's desktop at ~14 s.
 - Steam passes its own environment on: our Vulkan shim first in `LD_LIBRARY_PATH` and Steam's runtime after it.
   Every Qt program probes Vulkan, and the shim without libhybris' TLS preload crashed them (ksplash, kded6, the
   portals; plasmashell never came up, a black desktop). The script starts Plasma with the system's environment

@@ -73,8 +73,10 @@ function cleanup()
 # this script's alone (9>&- below): a child left behind must not keep it.
 exec 9>"$XDG_RUNTIME_DIR/nested_plasma.lock"
 if ! flock -n 9; then
-    pkill -USR1 -x q1desktop || true
-    exit 0
+    pkill -USR1 -x q1desktop && exit 0
+    # No overlay: either the running launch hasn't started q1desktop yet (it shows itself), or the last desktop
+    # was just closed and is still ending. In that case this click must open a new one, not be lost.
+    flock -w 20 9 || exit 0
 fi
 # Steam starts apps with the C locale here: the system's
 [ -r /etc/locale.conf ] && . /etc/locale.conf && export LANG
@@ -100,6 +102,10 @@ Xvfb :$n -screen 0 ${W}x${H}x24 -fbdir $NEW_XDG_RUNTIME_DIR/xvfb -nolisten tcp -
 pids+=($!)
 for i in $(seq 50); do [ -e /tmp/.X11-unix/X$n ] && break; sleep 0.1; done
 export DISPLAY=:$n
+# Quest 1: a second launch signals q1desktop (above). A SIGUSR1 before q1desktop has its handler (after
+# SteamVR's init, seconds) ended it, and the desktop with it: every launch died this way and only a lucky
+# click got through. It starts with the signal ignored, its handler replaces that.
+trap '' USR1
 LD_PRELOAD=/opt/hybris/lib/libbionictls.so \
 LD_LIBRARY_PATH=/usr/local/lib/quest1-vk-steam:/opt/hybris/lib \
 QUEST1_STEAMVR_COMPAT=1 \
@@ -107,6 +113,7 @@ Q1D_ICON=${Q1D_ICON:-/usr/share/applications/steam/steamos-nested-desktop/icon.p
     /usr/local/bin/q1desktop $NEW_XDG_RUNTIME_DIR/xvfb/Xvfb_screen0 9>&- &
 q1d=$!
 pids+=($q1d)
+trap - USR1
 
 ## Shadow kwin_wayland_wrapper so that we can pass args to kwin wrapper
 ## whilst being launched by plasma-session
