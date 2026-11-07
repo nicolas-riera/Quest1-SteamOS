@@ -117,7 +117,7 @@ g++ -std=c++17 -O2 -fPIC -shared -fvisibility=hidden -Wall -Wno-missing-field-in
 	-o $V/bin/linuxarm64/driver_quest1.so driver_quest1.cpp chaperone_frame.cpp controllers.cpp battery.cpp camera.cpp \
 	-ldl -lpthread -static-libstdc++ -static-libgcc -Wl,--no-undefined
 cp quest1/driver.vrdrivermanifest $V/; cp quest1/resources/input/*.json $V/resources/input/
-cp quest1/resources/settings/default.vrsettings $V/resources/settings/
+cp quest1/resources/settings/*.vrsettings quest1/resources/settings/*.json $V/resources/settings/
 g++ -std=c++17 -O2 -o $D/usr/local/bin/vrdash vrdash.cpp $OVR
 cd "$R/src/camtap"
 g++ -std=c++17 -O2 -o $D/usr/local/bin/q1-camoverlay camoverlay.cpp $OVR

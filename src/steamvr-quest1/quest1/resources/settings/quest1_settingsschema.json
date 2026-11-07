@@ -1,0 +1,15 @@
+{
+	"title": "Oculus Quest",
+	"controller": "quest1_settings",
+	"driver": "quest1",
+	"values": [
+		{
+			"name": "/settings/driver_quest1/clearSpatialAnchors",
+			"control": "toggle",
+			"label": "Clear the spatial anchor map",
+			"text": "Forgets the room map the headset finds its place in after a restart or a tracking loss. A new map is saved once the headset has been worn for about a minute; set the playspace up again then. The switch turns back off by itself.",
+			"off_label": "Clear",
+			"on_label": "Clearing"
+		}
+	]
+}

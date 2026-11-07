@@ -116,6 +116,26 @@ export QUEST1_DISPLAY_SIZE=${QUEST1_DISPLAY_SIZE:-1836x1020}
 [ -f /etc/quest1-direct-nofull ] && export QUEST1_DIRECT_NO_FULL_PASS=1 # debug
 [ -f /etc/quest1-spirv-dump ] && export QUEST1_COMPAT_SPIRV=2 # debug
 prog=${1:-vrserver}; [ $# -gt 0 ] && shift
+# the "Oculus Quest" page of SteamVR's settings: vrserver reads its settings schema from VR_SETTINGSSCHEMA_FILE when
+# set (a path relative to its resources directory); this SteamVR's own schema with driver_quest1's section added, made
+# again at each start (SteamVR updates)
+if [ "$prog" = vrserver ]; then
+	Q=/opt/quest1-steamvr/quest1/resources/settings/quest1_settingsschema.json
+	rel=$(python3 - "$S/../../resources" "$Q" "$XDG_RUNTIME_DIR/quest1-settingsschema.vrsettings" <<'PY'
+import json, os, sys
+res = os.path.realpath(sys.argv[1])
+schema = json.load(open(os.path.join(res, "settingsschema.vrsettings")))
+ours = json.load(open(sys.argv[2]))
+schema = [s for s in schema if s.get("controller") != ours["controller"]]
+at = next((i for i, s in enumerate(schema) if s.get("controller") == "startupshutdown_settings"), len(schema))
+schema.insert(at, ours)
+tmp = sys.argv[3] + ".tmp"
+json.dump(schema, open(tmp, "w"), indent=1)
+os.replace(tmp, sys.argv[3])
+print(os.path.relpath(os.path.realpath(sys.argv[3]), res))
+PY
+) && export VR_SETTINGSSCHEMA_FILE=$rel
+fi
 exec $S/$prog "$@"
 Q1EOF
 chmod 755 "$ROOT/usr/local/bin/steamvr-q1"

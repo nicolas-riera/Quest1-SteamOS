@@ -1845,12 +1845,32 @@ public:
 		VREvent_t e;
 		while (VRServerDriverHost()->PollNextEvent(&e, sizeof(e)))
 			controllers.OnEvent(e);
+		PollSettingsActions();
 	}
 	bool ShouldBlockStandbyMode() override { return false; }
 	void EnterStandby() override {}
 	void LeaveStandby() override {}
 
 private:
+	//! The "Oculus Quest" page of SteamVR's settings (resources/settings/quest1_settingsschema.json, merged into
+	//! SteamVR's schema by steamvr-q1). The schema has no button control: an action is a toggle the driver turns back
+	//! off once it has acted. Checked twice a second.
+	void PollSettingsActions()
+	{
+		const auto now = std::chrono::steady_clock::now();
+		if (now < nextSettingsPoll)
+			return;
+		nextSettingsPoll = now + std::chrono::milliseconds(500);
+		EVRSettingsError err = VRSettingsError_None;
+		if (!VRSettings()->GetBool("driver_quest1", "clearSpatialAnchors", &err) || err != VRSettingsError_None)
+			return;
+		// q1anchord (root, the tracking stack) removes the trigger and forgets every map (docs/boundary.md)
+		if (FILE *f = fopen("/tmp/quest1-clear-map", "w"))
+			fclose(f);
+		Log("quest1: settings: clearing the spatial anchor map\n");
+		VRSettings()->SetBool("driver_quest1", "clearSpatialAnchors", false, &err);
+	}
+
 	//! SteamVR takes the oculus_touch controller type's dashboard bindings from its own Oculus driver, so the
 	//! default_bindings of our input profile are never used: no right Oculus button, no double click for the
 	//! camera view, none of the Frame's grip actions. Select ours as the bindings UI would (it saves this key),
@@ -1881,6 +1901,7 @@ private:
 	XrBackend xr;
 	Quest1Hmd *hmd = nullptr;
 	Quest1Controllers controllers;
+	std::chrono::steady_clock::time_point nextSettingsPoll{};
 };
 
 static Quest1Provider g_provider;
