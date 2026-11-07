@@ -6,6 +6,8 @@
 // actions on the driver's session and publishes them to SteamVR as the Steam Frame's controllers
 // (frame_controller, with the Quest render models): SteamVR then uses the Frame's dashboard and game
 // bindings, and Steam turns them into its "Steam Frame Controllers" gamepad, as on the Frame.
+// Buttons: A, B, X, Y are the Frame's a, b, x, y (right controller), the left Menu is Start on a short press
+// and View while held, the right Oculus button is "system" (Activate, UpdateHand).
 //
 // Orientation: Monado's controller orientation is the IMU frame. The aim pose is
 //   aim = yaw * imu * imuToAim
@@ -196,10 +198,17 @@ enum Comp
 {
 	C_SYSTEM_CLICK,
 	C_SYSTEM_TOUCH,
-	C_PRIMARY_CLICK,
+	// right controller only: the Frame's face buttons and Start, the left Touch's X, Y and Menu included
+	C_PRIMARY_CLICK, // a
 	C_PRIMARY_TOUCH,
-	C_SECONDARY_CLICK,
+	C_SECONDARY_CLICK, // b
 	C_SECONDARY_TOUCH,
+	C_X_CLICK,
+	C_X_TOUCH,
+	C_Y_CLICK,
+	C_Y_TOUCH,
+	C_MENU_CLICK,
+	C_VIEW_CLICK, // left controller
 	C_TRIGGER_VALUE,
 	C_TRIGGER_CLICK,
 	C_TRIGGER_TOUCH,
@@ -246,6 +255,10 @@ public:
 		// and games get their Frame bindings. Our components below follow that profile.
 		p->SetStringProperty(container, Prop_InputProfilePath_String, "{frame_controller}/input/frame_controller_profile.json");
 		p->SetStringProperty(container, Prop_ControllerType_String, "frame_controller");
+		// Read by vrcompositor for each hand (UpdateInputFocus): unless it is true, the dashboard never hands the
+		// controllers' buttons to Steam (the VR_InputFocusState masks stay 0) and the gamepad mode does nothing.
+		// The public header only calls it Prop_Reserved_2117.
+		p->SetBoolProperty(container, (ETrackedDeviceProperty)2117, true);
 		p->SetInt32Property(container, Prop_ControllerRoleHint_Int32,
 		                    left ? TrackedControllerRole_LeftHand : TrackedControllerRole_RightHand);
 		p->SetBoolProperty(container, Prop_DeviceProvidesBatteryStatus_Bool, false);
@@ -262,19 +275,36 @@ public:
 		                         ButtonMaskFromId(k_EButton_SteamVR_Trigger));
 
 		IVRDriverInput *in = VRDriverInput();
-		// The Frame's right controller has the face buttons, its left one a d-pad: Touch X/Y are the d-pad's down/up
-		const char *ab = left ? "dpad_down" : "a", *by = left ? "dpad_up" : "b";
-		char path[64];
+		// The Frame's right controller has the four face buttons and Start ("menu"), its left one a d-pad and Select
+		// ("view", which also changes the dashboard's panel). The Touch have fewer buttons: A, B, X, Y are the Frame's
+		// a, b, x, y, all on the right controller here as on the Frame; the left Menu is Start when pressed, view when
+		// held; the right Oculus button is "system". The d-pad and bumpers exist, unpressed.
 		in->CreateBooleanComponent(container, "/input/system/click", &comp[C_SYSTEM_CLICK]);
 		in->CreateBooleanComponent(container, "/input/system/touch", &comp[C_SYSTEM_TOUCH]);
-		snprintf(path, sizeof(path), "/input/%s/click", ab);
-		in->CreateBooleanComponent(container, path, &comp[C_PRIMARY_CLICK]);
-		snprintf(path, sizeof(path), "/input/%s/touch", ab);
-		in->CreateBooleanComponent(container, path, &comp[C_PRIMARY_TOUCH]);
-		snprintf(path, sizeof(path), "/input/%s/click", by);
-		in->CreateBooleanComponent(container, path, &comp[C_SECONDARY_CLICK]);
-		snprintf(path, sizeof(path), "/input/%s/touch", by);
-		in->CreateBooleanComponent(container, path, &comp[C_SECONDARY_TOUCH]);
+		if (!left) {
+			in->CreateBooleanComponent(container, "/input/a/click", &comp[C_PRIMARY_CLICK]);
+			in->CreateBooleanComponent(container, "/input/a/touch", &comp[C_PRIMARY_TOUCH]);
+			in->CreateBooleanComponent(container, "/input/b/click", &comp[C_SECONDARY_CLICK]);
+			in->CreateBooleanComponent(container, "/input/b/touch", &comp[C_SECONDARY_TOUCH]);
+			in->CreateBooleanComponent(container, "/input/x/click", &comp[C_X_CLICK]);
+			in->CreateBooleanComponent(container, "/input/x/touch", &comp[C_X_TOUCH]);
+			in->CreateBooleanComponent(container, "/input/y/click", &comp[C_Y_CLICK]);
+			in->CreateBooleanComponent(container, "/input/y/touch", &comp[C_Y_TOUCH]);
+			in->CreateBooleanComponent(container, "/input/menu/click", &comp[C_MENU_CLICK]);
+		}
+		static const char *const kUnpressedRight[] = {"menu/touch", "bumper/click", "bumper/touch", nullptr};
+		if (left)
+			in->CreateBooleanComponent(container, "/input/view/click", &comp[C_VIEW_CLICK]);
+		static const char *const kUnpressedLeft[] = {
+		    "view/touch",      "dpad_up/click",    "dpad_up/touch",    "dpad_down/click",
+		    "dpad_down/touch", "dpad_left/click",  "dpad_left/touch",  "dpad_right/click", "dpad_right/touch",
+		    "bumper/click",    "bumper/touch",     nullptr};
+		for (const char *const *b = left ? kUnpressedLeft : kUnpressedRight; *b; b++) {
+			char path[64];
+			VRInputComponentHandle_t unused;
+			snprintf(path, sizeof(path), "/input/%s", *b);
+			in->CreateBooleanComponent(container, path, &unused);
+		}
 		in->CreateScalarComponent(container, "/input/trigger/value", &comp[C_TRIGGER_VALUE], VRScalarType_Absolute,
 		                          VRScalarUnits_NormalizedOneSided);
 		in->CreateBooleanComponent(container, "/input/trigger/click", &comp[C_TRIGGER_CLICK]);
@@ -368,6 +398,8 @@ struct Hand
 	Quat yaw;
 	bool aligned = false;
 	double systemDownSince = 0;
+	double menuDownSince = 0; //!< left Menu: Start on a short press, view while held (UpdateHand)
+	double startUntil = 0;
 	bool recenteredThisHold = false;
 	double lastValid = -10;
 	bool wasValid = false;
@@ -655,14 +687,33 @@ void State::UpdateHand(int h, double now, const XrPosef &headPose, bool headVali
 		return XR_SUCCEEDED(cxrGetActionStateFloat(xr.session, &gi, &s)) && s.isActive ? s.currentState : 0.f;
 	};
 	d->forced = pressHand == h && now < pressUntil ? (int)pressComp : -1;
-	// each hand's own button (left Menu, right Oculus): both are bound in our dashboard bindings, which
-	// driver_quest1 selects (the right one used to be copied onto the left, so it pressed both)
+	// the face buttons and Start are the right controller's (see Activate): the left Touch's X, Y and Menu
+	// go there; the right Oculus button is "system"
 	float system = boolean(ACT_SYSTEM);
-	d->Set(C_SYSTEM_CLICK, system);
-	d->Set(C_PRIMARY_CLICK, boolean(ACT_PRIMARY));
-	d->Set(C_PRIMARY_TOUCH, boolean(ACT_PRIMARY_TOUCH));
-	d->Set(C_SECONDARY_CLICK, boolean(ACT_SECONDARY));
-	d->Set(C_SECONDARY_TOUCH, boolean(ACT_SECONDARY_TOUCH));
+	TouchController *r = dev[1];
+	if (d->left) {
+		r->Set(C_X_CLICK, boolean(ACT_PRIMARY));
+		r->Set(C_X_TOUCH, boolean(ACT_PRIMARY_TOUCH));
+		r->Set(C_Y_CLICK, boolean(ACT_SECONDARY));
+		r->Set(C_Y_TOUCH, boolean(ACT_SECONDARY_TOUCH));
+		// Start: a 100 ms press when Menu is let go within kViewHold; view: from kViewHold until it is let go
+		constexpr double kViewHold = 0.5;
+		if (system != 0 && hd.menuDownSince == 0)
+			hd.menuDownSince = now;
+		if (system == 0 && hd.menuDownSince != 0) {
+			if (now - hd.menuDownSince < kViewHold)
+				hd.startUntil = now + 0.1;
+			hd.menuDownSince = 0;
+		}
+		r->Set(C_MENU_CLICK, now < hd.startUntil ? 1.f : 0.f);
+		d->Set(C_VIEW_CLICK, hd.menuDownSince != 0 && now - hd.menuDownSince >= kViewHold ? 1.f : 0.f);
+	} else {
+		d->Set(C_SYSTEM_CLICK, system);
+		d->Set(C_PRIMARY_CLICK, boolean(ACT_PRIMARY));
+		d->Set(C_PRIMARY_TOUCH, boolean(ACT_PRIMARY_TOUCH));
+		d->Set(C_SECONDARY_CLICK, boolean(ACT_SECONDARY));
+		d->Set(C_SECONDARY_TOUCH, boolean(ACT_SECONDARY_TOUCH));
+	}
 	float trigger = scalar(ACT_TRIGGER);
 	d->Set(C_TRIGGER_VALUE, trigger);
 	d->Set(C_TRIGGER_CLICK, trigger > 0.75f ? 1.f : 0.f); // the Touch trigger is analog only

@@ -257,15 +257,23 @@ SteamVR controllers:
   as on the Steam Frame: SteamVR uses the Frame's dashboard bindings (laser, grips switching laser and gamepad
   modes, Oculus button = system: dashboard, double click = room view) and the Frame bindings games ship, and
   Steam turns controllers of that type into its virtual "Steam Frame Controllers" gamepad (28de:11e0,
-  `/steamvr/virtual`, `CHIDDeviceListSteamVR` in steamclient.so; 2026-11-06: created, but no input reaches it
-  yet in gamepad mode). Render models stay the Quest's `oculus_quest_controller_{left,right}`. (Until
+  `/steamvr/virtual`, `CHIDDeviceListSteamVR` in steamclient.so). Render models stay the Quest's `oculus_quest_controller_{left,right}`. (Until
   2026-11-06: `oculus_touch`; a virtual Xbox pad for Steam doubled every press, reverted.)
-* Components, named as the Frame's: `/input/system/click` (left Menu, right Oculus button), right
-  `a`, `b` / left `dpad_down`, `dpad_up` (Touch X, Y: the Frame's left controller has a d-pad where the right
-  one has face buttons) click+touch, `trigger` value+touch+click (> 0.75), `grip` value+click (> 0.75)
-  (+touch = value > 0.05, the Touch grip has no capacitive sensor), `thumbstick` x/y/click/touch,
-  `thumbrest/touch`, `/output/haptic` (`VREvent_Input_HapticVibration` → `xrApplyHapticFeedback`). No
-  `bumper` or `view` on the Touch.
+* Gamepad mode: vrcompositor (`UpdateInputFocus`) hands a controller's buttons to Steam only if the
+  controller has property 2117 (`Prop_Reserved_2117` in the public header, Bool) set to true; without it the
+  `VR_InputFocusState` masks (shared memory, left buttons in bits 0-23, right in 32-55) stay 0 and nothing
+  reaches the gamepad. The driver sets it on both controllers.
+* Components, named as the Frame's. The Frame's right controller has the four face buttons and Start
+  (`menu`), its left one a d-pad and Select (`view`, which also switches the dashboard's panels). The Touch
+  have fewer buttons, so: A, B, X, Y are the Frame's `a`, `b`, `x`, `y`, all on the right controller as on the
+  Frame (click+touch); the left Menu is Start (`menu/click` on the right controller, a 100 ms press) when let
+  go within 0.5 s and `view/click` (left) while held longer; the right Oculus button is `/input/system/click`
+  (dashboard). Valve's own Touch remapping (`frame_controller_remapping.json`: X, Y to the d-pad, B to
+  b/x/y) was not kept: X and Y stay X and Y. `trigger` value+touch+click (> 0.75), `grip` value+click
+  (> 0.75) (+touch = value > 0.05, the Touch grip has no capacitive sensor), `thumbstick` x/y/click/touch,
+  `thumbrest/touch`, `/output/haptic` (`VREvent_Input_HapticVibration` → `xrApplyHapticFeedback`). The
+  profile's `bumper`, `dpad_*` and `menu/touch`, `view/touch` exist but are never pressed (no such buttons
+  on the Touch).
 * Pose: Monado's orientation is the controller IMU frame. `aim = yaw * imu * imuToAim`, with
   `imuToAim` = rotX(40°) by default (Monado's `rift_s` convention for the same controllers) or a
   per-hand calibration. SteamVR's device pose is the Oculus "raw" controller frame; the Quest
