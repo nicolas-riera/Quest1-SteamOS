@@ -9,6 +9,10 @@
 
 set -eu
 
+# Quest 1: "Desktop" launched from inside the desktop (Plasma's menu lists it too): the desktop is already
+# shown. Going on would start a second one inside it (its own Xvfb, kwin, Plasma, an overlay SteamVR refuses).
+case "${XDG_RUNTIME_DIR:-}" in */nested_plasma) exit 0 ;; esac
+
 # Remove the performance overlay, it meddles with some tasks
 unset LD_PRELOAD
 

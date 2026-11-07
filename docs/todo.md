@@ -194,6 +194,9 @@ Open items, roughly by priority. Done items move to the commit log.
   launch signalled `q1desktop` before it had its SIGUSR1 handler and ended the desktop; a click while the last desktop
   was ending was dropped. Both fixed (docs/desktop.md); a click on the entry (DOM events) launches it once, and four
   launches 1 s apart give one desktop. Left: confirm with the laser in the headset (user).
+- 2026-11-07, still several clicks with the laser (user): a click in the menu's first ~3 s was dropped by Steam while
+  its icon loaders (bubblewrap) failed one after the other; the kernel now has multi-instance devpts. To confirm in
+  the headset (icons in the "+" menu, one click). "Desktop" from Plasma's own menu no longer starts a nested desktop.
 - Discover showed no apps and asked for flatpak (user, 2026-11-06): polkit refused Flatpak's system actions to steamos
   (SteamOS's rule wants wheel and an active seat session), so the Flathub catalogue was never deployed ("DeployAppstream
   not allowed"). Fixed in holo-frame-mode.sh's polkit rule; Discover lists Flathub's apps (checked on the desktop's

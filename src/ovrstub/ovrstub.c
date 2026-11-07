@@ -132,6 +132,27 @@ static void logf_(const char *fmt, ...)
 	fputc('\n', stderr);
 }
 
+/* Calls that come again and again (OVRRemoteService's code 24 arrives ~400 times a second while the controllers
+ * are on) are logged the first time only, unless -v: each line goes to the kernel log through journald. */
+static int seen_before(const char *svc, uint32_t code)
+{
+	static struct {
+		const char *svc;
+		uint32_t code;
+	} seen[128];
+	static int nseen;
+	if (verbose)
+		return 0;
+	for (int i = 0; i < nseen; i++)
+		if (seen[i].code == code && seen[i].svc == svc)
+			return 1;
+	if (nseen < (int)(sizeof(seen) / sizeof(seen[0]))) {
+		seen[nseen].svc = svc;
+		seen[nseen++].code = code;
+	}
+	return 0;
+}
+
 /* ---- parcels ---- */
 struct parcel {
 	uint8_t data[2048];
@@ -601,7 +622,8 @@ static void remote_txn(const struct binder_transaction_data *t, struct rd *r, st
 		remote_cb = 0;
 		break;
 	default:
-		logf_("OVRRemoteService: call %u answered ok (ignored)", t->code);
+		if (!seen_before("OVRRemoteService ignored", t->code))
+			logf_("OVRRemoteService: call %u answered ok (ignored)", t->code);
 	}
 }
 
@@ -630,9 +652,11 @@ static void handle_txn(const struct binder_transaction_data *t)
 		(void)ws;
 		if (!r_str16(&r, desc, sizeof(desc)))
 			strcpy(desc, "(no token)");
-		logf_("%s: code %u%s from pid %d uid %d, %zu bytes, token %s%s", name, t->code,
-		      oneway ? " (oneway)" : "", t->sender_pid, t->sender_euid, (size_t)t->data_size,
-		      desc, s && strcmp(desc, s->desc) ? "  [UNEXPECTED DESCRIPTOR]" : "");
+		if (!seen_before(name, t->code) || (s && strcmp(desc, s->desc)))
+			logf_("%s: code %u%s from pid %d uid %d, %zu bytes, token %s%s%s", name, t->code,
+			      oneway ? " (oneway)" : "", t->sender_pid, t->sender_euid, (size_t)t->data_size,
+			      desc, s && strcmp(desc, s->desc) ? "  [UNEXPECTED DESCRIPTOR]" : "",
+			      verbose ? "" : " (logged once)");
 		if (verbose && r.pos < t->data_size)
 			hexdump(r.p + r.pos, t->data_size - r.pos > 128 ? 128 : t->data_size - r.pos);
 

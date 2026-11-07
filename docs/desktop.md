@@ -43,7 +43,14 @@ Everything above is the same, except gamescope:
   `q1desktop` starts with SIGUSR1 ignored (its handler comes after SteamVR's init, seconds later): a click in
   that window used to end it, and the desktop with it. A launch that finds the lock taken but no `q1desktop`
   (the last desktop was just closed and is still ending) waits for the lock (20 s) and opens a new one
-  instead of being lost. Timeline of one launch (2026-11-06, Steam's `LaunchNonSteamApp` called directly):
+  instead of being lost. Plasma's own menu lists "Desktop" too: launched from inside the desktop
+  (`XDG_RUNTIME_DIR` ends in `nested_plasma`) the script exits at once; it used to start a second desktop inside
+  the first (its overlay refused, `VROverlayError_KeyInUse`), which upset the running one (user, 2026-11-07).
+- A click in the "+" menu's first ~3 s after it opens was lost (user, 2026-11-07: still several clicks): Steam
+  answered `Apps.LaunchNonSteamApp` in 1.9 ms without launching anything while it was loading the entries' icons.
+  Each icon load runs a glycin loader in a bubblewrap sandbox, and every one failed ("Can't mount devpts on
+  /newroot/dev/pts": the kernel lacked `CONFIG_DEVPTS_MULTIPLE_INSTANCES`, kernel/steamos.config), so the menu
+  also had no icons. Timeline of one launch (2026-11-06, Steam's `LaunchNonSteamApp` called directly):
   the overlay is shown, black, after 3 s, KDE's splash spinner is on it at ~5 s, Plasma's desktop at ~14 s.
 - Steam passes its own environment on: our Vulkan shim first in `LD_LIBRARY_PATH` and Steam's runtime after it.
   Every Qt program probes Vulkan, and the shim without libhybris' TLS preload crashed them (ksplash, kded6, the
