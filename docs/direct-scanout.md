@@ -161,9 +161,9 @@ Worn with the 3 ms display time the user found the re-projection laggy when turn
   sooner.
 
 The display time is now 18 ms after the vsync before the commit (the middle of the panel's scan is ~21 ms on
-paper) and a setting: SteamVR's settings, "Oculus Quest" page, "Re-projection timing (ms)" (0-30), which
-driver_quest1 writes to `/tmp/quest1-display-delay-ms` for Monado (the pose age the driver's prediction follows
-uses it too). `delay=` in `/tmp/quest1-reproj` still overrides it for tests, `lead=` sets the tick lead.
+paper), fixed: a SteamVR setting for it existed for one day, the user wants no such knob (2026-11-08). The pose
+age the driver's prediction follows uses the same value. `delay=` in `/tmp/quest1-reproj` overrides it for tests,
+`lead=` sets the tick lead.
 A frame whose render-to-display rotation exceeds 45 degrees is shown unwarped (worn, two such frames, 112 and 142
 degrees, while Meta's tracking had lost the position: a render pose from another frame of reference).
 
@@ -223,21 +223,38 @@ panel-power race for good.
   snapshot (the image must move the right way: content shifts left when the head turns right).
 - `/tmp/quest1-gputime`-style timing of the warp pass.
 
-## Panel calibration data (for the brightness mismatch the user reported)
+## Panel calibration data and the brightness
 
 Read-only, in `/persist/calibration/display/{left,right}/` (file names carry the panel serials: never
 copy them into the repo):
-- `<serial>.uniformity` (96 bytes, magic "UNIF", little-endian floats): factory colorimetry of the
-  panel: CIE xy of white/red/green/blue and their luminances. Both panels measure ~98.4 nits white
-  (R ~26.3, G ~71.5, B ~5.9): the panels themselves match.
-- `<serial>.mura` (21-byte header "mURA..." + 1440x1600x3 bytes) and `.mura.astc`: a per-pixel
-  correction map Meta's compositor applies (OLED mottling, "mura"); we don't apply it yet. A
-  candidate for the re-projection/warp shader (one more texture fetch).
+- `<serial>.uniformity` (96 bytes, magic "UNIF", then 23 little-endian floats): factory colorimetry of the
+  panel at full drive. [0..8] its RGB -> XYZ matrix (rows X, Y, Z, linear light; the white it gives matches the
+  chromaticity stored further on), [9..11] its white luminance (~98.4 cd/m2 for both panels), then CIE xy
+  chromaticities. The two whites differ slightly (xy 0.2931/0.3138 against 0.2949/0.3199).
+- `<serial>.mura` (21-byte header "mURA", "gr", a float scale ~0.157, width 1440, height 1600, then
+  1440x1600x3 bytes centred on 127) and `.mura.astc` (the same as an ASTC texture): a per-pixel correction
+  map. Meta's boot animation shader (`/system/bin/vr_bootanimation`, GLSL in the binary) applies it in
+  gamma-encoded space: `out += (mura - 0.5) * clamp(out * MURA_CLAMP_SCALE, MURA_CLAMP_MIN, MURA_CLAMP_MAX) *
+  MuraScale` (sRGB output converted with pow(1/2.2) around it). Not applied: it needs a GPU pass over every
+  frame, and frames shown without re-projection go to the panels untouched (zero copy).
 - `{left,right}_screen_offset.json`: per-panel lens-to-panel alignment (`decenter` in pixels, about
-  2.5–3.9 px x and −4.8 px y; `roll` 0.02–0.056°). Not applied yet either; it belongs in the
-  distortion (driver_quest1 `ComputeDistortion` and Monado's `hmd_compute_distortion`).
-- Brightness: the Samsung dual-DSI panel (`Dual Samsung video mode dsi panel`) uses
-  `bl_ctrl_dcs` with `qcom,cmd-sync-wait-broadcast`, so the kernel sends the backlight DCS command to
-  both panels (mdss_dsi_panel.c `BL_DCS_CMD`): a single `lcd-backlight` level drives both. A
-  remaining whole-eye brightness difference would come from the missing mura correction or from
-  the rendering path, not from the backlight.
+  2.5-3.9 px x and -4.8 px y; `roll` 0.02-0.056 degrees). Not applied: Meta's sign and axis
+  conventions for it are unknown, and the effect is ~0.3 % of the panel width.
+
+Brightness (2026-11-08). The Samsung dual-DSI panel (`Dual Samsung video mode dsi panel`) uses
+`bl_ctrl_dcs` with `qcom,cmd-sync-wait-broadcast`: one `lcd-backlight` level drives both panels, but at low
+levels the two OLEDs answer it differently (user: the right eye dimmer at reduced brightness). So the backlight
+now stays at full (`QUEST1_BRIGHTNESS`, default 255) and Monado dims in the display engine instead: each DSI has
+its own DSPP, whose PCC (polynomial colour correction) Monado programs per panel with `MSMFB_MDP_PP`
+(`MDSS_PP_SPLIT_LEFT_ONLY` / `RIGHT_ONLY`; the fb's left half is the right eye; 1.0 = 0x8000). PCC works on
+gamma-encoded values, so a brightness b (linear) is a coefficient b^(1/2.2). The same coefficients carry a
+per-channel gain from the uniformity matrices: both panels are driven to the mean of their two whites (gains
+left 0.972/0.981/0.957, right 0.984/0.976/1.000), so they match in colour and luminance. Applied by the MDP at
+each commit: no GPU cost, also for frames shown without re-projection.
+
+The brightness is SteamVR's own setting, as on the Steam Frame: driver_quest1 sets
+`Prop_DisplaySupportsAnalogGain_Bool` (with min 0.03, max 1, UI min 0.2), so the dashboard's Video page shows
+"Display Brightness" and Steam's quick menu its slider; both write `/settings/steamvr/analogGain` (the slider's
+percent is 100 * gain^(1/2.2)). The driver writes the gain in percent of linear light (clamped to 2-100: SteamVR's
+default gain is 1.3) to `/tmp/quest1-brightness`, which Monado polls twice a second. Tested through the
+dashboard's slider (CEF remote debugging): 47 % on the slider -> gain 0.196 -> PCC 0.476.

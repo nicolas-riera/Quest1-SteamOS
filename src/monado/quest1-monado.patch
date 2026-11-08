@@ -207,10 +207,10 @@ index eb41c3c..5214613 100644
  
 diff --git a/src/xrt/compositor/main/comp_window_mdp.c b/src/xrt/compositor/main/comp_window_mdp.c
 new file mode 100644
-index 0000000..77a2d39
+index 0000000..b212226
 --- /dev/null
 +++ b/src/xrt/compositor/main/comp_window_mdp.c
-@@ -0,0 +1,2722 @@
+@@ -0,0 +1,2913 @@
 +// Copyright 2026, Quest1-SteamOS contributors
 +// SPDX-License-Identifier: BSL-1.0
 +/*!
@@ -250,6 +250,7 @@ index 0000000..77a2d39
 +#include "quest1_direct_proto.h"
 +#include "quest1_warp_spv.h"
 +
++#include <dirent.h>
 +#include <dlfcn.h>
 +#include <errno.h>
 +#include <pthread.h>
@@ -295,10 +296,8 @@ index 0000000..77a2d39
 +//! from moving frames, and with the warp computed right after the vsync (a 13.9 ms extrapolation on top). With 3
 +//! the user then found the re-projection laggy (2026-11-07 evening): the pose is not ahead of its stamp (Meta's
 +//! own log puts IMU samples 7-8 ms after capture; libossdk extrapolates its ~20 ms old samples to the time asked).
-+//! Default 18 ms; the user's value comes from SteamVR's settings ("Oculus Quest" page, driver_quest1 writes it
-+//! to MDP_DISPLAY_DELAY_FILE), "delay=" in /tmp/quest1-reproj overrides both.
++//! 18 ms (not a user setting: the user wants it fixed, 2026-11-08); "delay=" in /tmp/quest1-reproj overrides it.
 +#define MDP_DISPLAY_DELAY_DEFAULT_MS 18.0f
-+#define MDP_DISPLAY_DELAY_FILE "/tmp/quest1-display-delay-ms"
 +//! The vsync thread ticks (picks the newest frame, warps and commits it) this long before the vsync that latches
 +//! the commit, instead of right after the vsync before: the warp's pose is ~8 ms fresher (less extrapolation)
 +//! and a frame finished in the first part of the period reaches the panels a vsync sooner. The warp takes 3-4 ms
@@ -554,6 +553,229 @@ index 0000000..77a2d39
 + *
 + */
 +
++/*
++ * Brightness and the panels' factory calibration.
++ *
++ * The user's brightness is SteamVR's display brightness (steamvr/analogGain: the dashboard's Video settings, Steam's
++ * quick menu), which driver_quest1 writes to MDP_BRIGHTNESS_FILE in percent (linear light, 2-100). It used to drive
++ * the backlight, but the two OLED panels drift apart at low backlight levels (user, 2026-11-07: the right eye
++ * dimmer), while they match at full drive, where Meta calibrated them. So the backlight stays at QUEST1_BRIGHTNESS
++ * (default 255) and the brightness is a gain in each panel's display engine colour stage (DSPP PCC, one per
++ * DSI/panel, applied by the MDP to every frame at no GPU cost).
++ *
++ * The same per-panel PCC gains also equalise the two panels' white (colour and luminance) from Meta's factory data,
++ * /persist/calibration/display/<left|right>/<panel serial>.uniformity (read only): "UNIF" then 23 floats, of which
++ * [0..8] are the panel's RGB -> XYZ matrix (rows X, Y, Z, linear light, full drive) and [9] its white luminance
++ * (cd/m2). Both panels are driven to the same white, the mean of their native whites, scaled so no channel exceeds
++ * full drive: per-channel gains of 1-2 %. A diagonal gain is exact in linear light and in the panels' gamma-encoded
++ * space alike (g^(1/2.2)), which is where PCC works. The rest of the calibration (the per-pixel .mura files) would
++ * need a GPU pass on every frame, which frames shown without re-projection don't get.
++ */
++#define MDP_BRIGHTNESS_FILE "/tmp/quest1-brightness"
++#define MDP_CALIB_DIR "/persist/calibration/display"
++#define MDP_PCC_ONE 32768.0f //!< PCC coefficient for a gain of 1 (MDSS v1.7)
++
++static float panel_gain[2][3] = {{1, 1, 1}, {1, 1, 1}}; //!< per-channel linear gain, [0] left eye, [1] right eye
++static float brightness_set = -1.0f;                    //!< the brightness percent last applied
++
++//! Reads one panel's uniformity file: its RGB -> XYZ matrix scaled by its white luminance.
++static bool
++read_uniformity(const char *side, double m[9])
++{
++	char dir[96];
++	snprintf(dir, sizeof(dir), MDP_CALIB_DIR "/%s", side);
++	DIR *d = opendir(dir);
++	if (d == NULL) {
++		return false;
++	}
++	bool ok = false;
++	struct dirent *e;
++	while (!ok && (e = readdir(d)) != NULL) {
++		size_t n = strlen(e->d_name);
++		if (n < 12 || strcmp(e->d_name + n - 11, ".uniformity") != 0) {
++			continue;
++		}
++		char path[384];
++		snprintf(path, sizeof(path), "%s/%s", dir, e->d_name);
++		unsigned char b[96];
++		FILE *f = fopen(path, "rb");
++		if (f == NULL) {
++			continue;
++		}
++		size_t got = fread(b, 1, sizeof(b), f);
++		fclose(f);
++		if (got != sizeof(b) || memcmp(b, "UNIF", 4) != 0) {
++			continue;
++		}
++		float v[23];
++		memcpy(v, b + 4, sizeof(v));
++		if (!(v[9] > 10.0f && v[9] < 1000.0f)) {
++			continue;
++		}
++		for (int i = 0; i < 9; i++) {
++			m[i] = (double)v[i] * v[9];
++		}
++		ok = true;
++	}
++	closedir(d);
++	return ok;
++}
++
++static bool
++invert3(const double m[9], double r[9])
++{
++	double det = m[0] * (m[4] * m[8] - m[5] * m[7]) - m[1] * (m[3] * m[8] - m[5] * m[6]) +
++	             m[2] * (m[3] * m[7] - m[4] * m[6]);
++	if (fabs(det) < 1e-9) {
++		return false;
++	}
++	r[0] = (m[4] * m[8] - m[5] * m[7]) / det;
++	r[1] = (m[2] * m[7] - m[1] * m[8]) / det;
++	r[2] = (m[1] * m[5] - m[2] * m[4]) / det;
++	r[3] = (m[5] * m[6] - m[3] * m[8]) / det;
++	r[4] = (m[0] * m[8] - m[2] * m[6]) / det;
++	r[5] = (m[2] * m[3] - m[0] * m[5]) / det;
++	r[6] = (m[3] * m[7] - m[4] * m[6]) / det;
++	r[7] = (m[1] * m[6] - m[0] * m[7]) / det;
++	r[8] = (m[0] * m[4] - m[1] * m[3]) / det;
++	return true;
++}
++
++//! panel_gain from the factory calibration (left at 1 when it is missing or looks wrong).
++static void
++load_panel_calibration(void)
++{
++	static const char *sides[2] = {"left", "right"};
++	double m[2][9], inv[2][9], w[3] = {0, 0, 0}, g[2][3], top = 0;
++	for (int p = 0; p < 2; p++) {
++		if (!read_uniformity(sides[p], m[p]) || !invert3(m[p], inv[p])) {
++			U_LOG_W("mdp: no panel calibration for the %s eye: panels not equalised", sides[p]);
++			return;
++		}
++		for (int r = 0; r < 3; r++) {
++			w[r] += 0.5 * (m[p][r * 3] + m[p][r * 3 + 1] + m[p][r * 3 + 2]);
++		}
++	}
++	for (int p = 0; p < 2; p++) {
++		for (int c = 0; c < 3; c++) {
++			g[p][c] = inv[p][c * 3] * w[0] + inv[p][c * 3 + 1] * w[1] + inv[p][c * 3 + 2] * w[2];
++			top = fmax(top, g[p][c]);
++		}
++	}
++	for (int p = 0; p < 2; p++) {
++		for (int c = 0; c < 3; c++) {
++			if (!(g[p][c] / top > 0.8 && g[p][c] / top <= 1.0)) {
++				U_LOG_W("mdp: panel calibration out of range (%s %d: %.3f): panels not equalised", sides[p], c,
++				        g[p][c] / top);
++				return;
++			}
++		}
++	}
++	for (int p = 0; p < 2; p++) {
++		for (int c = 0; c < 3; c++) {
++			panel_gain[p][c] = (float)(g[p][c] / top);
++		}
++	}
++	U_LOG_W("mdp: panel calibration: left eye gains %.4f %.4f %.4f, right eye %.4f %.4f %.4f", panel_gain[0][0],
++	        panel_gain[0][1], panel_gain[0][2], panel_gain[1][0], panel_gain[1][1], panel_gain[1][2]);
++}
++
++//! The brightness setting in percent (1-100), 100 without one.
++static float
++brightness_wanted(void)
++{
++	FILE *f = fopen(MDP_BRIGHTNESS_FILE, "r");
++	if (f != NULL) {
++		float pct = 0;
++		int n = fscanf(f, "%f", &pct);
++		fclose(f);
++		if (n == 1 && pct >= 1.0f && pct <= 100.0f) {
++			return pct;
++		}
++	}
++	return 100.0f;
++}
++
++static void
++write_backlight(int level)
++{
++	int fd = open("/sys/class/leds/lcd-backlight/brightness", O_WRONLY | O_CLOEXEC);
++	if (fd < 0) {
++		return;
++	}
++	char buf[8];
++	int n = snprintf(buf, sizeof(buf), "%d", level);
++	if (write(fd, buf, n) < 0) {
++		U_LOG_W("mdp: cannot set the backlight: %s", strerror(errno));
++	}
++	close(fd);
++}
++
++//! Programs both panels' PCC: their calibration gains times the brightness (taken at the next commit).
++static void
++apply_pcc(struct mdp_target *t, float pct)
++{
++	float k = powf(pct / 100.0f, 1.0f / 2.2f); // PCC works on gamma-encoded values
++	// The left DSPP drives the framebuffer's left half, which is the right eye's panel (the fb is turned by 180
++	// degrees).
++	static const uint32_t split[2] = {MDSS_PP_SPLIT_RIGHT_ONLY, MDSS_PP_SPLIT_LEFT_ONLY};
++	for (int eye = 0; eye < 2; eye++) {
++		struct mdp_pcc_data_v1_7 d;
++		struct msmfb_mdp_pp pp;
++		memset(&d, 0, sizeof(d));
++		memset(&pp, 0, sizeof(pp));
++		d.r.r = (uint32_t)lroundf(MDP_PCC_ONE * k * powf(panel_gain[eye][0], 1.0f / 2.2f));
++		d.g.g = (uint32_t)lroundf(MDP_PCC_ONE * k * powf(panel_gain[eye][1], 1.0f / 2.2f));
++		d.b.b = (uint32_t)lroundf(MDP_PCC_ONE * k * powf(panel_gain[eye][2], 1.0f / 2.2f));
++		pp.op = mdp_op_pcc_cfg;
++		pp.data.pcc_cfg_data.version = mdp_pcc_v1_7;
++		pp.data.pcc_cfg_data.block = MDP_LOGICAL_BLOCK_DISP_0;
++		pp.data.pcc_cfg_data.ops = MDP_PP_OPS_WRITE | MDP_PP_OPS_ENABLE | split[eye];
++		pp.data.pcc_cfg_data.cfg_payload = &d;
++		if (ioctl(t->fb_fd, MSMFB_MDP_PP, &pp) < 0) {
++			U_LOG_W("mdp: cannot set the panels' colour gains: %s", strerror(errno));
++			return;
++		}
++	}
++	brightness_set = pct;
++}
++
++/*!
++ * mdss brings the panels back at its default backlight (127 of 255) on every unblank, while the
++ * LED class keeps showing the last value written: rewriting that same value does nothing. Write
++ * a different level first, then QUEST1_BRIGHTNESS (default 255). One level drives both panels
++ * (the dual-DSI panel's backlight DCS command is broadcast). Then the PCC gains (brightness).
++ */
++static void
++set_brightness(struct mdp_target *t)
++{
++	const char *e = getenv("QUEST1_BRIGHTNESS");
++	int level = e ? atoi(e) : 255;
++	if (level <= 0 || level > 255) {
++		level = 255;
++	}
++	write_backlight(level > 1 ? level - 1 : 2);
++	write_backlight(level);
++	apply_pcc(t, brightness_wanted());
++}
++
++//! Follows the setting while the panels are on (twice a second). Call with vsync_thread's mutex held.
++static void
++poll_brightness_locked(struct mdp_target *t)
++{
++	static int64_t last_ns;
++	int64_t now = os_monotonic_get_ns();
++	if (!t->unblanked || now - last_ns < 500 * U_TIME_1MS_IN_NS) {
++		return;
++	}
++	last_ns = now;
++	float pct = brightness_wanted();
++	if (pct != brightness_set) {
++		apply_pcc(t, pct);
++		U_LOG_W("mdp: brightness %.0f %%", pct);
++	}
++}
++
 +/*!
 + * Panels on while frames come in, off otherwise: when the last app goes away
 + * the compositor stops presenting and the display engine would keep scanning
@@ -561,31 +783,6 @@ index 0000000..77a2d39
 + * showing frames; msm-adreno-tz never ramps up without Android's services.
 + * Call with vsync_thread's mutex held.
 + */
-+/*!
-+ * mdss brings the panels back at its default backlight (127 of 255) on every unblank, while the
-+ * LED class keeps showing the last value written: rewriting that same value does nothing. Write
-+ * a different level first, then QUEST1_BRIGHTNESS (default 255).
-+ */
-+static void
-+set_brightness(void)
-+{
-+	const char *e = getenv("QUEST1_BRIGHTNESS");
-+	int level = e ? atoi(e) : 255;
-+	if (level <= 0 || level > 255) {
-+		return;
-+	}
-+	int fd = open("/sys/class/leds/lcd-backlight/brightness", O_WRONLY | O_CLOEXEC);
-+	if (fd < 0) {
-+		return;
-+	}
-+	char buf[8];
-+	int n = snprintf(buf, sizeof(buf), "%d", level > 1 ? level - 1 : 2);
-+	if (write(fd, buf, n) < 0 || (n = snprintf(buf, sizeof(buf), "%d", level), write(fd, buf, n) < 0)) {
-+		U_LOG_W("mdp: cannot set the backlight: %s", strerror(errno));
-+	}
-+	close(fd);
-+}
-+
 +static void
 +set_panels_locked(struct mdp_target *t, bool on)
 +{
@@ -622,7 +819,7 @@ index 0000000..77a2d39
 +	if (on) {
 +		unsigned int vsync_on = 1;
 +		ioctl(t->fb_fd, MSMFB_OVERLAY_VSYNC_CTRL, &vsync_on);
-+		set_brightness();
++		set_brightness(t);
 +	}
 +	t->unblanked = on;
 +	U_LOG_W("mdp: panels %s", on ? "on" : "off");
@@ -1109,7 +1306,7 @@ index 0000000..77a2d39
 +//! Test and tuning knobs, from the file /tmp/quest1-reproj (read twice a second): "off" shows the layer's frames
 +//! as they are, "yaw=<deg>" adds a fixed yaw to the re-projection, "thr=<deg>" is the angle under which a fresh
 +//! frame is shown as it is (default 0.2), "delay=<ms>" the time from the vsync before a commit to the pose it is
-+//! warped to (default: the setting, MDP_DISPLAY_DELAY_DEFAULT_MS), "lead=<ms>" the tick lead
++//! warped to (default MDP_DISPLAY_DELAY_DEFAULT_MS), "lead=<ms>" the tick lead
 +//! (MDP_TICK_LEAD_DEFAULT_MS), "sign=<mask>" negates the delta's x/y/z axes (1/2/4),
 +//! "rx=/ry=/rz=<deg>" a constant rotation R of the head frame against the eye frame (delta' = conj(R) delta R,
 +//! applied in that order x, y, z), "vel=0" (read by the head tracker, quest1_hmd.c) stops extrapolating Meta's
@@ -1127,14 +1324,6 @@ index 0000000..77a2d39
 +	D->knobs.delay_ms = 0;
 +	D->knobs.lead_ms = MDP_TICK_LEAD_DEFAULT_MS;
 +	D->knobs.display_delay_ms = MDP_DISPLAY_DELAY_DEFAULT_MS;
-+	FILE *df = fopen(MDP_DISPLAY_DELAY_FILE, "r");
-+	if (df != NULL) {
-+		float v = 0;
-+		if (fscanf(df, "%f", &v) == 1 && v >= 0.0f && v <= 40.0f) {
-+			D->knobs.display_delay_ms = v;
-+		}
-+		fclose(df);
-+	}
 +	D->knobs.sign = 0;
 +	D->knobs.rx_deg = D->knobs.ry_deg = D->knobs.rz_deg = 0;
 +	// perf knobs (not the re-projection ones): "early" answers the layer's present wait as soon as the frame is
@@ -2337,6 +2526,7 @@ index 0000000..77a2d39
 +		if (t->unblanked && os_monotonic_get_ns() - t->last_present_ns > U_TIME_1S_IN_NS) {
 +			set_panels_locked(t, false);
 +		}
++		poll_brightness_locked(t);
 +		os_thread_helper_unlock(&t->vsync_thread);
 +		// tick a lead before the vsync that latches what is committed now (MDP_TICK_LEAD_DEFAULT_MS)
 +		t->direct.tick_offset_ns = 0;
@@ -2854,6 +3044,7 @@ index 0000000..77a2d39
 +		return false;
 +	}
 +
++	load_panel_calibration();
 +	struct mdp_target *t = U_TYPED_CALLOC(struct mdp_target);
 +	t->fb_fd = open("/dev/fb0", O_RDWR | O_CLOEXEC);
 +	t->vsync_fd = open("/sys/class/graphics/fb0/vsync_event", O_RDONLY | O_CLOEXEC);

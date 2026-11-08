@@ -15,6 +15,10 @@
 # what was dropped): Meta's tracking logs ~300 lines/s (CONSTELLATION, VioInit...), which cost
 # journald and this script CPU and pushed everything else out of the journal within minutes.
 # FAKELOGD_LEVEL=V|D|I|W|E|F sets the lowest level printed (W by default).
+#
+# The tracking engine's map events (map context switches, map tracking gained/lost, relocalization; info lines, a
+# few per minute at most) are always printed, and also appended to MAPLOG with the wall-clock time, which outlives
+# the boot (the journal is volatile): what happened to the room's map when the headset was put on.
 import os, re, socket, time
 
 p = '/dev/socket/logdw'
@@ -26,6 +30,25 @@ prio = 'VDIWEF'
 min_pr = 2 + prio.index(os.environ.get('FAKELOGD_LEVEL', 'W')[:1].upper() or 'W')
 BURST, WINDOW = 20, 10.0
 window = {}  # tag -> [window start, lines printed, lines dropped]
+
+MAPLOG = '/var/log/quest1-map.log'  # shared with q1anchord
+MAPLOG_MAX = 256 * 1024
+map_re = re.compile(r'Map Context|map context|[Mm]ap tracking|promoted|demoted|[Rr]elocaliz|MapDB|placeAnchor|'
+                    r'persistAnchor|loadMap|removeAllMaps|Anchor(Import|Export)')
+
+
+def maplog(line):
+    try:
+        if os.path.getsize(MAPLOG) > MAPLOG_MAX:
+            os.replace(MAPLOG, MAPLOG + '.1')
+    except OSError:
+        pass
+    try:
+        with open(MAPLOG, 'a') as f:
+            f.write('%s %s\n' % (time.strftime('%Y-%m-%d %H:%M:%S'), line))
+    except OSError:
+        pass
+
 
 BAT = '/run/q1track/ctlbattery'
 cache_re = re.compile(r'id\s*:\s*([0-9a-f]{8})[0-9a-f]{8}\b.*?battery state\s*:\s*(\d+)%', re.S)
@@ -77,6 +100,11 @@ while True:
         battery(msg)
     if 'Syncboss input' in msg:
         controller(msg)
+    if map_re.search(msg):
+        line = '%s/%s: %s' % (prio[pr - 2] if 2 <= pr <= 7 else '?', tag, msg.rstrip())
+        print(line, flush=True)
+        maplog(line)
+        continue
     if pr < min_pr:
         continue
     now = time.monotonic()

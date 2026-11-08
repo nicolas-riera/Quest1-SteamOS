@@ -5,6 +5,9 @@ getent group aid_inet >/dev/null || groupadd -g 3003 aid_inet
 getent group aid_net_raw >/dev/null || groupadd -g 3004 aid_net_raw
 getent group aid_net_admin >/dev/null || groupadd -g 3005 aid_net_admin
 usermod -aG aid_inet,aid_net_raw alpm
+# systemd-timesyncd too, else its NTP socket is refused and the clock is never set (it starts at the image's date)
+mkdir -p /etc/systemd/system/systemd-timesyncd.service.d
+printf '[Service]\nSupplementaryGroups=aid_inet\n' > /etc/systemd/system/systemd-timesyncd.service.d/aid-inet.conf
 # No Landlock on 4.4: pacman's download sandbox can't work.
 grep -q '^DisableSandbox' /etc/pacman.conf || sed -i 's/^\[options\]/[options]\nDisableSandbox/' /etc/pacman.conf
 pacman-key --init >/dev/null 2>&1 || true

@@ -1503,6 +1503,13 @@ public:
 		// buttons (Playspace menu, Floor/Boundary) run ConstructStore.setRoomSetupStep(), which ignores
 		// every step except 0/1 ("HMD doesnt support setRoomSetupStep") unless this is true
 		VRProperties()->SetBoolProperty(c, (ETrackedDeviceProperty)11004, true);
+		// SteamVR's display brightness (Video settings, Steam's quick menu): steamvr/analogGain, applied to the
+		// panels by Monado (PollSettingsActions; a gain in the display engine, the backlight stays where the panels
+		// match). The dashboard's slider shows 100 * gain^(1/2.2) % and starts at 100 * MinUI %: 20 % = a 3 % gain.
+		VRProperties()->SetBoolProperty(c, Prop_DisplaySupportsAnalogGain_Bool, true);
+		VRProperties()->SetFloatProperty(c, Prop_DisplayMinAnalogGain_Float, 0.03f);
+		VRProperties()->SetFloatProperty(c, Prop_DisplayMaxAnalogGain_Float, 1.0f);
+		VRProperties()->SetFloatProperty(c, Prop_DisplayMinUIAnalogGain_Float, 0.2f);
 		VRProperties()->SetBoolProperty(c, Prop_IsOnDesktop_Bool, false);
 		VRProperties()->SetBoolProperty(c, Prop_DisplayDebugMode_Bool, false);
 		VRProperties()->SetBoolProperty(c, Prop_DeviceProvidesBatteryStatus_Bool, false);
@@ -1862,19 +1869,11 @@ private:
 			return;
 		nextSettingsPoll = now + std::chrono::milliseconds(500);
 		EVRSettingsError err = VRSettingsError_None;
-		// the re-projection's display time (Monado's warp, comp_window_mdp.c MDP_DISPLAY_DELAY_FILE): milliseconds
-		// from the vsync before a commit to the head pose it is warped to
-		float delay = VRSettings()->GetFloat("driver_quest1", "displayDelayMs", &err);
-		if (err == VRSettingsError_None && delay >= 0.0f && delay <= 40.0f && delay != writtenDisplayDelay) {
-			if (FILE *f = fopen("/tmp/quest1-display-delay-ms.tmp", "w")) {
-				fprintf(f, "%.1f\n", delay);
-				fclose(f);
-				if (rename("/tmp/quest1-display-delay-ms.tmp", "/tmp/quest1-display-delay-ms") == 0) {
-					writtenDisplayDelay = delay;
-					Log("quest1: settings: re-projection display time %.1f ms after the vsync\n", delay);
-				}
-			}
-		}
+		// the panels' brightness for Monado (comp_window_mdp.c MDP_BRIGHTNESS_FILE), in percent of the backlight,
+		// from SteamVR's own display brightness (steamvr/analogGain, a linear gain: the dashboard's slider and
+		// Steam's quick menu set it, Prop_DisplaySupportsAnalogGain_Bool shows them)
+		SettingToFile("steamvr", "analogGain", 100.0f, 2.0f, 100.0f, "/tmp/quest1-brightness", writtenBrightness,
+		              "display brightness %.0f %% (backlight)");
 		err = VRSettingsError_None;
 		if (!VRSettings()->GetBool("driver_quest1", "clearSpatialAnchors", &err) || err != VRSettingsError_None)
 			return;
@@ -1883,6 +1882,30 @@ private:
 			fclose(f);
 		Log("quest1: settings: clearing the spatial anchor map\n");
 		VRSettings()->SetBool("driver_quest1", "clearSpatialAnchors", false, &err);
+	}
+
+	//! A float setting for another process: written to `path` (atomically) when it changes.
+	//! (The value times `scale`, clamped to [lo, hi]: SteamVR's default analogGain is 1.3, our maximum 1.)
+	void SettingToFile(const char *section, const char *key, float scale, float lo, float hi, const char *path,
+	                   float &written, const char *what)
+	{
+		EVRSettingsError err = VRSettingsError_None;
+		float v = VRSettings()->GetFloat(section, key, &err) * scale;
+		v = roundf(std::min(std::max(v, lo), hi) * 10.0f) / 10.0f;
+		if (err != VRSettingsError_None || v == written)
+			return;
+		std::string tmp = std::string(path) + ".tmp";
+		FILE *f = fopen(tmp.c_str(), "w");
+		if (!f)
+			return;
+		fprintf(f, "%.1f\n", v);
+		fclose(f);
+		if (rename(tmp.c_str(), path) != 0)
+			return;
+		written = v;
+		char msg[128];
+		snprintf(msg, sizeof(msg), what, v);
+		Log("quest1: settings: %s\n", msg);
 	}
 
 	//! SteamVR takes the oculus_touch controller type's dashboard bindings from its own Oculus driver, so the
@@ -1916,7 +1939,7 @@ private:
 	Quest1Hmd *hmd = nullptr;
 	Quest1Controllers controllers;
 	std::chrono::steady_clock::time_point nextSettingsPoll{};
-	float writtenDisplayDelay = -1.0f;
+	float writtenBrightness = -1.0f;
 };
 
 static Quest1Provider g_provider;

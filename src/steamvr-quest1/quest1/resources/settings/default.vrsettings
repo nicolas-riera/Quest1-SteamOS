@@ -1,7 +1,6 @@
 {
 	"driver_quest1": {
 		"enable": true,
-		"clearSpatialAnchors": false,
-		"displayDelayMs": 18.0
+		"clearSpatialAnchors": false
 	}
 }

@@ -4,23 +4,13 @@
 	"driver": "quest1",
 	"values": [
 		{
-			"name": "/settings/driver_quest1/displayDelayMs",
-			"type": "float",
-			"control": "slider",
-			"label": "Re-projection timing (ms)",
-			"text": "When the head turns, each image is turned to where the head will be when the panels show it, this many milliseconds after the vsync. Raise it if the world lags behind your head, lower it if it overshoots. Default 18.",
-			"min": 0,
-			"max": 30,
-			"step": 1,
-			"decimals": 0
-		},
-		{
 			"name": "/settings/driver_quest1/clearSpatialAnchors",
-			"control": "toggle",
+			"control": "segment",
 			"label": "Clear the spatial anchor map",
-			"text": "Forgets the room map the headset finds its place in after a restart or a tracking loss. A new map is saved once the headset has been worn for about a minute; set the playspace up again then. The switch turns back off by itself.",
-			"off_label": "Clear",
-			"on_label": "Clearing"
+			"text": "Forgets the room map the headset finds its place in after a restart or a tracking loss. A new map is saved once the headset has been worn for about a minute; set the playspace up again then.",
+			"options": [
+				{ "value": true, "label": "Clear" }
+			]
 		}
 	]
 }

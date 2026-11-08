@@ -111,5 +111,18 @@ AnchorUuid = 16 bytes in text order; Parcelables are preceded by an int32 non-nu
   so driver_quest1 re-anchored the room on the head (the room turned and moved), and switched back when the saved map
   was found (a second jump). Once the saved map has been found in a run, q1anchord now stays `static`.
 
+- Clearing the map from SteamVR (2026-11-08): SteamVR's settings have an "Oculus Quest" page
+  (`quest1_settingsschema.json`, merged into SteamVR's schema by `steamvr-q1` through `VR_SETTINGSSCHEMA_FILE`) with a
+  "Clear" button for `/settings/driver_quest1/clearSpatialAnchors`. SteamVR's schema has no button control: it is a
+  one-option segment control (value true), which shows as a button as long as the setting is false; driver_quest1
+  sees it go true, touches `/tmp/quest1-clear-map` and sets it back. Tested by a click through CEF remote debugging
+  (q1anchord: "all maps removed").
+- Map events log (2026-11-08): the journal is volatile, so what happened to the map at a put-on was lost with the boot
+  (user: room in the wrong place, no chaperone). q1anchord's messages and the engine's map events (fakelogd lets its
+  info lines about map contexts, map tracking and relocalization through) go to `/var/log/quest1-map.log` with the
+  wall-clock time (256 KB, then `.1`). The clock itself was never set before (systemd-timesyncd lacked the
+  aid_inet group: firstboot.sh). Found that morning: no chaperone file at all (the playspace had not been set up again
+  after the map loss of 2026-11-07), which alone explains the missing chaperone.
+
 Not yet verified: relocalization after a real reboot with the headset worn and moved around the room; whether the
 persisted map keeps growing (mapdb rewritten) while used.

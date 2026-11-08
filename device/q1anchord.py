@@ -48,6 +48,18 @@ BACKUP_QUIET = 60.0  # mapdb unchanged this long before it is copied
 EMPTY_LOST = 30.0  # mapdb empty this long: the map is gone
 
 
+MAPLOG = '/var/log/quest1-map.log'  # shared with fakelogd (the engine's map events), outlives the boot
+
+
+def log(msg):
+    print(msg, flush=True)
+    try:
+        with open(MAPLOG, 'a') as f:
+            f.write('%s %s\n' % (time.strftime('%Y-%m-%d %H:%M:%S'), msg))
+    except OSError:
+        pass
+
+
 def svc(*a):
     r = subprocess.run(SVC + list(a), capture_output=True, text=True, timeout=20)
     words = []
@@ -117,7 +129,7 @@ def backup():
     subprocess.run(['sync'], check=False)
     subprocess.run(['rm', '-rf', MAPBAK], check=False)
     os.rename(tmp, MAPBAK)
-    print('q1anchord: map database copied (%d files)' % len(mapdb_sig(MAPBAK)), flush=True)
+    log('q1anchord: map database copied (%d files)' % len(mapdb_sig(MAPBAK)))
     return True
 
 
@@ -125,7 +137,7 @@ def restore():  # before trackingservice starts
     if read(MAPUUID) and not mapdb_sig() and mapdb_sig(MAPBAK):
         subprocess.run(['cp', '-a', MAPBAK + '/.', MAPDB + '/'], check=False)
         subprocess.run(['sync'], check=False)
-        print('q1anchord: mapdb was empty: restored the copy of map %s' % read(MAPUUID), flush=True)
+        log('q1anchord: mapdb was empty: restored the copy of map %s' % read(MAPUUID))
 
 
 def configured():  # chaperone data with a universe (playspace set up)
@@ -135,7 +147,7 @@ def configured():  # chaperone data with a universe (playspace set up)
 def forget():
     svc('call', 'TrackingEnvironment', '6')  # removeAllMaps
     drop_saved()
-    print('q1anchord: all maps removed', flush=True)
+    log('q1anchord: all maps removed')
 
 
 def drop_saved():
@@ -165,7 +177,7 @@ def persist():
     os.makedirs(os.path.dirname(MAPUUID), exist_ok=True)
     write_atomic(ANCHORUUID, u)
     write_atomic(MAPUUID, m)
-    print('q1anchord: persisted map %s anchor %s' % (m, u), flush=True)
+    log('q1anchord: persisted map %s anchor %s' % (m, u))
     return True
 
 
@@ -197,8 +209,7 @@ def main():
             # rewrite dropped a good map and its copy)
             empty_since = (empty_since or now) if not s else None
             if saved and empty_since and now - empty_since > EMPTY_LOST:
-                print('q1anchord: map %s is gone from mapdb (deleted by the engine?): a new one will be saved' % saved,
-                      flush=True)
+                log('q1anchord: map %s is gone from mapdb (deleted by the engine?): a new one will be saved' % saved)
                 drop_saved()
                 saved = ''
             if s != sig:
@@ -213,11 +224,11 @@ def main():
             else:
                 state = 'static'
             if saved and cur and cur != saved and found == saved and lost_logged != cur:
-                print('q1anchord: current map %s is not the saved one (tracking lost?): staying static' % cur, flush=True)
+                log('q1anchord: current map %s is not the saved one (tracking lost?): staying static' % cur)
                 lost_logged = cur
             if state != last:
                 write_atomic(STATE, state)
-                print('q1anchord: frame state %s (current map %s, saved %s)' % (state, cur or '-', saved or '-'), flush=True)
+                log('q1anchord: frame state %s (current map %s, saved %s)' % (state, cur or '-', saved or '-'))
                 last = state
             if not os.path.exists(PANELS_OFF):
                 worn_since = worn_since or now
@@ -226,7 +237,7 @@ def main():
             if not saved and cur and worn_since and now - worn_since > WORN_BEFORE_PERSIST:
                 persist()
         except Exception as e:  # keep running
-            print('q1anchord: %r' % (e,), flush=True)
+            log('q1anchord: %r' % (e,))
         time.sleep(3)
 
 
