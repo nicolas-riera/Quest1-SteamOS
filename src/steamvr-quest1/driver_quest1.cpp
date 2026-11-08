@@ -1499,6 +1499,10 @@ public:
 		// buttons (Playspace menu, Floor/Boundary) run ConstructStore.setRoomSetupStep(), which ignores
 		// every step except 0/1 ("HMD doesnt support setRoomSetupStep") unless this is true
 		VRProperties()->SetBoolProperty(c, (ETrackedDeviceProperty)11004, true);
+		// Prop_Hmd_RecommendedResolutionIsPerApp_Bool (2121, not in the public headers), as on the Steam Frame:
+		// the dashboard's Video settings drop the global render resolution slider (systemInfo.resolution_per_app)
+		// and each game's own Video settings keep theirs, in pixels.
+		VRProperties()->SetBoolProperty(c, (ETrackedDeviceProperty)2121, true);
 		// SteamVR's display brightness (Video settings, Steam's quick menu): steamvr/analogGain, applied to the
 		// panels by Monado (PollSettingsActions; a gain in the display engine, the backlight stays where the panels
 		// match). The dashboard's slider shows 100 * gain^(1/2.2) % and starts at 100 * MinUI %: 20 % = a 3 % gain.

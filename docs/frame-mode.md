@@ -28,6 +28,25 @@ Revert: put the old args back (`/etc/systemd/system/steam.service.d/vr.conf.bak-
   Check the dashboard instead: `runuser -u steamos -- touch /tmp/quest1-snap` writes /tmp/quest1-snap.ppm.
 
 
+## SteamVR render resolution: per game only (2026-11-09)
+
+As on the Steam Frame, SteamVR's Video settings have no global render resolution slider; each game's own Video
+settings keep theirs (in pixels per eye). The user asked for it: one global resolution makes no sense next to the
+per-game one.
+
+- driver_quest1 sets `Prop_Hmd_RecommendedResolutionIsPerApp_Bool` (2121, not in the public OpenVR headers; id
+  read from vrserver's property-name switch). vrserver passes it to the dashboard as `systemInfo.resolution_per_app`;
+  the dashboard then hides the global slider. In this mode vrserver ignores `steamvr/supersampleManualOverride` and
+  `supersampleScale`.
+- A game without its own setting then gets vrcompositor's automatic resolution. On arm64 vrcompositor does not
+  measure the GPU: it logs "GPU speed override on platform: 450" (MP/s), divides by the headset's 299 MP/s and
+  clamps to 1.5x: 1496x1664 per eye instead of 1224x1360, 50 % more pixels than the GPU has room for.
+  `GpuSpeed/ignoreGpuSpeed = true` (quest1-frame-settings) sets the automatic resolution to the driver's
+  recommended size: 1224x1360, the same as before (measured with an OpenVR background client:
+  IVRSystem::GetRecommendedRenderTargetSize).
+- `GpuSpeed/gpuSpeedManualOverride(Scale)` and writing `gpuSpeedRenderTargetScale` do nothing: vrcompositor
+  computes it again at every start.
+
 ## Notes moved from the to-do list (2026-11-08): Power
 
 History of measurements, fixes and open points as they were written in docs/todo.md (the to-do list now only
