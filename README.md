@@ -167,5 +167,9 @@ Quest and Horizon are trademarks of Meta Platforms. Steam, SteamVR, SteamOS and 
 are trademarks of Valve Corporation.
 
 No firmware, library or software from Meta or Valve is included in this repository or in
-its releases. The kernel and its changes are GPL-2.0, like Linux. The Monado patch follows
-Monado's license (BSL-1.0).
+its releases.
+
+## License
+
+MIT ([LICENSE](LICENSE)), except the kernel changes (`kernel/`), GPL-2.0-only like Linux, and
+the Monado changes (`src/monado/`, `src/qbridge/monado/`), BSL-1.0 like Monado.
