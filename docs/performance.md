@@ -3,6 +3,14 @@
 Where the frame time goes and what was tried. Current numbers and the direct scanout path:
 docs/direct-scanout.md; Steam's UI: docs/steam-gpu.md.
 
+## 2026-11-08 (evening): vrcompositor's render thread realtime
+
+vrcompositor asks for realtime priority for its RenderThread and SignalThread ("Error establishing real-time priority",
+vrcompositor.txt): on desktop Linux SteamVR's launcher is setcap'd for it. The unit now gives SteamVR
+`AmbientCapabilities=CAP_SYS_NICE`: both run SCHED_RR. Monado's warp thread (FIFO 99) keeps its timing (late 0, wake
+max < 0.1 ms). Benchmark (scene mode, warm): 71.8 / 71.1 / 72.0 / 71.2 fps (71.8 / 71.2 / 70.9 / 70.7 before); the
+frame trace of a quiet dashboard shows 218 presents for 217 vblanks.
+
 ## 2026-11-08 (evening): scene mode, the eyes render straight into Monado's buffers (`/etc/quest1-warp-lens` 2)
 
 vrcompositor's distortion pass resampled each 1500x1664 eye render into a 1440x1600 panel image (~2 ms an eye, all

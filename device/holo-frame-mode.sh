@@ -180,6 +180,11 @@ ExecStartPre=+/usr/local/sbin/quest1-frame-settings
 ExecStartPre=/bin/sh -c 'rm -f /home/steamos/.local/share/Steam/logs/vr*.txt'
 # SteamVR's own qgl_config.txt (written above): the Adreno blob renders vrcompositor's passes straight to memory
 BindReadOnlyPaths=-/etc/quest1/qgl_config-steamvr.txt:/data/vendor/gpu/qgl_config.txt
+# what SteamVR's setcap'd launcher gives it on desktop Linux: vrcompositor's RenderThread and SignalThread run
+# realtime (SCHED_RR). Its running start leaves the render thread ~4.4 ms before the vblank, so preemptions cost
+# frames. Monado's warp is unaffected (late 0, wake max < 0.1 ms, 2026-11-08). The layer still drops its global
+# GPU priority request: on Monado's kgsl ring, the warp could no longer preempt it.
+AmbientCapabilities=CAP_SYS_NICE
 ExecStart=/usr/local/bin/steamvr-q1 vrserver --keepalive
 # vrcompositor, vrwebhelpers etc. are vrserver's children: stopping the unit stops all of SteamVR
 KillMode=control-group
