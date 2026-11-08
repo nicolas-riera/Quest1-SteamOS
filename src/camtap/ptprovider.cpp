@@ -327,6 +327,35 @@ static void RenderComposite(const std::vector<CompTap> &lut, const uint8_t *bott
 	}
 }
 
+//! Test pattern 5: each pixel of the image as the shader's model (FillDesc: KB fisheye, the record's pose) places it, in
+//! device directions: lines every 10 degrees of azimuth and elevation, the horizon and straight ahead in red, above the
+//! horizon lighter. With the head level, the red cross must sit on the virtual world's horizon, straight ahead.
+static void DirectionGrid(const Calib &cal, std::vector<uint8_t> &luma, std::vector<uint8_t> &red)
+{
+	luma.assign((size_t)kW * kH, 0), red.assign((size_t)kW * kH, 0);
+	const double deg = 180 / M_PI;
+	for (int y = 0; y < kH; y++)
+		for (int x = 0; x < kW; x++) {
+			double u = (x - cal.cx) / cal.f, v = (y - cal.cy) / cal.f, thd = sqrt(u * u + v * v), th = thd;
+			for (int it = 0; it < 20; it++) { // th (1 + k1 th^2 + ...) = thd
+				double t2 = th * th, poly = 1 + t2 * (cal.kb[0] + t2 * (cal.kb[1] + t2 * (cal.kb[2] + t2 * cal.kb[3])));
+				double dpoly = 1 + t2 * (3 * cal.kb[0] + t2 * (5 * cal.kb[1] + t2 * (7 * cal.kb[2] + t2 * 9 * cal.kb[3])));
+				th -= (th * poly - thd) / dpoly;
+			}
+			double s = thd > 1e-9 ? sin(th) / thd : 1, dc[3] = {u * s, v * s, cos(th)}, d[3];
+			for (int r = 0; r < 3; r++)
+				d[r] = cal.m[r * 4] * dc[0] + cal.m[r * 4 + 1] * dc[1] + cal.m[r * 4 + 2] * dc[2];
+			double az = atan2(d[0], -d[2]) * deg, el = asin(std::max(-1.0, std::min(1.0, d[1]))) * deg;
+			double fe = fabs(el - 10 * std::round(el / 10)), fa = fabs(az - 10 * std::round(az / 10));
+			size_t i = (size_t)y * kW + x;
+			luma[i] = el > 0 ? 110 : 50;
+			if (fe < 0.5 || fa < 0.5)
+				luma[i] = 235;
+			if ((fabs(el) < 0.8 && fabs(az) < 60) || (fabs(az) < 0.8 && fabs(el) < 60))
+				red[i] = 1, luma[i] = 150;
+		}
+}
+
 //! The per-frame record descriptor (248 bytes) vrcompositor copies (0x15f4bc) into its camera state (0x15f748..0x15f8b4):
 //!   +8 double capture time (s); +16..+28 float fx, fy, cx, cy (pixels: the shader divides by the block's image size);
 //!   +32..+44 float k1..k4 (Kannala-Brandt fisheye; all zero = pinhole); +224 u8 "spline" (adds the spline distortion
@@ -342,7 +371,7 @@ static void FillDesc(uint8_t *desc, double captureS, const Calib &cal, const Hmd
 	// into the shader's _m3, which projects head-space points (the depth mesh's frame) into the camera.
 	// +96: the same pose: vrcompositor (0x160a80) draws each eye with the camera nearest to it, comparing these with the eye
 	// positions (when params byte 1, state[3], is set: SetShow).
-	// +144: the head pose at capture (raw tracking space, rotation only: see below)
+	// +144: the head pose at capture (raw tracking space; its position is set by PivotFreePosition)
 	float m1[12];
 	for (int r = 0; r < 3; r++)
 		for (int c = 0; c < 4; c++)
@@ -387,6 +416,30 @@ static bool CapturePose(int64_t capNs, HmdMatrix34_t &out)
 		usleep(500);
 	}
 	return false;
+}
+
+/*
+ * The position written with the capture pose (+144). vrcompositor corrects the head motion between a frame's capture
+ * and its display with X = G * P^-1 in raw tracking space (G = +144, P = the head pose it displays with): the rotation
+ * R_G R_P^T, the translation t_G - R_G R_P^T t_P, applied to our head-centred mesh. Read from its roomview uniforms
+ * (2026-11-08): with G's translation zeroed X held -t_P, a constant 1.65 m drop (the head's height above the raw origin,
+ * the floor): the whole passthrough sat ~35 degrees too low (user: "the view is far too low", the controllers far off).
+ * With G's true position a 10 degree turn gave 0.28 m (= 1.65 sin 10), the image swinging about the floor as the head
+ * turns (2026-11-07). So t_G' = R_G R_E^T t_E, E the head's newest pose (SteamVR's, already predicted to the display):
+ * X keeps the rotation and its translation is only what the head moves between now and the display (P - E).
+ */
+static void PivotFreePosition(HmdMatrix34_t &head)
+{
+	TrackedDevicePose_t hp = {};
+	VRSystem()->GetDeviceToAbsoluteTrackingPose(TrackingUniverseRawAndUncalibrated, 0, &hp, 1);
+	if (!hp.bPoseIsValid)
+		return; // the capture position as it is: right while the head does not turn
+	const HmdMatrix34_t &e = hp.mDeviceToAbsoluteTracking;
+	double q[3]; // R_E^T t_E
+	for (int i = 0; i < 3; i++)
+		q[i] = e.m[0][i] * e.m[0][3] + e.m[1][i] * e.m[1][3] + e.m[2][i] * e.m[2][3];
+	for (int r = 0; r < 3; r++)
+		head.m[r][3] = (float)(head.m[r][0] * q[0] + head.m[r][1] * q[1] + head.m[r][2] * q[2]);
 }
 
 //! The "params" of IVRCameraPassthroughInternal (GetParams/SetParams, vrclient 0x1a49d8/0x1a4bf8) are 5 bytes at state+2: the
@@ -447,6 +500,10 @@ int main()
 			lut[c] = BuildComposite(calib[c], pair, both);
 			printf("ptprovider: eye %d: composite of cameras %d and %d, %d blended pixels" "\n", c, c ? 2 : 0, c ? 3 : 1, both);
 		}
+	std::vector<uint8_t> gridLuma[2], gridRed[2];
+	if (pattern == 5)
+		for (int c = 0; c < 2; c++)
+			DirectionGrid(calib[c], gridLuma[c], gridRed[c]);
 	// The sensors' values are linear in light; the roomview shader decodes its Y' as sRGB (full-range BT.601, then the sRGB
 	// curve): encode them so that the light reaches the display linear, as Meta's passthrough does (its gamma steps cancel out)
 	uint8_t toSrgb[256];
@@ -651,7 +708,10 @@ int main()
 			fresh = true;
 			for (int c = 0; c < 2; c++) {
 				Img &im = img[c][slot[c]];
-				if (pattern >= 3) { // the whole buffer filled with one RGBA value (3: 255,0,0,255; 4: 0,0,255,255)
+				if (pattern == 5)
+					WriteYuv(im, [&](int x, int y) { return gridLuma[c][(size_t)y * kW + x]; },
+					         [&](int x, int y) { return gridRed[c][(size_t)y * kW + x] != 0; });
+				else if (pattern >= 3) { // the whole buffer filled with one RGBA value (3: 255,0,0,255; 4: 0,0,255,255)
 					for (size_t o = 0; o + 4 <= im.len; o += 4)
 						im.map[o] = pattern == 3 ? 255 : 0, im.map[o + 1] = 0, im.map[o + 2] = pattern == 3 ? 0 : 255,
 						im.map[o + 3] = 255;
@@ -739,13 +799,7 @@ int main()
 				VRSystem()->GetDeviceToAbsoluteTrackingPose(TrackingUniverseRawAndUncalibrated, 0, &hp, 1);
 				head = hp.bPoseIsValid ? hp.mDeviceToAbsoluteTracking : HmdMatrix34_t{{{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}}};
 			}
-			// Rotation only: vrcompositor turns the capture-to-display rotation about +144's position, so with the head's raw
-			// position (1.65 m above the floor, metres away once walking) every pitch or roll between capture and display also
-			// moved the image (the shake and tilt). Measured 2026-11-07 with the head still and SteamVR's pose turned by
-			// +-10 degrees: with the position the camera image moved -134/+114 px against the room's -162/+163, without it
-			// -157/+150 against -168/+157 (yaw: -152 against -164; the rest is the lens). The static image is the same.
-			for (int r = 0; r < 3; r++)
-				head.m[r][3] = 0;
+			PivotFreePosition(head);
 			for (int c = 0; c < 2; c++) {
 				FillDesc((uint8_t *)Rec(c, slot[c]) + 4, capS, calib[c], head);
 				__atomic_store_n(Rec(c, slot[c]), 1u, __ATOMIC_RELEASE); // frame ready

@@ -387,10 +387,24 @@ reference; shifts from layer snapshots by profile correlation, a band of the das
 - `rawFromMeshPose` (the mesh's own pose, given as the head's raw position) changes nothing. +144 with its translation
   zeroed: the static image is unchanged and pitch gives -157/+150 against -168/+157 (yaw as before): the pivot is
   +144's position.
-- Fix: ptprovider writes +144 as the capture **rotation only** (translation 0). Pitch +-10 after: camera -156/+150,
+- Fix (replaced 2026-11-08, below): ptprovider writes +144 as the capture **rotation only** (translation 0). Pitch +-10 after: camera -156/+150,
   dashboard -156/+169. The compositor so corrects rotation only between capture and display (like Monado's warp); a
   head translation in those ~60 ms (a few cm walking) is not corrected, below a degree on the 3 m sphere.
 - To confirm worn (user): the shake and tilt when the head moves. Depth (a real mesh) after that.
+
+### The view 35 degrees too low (2026-11-08)
+
+User: "the passthrough view is far too low", the real controllers far from the virtual ones, in both the composite and
+the bottom-camera-only modes. A test pattern (`PT_PATTERN=5`: each pixel drawn at its direction under the camera model
+the record declares, lines every 10 degrees, the horizon in red) showed the red horizon ~35 degrees above the virtual
+world's, with either camera model: vrcompositor, not the cameras. Its uniforms (`/root/pt-ubo.sh`) gave `_m1` a
+translation of -1.65 m: the head's height. Since the raw space has its origin on the floor (the anchored frame), the
+rotation-only +144 above makes X = G * P^-1 hold -t_P: the mesh sphere dropped by the head's height. And a pose with its
+true position gave, for a 10 degree pitch, 0.28 m (1.65 sin 10): the pivot about the floor measured on 2026-11-07.
+Fix: +144 keeps the capture rotation R_G and gets the position R_G R_E^T t_E, E the newest head pose (SteamVR's, already
+predicted to the display): X is then the rotation alone plus the head's motion between now and the display. Checked
+in the uniforms: 10 degrees of pitch give the rotation and a translation of only the half IPD (the eye offset); the
+pattern's horizon sits on the virtual one.
 
 
 ## The top cameras: one composite image per eye (2026-11-08)
