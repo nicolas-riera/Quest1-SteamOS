@@ -14,6 +14,7 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/moduleparam.h>
+#include <linux/percpu.h>
 #include <linux/sched.h>
 #include <linux/uaccess.h>
 #include <asm/ptrace.h>
@@ -24,8 +25,23 @@
 #undef MODULE_PARAM_PREFIX
 #define MODULE_PARAM_PREFIX "lse_emul."
 
-static unsigned long count;
-module_param(count, ulong, 0444);
+/* per CPU: one shared counter bounced its cache line between the cores at every trap */
+static DEFINE_PER_CPU(unsigned long, lse_count);
+
+static int count_get(char *buf, const struct kernel_param *kp)
+{
+	unsigned long sum = 0;
+	int cpu;
+
+	for_each_possible_cpu(cpu)
+		sum += per_cpu(lse_count, cpu);
+	return sprintf(buf, "%lu\n", sum);
+}
+
+static const struct kernel_param_ops count_ops = {
+	.get = count_get,
+};
+module_param_cb(count, &count_ops, NULL, 0444);
 
 /*
  * One compare-and-swap on user memory: if *p == old, store new. *cur gets the
@@ -109,6 +125,23 @@ static int user_cmpxchg(unsigned int size, unsigned long addr, u64 old, u64 new,
 	case 2: return user_cmpxchg32(addr, old, new, cur);
 	default: return user_cmpxchg64(addr, old, new, cur);
 	}
+}
+
+/* A plain (single-copy atomic, aligned) load of the user value. Returns 0 or -EFAULT. */
+static int user_load(unsigned int size, unsigned long addr, u64 *val)
+{
+	u8 b;
+	u16 h;
+	u32 w;
+	int err;
+
+	switch (size) {
+	case 0: err = get_user(b, (u8 __user *)addr); *val = b; break;
+	case 1: err = get_user(h, (u16 __user *)addr); *val = h; break;
+	case 2: err = get_user(w, (u32 __user *)addr); *val = w; break;
+	default: err = get_user(*val, (u64 __user *)addr); break;
+	}
+	return err ? -EFAULT : 0;
 }
 
 static inline u64 size_mask(unsigned int size)
@@ -199,6 +232,12 @@ static int emulate_atomic(struct pt_regs *regs, u32 insn)
 		smp_mb();
 		set_reg(regs, rt, cur);
 	} else {
+		/*
+		 * Start from the value in memory rather than 0: with a guess of 0 almost every
+		 * operation took two exclusive loops (the first compare fails and returns the value).
+		 */
+		if (user_load(size, addr, &guess))
+			return fault(regs, addr, 0);
 		for (;;) {
 			if (user_cmpxchg(size, addr, guess, alu(o3opc, guess, v, size) & mask, &cur))
 				return fault(regs, addr, 0);
@@ -208,7 +247,7 @@ static int emulate_atomic(struct pt_regs *regs, u32 insn)
 		}
 		set_reg(regs, rt, cur);
 	}
-	count++;
+	this_cpu_inc(lse_count);
 	regs->pc += 4;
 	return 0;
 }
@@ -225,7 +264,7 @@ static int emulate_cas(struct pt_regs *regs, u32 insn)
 	if (user_cmpxchg(size, addr, get_reg(regs, rs) & mask, get_reg(regs, rt) & mask, &cur))
 		return fault(regs, addr, 0);
 	set_reg(regs, rs, cur);
-	count++;
+	this_cpu_inc(lse_count);
 	regs->pc += 4;
 	return 0;
 }
@@ -256,7 +295,7 @@ static int emulate_casp(struct pt_regs *regs, u32 insn)
 		set_reg(regs, rs, cur & 0xffffffff);
 		set_reg(regs, rs + 1, cur >> 32);
 	}
-	count++;
+	this_cpu_inc(lse_count);
 	regs->pc += 4;
 	return 0;
 }
@@ -286,6 +325,24 @@ static struct undef_hook lse_hooks[] = {
 		.fn = emulate_casp,
 	},
 };
+
+/*
+ * Called by call_undef_hook (traps.c) for every AArch64 EL0 undefined instruction before it
+ * takes undef_lock: at ~100,000 traps a second (Steam, vrserver, vrcompositor) that global
+ * spinlock and the hook list walk were a large part of each trap. Returns 0 when the
+ * instruction was emulated, 1 to let the normal hook path handle it.
+ */
+int lse_emul_fast(struct pt_regs *regs, u32 insn)
+{
+	int i;
+
+	if ((regs->pstate & EL0_A64_MASK) != PSR_MODE_EL0t)
+		return 1;
+	for (i = 0; i < ARRAY_SIZE(lse_hooks); i++)
+		if ((insn & lse_hooks[i].instr_mask) == lse_hooks[i].instr_val)
+			return lse_hooks[i].fn(regs, insn);
+	return 1;
+}
 
 static int __init lse_emul_init(void)
 {
