@@ -354,6 +354,12 @@ context.objects = [
       audio.position = [ FL FR ]
       priority.session = 2000
       priority.driver = 2000
+      # always running (silence when nothing plays): closing the PCM when idle ends the ADSP session, and
+      # each sound after a silence (Steam's UI clicks) then reopened the whole ASM/ADM/AFE/MI2S/codec chain:
+      # a click at each start, and the crackle came and went with how often sounds played (2026-11-08)
+      session.suspend-timeout-seconds = 0
+      node.pause-on-idle = false
+      node.always-process = true
     }
   }
   { factory = adapter

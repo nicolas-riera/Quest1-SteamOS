@@ -267,6 +267,17 @@ UCM routing itself (`holo-audio output speaker|headphones`). Not yet tested: nex
 only then `holo-audio enable`.
 
 
+## 2026-11-08: the output never stops
+
+The crackle came and went, and a click was heard at each Steam start. PipeWire never saw an xrun, and the
+ALSA ring never ran empty (the 2026-11-03 capture: the fill level stays at 1-2 periods of 1024). But the
+output PCM was closed whenever nothing played: each sound after a silence (Steam's UI clicks) opened it again,
+and every open rebuilds the whole chain in the ADSP (ASM session, ADM/COPP, AFE port, MI2S clocks) and the
+codec path, without calibration data (`send_afe_cal_type cal_block not found`, `q6asm_send_cal: cal_block is
+NULL` at each open). The `quest1-output` node is now always running (`node.always-process = true`,
+`session.suspend-timeout-seconds = 0`, `node.pause-on-idle = false`): the PCM stays open and plays silence
+between sounds (PipeWire ~0 % CPU). To confirm by ear in the headset (user).
+
 ## Notes moved from the to-do list (2026-11-08): Audio
 
 History of measurements, fixes and open points as they were written in docs/todo.md (the to-do list now only
