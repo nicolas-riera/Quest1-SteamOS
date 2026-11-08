@@ -26,6 +26,7 @@
 #include "camera.h"
 #include "q1json.h"
 #include "quest1_camera_ring.h"
+#include "stereo_depth.h"
 
 #include <fcntl.h>
 #include <linux/futex.h>
@@ -256,7 +257,8 @@ public:
 class RingSource : public FrameSource
 {
 public:
-	explicit RingSource(std::string path) : path(std::move(path)) {}
+	//! passive: never asks the producer for frames (no .want heartbeat), only reads the ones others asked for
+	explicit RingSource(std::string path, bool passive = false) : path(std::move(path)), passive(passive) {}
 	~RingSource() override { Unmap(); }
 
 	bool Acquire(const std::vector<int> &ids, std::vector<SrcImage> &out, int64_t &captureNs, int timeoutMs) override
@@ -312,6 +314,8 @@ private:
 	//! mtime is less than 3 s old: touch it once a second while we are reading
 	void Heartbeat()
 	{
+		if (passive)
+			return;
 		int64_t now = MonoNs();
 		if (now - lastBeat < 1000000000LL)
 			return;
@@ -371,6 +375,7 @@ private:
 	}
 
 	std::string path;
+	bool passive = false;
 	const q1cam_ring_header *hdr = nullptr;
 	size_t mapSize = 0;
 	uint32_t lastCount = 0, slotIndex = 0, seq0 = 0;
@@ -1162,8 +1167,9 @@ private:
 
 	//! The depth mesh vrcompositor's 3D roomview draws (see docs/passthrough.md): a layout block (index buffer, vertex and
 	//! index counts), a data block (float3 vertices, pose of the mesh in tracking space) and the queue-wide meshIsUpToDate.
-	//! For now a static sphere around the head (vrcompositor draws the mesh in head space: its _m0 stays identity), 3 m
-	//! radius, its triangles facing inwards (vrcompositor culls the others).
+	//! A sphere around the head (vrcompositor draws the mesh in head space: its _m0 stays identity), its triangles facing
+	//! inwards (vrcompositor culls the others): 3 m away, except where the bottom camera pair sees the room, where each
+	//! vertex sits at the depth measured there (UpdateDepth).
 	void BuildMesh()
 	{
 		EVRInitError err = VRInitError_None;
@@ -1172,15 +1178,17 @@ private:
 			CLog("quest1 camera: no IVRPaths (%d), no depth mesh\n", (int)err);
 			return;
 		}
-		const int rings = 24, segs = 48;
+		const int rings = 48, segs = 96;
 		const float radius = (float)atof(Env("QUEST1_CAMERA_MESH_RADIUS", "3")), cy = 0.0f;
 		for (int r = 0; r <= rings; r++) {
 			float th = (float)M_PI * r / rings;
 			for (int sgm = 0; sgm <= segs; sgm++) {
 				float ph = 2.f * (float)M_PI * sgm / segs;
-				verts.push_back(radius * sinf(th) * cosf(ph));
-				verts.push_back(cy + radius * cosf(th));
-				verts.push_back(radius * sinf(th) * sinf(ph));
+				const float d[3] = {sinf(th) * cosf(ph), cosf(th), sinf(th) * sinf(ph)};
+				dirs.insert(dirs.end(), d, d + 3);
+				verts.push_back(radius * d[0]);
+				verts.push_back(cy + radius * d[1]);
+				verts.push_back(radius * d[2]);
 			}
 		}
 		for (int r = 0; r < rings; r++)
@@ -1190,12 +1198,82 @@ private:
 				idx.insert(idx.end(), t, t + 6);
 			}
 		CLog("quest1 camera: depth mesh %zu vertices, %zu indices\n", verts.size() / 3, idx.size());
+		defaultRadius = radius;
+		SetupDepth();
+	}
+
+	//! The stereo depth grid (stereo_depth.h) on the bottom camera pair, and where each sphere vertex reads it: grid
+	//! coordinates and a weight that fades to the default radius over the grid's last 10 degrees.
+	void SetupDepth()
+	{
+		// off by default: on 2026-11-08 the depths were too unreliable (~10 % of the cells confident, on a desk) and the
+		// view warped; QUEST1_CAMERA_DEPTH=1 turns it on to work on it
+		if (!atoi(Env("QUEST1_CAMERA_DEPTH", "0")))
+			return;
+		std::vector<CamModel> pair(2);
+		pair[0].id = 0, pair[1].id = 2;
+		LoadCalibration(pair);
+		if (!pair[0].calibrated || !pair[1].calibrated) {
+			CLog("quest1 camera: no calibration for the bottom cameras: fixed-depth mesh\n");
+			return;
+		}
+		auto proj = [](CamModel c) {
+			return [c](const double p[3], double &px, double &py) {
+				double q[3] = {p[0] - c.t[0], p[1] - c.t[1], p[2] - c.t[2]}, d[3];
+				for (int i = 0; i < 3; i++)
+					d[i] = c.R[0][i] * q[0] + c.R[1][i] * q[1] + c.R[2][i] * q[2]; // R^T (p - t)
+				return d[2] > 0 && c.Project(d, px, py);
+			};
+		};
+		if (!depth.Configure(depthParams, proj(pair[0]), proj(pair[1]), pair[0].w, pair[0].h)) {
+			CLog("quest1 camera: stereo depth unusable: fixed-depth mesh\n");
+			return;
+		}
+		const double fade = 10, deg = 180 / M_PI;
+		const StereoDepth::Params &dp = depthParams;
+		size_t n = dirs.size() / 3;
+		gridX.assign(n, -1), gridY.assign(n, -1), gridW.assign(n, 0);
+		for (size_t v = 0; v < n; v++) {
+			const float *d = &dirs[v * 3];
+			if (d[2] >= 0)
+				continue; // behind
+			double az = atan2(d[0], -d[2]) * deg, el = asin(std::max(-1.f, std::min(1.f, d[1]))) * deg;
+			double x = (az - dp.azMinDeg) / (dp.azMaxDeg - dp.azMinDeg) * dp.cols - 0.5;
+			double y = (dp.elMaxDeg - el) / (dp.elMaxDeg - dp.elMinDeg) * dp.rows - 0.5;
+			double edge = std::min({az - dp.azMinDeg, dp.azMaxDeg - az, el - dp.elMinDeg, dp.elMaxDeg - el});
+			if (edge <= 0)
+				continue;
+			gridX[v] = (float)std::max(0.0, std::min(x, dp.cols - 1.0));
+			gridY[v] = (float)std::max(0.0, std::min(y, dp.rows - 1.0));
+			gridW[v] = (float)std::min(1.0, edge / fade);
+		}
+		depthOn = true;
+		CLog("quest1 camera: stereo depth on the bottom camera pair, %dx%d cells\n", dp.cols, dp.rows);
+	}
+
+	//! New radii for the sphere's vertices from the latest depth grid (bilinear), in place.
+	void UpdateDepth()
+	{
+		const int cols = depth.Cols(), rows = depth.Rows();
+		for (size_t v = 0; v < gridW.size(); v++) {
+			float r = defaultRadius;
+			if (gridW[v] > 0) {
+				int x0 = (int)gridX[v], y0 = (int)gridY[v], x1 = std::min(x0 + 1, cols - 1), y1 = std::min(y0 + 1, rows - 1);
+				float fx = gridX[v] - x0, fy = gridY[v] - y0;
+				float a = depth.Depth(y0 * cols + x0) * (1 - fx) + depth.Depth(y0 * cols + x1) * fx;
+				float b = depth.Depth(y1 * cols + x0) * (1 - fx) + depth.Depth(y1 * cols + x1) * fx;
+				float dd = a * (1 - fy) + b * fy;
+				r = defaultRadius + (dd - defaultRadius) * gridW[v];
+			}
+			for (int i = 0; i < 3; i++)
+				verts[v * 3 + i] = r * dirs[v * 3 + i];
+		}
 	}
 
 	//! Publishes the mesh: the layout block, then a data block with a new meshId. vrcompositor drops a data block whose
 	//! layoutId does not match the layout it has read so far, so both are published again every second (it rebuilds its
 	//! buffers only when layoutId changes, and re-reads the vertices when meshId changes).
-	void PublishMesh(uint64_t meshId)
+	void PublishMesh(uint64_t meshId, bool layout = true)
 	{
 		if (!paths || queues.size() != 2 || verts.empty())
 			return;
@@ -1205,7 +1283,9 @@ private:
 		uint64_t layoutId = 1;
 		uint64_t block = 0;
 		void *buf = nullptr;
-		int e = table->AcquireWriteOnlyBlock(queues[1], &block, &buf);
+		int e = 0;
+		if (layout) {
+		e = table->AcquireWriteOnlyBlock(queues[1], &block, &buf);
 		if (e) {
 			CLog("quest1 camera: layout block: error %d\n", e);
 			return;
@@ -1223,6 +1303,7 @@ private:
 		WriteProp(block, "/meshLayout/vertexCount", 2, &vertexCount, 4);
 		WriteProp(block, "/meshLayout/indexCount", 2, &indexCount, 4);
 		table->ReleaseWriteOnlyBlock(queues[1], block);
+		}
 
 		e = table->AcquireWriteOnlyBlock(queues[0], &block, &buf);
 		if (e) {
@@ -1251,6 +1332,10 @@ private:
 		uint8_t *state = nullptr;
 		size_t size = 25088;
 		uint64_t meshId = 0;
+		std::unique_ptr<RingSource> ring;
+		if (depthOn)
+			ring.reset(new RingSource(Env("QUEST1_CAMERA_RING", Q1CAM_RING_DEFAULT_PATH), true));
+		int64_t computeNs = 0, computed = 0, lastReport = MonoNs();
 		while (running) {
 			PublishMesh(++meshId);
 			if (poke && !state) {
@@ -1278,8 +1363,34 @@ private:
 			}
 			if (state)
 				state[24] = 1;
-			for (int i = 0; i < 10 && running; i++)
-				usleep(100000);
+			// until the next once-a-second publish: a new depth mesh for each frame set the cameras send (they send
+			// only while someone, q1-ptprovider showing the roomview, asks for them)
+			for (int64_t until = MonoNs() + 1000000000LL; running && MonoNs() < until;) {
+				std::vector<SrcImage> img;
+				int64_t cap = 0;
+				if (!ring || !ring->Acquire({0, 2}, img, cap, 100)) {
+					if (!ring)
+						usleep(100000);
+					continue;
+				}
+				if (!img[0].data || !img[1].data || img[0].stride != img[1].stride) {
+					ring->Done();
+					continue;
+				}
+				int64_t t0 = MonoNs();
+				bool ok = depth.Compute(img[0].data, img[1].data, img[0].stride);
+				if (!ring->Done() || !ok)
+					continue; // torn frame set
+				UpdateDepth();
+				PublishMesh(++meshId, false);
+				computeNs += MonoNs() - t0, computed++;
+			}
+			if (computed && MonoNs() - lastReport > 30000000000LL) {
+				const StereoDepth::Stats &st = depth.LastStats();
+				CLog("quest1 camera: depth mesh: %.1f updates/s, %.2f ms each, %d of %d cells textured\n",
+				     computed * 1e9 / (MonoNs() - lastReport), computeNs / 1e6 / computed, st.textured, st.visible);
+				computed = computeNs = 0, lastReport = MonoNs();
+			}
 		}
 		if (state)
 			munmap(state, size);
@@ -1289,7 +1400,13 @@ private:
 	bool poke = true;
 	std::thread thread;
 	std::vector<float> verts;   //!< the depth mesh (BuildMesh)
+	std::vector<float> dirs;    //!< its vertices' unit directions
 	std::vector<uint32_t> idx;
+	float defaultRadius = 3;
+	StereoDepth depth;
+	StereoDepth::Params depthParams;
+	bool depthOn = false;
+	std::vector<float> gridX, gridY, gridW; //!< per vertex: where it reads the depth grid, and how much
 	BlockQueueIface *table = nullptr;
 	PathsIface *paths = nullptr;
 	std::vector<uint64_t> queues;

@@ -9,3 +9,5 @@ aarch64-linux-gnu-g++ -std=c++17 -O2 -I/root/openvr-sdk/headers -o vrmailbox vrm
 	-L/opt/q1libs -l:libopenvr_api.so -Wl,-rpath,/opt/steamvr/bin/linuxarm64 -Wl,--allow-shlib-undefined
 aarch64-linux-gnu-g++ -std=c++17 -O2 -I/root/openvr-sdk/headers -o vrscene_idle vrscene_idle.cpp \
 	-L/opt/q1libs -l:libopenvr_api.so -Wl,-rpath,/opt/steamvr/bin/linuxarm64 -Wl,--allow-shlib-undefined
+# depth_test (headset depth from the bottom stereo pair; needs no OpenVR library at run time)
+aarch64-linux-gnu-g++ -std=c++17 -O2 -I/root/openvr-sdk/headers -o depth_test depth_test.cpp ../steamvr-quest1/stereo_depth.cpp

@@ -13,10 +13,10 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   (`build/perf/boot-native-holo-lse.img`, built 2026-11-08) to boot and measure; Meta's tracking threads starving
   when worn (Android pins syncboss to CPUs 0-3); memory (~500 MB available after boot; kswapd and loop0 busy while
   Steam is used).
-- Passthrough like Meta's: depth (near objects at their true distance) instead of the fixed sphere. Meta's engine
-  (MrSystemServiceIPCServer) refuses our client: getting past its permission check is not something we pursue
-  (2026-11-08). Now: our own depth mesh from the bottom camera pair (plane-sweep stereo), fed to vrcompositor's
-  3D roomview through the driver's depth-mesh queues.
+- Passthrough: confirm in the headset the composite of the bottom and top cameras (2026-11-08: the upper half was the
+  bottom camera's stretched edge). Then depth, so near things (the controllers, the hands) sit where they are: our own
+  stereo (`stereo_depth.cpp`, off by default) is not reliable yet, see docs/passthrough.md "Depth from our own stereo".
+  Meta's engine refuses our client (not pursued).
 - Re-projection: confirm in the headset that turning the head no longer lags (warp 8 ms before the vsync,
   display time 18 ms, 2026-11-07).
 - Spatial anchors: confirm in the headset that the room comes back in place after a reboot and after putting the

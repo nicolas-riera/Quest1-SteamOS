@@ -298,6 +298,9 @@ fb_users() { # processes holding /dev/fb0 open
 	done | sort -u | while read -r p; do echo "$p $(cat /proc/$p/comm 2>/dev/null)"; done
 }
 sb_free() { # ExecStartPre of the sensors HAL: nobody else may drive SyncBoss (powerstate is shared)
+	# SyncBoss's kernel threads (SPI polling, RT) on CPUs 0-3 like Meta's tracking, as Android's init.monterey.rc does
+	# (they ran on all eight, next to vrcompositor's render thread on the big cores)
+	echo 0f > /sys/devices/virtual/misc/syncboss0/spi/control/cpu_affinity 2>/dev/null
 	# one find, not a readlink per descriptor: with Steam up there are thousands, and the per-fd forks outlasted
 	# the unit's start timeout (2026-11-07: the stack could not be restarted)
 	busy=$(find /proc/[0-9]*/fd -maxdepth 1 \( -lname /dev/syncboss0 -o -lname /dev/syncboss_control0 \

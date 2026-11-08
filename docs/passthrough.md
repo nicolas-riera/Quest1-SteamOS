@@ -421,7 +421,14 @@ driver_quest1:
 - `camera.cpp` (`CompositorGate`): the roomview mesh is a finer sphere (48 x 96); each vertex inside the grid takes the
   measured depth along its direction (bilinear), fading to 3 m over the grid's last 10 degrees. A new mesh (data block,
   same layout) is published for each camera frame set while frames flow; the driver reads the ring passively (it never
-  asks for frames: q1-ptprovider does while the roomview is shown). `QUEST1_CAMERA_DEPTH=0` keeps the fixed sphere.
+  asks for frames: q1-ptprovider does while the roomview is shown). Off by default (`QUEST1_CAMERA_DEPTH=1` turns it on).
+- First results (2026-11-08, headset on a desk): 4-7 ms per frame pair at 30 Hz, but only ~10 % of the cells pass the
+  confidence test (mean best ZNCC 0.64) and the nearest surfaces (the desk under the cameras, < 0.3 m) are outside the
+  sweep. Unknown cells first took the 3 m default next to measured 0.4 m cells: jumps of metres between neighbours,
+  stretched triangles, smears (user: "clearly a big problem"). They are now interpolated (membrane in inverse depth),
+  which removed the smears, but the view still warped against the fixed sphere: the depths are not trustworthy yet.
+  Next: a ground truth to tune against (a known target at a measured distance), the top cameras (the overlap of all
+  four), and a check of the matching on rectified patches instead of axis-aligned ones.
 - `src/camtap/depth_test.cpp`: the same module on the live ring, printing only numbers (timing, a coarse depth map).
 
 ## Notes moved from the to-do list (2026-11-08): Passthrough
