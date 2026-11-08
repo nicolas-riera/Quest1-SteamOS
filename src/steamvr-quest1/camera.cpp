@@ -1105,12 +1105,14 @@ struct PathsIface
 class CompositorGate
 {
 public:
-	//! poke = also set the "camera enabled" byte of the shared state (the hack); without it only the queues are made
-	void Start(bool poke = true)
+	//! poke = also set the "camera enabled" byte of the shared state (the hack); without it only the queues are made.
+	//! poseAt: the head's raw pose at a CLOCK_MONOTONIC time, which places the mesh in raw tracking space.
+	void Start(bool poke = true, std::function<bool(int64_t, HmdMatrix34_t &)> poseAt = nullptr)
 	{
 		if (running.exchange(true))
 			return;
 		this->poke = poke;
+		this->poseAt = std::move(poseAt);
 		CreateQueues();
 		thread = std::thread([this] { Run(); });
 	}
@@ -1273,7 +1275,7 @@ private:
 	//! Publishes the mesh: the layout block, then a data block with a new meshId. vrcompositor drops a data block whose
 	//! layoutId does not match the layout it has read so far, so both are published again every second (it rebuilds its
 	//! buffers only when layoutId changes, and re-reads the vertices when meshId changes).
-	void PublishMesh(uint64_t meshId, bool layout = true)
+	void PublishMesh(uint64_t meshId, bool layout = true, const float *rawFromMesh = nullptr)
 	{
 		if (!paths || queues.size() != 2 || verts.empty())
 			return;
@@ -1313,6 +1315,8 @@ private:
 		memcpy(buf, verts.data(), verts.size() * 4);
 		int32_t elementCount = (int32_t)verts.size();
 		float pose[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+		if (rawFromMesh)
+			memcpy(pose, rawFromMesh, sizeof(pose));
 		double baseTime = 0;
 		WriteProp(block, "/meshData/meshId", 3, &meshId, 8);
 		WriteProp(block, "/meshData/layoutId", 3, &layoutId, 8);
@@ -1326,6 +1330,27 @@ private:
 			CLog("quest1 camera: depth mesh published\n");
 	}
 
+	/*
+	 * The mesh lives in raw tracking space (rawFromMeshPose, vrcompositor's _m0): vrcompositor draws it with the head pose it
+	 * renders with (its X = capture pose * P^-1 with ptprovider's capture pose the identity, so P^-1: exact for any display
+	 * pose), and projects it into each camera with that camera's raw pose at the capture (ptprovider's record +48). Before
+	 * 2026-11-08 the mesh was in head space and the correction pivoted about the raw origin, the floor: the view sat 35
+	 * degrees too low, then shook (docs/passthrough.md). The sphere is centred on the head: re-placed 30 times a second.
+	 * A depth mesh is in the head frame of its frame set's capture: its pose is the head's at that capture.
+	 */
+	bool MeshPose(int64_t monoNs, bool rotation, float out[12])
+	{
+		HmdMatrix34_t raw;
+		if (!poseAt || !poseAt(monoNs, raw))
+			return false;
+		for (int r = 0; r < 3; r++) {
+			for (int c = 0; c < 3; c++)
+				out[r * 4 + c] = rotation ? raw.m[r][c] : (r == c ? 1.0f : 0.0f);
+			out[r * 4 + 3] = raw.m[r][3];
+		}
+		return true;
+	}
+
 	//! maps the 25088-byte VR_CameraPassthroughState file and keeps its "camera enabled" byte set
 	void Run()
 	{
@@ -1336,8 +1361,9 @@ private:
 		if (depthOn)
 			ring.reset(new RingSource(Env("QUEST1_CAMERA_RING", Q1CAM_RING_DEFAULT_PATH), true));
 		int64_t computeNs = 0, computed = 0, lastReport = MonoNs();
+		float meshPose[12];
 		while (running) {
-			PublishMesh(++meshId);
+			PublishMesh(++meshId, true, MeshPose(MonoNs(), false, meshPose) ? meshPose : nullptr);
 			if (poke && !state) {
 				if (DIR *d = opendir("/dev/shm")) {
 					while (dirent *de = readdir(d)) {
@@ -1369,8 +1395,11 @@ private:
 				std::vector<SrcImage> img;
 				int64_t cap = 0;
 				if (!ring || !ring->Acquire({0, 2}, img, cap, 100)) {
-					if (!ring)
-						usleep(100000);
+					if (!ring) { // the sphere follows the head
+						usleep(33000);
+						if (MeshPose(MonoNs(), false, meshPose))
+							PublishMesh(++meshId, false, meshPose);
+					}
 					continue;
 				}
 				if (!img[0].data || !img[1].data || img[0].stride != img[1].stride) {
@@ -1382,7 +1411,8 @@ private:
 				if (!ring->Done() || !ok)
 					continue; // torn frame set
 				UpdateDepth();
-				PublishMesh(++meshId, false);
+				if (MeshPose(cap, true, meshPose))
+					PublishMesh(++meshId, false, meshPose);
 				computeNs += MonoNs() - t0, computed++;
 			}
 			if (computed && MonoNs() - lastReport > 30000000000LL) {
@@ -1399,6 +1429,7 @@ private:
 	std::atomic<bool> running{false};
 	bool poke = true;
 	std::thread thread;
+	std::function<bool(int64_t, HmdMatrix34_t &)> poseAt;
 	std::vector<float> verts;   //!< the depth mesh (BuildMesh)
 	std::vector<float> dirs;    //!< its vertices' unit directions
 	std::vector<uint32_t> idx;
@@ -1595,7 +1626,7 @@ void Quest1CameraAttach(PropertyContainerHandle_t container, std::function<Drive
 			// (HSV hue, 0.7, 1 at 0x122de0), otherwise its plain 0.7 grey fade: the slider did nothing without it
 			p->SetInt32Property(container, (ETrackedDeviceProperty)1059, 2);
 			CLog("quest1 camera: HMD camera properties set (props mode, with the camera component)\n");
-			g_gate.Start(false); // the empty depth-mesh block queues vrcompositor's roomview connects to
+			g_gate.Start(false, poseAt); // the depth-mesh block queues vrcompositor's roomview connects to
 			g_capturePoses.Start(std::move(poseAt));
 		}
 		return;

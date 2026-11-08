@@ -367,18 +367,26 @@ static void FillDesc(uint8_t *desc, double captureS, const Calib &cal, const Hmd
 	float in[8] = {(float)cal.f, (float)cal.f, (float)(cal.cx + 0.5), (float)(cal.cy + 0.5),
 	               (float)cal.kb[0], (float)cal.kb[1], (float)cal.kb[2], (float)cal.kb[3]};
 	memcpy(desc + 16, in, sizeof(in));
-	// +48: the camera's pose, Meta's DeviceFromCamera (OpenCV camera axes in the head frame): vrcompositor (0x15f660) inverts it
-	// into the shader's _m3, which projects head-space points (the depth mesh's frame) into the camera.
-	// +96: the same pose: vrcompositor (0x160a80) draws each eye with the camera nearest to it, comparing these with the eye
-	// positions (when params byte 1, state[3], is set: SetShow).
-	// +144: the head pose at capture (raw tracking space; its position is set by PivotFreePosition)
+	// +48: the camera's pose in raw tracking space at the capture (head pose at capture * Meta's DeviceFromCamera, OpenCV
+	// camera axes): it becomes the shader's _m3, which projects the mesh's points (raw space: driver_quest1 publishes the mesh
+	// with its rawFromMeshPose) into the camera.
+	// +96: DeviceFromCamera alone (head frame): vrcompositor (0x160a80) draws each eye with the camera nearest to it,
+	// comparing these with the eye positions (when params byte 1, state[3], is set: SetShow).
+	// +144: identity. vrcompositor turns the mesh by X = (+144) * P^-1 (P: the head pose it renders with) into its _m1 (head
+	// -> eye * X): with the identity that is P^-1, raw space -> the head at display, exact for any P. See
+	// docs/passthrough.md, "The view 35 degrees too low" and "The mesh in tracking space".
 	float m1[12];
 	for (int r = 0; r < 3; r++)
 		for (int c = 0; c < 4; c++)
 			m1[r * 4 + c] = (float)cal.m[r * 4 + c];
-	memcpy(desc + 48, m1, sizeof(m1));
 	memcpy(desc + 96, m1, sizeof(m1));
-	memcpy(desc + 144, &head.m[0][0], sizeof(head.m));
+	for (int r = 0; r < 3; r++)
+		for (int c = 0; c < 4; c++)
+			m1[r * 4 + c] = (float)(head.m[r][0] * cal.m[c] + head.m[r][1] * cal.m[4 + c] + head.m[r][2] * cal.m[8 + c] +
+			                        (c == 3 ? head.m[r][3] : 0));
+	memcpy(desc + 48, m1, sizeof(m1));
+	const float identity[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+	memcpy(desc + 144, identity, sizeof(identity));
 	// +204..+216: the valid image area in texture coordinates (u min, v min, u max, v max; the fragment shader's bounds,
 	// vrcompositor 0x15f754 -> uniforms _m15/_m16): outside it the roomview is black.
 	// Unbounded: where the bottom cameras do not see (above the horizon), the image's edge is stretched (the sampler clamps
@@ -416,30 +424,6 @@ static bool CapturePose(int64_t capNs, HmdMatrix34_t &out)
 		usleep(500);
 	}
 	return false;
-}
-
-/*
- * The position written with the capture pose (+144). vrcompositor corrects the head motion between a frame's capture
- * and its display with X = G * P^-1 in raw tracking space (G = +144, P = the head pose it displays with): the rotation
- * R_G R_P^T, the translation t_G - R_G R_P^T t_P, applied to our head-centred mesh. Read from its roomview uniforms
- * (2026-11-08): with G's translation zeroed X held -t_P, a constant 1.65 m drop (the head's height above the raw origin,
- * the floor): the whole passthrough sat ~35 degrees too low (user: "the view is far too low", the controllers far off).
- * With G's true position a 10 degree turn gave 0.28 m (= 1.65 sin 10), the image swinging about the floor as the head
- * turns (2026-11-07). So t_G' = R_G R_E^T t_E, E the head's newest pose (SteamVR's, already predicted to the display):
- * X keeps the rotation and its translation is only what the head moves between now and the display (P - E).
- */
-static void PivotFreePosition(HmdMatrix34_t &head)
-{
-	TrackedDevicePose_t hp = {};
-	VRSystem()->GetDeviceToAbsoluteTrackingPose(TrackingUniverseRawAndUncalibrated, 0, &hp, 1);
-	if (!hp.bPoseIsValid)
-		return; // the capture position as it is: right while the head does not turn
-	const HmdMatrix34_t &e = hp.mDeviceToAbsoluteTracking;
-	double q[3]; // R_E^T t_E
-	for (int i = 0; i < 3; i++)
-		q[i] = e.m[0][i] * e.m[0][3] + e.m[1][i] * e.m[1][3] + e.m[2][i] * e.m[2][3];
-	for (int r = 0; r < 3; r++)
-		head.m[r][3] = (float)(head.m[r][0] * q[0] + head.m[r][1] * q[1] + head.m[r][2] * q[2]);
 }
 
 //! The "params" of IVRCameraPassthroughInternal (GetParams/SetParams, vrclient 0x1a49d8/0x1a4bf8) are 5 bytes at state+2: the
@@ -784,8 +768,9 @@ int main()
 				}
 			}
 		}
-		// the head pose at capture (+144: vrcompositor reprojects the frame from it to the head pose it displays with): the
-		// frames reach us 25-35 ms after their mid-exposure, and a pose of the wrong time shakes the view as the head turns.
+		// the head pose at capture (it places the camera in raw space, +48: vrcompositor reprojects the frame from there to the
+		// head pose it displays with): the frames reach us 25-35 ms after their mid-exposure, and a pose of the wrong time
+		// shakes the view as the head turns.
 		// driver_quest1 publishes it (Monado's pose at the capture time). A camera frame without it is dropped (the previous
 		// one stays, reprojected): SteamVR's own HMD pose is predicted to the display time and made the view jump.
 		HmdMatrix34_t head;
@@ -799,7 +784,6 @@ int main()
 				VRSystem()->GetDeviceToAbsoluteTrackingPose(TrackingUniverseRawAndUncalibrated, 0, &hp, 1);
 				head = hp.bPoseIsValid ? hp.mDeviceToAbsoluteTracking : HmdMatrix34_t{{{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}}};
 			}
-			PivotFreePosition(head);
 			for (int c = 0; c < 2; c++) {
 				FillDesc((uint8_t *)Rec(c, slot[c]) + 4, capS, calib[c], head);
 				__atomic_store_n(Rec(c, slot[c]), 1u, __ATOMIC_RELEASE); // frame ready

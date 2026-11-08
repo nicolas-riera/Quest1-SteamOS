@@ -401,11 +401,33 @@ world's, with either camera model: vrcompositor, not the cameras. Its uniforms (
 translation of -1.65 m: the head's height. Since the raw space has its origin on the floor (the anchored frame), the
 rotation-only +144 above makes X = G * P^-1 hold -t_P: the mesh sphere dropped by the head's height. And a pose with its
 true position gave, for a 10 degree pitch, 0.28 m (1.65 sin 10): the pivot about the floor measured on 2026-11-07.
-Fix: +144 keeps the capture rotation R_G and gets the position R_G R_E^T t_E, E the newest head pose (SteamVR's, already
+First fix (replaced below): +144 kept the capture rotation R_G and got the position R_G R_E^T t_E, E the newest head pose (SteamVR's, already
 predicted to the display): X is then the rotation alone plus the head's motion between now and the display. Checked
 in the uniforms: 10 degrees of pitch give the rotation and a translation of only the half IPD (the eye offset); the
 pattern's horizon sits on the virtual one.
 
+
+### The mesh in tracking space (2026-11-08)
+
+The fix above made the view level, but the user saw it shake "enormously", and the head motion still looked wrong.
+20 frames of vrcompositor's uniforms, worn: 1 to 6 degrees of capture-to-display rotation per frame, and translations of
+2 to 12 cm on some. Its correction is X = G * P^-1 (G = record +144, P = the head pose it renders with), in raw space:
+- for a mesh in the head frame its rotation is in the wrong frame: 10 degrees of pitch with the head at 14 degrees of
+  yaw came out about an axis 14 degrees off (with the head turned 90 degrees, a pitch becomes a roll);
+- its translation pivots about the raw origin: any rotation between the pose we write and P becomes 1.65 m times the
+  angle. Writing G for the head pose of "now" (E^-1 G E) is only exact when P = E, and the compositor keeps a camera frame
+  for several of its frames (it took 23.5 records a second, not 72, so refreshing the records at the display rate is
+  no way out).
+
+X = G * P^-1 is the form for a mesh in raw tracking space, the way the Frame (and Meta's passthrough, "viewProj *
+model(capture pose)") draws it. So:
+- driver_quest1 publishes the mesh with `rawFromMeshPose` = the head's raw position (the sphere centred on the head, 30
+  times a second); a depth mesh will carry the head's full pose at its frame set's capture;
+- ptprovider writes +144 = identity, so X = P^-1 exactly whatever the display pose, and +48 = the camera's raw pose at
+  the capture (head pose at capture * DeviceFromCamera), which becomes the shader's `_m3` (camera projection of the
+  raw-space mesh). +96 stays DeviceFromCamera (head frame): the per-eye camera choice compares it with the eyes.
+Checked in the uniforms: `_m0` = the head's position (0, 1.65, 0), `_m1` = head -> eye * P^-1, `_m3` = the camera's raw
+pose. To confirm worn: no shake with the head still, the room steady as the head turns.
 
 ## The top cameras: one composite image per eye (2026-11-08)
 
