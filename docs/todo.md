@@ -19,9 +19,12 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   Meta's engine refuses our client (not pursued).
 - Re-projection: confirm worn that nothing trembles with the head still and nothing stretches as it turns (every
   frame warped, each row at its own scan-out time, 2026-11-08, docs/direct-scanout.md).
-- Spatial anchors: confirm in the headset that the room comes back in place after a reboot and after putting the
-  headset back on (set the playspace up again first: there is none since 2026-11-07). If not, read
-  `/var/log/quest1-map.log` (the engine's map events and q1anchord's states) right after.
+- Playspace and spatial anchors: set the playspace up again (the one of 2026-11-08 was never written to disk, fixed
+  since: docs/boundary.md), then confirm it comes back in place after a SteamVR restart, a reboot and putting the
+  headset back on. If not, read `/var/log/quest1-map.log` (the engine's map events and q1anchord's states) right after.
+- "View in theater mode" (dashboard) crashes vrcompositor (2026-11-08 13:00:37, minidump in /tmp/dumps): right after
+  the compat layer logged a failed graphics pipeline (2 stages, R8G8B8A8_SRGB colour attachment, vertex stride 20,
+  1 sample). SteamVR restarts by itself.
 - Brightness: confirm in the headset that both eyes match at low brightness (display-engine dimming, panels'
   calibration, 2026-11-08).
 - Audio: confirm by ear that the crackle and the click at each Steam start are gone (the output now never closes,

@@ -15,8 +15,11 @@
 #              after a tracking loss, and switching to "anchor" re-anchored the room on the head (the
 #              whole room turned and moved) and again when the engine found the saved map back. It stays
 #              "static" then: the engine snaps back into the saved frame when it relocalizes.
-#  * `touch /tmp/quest1-clear-map` (or the Playspace menu's "Clear playspace" through the chaperone
-#    file watch below) forgets everything: removeAllMaps, saved uuids deleted.
+#  * `touch /tmp/quest1-clear-map` (SteamVR settings, Oculus Quest page: "Clear") forgets everything: removeAllMaps,
+#    saved uuids deleted. "Clear playspace" only resets the boundary (vrserver writes a default 1x1 m one, the map stays).
+#  * each time the user saves a playspace (vrserver rewrites chaperone_info.vrchap) the map is saved at once: persisted
+#    then if none is yet (without waiting 45 s worn), and mapdb copied as soon as it has been quiet a few seconds
+#    (instead of a minute), so the room the playspace was drawn in is on disk right away.
 #  * the engine's MapDB checks its entries (CRC) and deletes the ones it finds corrupted: on 2026-11-07
 #    ("MapDB: Deleting 3 corrupted entrees", most likely writes cut by a reboot) that emptied mapdb, while
 #    the saved uuid stayed, so the frame stayed "anchor" for good and no map was ever saved again. Now:
@@ -45,6 +48,8 @@ WORN_BEFORE_PERSIST = 45.0
 MAPDB = '/vision/insideout/mapdb'
 MAPBAK = '/data/misc/tracking/mapdb.bak'
 BACKUP_QUIET = 60.0  # mapdb unchanged this long before it is copied
+BACKUP_QUIET_SAVED = 5.0  # the same just after the user saved a playspace
+SAVED_URGENT = 120.0  # how long after a playspace save the quick saving applies
 EMPTY_LOST = 30.0  # mapdb empty this long: the map is gone
 
 
@@ -140,8 +145,11 @@ def restore():  # before trackingservice starts
         log('q1anchord: mapdb was empty: restored the copy of map %s' % read(MAPUUID))
 
 
-def configured():  # chaperone data with a universe (playspace set up)
-    return '"standing"' in read(CHAP)
+def chap_mtime():  # vrserver rewrites the chaperone file when a playspace is committed (or cleared)
+    try:
+        return os.stat(CHAP).st_mtime
+    except OSError:
+        return None
 
 
 def forget():
@@ -183,7 +191,8 @@ def persist():
 
 def main():
     worn_since = None
-    chap_seen = configured()
+    chap_seen = chap_mtime()
+    urgent_until = 0.0  # a playspace was just saved: save the map quickly until then
     last = ''
     sig, sig_since, backed = None, 0.0, None
     found, lost_logged = '', ''  # the saved map was the current one in this run; the map logged as temporary
@@ -193,16 +202,18 @@ def main():
             if os.path.exists(CLEAR):
                 os.unlink(CLEAR)
                 forget()
-            # "Clear playspace" in the dashboard deletes the chaperone data: forget the map too
-            have = configured()
-            if chap_seen and not have:
-                forget()
-            chap_seen = have
+            now = time.time()
+            m = chap_mtime()
+            if m is not None and m != chap_seen:
+                log('q1anchord: playspace saved by SteamVR: saving the map now')
+                urgent_until = now + SAVED_URGENT
+                backed = None  # copy mapdb again even if unchanged since the last copy
+            chap_seen = m
+            urgent = now < urgent_until
             saved = read(MAPUUID)
             cur = string16(svc('call', 'TrackingEnvironment', '4'))
             if cur.startswith('00000000-0000'):
                 cur = ''
-            now = time.time()
             s = mapdb_sig()
             # the engine rewrites every file of mapdb at once (deletes, then writes them again within a second): an
             # empty mapdb is a lost map only once it has stayed empty for a while (2026-11-07: one read during such a
@@ -214,7 +225,8 @@ def main():
                 saved = ''
             if s != sig:
                 sig, sig_since = s, now
-            elif saved and cur == saved and s and s != backed and now - sig_since > BACKUP_QUIET:
+            elif saved and cur == saved and s and s != backed and \
+                    now - sig_since > (BACKUP_QUIET_SAVED if urgent else BACKUP_QUIET):
                 if backup():
                     backed = s
             if saved and cur == saved:
@@ -234,7 +246,7 @@ def main():
                 worn_since = worn_since or now
             else:
                 worn_since = None
-            if not saved and cur and worn_since and now - worn_since > WORN_BEFORE_PERSIST:
+            if not saved and cur and (urgent or (worn_since and now - worn_since > WORN_BEFORE_PERSIST)):
                 persist()
         except Exception as e:  # keep running
             log('q1anchord: %r' % (e,))

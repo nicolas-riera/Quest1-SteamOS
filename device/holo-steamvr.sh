@@ -77,6 +77,44 @@ if "quest1" not in json.loads(s)["drivers"]:
     json.loads(s)
     open(p, "w", newline="").write(s)
     print("edited: resources/safe_mode_driver_whitelist.json")
+
+# The settings schema's controls (toggle, select, segment, slider...) have no button: SteamVR's own buttons are written
+# into its pages (developer settings: div.SettingsItem > div.Label + div.SubsectionStem > div.ButtonControl). The
+# dashboard's schema renderer gets a "button" control drawn the same way, for driver_quest1's page: a click sets the
+# setting to "value" (default true), after a second click when "confirm_label" is given; "text" goes below in italics.
+# The renderer is minified: its local names are read from its "label" case, so a SteamVR update with the same code
+# keeps working, and one without it stops this script before anything is written.
+import glob, re
+D = os.path.join(R, "resources/webinterface/dashboard")
+pat = re.compile(r'case"label":(\w+)=(\w+)\.createElement\((\w+),Object\.assign\(\{key:(\w+)\.name\},\4\)\)')
+hits = [p for p in glob.glob(os.path.join(D, "*.js")) if 'case"segment":' in open(p, encoding="utf-8").read()
+        and pat.search(open(p, encoding="utf-8").read())]
+if len(hits) != 1:
+    sys.exit("dashboard settings renderer: %d candidates (SteamVR changed?), nothing written" % len(hits))
+p = hits[0]
+s = open(p, encoding="utf-8", newline="").read()
+if "/*quest1 button*/" in s:
+    print("already done:", os.path.relpath(p, R))
+else:
+    m = pat.search(s)
+    c, e, r = m.group(1), m.group(2), m.group(4)
+    js = ('/*quest1 button*/case"button":{c}={e}.createElement("div",{{key:{r}.name,className:"SettingsItem"}},'
+          '{e}.createElement("div",{{className:"Label"}},{r}.label||""),'
+          '{e}.createElement("div",{{className:"SubsectionStem"}},{e}.createElement("div",{{className:"ButtonControl",'
+          'onClick:q=>{{const t=q.currentTarget,b={r}.button_label||"OK",z=(x,ms)=>{{clearTimeout(t.q1timer);'
+          't.textContent=x;t.q1timer=setTimeout(()=>{{delete t.dataset.q1armed;t.textContent=b}},ms)}};'
+          'if({r}.confirm_label&&!t.dataset.q1armed){{t.dataset.q1armed="1";z({r}.confirm_label,4e3);return}}'
+          'delete t.dataset.q1armed;const n={r}.name.split("/");'
+          'VRHTML.VRSettings.Set(n[2],n[3],void 0==={r}.value?!0:{r}.value);z({r}.done_label||b,3e3)}}}},'
+          '{r}.button_label||"OK")));'
+          'if({r}.text){c}={e}.createElement({e}.Fragment,{{key:{r}.name}},{c},{e}.createElement("div",'
+          '{{className:"SettingsItem"}},{e}.createElement("div",{{className:"SettingsItemValueInfo Left"}},{r}.text)));'
+          'break;').format(c=c, e=e, r=r)
+    if not os.path.exists(p + ".orig"):
+        open(p + ".orig", "w", encoding="utf-8", newline="").write(s)
+    s = s[:m.start()] + js + s[m.start():]
+    open(p, "w", encoding="utf-8", newline="").write(s)
+    print("edited:", os.path.relpath(p, R))
 PY
 
 # steamvr-q1: how every SteamVR program is started here (quest1-steamvr, -vrsession and -frame-dashboard units)
@@ -135,10 +173,41 @@ os.replace(tmp, sys.argv[3])
 print(os.path.relpath(os.path.realpath(sys.argv[3]), res))
 PY
 ) && export VR_SETTINGSSCHEMA_FILE=$rel
+	# the playspace: vrserver needs a universe (universe 2, driver_quest1's Prop_CurrentUniverseId) with a standing
+	# pose, or the room setup draws no floor and no brush and Accept commits nothing. With none saved yet (first
+	# start) a default one goes in the chaperone file: standing = raw (driver_quest1's raw
+	# space is floor-anchored), no bounds. Not through the driver's Prop_DriverProvidedChaperoneJson: with it,
+	# vrserver never saves the user's playspace (docs/boundary.md).
+	/usr/local/bin/quest1-chaperone-default || true
 fi
 exec $S/$prog "$@"
 Q1EOF
 chmod 755 "$ROOT/usr/local/bin/steamvr-q1"
+# quest1-chaperone-default: puts the default universe 2 (standing = raw, no bounds) in the user's chaperone file when
+# it has none (run by steamvr-q1 before vrserver; "Clear playspace" keeps the universe, with a default 1x1 m boundary)
+cat > "$ROOT/usr/local/bin/quest1-chaperone-default" <<'Q1EOF'
+#!/usr/bin/python3
+import json, os, sys
+p = os.path.expanduser('~/.local/share/Steam/config/chaperone_info.vrchap')
+try:
+    d = json.load(open(p))
+    if not isinstance(d.get('universes'), list):
+        raise ValueError
+except (OSError, ValueError):
+    d = {'jsonid': 'chaperone_info', 'version': 5, 'universes': []}
+if any(str(u.get('universeID')) == '2' and 'standing' in u for u in d['universes']):
+    sys.exit(0)
+d['universes'] = [u for u in d['universes'] if str(u.get('universeID')) != '2']
+d['universes'].append({'universeID': '2', 'collision_bounds': [], 'play_area': [0, 0],
+                       'seated': {'translation': [0, 0, 0], 'yaw': 0},
+                       'standing': {'translation': [0, 0, 0], 'yaw': 0}})
+os.makedirs(os.path.dirname(p), exist_ok=True)
+with open(p + '.tmp', 'w') as f:
+    json.dump(d, f, indent=3)
+os.replace(p + '.tmp', p)
+print('quest1-chaperone-default: default universe 2 written to', p)
+Q1EOF
+chmod 755 "$ROOT/usr/local/bin/quest1-chaperone-default"
 # display defaults read by steamvr-q1 and quest1-frame-settings, kept if already set:
 # direct scanout on (vrcompositor's output goes straight to the panels), its orientation flags (driver_quest1
 # DirectFlip), and vrcompositor (not Monado's warp) doing the lens distortion

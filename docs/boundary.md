@@ -18,8 +18,8 @@ the laser/brush and the boundary, through `IVRChaperoneSetup`.
   floor + circle / drawn variants. Accept/Back/Floor fine adjust also exist as optional input actions
   (`/actions/roomsetup`); the Touch profile has no binding for them, so the on-screen buttons are used.
 - Result: `~steamos/.local/share/Steam/config/chaperone_info.vrchap` (universe, standing transform, bounds),
-  `VREvent_ChaperoneRoomSetupCommitted`. "Clear playspace" calls `ClearRoomSetup`: that is the
-  "delete all the mapping" button.
+  `VREvent_ChaperoneRoomSetupCommitted`. "Clear playspace" calls `ClearRoomSetup`: it resets the
+  boundary to a default 1x1 m square and keeps the universe.
 - No depth or camera is needed: the floor comes from the controller touching it, the boundary from the
   controller's laser projected on the floor.
 
@@ -27,9 +27,10 @@ the laser/brush and the boundary, through `IVRChaperoneSetup`.
 
 The room setup works on the Quest 1 (user-tested 2026-11-05) with these fixes:
 
-- **Default universe.** With no `chaperone_info.vrchap` (first start, or after Clear playspace) vrserver had
-  no standing pose: no floor, no brush, Accept committed nothing. `driver_quest1` provides a default
-  universe (`Prop_DriverProvidedChaperoneJson_String`, standing = raw).
+- **Default universe.** With no `chaperone_info.vrchap` (first start) vrserver had no standing pose: no floor,
+  no brush, Accept committed nothing. `steamvr-q1` writes a default universe 2 (standing = raw, no bounds) into
+  the chaperone file before vrserver starts (`quest1-chaperone-default`, `device/holo-steamvr.sh`).
+  It used to be `driver_quest1`'s `Prop_DriverProvidedChaperoneJson_String`, which broke saving (below).
 - **Empty SDF texture.** vrcompositor sizes its "Playspace area SDF" texture from the boundary: 0x0 before
   one exists. The Adreno driver cannot allocate 0 bytes, CreateTexture failed every frame (~3 fps): empty
   images are made 1x1.
@@ -48,6 +49,25 @@ The room setup works on the Quest 1 (user-tested 2026-11-05) with these fixes:
 Debug notes: SPIR-V/pipeline logs in `/tmp/quest1-compat-vrcompositor.log`; `tools/headset-dev/sg-hide.sh`
 removes one scene graph node live. Adding hooks for vkCreateImageView and vkCmdCopyImage to the layer made
 vrcompositor's whole output black (not investigated): keep debug hooks off those.
+
+## The playspace was never saved (fixed 2026-11-08)
+
+User: playspace set up, then "View in theater mode" crashed SteamVR, and after the restart the playspace was gone.
+There was no `chaperone_info.vrchap` at all: vrserver had never written it. A test client committing a playspace
+through `IVRChaperoneSetup::CommitWorkingCopy(Live)` got `true` back while vrserver logged
+`[CVRChaperoneServer] Failed to presiste chaperone data ... but still proceed to update VRPaths`: the playspace lived
+in vrserver's memory only. In vrserver, the chaperone server sets a flag when the HMD driver provides a chaperone
+(`Prop_DriverProvidedChaperonePath_String` or `Prop_DriverProvidedChaperoneJson_String` not empty), and with that
+flag it never writes the file. `driver_quest1` set the JSON one (the default universe, 2026-11-04). Now the default
+universe goes into the file itself (above) and the driver sets neither: the test playspace is written
+("Wrote chaperone data to ...chaperone_info.vrchap") and is back after a SteamVR restart. "Clear playspace"
+(`ClearRoomSetup`) rewrites the file with a default 1x1 m boundary around the standing origin and keeps the universe.
+
+Each time vrserver writes the chaperone file (a playspace saved or cleared), `q1anchord` saves the tracking map
+right away: it persists the map if none is saved yet (without waiting 45 s worn) and copies mapdb once it has been
+quiet 5 s (instead of a minute), so the room the playspace was drawn in is on disk at once. "Clear playspace" no
+longer forgets Meta's map (it only resets the boundary); the map is cleared from SteamVR's settings, Oculus Quest
+page, "Clear" (a click, then "Confirm").
 
 ## Raw space and persistence (`chaperone_frame.cpp`)
 
@@ -90,11 +110,12 @@ AnchorUuid = 16 bytes in text order; Parcelables are preceded by an int32 non-nu
 - After a restart of the stack the engine loads that map by itself and relocalizes: the current map uuid is the saved
   one and the head pose comes back in the same world frame (measured: before/after restart, headset lying still,
   head position (-0.041, 0.032, 0.067) vs (-0.039, 0.032, 0.070), same orientation).
-- `device/q1anchord.py` (unit `android-q1anchord`): after the headset has been worn 45 s with no saved map it persists the
+- `device/q1anchord.py` (unit `android-q1anchord`): after the headset has been worn 45 s with no saved map (or at once when a
+  playspace is saved) it persists the
   anchor and saves the map uuid in `/data/misc/tracking/world-map.uuid`; it writes `/run/q1track/frame-state`:
   `static` (the current map is the saved one, or none is saved yet) or `anchor` (a map is saved but the current one is
-  another: relocalization failed). `touch /tmp/quest1-clear-map`, or clearing the playspace (the chaperone file loses its
-  universe), calls `removeAllMaps` and forgets the uuids.
+  another: relocalization failed). `touch /tmp/quest1-clear-map` (the settings page's "Clear") calls `removeAllMaps` and
+  forgets the uuids.
 - `chaperone_frame.cpp` uses Meta's frame as is in `static` state (raw y = world y + eye height; floor and boundary
   in `chaperone_info.vrchap` stay valid because the frame is persistent) and falls back to the head anchoring above
   in `anchor` state or when `frame-state` is missing.
@@ -113,10 +134,13 @@ AnchorUuid = 16 bytes in text order; Parcelables are preceded by an int32 non-nu
 
 - Clearing the map from SteamVR (2026-11-08): SteamVR's settings have an "Oculus Quest" page
   (`quest1_settingsschema.json`, merged into SteamVR's schema by `steamvr-q1` through `VR_SETTINGSSCHEMA_FILE`) with a
-  "Clear" button for `/settings/driver_quest1/clearSpatialAnchors`. SteamVR's schema has no button control: it is a
-  one-option segment control (value true), which shows as a button as long as the setting is false; driver_quest1
-  sees it go true, touches `/tmp/quest1-clear-map` and sets it back. Tested by a click through CEF remote debugging
-  (q1anchord: "all maps removed").
+  "Clear" button for `/settings/driver_quest1/clearSpatialAnchors`. SteamVR's schema has no button control (its own
+  buttons are written into its pages), and a one-option segment control showed as a long switch with an empty first
+  half (user). `holo-steamvr.sh` adds a `"button"` control to the dashboard's schema renderer, drawn like the
+  developer page's buttons (label, button on the right, the text below in italics); a click arms it ("Confirm"), a
+  second one sets the setting through `VRHTML.VRSettings.Set`. driver_quest1 sees it go true, touches
+  `/tmp/quest1-clear-map` and sets it back. Tested by clicks through CEF remote debugging (q1anchord: "all maps
+  removed").
 - Map events log (2026-11-08): the journal is volatile, so what happened to the map at a put-on was lost with the boot
   (user: room in the wrong place, no chaperone). q1anchord's messages and the engine's map events (fakelogd lets its
   info lines about map contexts, map tracking and relocalization through) go to `/var/log/quest1-map.log` with the
