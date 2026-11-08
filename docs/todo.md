@@ -5,21 +5,18 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 
 ## Before the next push (user, 2026-11-08)
 
-- Performance: 72 fps (60 at least) with the headset worn, the controllers in view and the dashboard and Steam
-  in use. SteamVR drops frames as soon as the dashboard (Steam's UI) is used: keep SteamVR's frame rate while
-  Steam is in use, and make Steam as fast as possible without taking it from SteamVR (Steam lagging is
-  acceptable). Leads (docs/direct-scanout.md, docs/steam-gpu.md):
-  - the system layer (dashboard overlays) is rendered at 4x MSAA in vrcompositor, hard-coded; 1x would save a
-    lot of GPU but is a quality trade-off: the user decides;
-  - the LSE atomics trap path (kernel/lse_emul.c): ~17 % of vrcompositor's render thread, ~100,000 traps/s
-    in all; make the trap path itself faster (no binary rewriting of Valve's files);
-  - CPU placement: Meta's tracking threads starve when worn (position lost under load); Android pins
-    syncboss to CPUs 0-3, here it runs on all eight;
-  - the controller models: each part is a render pass of its own (~2.7 ms of GPU for both);
-  - memory: ~500 MB available after boot with SteamVR, Steam's webhelpers ~1.65 GB;
-  - Steam's UI: its renderer's main thread ~80 % of a big core, the VR overlay path copies frames with the CPU.
-- Passthrough like Meta's: depth (near objects at their true distance) from Meta's own engine through
-  MrSystemServiceIPCServer (user's call, 2026-11-06), instead of the fixed sphere.
+- Performance: confirm worn, controllers moving, dashboard and Steam in use. On the table since 2026-11-08 (vrcompositor's CPU
+  and GPU overlap, docs/performance.md): 72 fps with the dashboard (with or without passthrough), 68-70 while it is
+  used. GPU-bound now (~12.4 of 13.9 ms a frame). Levers left, all visible, so the user decides: achromatic distortion
+  (vrcompositor's distortion pass is ~2 ms per eye), a lighter environment than Aurora (~4 ms; passthrough itself is
+  cheaper), simpler controller models (~2 ms), the 4x MSAA of the dashboard layer. Also: the LSE emulation kernel
+  (`build/perf/boot-native-holo-lse.img`, built 2026-11-08) to boot and measure; Meta's tracking threads starving
+  when worn (Android pins syncboss to CPUs 0-3); memory (~500 MB available after boot; kswapd and loop0 busy while
+  Steam is used).
+- Passthrough like Meta's: depth (near objects at their true distance) instead of the fixed sphere. Meta's engine
+  (MrSystemServiceIPCServer) refuses our client: getting past its permission check is not something we pursue
+  (2026-11-08). Now: our own depth mesh from the bottom camera pair (plane-sweep stereo), fed to vrcompositor's
+  3D roomview through the driver's depth-mesh queues.
 - Re-projection: confirm in the headset that turning the head no longer lags (warp 8 ms before the vsync,
   display time 18 ms, 2026-11-07).
 - Spatial anchors: confirm in the headset that the room comes back in place after a reboot and after putting the
@@ -27,10 +24,12 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   `/var/log/quest1-map.log` (the engine's map events and q1anchord's states) right after.
 - Brightness: confirm in the headset that both eyes match at low brightness (display-engine dimming, panels'
   calibration, 2026-11-08).
-- Audio crackles at random, for a while, sometimes for good (user, 2026-11-02 to 05). PipeWire sees no xrun:
+- Audio: confirm by ear that the crackle and the click at each Steam start are gone (the output now never closes,
+  2026-11-08, docs/audio.md). If not: crackles at random, for a while, sometimes for good (user, 2026-11-02 to 05). PipeWire sees no xrun:
   below it (ADSP, codec) or memory pressure. Capture: `q1-audioring` (docs/audio.md). Also a click at each
   Steam start.
-- After each put-on, ~10 s where every commit blocks ~10.7 ms in `MSMFB_ATOMIC_COMMIT` (a frame late each).
+- After each put-on, ~10 s where every commit blocks ~10.7 ms in `MSMFB_ATOMIC_COMMIT` (a frame late each). Reproduced
+  without wearing it (2026-11-08): `/run/quest1-standby` for 6 s, then panels on: 58 then 3 late commits in two 2 s windows.
 
 ## Tracking
 

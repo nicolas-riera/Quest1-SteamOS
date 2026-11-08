@@ -50,16 +50,16 @@ from Valve's servers and from Meta's last Quest 1 update image.
 
 ## Work in progress
 
-- **Performance.** SteamVR renders at about 25 to 40 fps (GPU bound); Monado fills the 72 Hz
-  with re-projection. The goal is to get as close to 72 as possible; an open Vulkan driver
-  (Mesa Turnip) is to be evaluated.
+- **Performance.** On the table SteamVR now holds 72 fps with the dashboard and 68-70 while Steam's UI
+  is used (GPU bound); Monado fills the 72 Hz with re-projection. To confirm worn, with the controllers moving.
 - **Memory.** Steam, SteamVR and its dashboard fill most of the 4 GB. Already saved: the root
   image's double page cache (direct I/O, ~335 MB), SteamVR's 256 MB GPU upload rings allocated
   on first use (~500 MB, ~250 MB more with the desktop), zstd swap compression. Steam's web
   processes are next.
-- **Passthrough.** The depth is a fixed sphere, so near objects are not at their true distance.
+- **Passthrough.** The depth is a fixed sphere, so near objects are not at their true distance: a depth
+  mesh from the bottom camera pair is being written.
 - **Sleep.** Suspend to RAM loses Meta's tracking and the sound on resume.
-- **Streaming** from a PC (Steam Link), **x86 games** (FEX, Proton), the audio crackle, and the
+- **Streaming** from a PC (Steam Link), **x86 games** (FEX, Proton), and the
   remaining distortion and chromatic aberration.
 - **The installer** (see above): downloads and the image build work end to end; flashing the
   built image is to do.
