@@ -94,6 +94,8 @@ remote debugging on 127.0.0.1:9333; `/root/cdp.py 'js'` evaluates JS in the syst
 
 ## Meta's tracking map persistence (q1anchord)
 
+Confirmed by the user in the headset (2026-11-08 night): the playspace and the spatial anchors come back in place.
+
 The tracker ("SuperVega") has no whole-map API (`keepMap`/`listMaps`: "API ... is not supported"), but it
 persists maps through spatial anchors, like Guardian does. Binder service `TrackingEnvironment`
 (`oculus.internal.ITrackingEnvironment`), transaction codes (call with `/root/svc.sh call TrackingEnvironment <code> ...`

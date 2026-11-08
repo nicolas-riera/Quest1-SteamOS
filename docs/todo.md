@@ -19,9 +19,6 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   Meta's engine refuses our client (not pursued).
 - Re-projection: confirm worn that nothing trembles with the head still and nothing stretches as it turns (every
   frame warped, each row at its own scan-out time, 2026-11-08, docs/direct-scanout.md).
-- Playspace and spatial anchors: set the playspace up again (the one of 2026-11-08 was never written to disk, fixed
-  since: docs/boundary.md), then confirm it comes back in place after a SteamVR restart, a reboot and putting the
-  headset back on. If not, read `/var/log/quest1-map.log` (the engine's map events and q1anchord's states) right after.
 - "View in theater mode" (dashboard) crashes vrcompositor (2026-11-08 13:00:37, minidump in /tmp/dumps): right after
   the compat layer logged a failed graphics pipeline (2 stages, R8G8B8A8_SRGB colour attachment, vertex stride 20,
   1 sample). SteamVR restarts by itself.
@@ -37,6 +34,10 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 
 ## Tracking
 
+- A controller asleep when Meta's stack starts is never taken (2026-11-08: the right one; battery out and in gave
+  it its radio link back, white LED, but nothing reached SteamVR although ovrstub announced it every 3 s).
+  `holo-android-tracking restart` (through q1restart.sh, ~30 s without tracking, the headset must be worn for the
+  cameras) brings it back; do it without a restart: what trackingservice needs to take a late controller.
 - Meta's tracking cameras keep running while the headset is not worn (trackingservice IOTcam ~50 % of a core,
   CtrllrCam ~11 %, 2026-11-08): pause them while the headset is off, if the map and the controllers come back fine.
 
@@ -133,4 +134,6 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - x86 games (FEX, Proton): very low priority.
 - Other controllers: Windows Mixed Reality, Quest 2 (github.com/Juspertinry/q2ctrl-module). Not Quest 3 / Pro.
 - The installer app (app/, installer/); later a Linux version that builds the image on the PC.
+- While the headset's install system (the small Linux that builds the image on the headset) is building, the
+  power LED blinks white <-> purple.
 - Dual boot with a boot selector in the headset (very low priority).

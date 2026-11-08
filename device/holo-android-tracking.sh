@@ -16,6 +16,8 @@
 #                                        and its own SyncBoss IMU; restarts Monado: only through
 #                                        /root/q1restart.sh)
 #        holo-android-tracking stop | cli <trackinginterface_cli args>
+#        holo-android-tracking restart  (Meta's stack again, e.g. for a controller it missed; only
+#                                        through /root/q1restart.sh: ~30 s without tracking)
 #
 # Meta mode ("meta-on"): the sensors HAL owns SyncBoss, trackingservice tracks, q1trackd
 # (src/q1track) publishes the poses in /run/q1track/poses and Monado's quest1 driver reads them
@@ -388,6 +390,25 @@ meta_start() { # Meta's stack, in order (the sensors HAL first: it takes SyncBos
 	systemctl start android-sensors-hal
 	systemctl start android-cameramuxmode android-calibration android-trackingservice android-q1trackd android-q1anchord
 }
+# restart: Meta's stack from the sensors HAL up, for a controller it did not take. The sensors HAL and
+# trackingservice enumerate the controllers when they start: one asleep then and woken later (2026-11-08: the
+# right one, battery out and in) gets its radio link back but never reaches SteamVR, though ovrstub announces it
+# every 3 s. ovrstub then replays what trackingservice saw at boot, RUNNING and a second later STANDBY: given
+# STANDBY alone (ovrstub already in it), trackingservice never powered the cameras on (front LED off, rotation only).
+meta_restart() {
+	systemctl stop android-q1anchord android-q1trackd android-trackingservice android-runtimeipcbroker 		android-calibration android-cameramuxmode android-sensors-hal
+	sleep 2
+	t0=$(date +%s)
+	meta_start
+	# once the new trackingservice has registered with ovrstub's vrpowermanager (~5 s)
+	for i in $(seq 60); do
+		journalctl -u android-ovrstub --since "@$t0" -o cat --no-pager | grep -q "vrpowermanager: client registered" && break
+		sleep 1
+	done
+	sleep 2
+	p=$(systemctl show -p MainPID --value android-ovrstub)
+	[ "${p:-0}" -gt 0 ] && { kill -USR1 "$p"; sleep 1.5; kill -HUP "$p"; }
+}
 # meta-on: Monado without SyncBoss + Meta's stack. Restarts Monado: through /root/q1restart.sh.
 meta_on() {
 	echo meta > /etc/quest1-tracking
@@ -422,6 +443,7 @@ meta-off) meta_off ;;
 boot) [ "$(cat /etc/quest1-tracking 2>/dev/null)" = meta ] && meta_start || true ;;
 sb-free) sb_free ;;
 stop) systemctl stop $SB $BASE ;;
+restart) meta_restart ;;
 cli) shift; cli "$@" ;;
 *) echo "usage: $0 setup|install|base|trial|monado-trial|meta-on|meta-off|boot|sb-free|stop|cli <trackinginterface_cli args>" >&2; exit 2 ;;
 esac
