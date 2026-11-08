@@ -17,8 +17,8 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   bottom camera's stretched edge). Then depth, so near things (the controllers, the hands) sit where they are: our own
   stereo (`stereo_depth.cpp`, off by default) is not reliable yet, see docs/passthrough.md "Depth from our own stereo".
   Meta's engine refuses our client (not pursued).
-- Re-projection: confirm in the headset that turning the head no longer lags (warp 8 ms before the vsync,
-  display time 18 ms, 2026-11-07).
+- Re-projection: confirm worn that nothing trembles with the head still and nothing stretches as it turns (every
+  frame warped, each row at its own scan-out time, 2026-11-08, docs/direct-scanout.md).
 - Spatial anchors: confirm in the headset that the room comes back in place after a reboot and after putting the
   headset back on (set the playspace up again first: there is none since 2026-11-07). If not, read
   `/var/log/quest1-map.log` (the engine's map events and q1anchord's states) right after.

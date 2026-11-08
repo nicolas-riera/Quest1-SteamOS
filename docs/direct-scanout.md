@@ -170,6 +170,31 @@ degrees, while Meta's tracking had lost the position: a render pose from another
 Left: for ~10 s after each put-on every commit blocks ~10.7 ms in `MSMFB_ATOMIC_COMMIT` (until the next vsync), so
 every frame is a vsync late until it stops (seen three times worn, not with the panels forced on).
 
+### 2026-11-08: every frame warped, each row for its own lighting time
+
+User, worn: micro-tremors "at each heartbeat" with the head still, and the dashboard and Aurora stretching while
+the head moves. Measured, worn, head still (Meta's poses recorded at ~370 Hz, `headrec`): libossdk's prediction is
+good, the angular velocity is in the head frame and extrapolating with it beats holding the last pose at every
+horizon (26 ms ahead: 0.039 deg p90 against 0.057 still, 0.6 against 5 deg at 150-200 deg/s). So the prediction
+was not the tremor. Two causes:
+- **Frames shown unwarped**: a fresh frame within 0.2 deg (`thr`) of its display pose was committed as rendered, to
+  save the warp's GPU time: 37 of 40 frames a second with the head still. With the head moving a little, frames
+  went back and forth between warped and unwarped, the image jumping by up to 0.2 deg. A/B worn: A (as was) and C
+  (10 ms display time) trembled, B (no velocity) less but felt "heavy", D (`thr=0`, always warp) no tremor and not
+  heavy. Every fresh frame is now warped (1.1 ms GPU, 3.4 ms CPU a frame; vrcompositor still 71.7 fps).
+- **The scan-out**: measured with fb0's `mdp_line` (the line being scanned) against its `vsync_event` timestamp,
+  3000 samples: 116 lines a millisecond (8.6 us a line), line 0 ~0.1 ms after the vsync, the 1600 rows in 13.75 ms;
+  both panels in step, the buffer's row 0 first. A commit latched at vsync N+1 lights row r at vsync N + 14.0 +
+  r * 0.0086 ms. The warp used one display time (18 ms) for the whole image: in a 100 deg/s turn the top and the
+  bottom of the image are 1.4 deg apart, the image sheared and stretched. The warp mesh now takes each row's own
+  time: the rotations for the first and the last row (Monado's head pose at both lighting times) are interpolated
+  down the mesh's rows (`MDP_SCAN_FIRST_MS`, `MDP_SCAN_MS`; `scan=0` in `/tmp/quest1-reproj` turns it off for an
+  A/B). The display time the driver's prediction follows is the middle row's, 20.9 ms.
+
+This is what Meta's timewarp does on the same panels: never show a frame unwarped, warp late (ours 8 ms before
+the latching vsync, the shortest lead without late commits), use the real time each part of the panel lights up,
+and predict from the IMU (libossdk, which we already use).
+
 ## Plan: Monado presents vrcompositor's frames and re-projects them
 
 Monado already has everything a 72 Hz re-projection needs: the head pose at any time, a
