@@ -998,6 +998,9 @@ static VkResult qd_acquire(struct qd_swapchain *sc, uint64_t timeout, VkSemaphor
 	sc->next = (found + 1) % sc->count;
 	qd_stats.acquire += now_ns() - t0;
 	pthread_mutex_unlock(&sc->mutex);
+	if (qs_trace_left > 0 && qs_trace_left--)
+		LOG("trace: acquire %d\n", found);
+	ft("acquire", found);
 
 	// the transition to PRESENT_SRC doubles as the acquire signal operation
 	VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
@@ -1055,6 +1058,7 @@ static void qd_record_present_id(struct qd_swapchain *sc, uint64_t frame, uint64
 static VKAPI_ATTR VkResult VKAPI_CALL qd_QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *pi)
 {
 	qd_trace("present");
+	ft("present", 0);
 	VkResult result = VK_SUCCESS;
 	bool waited = false;
 	for (uint32_t s = 0; s < pi->swapchainCount; s++) {
@@ -1158,6 +1162,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL qd_QueuePresentKHR(VkQueue queue, const Vk
 			pthread_cond_broadcast(&sc->cond);
 			pthread_mutex_unlock(&sc->mutex);
 			qd_stats_present(t_entry, t_gpu, now_ns());
+			ft("presented", (int64_t)(t_gpu - t_entry));
 		}
 		waited = true;
 		if (pi->pResults)
@@ -1168,10 +1173,63 @@ static VKAPI_ATTR VkResult VKAPI_CALL qd_QueuePresentKHR(VkQueue queue, const Vk
 	return result;
 }
 
+// --- debug: `runuser -u steamos -- touch /tmp/quest1-frametrace` records 3 s of vrcompositor's frame loop (vblank
+// ticks, display events, fence waits, acquires, submits, presents) into /tmp/quest1-frametrace.txt
+#define FT_MAX 30000
+static struct
+{
+	uint64_t t;
+	const char *what;
+	long tid;
+	int64_t arg;
+} ft_ev[FT_MAX];
+static _Atomic unsigned ft_n;
+static _Atomic int ft_on; //!< 0 idle, 1 recording, 2 dumping
+static uint64_t ft_until;
+
+static void ft(const char *what, int64_t arg)
+{
+	if (ft_on != 1)
+		return;
+	unsigned i = atomic_fetch_add(&ft_n, 1);
+	if (i >= FT_MAX)
+		return;
+	ft_ev[i].t = now_ns();
+	ft_ev[i].what = what;
+	ft_ev[i].tid = (long)syscall(SYS_gettid);
+	ft_ev[i].arg = arg;
+}
+
+//! From the vblank thread, once a tick.
+static void ft_tick(uint64_t t)
+{
+	if (ft_on == 0 && t % 1000000000ull < 14000000ull && unlink("/tmp/quest1-frametrace") == 0) {
+		ft_n = 0;
+		ft_until = t + 3000000000ull;
+		ft_on = 1;
+	} else if (ft_on == 1 && t > ft_until) {
+		ft_on = 2;
+		FILE *f = fopen("/tmp/quest1-frametrace.txt.tmp", "w");
+		unsigned n = ft_n < FT_MAX ? ft_n : FT_MAX;
+		for (unsigned i = 0; f && i < n; i++)
+			fprintf(f, "%llu %s %ld %lld\n", (unsigned long long)ft_ev[i].t, ft_ev[i].what, ft_ev[i].tid,
+			        (long long)ft_ev[i].arg);
+		if (f) {
+			fclose(f);
+			rename("/tmp/quest1-frametrace.txt.tmp", "/tmp/quest1-frametrace.txt");
+		}
+		ft_on = 0;
+	}
+}
+
 // --- vblank events (VK_EXT_display_control) ---------------------------------------------------------------
 // vrcompositor paces its frames on vkRegisterDisplayEventEXT fences and vkGetSwapchainCounterEXT. The
 // simulated display ticks at the mode's rate on CLOCK_MONOTONIC; a thread signals the registered fences
-// at every tick (an empty submission, the blob cannot signal a fence from the CPU otherwise).
+// at every tick (an empty submission, the blob cannot signal a fence from the CPU otherwise). It signals the fence
+// once the GPU has done the work queued before it, often after the tick: tried on 2026-11-08, signalling the
+// fences from the CPU at the tick (the layer answering vkWaitForFences/vkGetFenceStatus on them) cut the
+// present-to-rendered time from ~17 to ~14 ms but cost 1-1.5 fps (69.6 against 71.0, alternated A/B): vrcompositor's
+// running start then leaves its render thread less slack before the next vblank.
 
 struct qd_event
 {
@@ -1196,7 +1254,9 @@ static void *qd_vblank_thread(void *arg)
 		struct timespec ts = {(time_t)(next / 1000000000ull), (long)(next % 1000000000ull)};
 		while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL) == EINTR)
 			;
+		ft_tick(next);
 		pthread_mutex_lock(&qd_event_mutex);
+		ft("tick", qd_event_count);
 		if (qd_event_count)
 			atomic_store(&qd_frame_tick, next);
 		for (uint32_t i = 0; i < qd_event_count; i++) {
@@ -1233,6 +1293,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL qd_RegisterDisplayEventEXT(VkDevice device
 	VkResult r = d->CreateFence(device, &fci, alloc, fence);
 	if (r != VK_SUCCESS)
 		return r;
+	ft("event", (int64_t)(uint64_t)*fence);
 	PFN_vkGetDeviceQueue get_queue = (PFN_vkGetDeviceQueue)d->gdpa(device, "vkGetDeviceQueue");
 	VkQueue queue;
 	get_queue(device, 0, 0, &queue);
@@ -1247,6 +1308,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL qd_GetSwapchainCounterEXT(VkDevice device,
                                                               VkSurfaceCounterFlagBitsEXT counter, uint64_t *value)
 {
 	qd_trace("counter");
+	ft("counter", 0);
 	pthread_once(&qd_vblank_once, qd_vblank_start);
 	*value = qd_vblank_count();
 	return VK_SUCCESS;

@@ -809,9 +809,12 @@ static void *completer_main(void *arg)
 	return NULL;
 }
 
+static void ft(const char *what, int64_t arg); // quest1_display.c (frame trace)
+
 static VKAPI_ATTR VkResult VKAPI_CALL QueueSubmit(VkQueue queue, uint32_t n, const VkSubmitInfo *submits, VkFence fence)
 {
 	struct device *d = device_of(queue);
+	ft("submit", (int64_t)(uint64_t)fence);
 	struct submit_job *j = job_build(queue, n, submits, fence);
 	pthread_mutex_lock(&d->mutex);
 	if (d->tail)
@@ -1064,13 +1067,19 @@ static VKAPI_ATTR VkResult VKAPI_CALL WaitForFences(VkDevice device, uint32_t n,
 {
 	struct device *d = device_of(device);
 	const uint64_t step = 100000000ull; // 100 ms
-	if (timeout <= step)
-		return d->WaitForFences(device, n, fences, all, timeout);
+	ft("waitfences", n ? (int64_t)(uint64_t)fences[0] : 0);
+	if (timeout <= step) {
+		VkResult r0 = d->WaitForFences(device, n, fences, all, timeout);
+		ft("waited", r0);
+		return r0;
+	}
 	uint64_t deadline = timeout == UINT64_MAX ? UINT64_MAX : now_ns() + timeout;
 	for (;;) {
 		VkResult r = d->WaitForFences(device, n, fences, all, step);
-		if (r != VK_TIMEOUT || (deadline != UINT64_MAX && now_ns() >= deadline))
+		if (r != VK_TIMEOUT || (deadline != UINT64_MAX && now_ns() >= deadline)) {
+			ft("waited", r);
 			return r;
+		}
 	}
 }
 
@@ -1480,7 +1489,7 @@ static struct ub_chunk *ub_chunk_new(struct device *d)
 	struct ub_chunk *c = calloc(1, sizeof(*c));
 	VkBufferCreateInfo bci = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
 	bci.size = UB_CHUNK;
-	bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+	bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT; // and snapshots (rpmerge)
 	bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 	if (!c || d->CreateBuffer(dev, &bci, NULL, &c->buf) != VK_SUCCESS) {
 		free(c);
@@ -1549,6 +1558,7 @@ static void ub_drop(struct device *d, VkCommandPool pool, VkCommandBuffer cb)
 	pthread_mutex_unlock(&ub_lock);
 	for (struct ub_arena *n; gone; gone = n) {
 		n = gone->next;
+		rm_cb_drop(gone->d, gone->cb);
 		ub_arena_free(gone);
 	}
 }
@@ -1603,12 +1613,13 @@ static VKAPI_ATTR VkResult VKAPI_CALL BeginCommandBuffer(VkCommandBuffer cb, con
 		a->cur = a->chunks;
 		a->pos = 0;
 	}
+	rm_cb_begin(device_of(cb), cb);
 	return device_of(cb)->BeginCommandBuffer(cb, bi);
 }
 
-//! Records data through the command buffer's staging, false if it has none (the caller uses the blob's path).
-static bool ub_update(struct device *d, VkCommandBuffer cb, VkBuffer b, VkDeviceSize off, VkDeviceSize size,
-                      const void *data)
+//! size bytes of the command buffer's staging, 256-aligned (a uniform buffer offset), until it is begun again.
+static bool ub_alloc(struct device *d, VkCommandBuffer cb, VkDeviceSize size, VkBuffer *buf, VkDeviceSize *off,
+                     void **ptr)
 {
 	pthread_mutex_lock(&ub_lock);
 	struct ub_arena *a = ub_find(cb);
@@ -1616,6 +1627,7 @@ static bool ub_update(struct device *d, VkCommandBuffer cb, VkBuffer b, VkDevice
 	if (!a || size > UB_CHUNK)
 		return false;
 	// recording is externally synchronized: the arena is this thread's until it ends
+	a->pos = (a->pos + 255) & ~(VkDeviceSize)255;
 	if (a->cur && a->pos + size > UB_CHUNK) {
 		a->cur = a->cur->next;
 		a->pos = 0;
@@ -1632,16 +1644,33 @@ static bool ub_update(struct device *d, VkCommandBuffer cb, VkBuffer b, VkDevice
 		a->cur = c;
 		a->pos = 0;
 	}
-	memcpy(a->cur->ptr + a->pos, data, size);
-	VkBufferCopy r = {a->pos, off, size};
-	d->CmdCopyBuffer(cb, a->cur->buf, b, 1, &r);
-	a->pos += (size + 15) & ~(VkDeviceSize)15;
+	*buf = a->cur->buf;
+	*off = a->pos;
+	*ptr = a->cur->ptr + a->pos;
+	a->pos += size;
+	return true;
+}
+
+//! Records data through the command buffer's staging, false if it has none (the caller uses the blob's path).
+static bool ub_update(struct device *d, VkCommandBuffer cb, VkBuffer b, VkDeviceSize off, VkDeviceSize size,
+                      const void *data)
+{
+	VkBuffer sb;
+	VkDeviceSize soff;
+	void *p;
+	if (!ub_alloc(d, cb, size, &sb, &soff, &p))
+		return false;
+	memcpy(p, data, size);
+	VkBufferCopy r = {soff, off, size};
+	d->CmdCopyBuffer(cb, sb, b, 1, &r);
 	return true;
 }
 
 static VKAPI_ATTR void VKAPI_CALL CmdUpdateBuffer(VkCommandBuffer cb, VkBuffer b, VkDeviceSize off, VkDeviceSize size,
                                                   const void *data)
 {
+	if (rm_update(cb, b, off, size, data))
+		return; // absorbed into a merged render pass (quest1_rpmerge.c)
 	bool u32 = size % 4 == 0 && u32_shaped(data, size / 2);
 	pthread_mutex_lock(&u32_lock);
 	u32_note((uint64_t)b, off, u32);
@@ -1654,6 +1683,9 @@ static VKAPI_ATTR void VKAPI_CALL CmdUpdateBuffer(VkCommandBuffer cb, VkBuffer b
 static VKAPI_ATTR void VKAPI_CALL CmdCopyBuffer(VkCommandBuffer cb, VkBuffer src, VkBuffer dst, uint32_t n,
                                                 const VkBufferCopy *r)
 {
+	rm_flush(cb);
+	for (uint32_t i = 0; i < n; i++)
+		rm_buf_unknown(dst, r[i].dstOffset, r[i].size);
 	pthread_mutex_lock(&u32_lock);
 	const char *sp = NULL;
 	for (unsigned i = 0; i < U32_BUFS && !sp; i++)
@@ -2030,6 +2062,15 @@ static void obj_desc_set(uint64_t handle, const char *text)
 	pthread_mutex_unlock(&g_lock);
 }
 
+static void obj_desc_copy(uint64_t handle, char *out, size_t n)
+{
+	pthread_mutex_lock(&g_lock);
+	for (unsigned i = 0; i < OBJ_DESCS; i++)
+		if (obj_descs[i].handle == handle && handle)
+			snprintf(out, n, "%s", obj_descs[i].text);
+	pthread_mutex_unlock(&g_lock);
+}
+
 static void obj_desc_log(const char *what, uint64_t handle)
 {
 	pthread_mutex_lock(&g_lock);
@@ -2085,6 +2126,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateDescriptorSetLayout(VkDevice device,
 			                        b->descriptorCount, b->stageFlags, b->pImmutableSamplers ? "i" : "");
 		}
 		obj_desc_set((uint64_t)*out, buf);
+		rm_note_layout(*out, ci);
 		if (ci->bindingCount <= 64) {
 			pthread_mutex_lock(&g_lock);
 			unsigned s = set_layout_next++ % LAYOUTS;
@@ -2127,6 +2169,8 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateRenderPass(VkDevice device, const Vk
                                                        const VkAllocationCallbacks *alloc, VkRenderPass *out)
 {
 	VkResult r = device_of(device)->CreateRenderPass(device, ci, alloc, out);
+	if (r == VK_SUCCESS)
+		rm_note_rp(device_of(device), *out, ci);
 	if (r == VK_SUCCESS) {
 		char buf[480];
 		size_t len = 0;
@@ -2135,8 +2179,11 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateRenderPass(VkDevice device, const Vk
 		for (const VkBaseInStructure *p = ci->pNext; p && len < sizeof(buf) - 24; p = p->pNext)
 			len += (size_t)snprintf(buf + len, sizeof(buf) - len, " (sType %d)", p->sType);
 		for (uint32_t i = 0; i < ci->attachmentCount && len < sizeof(buf) - 40; i++)
-			len += (size_t)snprintf(buf + len, sizeof(buf) - len, ", att%u fmt %d x%d", i, ci->pAttachments[i].format,
-			                        ci->pAttachments[i].samples);
+			len += (size_t)snprintf(buf + len, sizeof(buf) - len, ", att%u fmt %d x%d ld %d st %d sld %d sst %d lay %d>%d", i,
+			                        ci->pAttachments[i].format, ci->pAttachments[i].samples, ci->pAttachments[i].loadOp,
+			                        ci->pAttachments[i].storeOp, ci->pAttachments[i].stencilLoadOp,
+			                        ci->pAttachments[i].stencilStoreOp, ci->pAttachments[i].initialLayout,
+			                        ci->pAttachments[i].finalLayout);
 		for (uint32_t i = 0; i < ci->subpassCount && len < sizeof(buf) - 60; i++) {
 			const VkSubpassDescription *sp = &ci->pSubpasses[i];
 			len += (size_t)snprintf(buf + len, sizeof(buf) - len, ", sub%u in %u col %u res %s ds %s", i,
@@ -2438,6 +2485,66 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateComputePipelines(VkDevice device, Vk
 	return r;
 }
 
+// --- buffers and descriptor sets, followed for the render pass merge (quest1_rpmerge.c) -------------------
+
+static VKAPI_ATTR VkResult VKAPI_CALL CreateBuffer(VkDevice device, const VkBufferCreateInfo *ci,
+                                                   const VkAllocationCallbacks *alloc, VkBuffer *out)
+{
+	VkResult r = device_of(device)->CreateBuffer(device, ci, alloc, out);
+	if (r == VK_SUCCESS)
+		rm_note_buffer(*out, ci);
+	return r;
+}
+
+static VKAPI_ATTR void VKAPI_CALL DestroyBuffer(VkDevice device, VkBuffer b, const VkAllocationCallbacks *alloc)
+{
+	rm_forget_buffer(b);
+	device_of(device)->DestroyBuffer(device, b, alloc);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL AllocateDescriptorSets(VkDevice device, const VkDescriptorSetAllocateInfo *ai,
+                                                             VkDescriptorSet *out)
+{
+	static PFN_vkAllocateDescriptorSets next;
+	if (!next)
+		next = (PFN_vkAllocateDescriptorSets)device_of(device)->gdpa(device, "vkAllocateDescriptorSets");
+	VkResult r = next(device, ai, out);
+	if (r == VK_SUCCESS)
+		rm_note_sets(ai, out);
+	return r;
+}
+
+static VKAPI_ATTR void VKAPI_CALL UpdateDescriptorSets(VkDevice device, uint32_t nw, const VkWriteDescriptorSet *w,
+                                                      uint32_t nc, const VkCopyDescriptorSet *c)
+{
+	static PFN_vkUpdateDescriptorSets next;
+	if (!next)
+		next = (PFN_vkUpdateDescriptorSets)device_of(device)->gdpa(device, "vkUpdateDescriptorSets");
+	rm_note_writes(nw, w, nc, c);
+	next(device, nw, w, nc, c);
+}
+
+static VKAPI_ATTR void VKAPI_CALL UpdateDescriptorSetWithTemplate(VkDevice device, VkDescriptorSet s,
+                                                                 VkDescriptorUpdateTemplate t, const void *data)
+{
+	static PFN_vkUpdateDescriptorSetWithTemplate next;
+	if (!next)
+		next = (PFN_vkUpdateDescriptorSetWithTemplate)device_of(device)->gdpa(device, "vkUpdateDescriptorSetWithTemplate");
+	rm_note_template_write(s);
+	next(device, s, t, data);
+}
+
+static VKAPI_ATTR void VKAPI_CALL UpdateDescriptorSetWithTemplateKHR(VkDevice device, VkDescriptorSet s,
+                                                                    VkDescriptorUpdateTemplate t, const void *data)
+{
+	static PFN_vkUpdateDescriptorSetWithTemplate next;
+	if (!next)
+		next = (PFN_vkUpdateDescriptorSetWithTemplate)device_of(device)->gdpa(device,
+		                                                                    "vkUpdateDescriptorSetWithTemplateKHR");
+	rm_note_template_write(s);
+	next(device, s, t, data);
+}
+
 // --- device creation -----------------------------------------------------------------------------------
 
 static VKAPI_ATTR void VKAPI_CALL noop_cmd(void) {}
@@ -2483,9 +2590,14 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice pd, const Vk
 	// vrcompositor asks for a HIGH/REALTIME global-priority queue, which the blob refuses to non-root
 	// processes (VK_ERROR_NOT_PERMITTED): drop the priority request, keep default priority queues
 	VkDeviceQueueCreateInfo queues[8];
-	if (!getenv("QUEST1_COMPAT_KEEP_PRIORITY") && ci->queueCreateInfoCount <= 8) {
-		for (uint32_t i = 0; i < ci->queueCreateInfoCount; i++) {
+	bool keep = getenv("QUEST1_COMPAT_KEEP_PRIORITY") != NULL;
+	if (ci->queueCreateInfoCount <= 8) {
+		for (uint32_t i = 0; i < ci->queueCreateInfoCount; i++)
 			queues[i] = ci->pQueueCreateInfos[i];
+		copy.pQueueCreateInfos = queues;
+	}
+	if (!keep && ci->queueCreateInfoCount <= 8) {
+		for (uint32_t i = 0; i < ci->queueCreateInfoCount; i++) {
 			const VkBaseInStructure **link = (const VkBaseInStructure **)&queues[i].pNext;
 			while (*link) {
 				if ((*link)->sType == VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_KHR) {
@@ -2498,7 +2610,44 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice pd, const Vk
 				link = (const VkBaseInStructure **)&(*link)->pNext;
 			}
 		}
-		copy.pQueueCreateInfos = queues;
+	}
+
+	// Steam's CEF processes draw their VR pages through vrclient's Vulkan renderer in GPU batches of up to ~40 ms.
+	// At the default priority (kgsl MED) they share vrcompositor's ring buffer, and vrcompositor waits behind
+	// them and misses its frame. With LOW they go on the ring below, which vrcompositor's ring preempts
+	// (Monado, root, is on the ring above both).
+	VkDeviceQueueGlobalPriorityCreateInfoKHR low[8];
+	const char *prog = program_invocation_short_name;
+	if (!keep && ci->queueCreateInfoCount <= 8 && (!strcmp(prog, "steamwebhelper") || !strcmp(prog, "vrwebhelper"))) {
+		PFN_vkEnumerateDeviceExtensionProperties enum_exts =
+		    (PFN_vkEnumerateDeviceExtensionProperties)gipa(in->handle, "vkEnumerateDeviceExtensionProperties");
+		uint32_t n = 0;
+		VkExtensionProperties *props = NULL;
+		bool have = false, enabled = false;
+		if (enum_exts && enum_exts(pd, NULL, &n, NULL) == VK_SUCCESS && (props = calloc(n, sizeof(*props))) &&
+		    enum_exts(pd, NULL, &n, props) >= 0)
+			for (uint32_t i = 0; i < n; i++)
+				have |= !strcmp(props[i].extensionName, VK_EXT_GLOBAL_PRIORITY_EXTENSION_NAME);
+		free(props);
+		for (uint32_t i = 0; i < ne; i++)
+			enabled |= !strcmp(exts[i], VK_EXT_GLOBAL_PRIORITY_EXTENSION_NAME);
+		if (have) {
+			if (!enabled)
+				exts[ne++] = VK_EXT_GLOBAL_PRIORITY_EXTENSION_NAME;
+			copy.enabledExtensionCount = ne;
+			for (uint32_t i = 0; i < ci->queueCreateInfoCount; i++) {
+				bool set = false;
+				for (const VkBaseInStructure *p = queues[i].pNext; p; p = p->pNext)
+					set |= p->sType == VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_KHR;
+				if (set)
+					continue;
+				low[i] = (VkDeviceQueueGlobalPriorityCreateInfoKHR){
+				    VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_KHR, queues[i].pNext,
+				    VK_QUEUE_GLOBAL_PRIORITY_LOW_KHR};
+				queues[i].pNext = &low[i];
+			}
+			LOG("GPU priority LOW (below vrcompositor)\n");
+		}
 	}
 
 	VkResult r;
@@ -2649,6 +2798,12 @@ static PFN_vkVoidFunction device_intercept(const char *name)
 	I("vkCreateDescriptorSetLayout", CreateDescriptorSetLayout)
 	I("vkCreatePipelineLayout", CreatePipelineLayout)
 	I("vkCreateRenderPass", CreateRenderPass)
+	I("vkCreateBuffer", CreateBuffer)
+	I("vkDestroyBuffer", DestroyBuffer)
+	I("vkAllocateDescriptorSets", AllocateDescriptorSets)
+	I("vkUpdateDescriptorSets", UpdateDescriptorSets)
+	I("vkUpdateDescriptorSetWithTemplate", UpdateDescriptorSetWithTemplate)
+	I("vkUpdateDescriptorSetWithTemplateKHR", UpdateDescriptorSetWithTemplateKHR)
 	I("vkCreateComputePipelines", CreateComputePipelines)
 	I("vkDeviceWaitIdle", DeviceWaitIdle)
 	I("vkGetQueryPoolResults", GetQueryPoolResults)

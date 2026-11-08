@@ -14,13 +14,16 @@
 // Env: QUEST1_VKSHIM_NEXT  (default /opt/hybris/lib/libvulkan.so.1)
 //      QUEST1_VKSHIM_LAYER (default /usr/local/lib/libVkLayer_quest1_steamvr_compat.so, "none": no layer)
 //      QUEST1_VKSHIM_WSI=1 X11 surfaces and swapchains
+#define _GNU_SOURCE // program_invocation_short_name
 #include <vulkan/vk_layer.h>
 #include <vulkan/vulkan.h>
 
 #include "quest1_wsi.h"
 
 #include <dlfcn.h>
+#include <errno.h>
 #include <pthread.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -155,7 +158,52 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice pd, const Vk
 		PFN_vkCreateDevice create = (PFN_vkCreateDevice)layer_gipa(inst, "vkCreateDevice");
 		r = create(pd, &copy, alloc, out);
 	} else {
-		r = ((PFN_vkCreateDevice)next_gipa(inst, "vkCreateDevice"))(pd, ci, alloc, out);
+		// Steam's CEF GPU process (it loads no layer) composites the pages in GPU batches of up to ~40 ms (a
+		// repaint, e.g. the laser hovering the dashboard). At the default priority (kgsl MED) they share
+		// vrcompositor's ring buffer and it misses frames; LOW puts them on the ring below, which vrcompositor
+		// preempts. Same as the layer does in the other Steam processes (quest1_compat.c).
+		VkDeviceCreateInfo copy = *ci;
+		VkDeviceQueueCreateInfo queues[8];
+		VkDeviceQueueGlobalPriorityCreateInfoKHR low[8];
+		const char *exts[64];
+		const char *prog = program_invocation_short_name;
+		PFN_vkEnumerateDeviceExtensionProperties enum_exts =
+		    (PFN_vkEnumerateDeviceExtensionProperties)next_gipa(inst, "vkEnumerateDeviceExtensionProperties");
+		bool have = false;
+		uint32_t n = 0;
+		VkExtensionProperties props[256];
+		if ((!strcmp(prog, "steamwebhelper") || !strcmp(prog, "vrwebhelper")) && !getenv("QUEST1_COMPAT_KEEP_PRIORITY") &&
+		    ci->queueCreateInfoCount <= 8 && ci->enabledExtensionCount < 63 && enum_exts &&
+		    enum_exts(pd, NULL, &n, NULL) == VK_SUCCESS && n <= 256 && enum_exts(pd, NULL, &n, props) == VK_SUCCESS)
+			for (uint32_t i = 0; i < n; i++)
+				have |= !strcmp(props[i].extensionName, VK_EXT_GLOBAL_PRIORITY_EXTENSION_NAME);
+		if (have) {
+			bool enabled = false;
+			for (uint32_t i = 0; i < ci->enabledExtensionCount; i++) {
+				exts[i] = ci->ppEnabledExtensionNames[i];
+				enabled |= !strcmp(exts[i], VK_EXT_GLOBAL_PRIORITY_EXTENSION_NAME);
+			}
+			copy.enabledExtensionCount = ci->enabledExtensionCount;
+			if (!enabled)
+				exts[copy.enabledExtensionCount++] = VK_EXT_GLOBAL_PRIORITY_EXTENSION_NAME;
+			copy.ppEnabledExtensionNames = exts;
+			for (uint32_t i = 0; i < ci->queueCreateInfoCount; i++) {
+				queues[i] = ci->pQueueCreateInfos[i];
+				bool set = false;
+				for (const VkBaseInStructure *p = queues[i].pNext; p; p = p->pNext)
+					set |= p->sType == VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_KHR;
+				if (set)
+					continue;
+				low[i] = (VkDeviceQueueGlobalPriorityCreateInfoKHR){
+				    VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_KHR, queues[i].pNext,
+				    VK_QUEUE_GLOBAL_PRIORITY_LOW_KHR};
+				queues[i].pNext = &low[i];
+			}
+			copy.pQueueCreateInfos = queues;
+		}
+		r = ((PFN_vkCreateDevice)next_gipa(inst, "vkCreateDevice"))(pd, &copy, alloc, out);
+		if (r != VK_SUCCESS && have) // never refused, LOW needs no privilege; but keep the device either way
+			r = ((PFN_vkCreateDevice)next_gipa(inst, "vkCreateDevice"))(pd, ci, alloc, out);
 	}
 	if (r == VK_SUCCESS && wsi_enabled())
 		wsi_device_created(inst, pd, ci, *out, down_gdpa);

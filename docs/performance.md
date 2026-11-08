@@ -3,6 +3,51 @@
 Where the frame time goes and what was tried. Current numbers and the direct scanout path:
 docs/direct-scanout.md; Steam's UI: docs/steam-gpu.md.
 
+## 2026-11-08 (afternoon): render passes merged, Steam's GPU work below vrcompositor's
+
+Where the GPU goes (kgsl trace of every batch, `adreno_cmdbatch_submitted/retired`; per pass with
+`/tmp/quest1-gputime`): ~88-92 % busy at 62-71 fps when the scene is heavy (a controller lying in front of a lens),
+~70-80 % in the benchmark below. Per eye: the Aurora environment ~2.2 ms, a controller up to 0.8 ms, the dashboard
+overlay ~0.5 ms, the distortion pass ~2 ms; Monado's warp ~1.1 ms a vsync. DDR and GPU bus votes are already at their
+maximum (`soc:qcom,cpubw` / `gpubw` 13763).
+
+- **Render passes merged** (`quest1_rpmerge.c`). vrcompositor draws every layer of an eye in a render pass of its own
+  (~27 an eye), each loading and storing the whole 1500x1664 colour and depth images, with its uniforms rewritten by
+  `vkCmdUpdateBuffer` between barriers that drain the GPU. The layer keeps the pass open across them: the updates go
+  into CPU copies of the buffers, each draw reads them through a copy of its descriptor set pointing at a snapshot
+  in the command buffer's staging, and the buffers get their final contents once the pass really ends. Snapshots
+  identical with and without it. Measured: render thread 4.2 -> 3.1-3.8 ms a frame, GPU -0 to -0.5 ms a frame (the
+  draws are fill and bandwidth bound, not drain bound: a test that dropped the uniform updates looked like -4 ms,
+  but it drew every object at the same place). `nomerge` in `/tmp/quest1-layer` turns it off.
+- **Steam's CEF at LOW GPU priority.** steamwebhelper's GPU process (Chromium compositing, e.g. a repaint when the
+  laser hovers the dashboard) and its main process (the VR pages through vrclient's Vulkan renderer) submitted batches
+  of 30-40 ms at kgsl priority 8, on vrcompositor's ring buffer: a frame lost each time. They now ask for
+  `VK_QUEUE_GLOBAL_PRIORITY_LOW` (kgsl 12, the ring below, which vrcompositor's preempts): the compat layer in the
+  processes that load it, `quest1_vkshim` in the GPU process (it loads no layer). Monado (root) stays above both.
+
+Benchmark (`bench4.sh`-style: dashboard shown / in use = fake pointer sweeping + Steam switching pages, with and
+without passthrough), after both: 71.3 / 69.8 / 70.7 / 70.2 fps, render thread 3.1-3.8 ms, GPU 9.6-10.7 ms a frame.
+
+Why not 72 with GPU to spare: vrcompositor uses a running start. It starts recording ~4.4 ms before the vblank and
+presents ~2.6 ms before it (the GPU then renders through the next period). A frame whose CPU part runs late
+presents after the vblank and that vblank gets no new frame (`/tmp/quest1-frametrace`, below). Its render-thread
+time is the lever.
+
+Tried and dropped:
+
+- **Scene mode with a copy** (`/etc/quest1-warp-lens` 2: the layer copies each eye's 1500x1664 render into Monado's
+  buffer and drops vrcompositor's distortion pass, Monado's warp does the lens): the copy into the UBWC gralloc
+  buffer costs ~4.4 ms an eye and Monado's lens warp ~2 ms a vsync instead of ~1.1. 15 fps. A zero-copy version
+  (the eye passes rendering straight into the gralloc buffers) is still worth it: the distortion pass is pure memory
+  traffic (~2 ms an eye even as an identity copy, `/etc/quest1-warp-lens` 1), Monado's lens warp adds only ~0.9 ms.
+  Needs the swapchain image before vrcompositor acquires it (it acquires after recording the first eye).
+- **Vblank event fences signalled from the CPU** (the layer answering the waits): present-to-rendered 17 -> 14 ms,
+  but 69.6 against 71.0 fps (alternated A/B): with less slack, the running start misses more vblanks.
+- **Anisotropic filtering** (vrcompositor asks for 16x on most samplers): capped to 1x, no difference.
+
+Debug: `runuser -u steamos -- touch /tmp/quest1-frametrace` records 3 s of vrcompositor's frame loop (vblank ticks,
+display events, fence waits, acquires, submits, presents, with their thread) in `/tmp/quest1-frametrace.txt`.
+
 ## 2026-11-08: vrcompositor's CPU and GPU now overlap (55 -> 68-72 fps)
 
 vrcompositor's render thread read its GPU timestamps with `vkGetQueryPoolResults(..., VK_QUERY_RESULT_WAIT_BIT)` right

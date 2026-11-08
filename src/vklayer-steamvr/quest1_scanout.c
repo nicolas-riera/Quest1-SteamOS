@@ -639,10 +639,12 @@ static struct
 		VkCommandBuffer cb;
 		unsigned first, count, indices;
 		VkRect2D area;
+		uint64_t rp;
 	} cbs[8];
-	char label[QS_TS_SLOTS][64];
+	char label[QS_TS_SLOTS][224];
 } qs_ts;
 static pthread_mutex_t qs_ts_lock = PTHREAD_MUTEX_INITIALIZER;
+static void obj_desc_copy(uint64_t handle, char *out, size_t n); // quest1_compat.c
 
 //! Call with qs_ts_lock held: the instrumented entry of `cb`, if any (or a new one when `add`).
 static int qs_ts_entry(VkCommandBuffer cb, bool add)
@@ -687,8 +689,11 @@ static void qs_ts_stamp(VkCommandBuffer cb, int e, const char *label)
 }
 
 //! Once per displayed frame: arms the instrumentation, then logs the results.
+static void rm_stats(void); // quest1_rpmerge.c
+
 static void qs_ts_frame(void)
 {
+	rm_stats();
 	pthread_mutex_lock(&qs_ts_lock);
 	if (qs_ts.state == 0 && unlink("/tmp/quest1-gputime") == 0) {
 		qs_ts.state = 1;
@@ -722,7 +727,7 @@ static void qs_ts_frame(void)
 	pthread_mutex_unlock(&qs_ts_lock);
 }
 
-static void qs_ts_begin_pass(VkCommandBuffer cb, const VkRect2D *area)
+static void qs_ts_begin_pass(VkCommandBuffer cb, const VkRect2D *area, uint64_t rp)
 {
 	if (qs_ts.state != 1)
 		return;
@@ -732,6 +737,7 @@ static void qs_ts_begin_pass(VkCommandBuffer cb, const VkRect2D *area)
 		if (qs_ts.cbs[e].count == 0)
 			qs_ts_stamp(cb, e, "start");
 		qs_ts.cbs[e].area = *area;
+		qs_ts.cbs[e].rp = rp;
 		qs_ts.cbs[e].indices = 0;
 	}
 	pthread_mutex_unlock(&qs_ts_lock);
@@ -755,10 +761,11 @@ static void qs_ts_end_pass(VkCommandBuffer cb)
 	pthread_mutex_lock(&qs_ts_lock);
 	int e = qs_ts_entry(cb, false);
 	if (e >= 0) {
-		char label[64];
+		char label[224], rpd[160] = "";
 		const VkRect2D *a = &qs_ts.cbs[e].area;
-		snprintf(label, sizeof(label), "pass %ux%u@%d,%d, %u vertices", a->extent.width, a->extent.height, a->offset.x,
-		         a->offset.y, qs_ts.cbs[e].indices);
+		obj_desc_copy(qs_ts.cbs[e].rp, rpd, sizeof(rpd));
+		snprintf(label, sizeof(label), "pass %ux%u@%d,%d, %u vertices; %s", a->extent.width, a->extent.height,
+		         a->offset.x, a->offset.y, qs_ts.cbs[e].indices, rpd);
 		qs_ts_stamp(cb, e, label);
 	}
 	pthread_mutex_unlock(&qs_ts_lock);
@@ -768,6 +775,8 @@ static void qs_ts_end_pass(VkCommandBuffer cb)
 	static type next; \
 	if (!next) \
 		next = (type)device_of(cb)->gdpa(device_of(cb)->handle, fn);
+
+#include "quest1_rpmerge.c"
 
 // vrcompositor's distortion pass draws each eye in its own render pass whose render area is the
 // eye's half of the display image. On the Adreno 540 blob, a render area at x = 1440 of a linear
@@ -823,6 +832,7 @@ static VKAPI_ATTR void VKAPI_CALL qs_DestroyRenderPass(VkDevice device, VkRender
 {
 	struct device *d = device_of(device);
 	PFN_vkDestroyRenderPass next = (PFN_vkDestroyRenderPass)d->gdpa(device, "vkDestroyRenderPass");
+	rm_forget_rp(d, rp);
 	pthread_mutex_lock(&qs_rp_lock);
 	for (unsigned i = 0; i < qs_rp_nvariants; i++)
 		if (qs_rp_variants[i].rp == rp) {
@@ -857,9 +867,11 @@ static VKAPI_ATTR void VKAPI_CALL qs_CmdBeginRenderPass(VkCommandBuffer cb, cons
 		    (void *)bi->framebuffer, bi->renderArea.offset.x, bi->renderArea.offset.y, bi->renderArea.extent.width,
 		    bi->renderArea.extent.height, bi->clearValueCount);
 	const VkRect2D a = bi->renderArea;
-	qs_ts_begin_pass(cb, &a);
+	qs_ts_begin_pass(cb, &a, (uint64_t)bi->renderPass);
 	bool eye_pass = a.extent.width == QS_PANEL_W && a.extent.height == QS_PANEL_H && a.offset.y == 0 &&
 	                (a.offset.x == 0 || a.offset.x == QS_PANEL_W);
+	if (rm_begin(cb, bi, contents, eye_pass))
+		return; // it continues the open render pass
 	pthread_mutex_lock(&qs_twin_lock);
 	const struct qs_twin *t = eye_pass ? qs_twin_find(qs_fbs, qs_nfbs, (uint64_t)bi->framebuffer) : NULL;
 	int h = a.offset.x == QS_PANEL_W;
@@ -934,6 +946,7 @@ static VKAPI_ATTR void VKAPI_CALL qs_CmdSetScissor(VkCommandBuffer cb, uint32_t 
 static VKAPI_ATTR void VKAPI_CALL qs_CmdDispatch(VkCommandBuffer cb, uint32_t x, uint32_t y, uint32_t z)
 {
 	QS_TRACE_NEXT(PFN_vkCmdDispatch, "vkCmdDispatch")
+	rm_flush(cb);
 	if (qs_trace_left > 0 && qs_trace_left--)
 		LOG("trace: cb %p Dispatch %u %u %u\n", (void *)cb, x, y, z);
 	next(cb, x, y, z);
@@ -943,6 +956,7 @@ static VKAPI_ATTR void VKAPI_CALL qs_CmdDispatchBase(VkCommandBuffer cb, uint32_
                                                     uint32_t x, uint32_t y, uint32_t z)
 {
 	QS_TRACE_NEXT(PFN_vkCmdDispatchBase, "vkCmdDispatchBase")
+	rm_flush(cb);
 	if (qs_trace_left > 0 && qs_trace_left--)
 		LOG("trace: cb %p DispatchBase %u %u %u + %u %u %u\n", (void *)cb, bx, by, bz, x, y, z);
 	next(cb, bx, by, bz, x, y, z);
@@ -951,6 +965,7 @@ static VKAPI_ATTR void VKAPI_CALL qs_CmdDispatchBase(VkCommandBuffer cb, uint32_
 static VKAPI_ATTR void VKAPI_CALL qs_CmdDraw(VkCommandBuffer cb, uint32_t vc, uint32_t ic, uint32_t fv, uint32_t fi)
 {
 	QS_TRACE_NEXT(PFN_vkCmdDraw, "vkCmdDraw")
+	rm_draw(cb);
 	if (qs_trace_left > 0 && qs_trace_left--)
 		LOG("trace: cb %p Draw %u x%u\n", (void *)cb, vc, ic);
 	qs_ts_draw(cb, vc * ic);
@@ -961,6 +976,7 @@ static VKAPI_ATTR void VKAPI_CALL qs_CmdDrawIndexed(VkCommandBuffer cb, uint32_t
                                                    uint32_t fin)
 {
 	QS_TRACE_NEXT(PFN_vkCmdDrawIndexed, "vkCmdDrawIndexed")
+	rm_draw(cb);
 	if (qs_trace_left > 0 && qs_trace_left--)
 		LOG("trace: cb %p DrawIndexed %u x%u first %u\n", (void *)cb, n, ic, fi);
 	qs_ts_draw(cb, n * ic);
@@ -981,6 +997,10 @@ static VKAPI_ATTR void VKAPI_CALL qs_CmdEndRenderPass(VkCommandBuffer cb)
 	QS_TRACE_NEXT(PFN_vkCmdEndRenderPass, "vkCmdEndRenderPass")
 	if (qs_trace_left > 0 && qs_trace_left--)
 		LOG("trace: cb %p EndRenderPass\n", (void *)cb);
+	if (rm_end(cb)) { // held back: the next pass may continue it
+		qs_ts_end_pass(cb);
+		return;
+	}
 	next(cb);
 	qs_set_shifted(cb, false);
 	qs_ts_end_pass(cb);
@@ -998,6 +1018,8 @@ static VKAPI_ATTR void VKAPI_CALL qs_CmdPipelineBarrier(VkCommandBuffer cb, VkPi
 			LOG("trace:   image %p layout %d -> %d access 0x%x -> 0x%x\n", (void *)im[i].image, im[i].oldLayout,
 			    im[i].newLayout, im[i].srcAccessMask, im[i].dstAccessMask);
 	}
+	if (rm_barrier(cb, nm, nb, b, ni))
+		return; // the uniform buffers it covers are read through copies
 	next(cb, src, dst, dep, nm, m, nb, b, ni, im);
 }
 
@@ -1005,6 +1027,7 @@ static VKAPI_ATTR void VKAPI_CALL qs_CmdCopyBufferToImage(VkCommandBuffer cb, Vk
                                                          uint32_t n, const VkBufferImageCopy *r)
 {
 	QS_TRACE_NEXT(PFN_vkCmdCopyBufferToImage, "vkCmdCopyBufferToImage")
+	rm_flush(cb);
 	if (qs_trace_left > 0 && qs_trace_left--)
 		LOG("trace: cb %p CopyBufferToImage %p %ux%u\n", (void *)cb, (void *)img, n ? r[0].imageExtent.width : 0,
 		    n ? r[0].imageExtent.height : 0);
@@ -1015,6 +1038,7 @@ static VKAPI_ATTR void VKAPI_CALL qs_CmdCopyImage(VkCommandBuffer cb, VkImage s,
                                                  VkImageLayout dl, uint32_t n, const VkImageCopy *r)
 {
 	QS_TRACE_NEXT(PFN_vkCmdCopyImage, "vkCmdCopyImage")
+	rm_flush(cb);
 	if (qs_trace_left > 0 && qs_trace_left--)
 		LOG("trace: cb %p CopyImage %p -> %p %ux%u\n", (void *)cb, (void *)s, (void *)d, n ? r[0].extent.width : 0,
 		    n ? r[0].extent.height : 0);
@@ -1025,6 +1049,7 @@ static VKAPI_ATTR void VKAPI_CALL qs_CmdBlitImage(VkCommandBuffer cb, VkImage s,
                                                  VkImageLayout dl, uint32_t n, const VkImageBlit *r, VkFilter f)
 {
 	QS_TRACE_NEXT(PFN_vkCmdBlitImage, "vkCmdBlitImage")
+	rm_flush(cb);
 	if (qs_trace_left > 0 && qs_trace_left--)
 		LOG("trace: cb %p BlitImage %p -> %p\n", (void *)cb, (void *)s, (void *)d);
 	next(cb, s, sl, d, dl, n, r, f);
@@ -1038,6 +1063,7 @@ static VKAPI_ATTR void VKAPI_CALL qs_CmdBindDescriptorSets(VkCommandBuffer cb, V
 	if (qs_trace_left > 0 && qs_trace_left--)
 		LOG("trace: cb %p BindDescriptorSets %u..%u\n", (void *)cb, first, first + n);
 	next(cb, bp, pl, first, n, sets, nd, dyn);
+	rm_bind(cb, bp, pl, first, n, sets, nd);
 }
 
 static VKAPI_ATTR void VKAPI_CALL qs_CmdPushConstants(VkCommandBuffer cb, VkPipelineLayout pl, VkShaderStageFlags st,
@@ -1051,6 +1077,9 @@ static VKAPI_ATTR void VKAPI_CALL qs_CmdPushConstants(VkCommandBuffer cb, VkPipe
 
 static PFN_vkVoidFunction qs_trace_proc(const char *name)
 {
+	PFN_vkVoidFunction f = rm_proc(name);
+	if (f)
+		return f;
 #define T(n) if (strcmp(name, "vk" #n) == 0) return (PFN_vkVoidFunction)qs_##n;
 	T(CmdEndRenderPass)
 	T(CreateImageView)
