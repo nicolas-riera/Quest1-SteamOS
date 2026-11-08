@@ -3,6 +3,34 @@
 Where the frame time goes and what was tried. Current numbers and the direct scanout path:
 docs/direct-scanout.md; Steam's UI: docs/steam-gpu.md.
 
+## 2026-11-08: vrcompositor's CPU and GPU now overlap (55 -> 68-72 fps)
+
+vrcompositor's render thread read its GPU timestamps with `vkGetQueryPoolResults(..., VK_QUERY_RESULT_WAIT_BIT)` right
+after submitting each frame. The blob implements the wait as a `usleep` loop, so the thread slept until the GPU had
+finished the frame (55 % of its time in `nanosleep`, sampled through /proc wchan and eu-stack) and only then recorded
+the next one: ~5 ms of CPU and ~12 ms of GPU in series, 55 fps. The timestamps only feed its frame-timing statistics,
+so the compat layer (`quest1_compat.c`, `GetQueryPoolResults`) returns at once: the results when ready, else the last
+ones read for the same queries, while a helper thread (`q1-queryresults`) waits for the real ones for the next call.
+`qrwait` in `/tmp/quest1-layer` restores the plain wait. No visible change in snapshots; vrcompositor rotates several
+command buffers, so recording the next frame while the GPU runs the previous one is safe.
+
+Measured on the table, panels forced on, both controllers seen by the cameras and drawn, dashboard shown (`bench4.sh`
+style: the dashboard "in use" = both controllers emulated in front of the head, the right laser sweeping the panel and
+its stick scrolling, plus Steam switching pages every 1.2 s):
+
+| Case | Before | After |
+| --- | --- | --- |
+| Dashboard | 56.0 fps | 71.7 fps |
+| Dashboard in use | 55.2 fps | 68.5 fps (min 66.4) |
+| Passthrough + dashboard | - | 71.8 fps |
+| Passthrough + dashboard in use | - | 68.6 fps |
+
+GPU per frame: ~11.7-11.9 ms with the Aurora environment, ~8 ms with passthrough (it replaces the environment).
+Of the 11.8 ms: vrcompositor's distortion pass ~2 ms per eye (1440x1600), the Aurora environment ~4 ms, the two
+controller models ~2 ms, the dashboard overlays (4x MSAA system layer) the rest. In use, the render thread takes
+5.6-6.3 ms a frame (Steam's page changes and pointer events), on top of Steam's own load on the big cores.
+
+
 ## Notes moved from the to-do list (2026-11-08): Performance
 
 History of measurements, fixes and open points as they were written in docs/todo.md (the to-do list now only
