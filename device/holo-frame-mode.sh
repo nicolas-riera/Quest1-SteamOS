@@ -91,6 +91,8 @@ PORT = {
         "activateMultipleDrivers": False,
         "enableLinuxVulkanAsync": True,     # high-priority queue for vrcompositor
         "motionSmoothing": False,
+        "supersampleManualOverride": True,  # 100 %: the GPU has no headroom for more
+        "supersampleScale": 1,
         "allowSupersampleFiltering": False,
         "sharpening": False,
         "overlayMips": 1,
@@ -102,12 +104,6 @@ PORT = {
         "showMirrorView": False,
         "enableHomeApp": False,
     },
-    # Render resolution: per game only, as on the Steam Frame (driver_quest1 sets
-    # Prop_Hmd_RecommendedResolutionIsPerApp_Bool; the global slider and supersampleScale are then gone/ignored).
-    # A game without its own setting gets vrcompositor's automatic resolution, which here would be 150 %
-    # (fixed "GPU speed override on platform: 450" MP/s for arm64, clamped to 1.5x): the GPU has no headroom
-    # for that. ignoreGpuSpeed makes the automatic resolution the driver's recommended size (100 %, 1224x1360).
-    "GpuSpeed": {"ignoreGpuSpeed": True},
     "power": {"pauseCompositorOnStandby": False},
     "audio": {"enableSpatializeGlobal": False, "enableSpatializeSurround": False},
     "camera": {"enableCamera": True},       # passthrough (q1-ptprovider)
