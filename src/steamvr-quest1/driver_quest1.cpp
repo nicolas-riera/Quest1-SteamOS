@@ -1724,7 +1724,8 @@ public:
 		// the re-projection in one pass (like Meta's TimeWarp), vrcompositor hands over the undistorted eyes
 		static const bool monadoLens = [] {
 			FILE *f = fopen("/etc/quest1-warp-lens", "r");
-			bool on = f && fgetc(f) == '1';
+			int c = f ? fgetc(f) : 0; // "2": the layer hands Monado the eye renders and drops the distortion pass
+			bool on = c == '1' || c == '2';
 			if (f)
 				fclose(f);
 			return on;

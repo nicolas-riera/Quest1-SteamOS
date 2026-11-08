@@ -464,6 +464,7 @@ struct qd_swapchain
 	} present_ids[64];
 	uint64_t displayed_id, displayed_ns;
 	uint32_t next;
+	uint32_t reserved1; //!< index + 1 the next acquire returns (scene mode, qs_reserve), 0: none
 
 	// direct scanout (quest1_scanout.c, QUEST1_DIRECT_SCANOUT=1): gralloc images committed on /dev/fb0
 	bool direct;
@@ -976,7 +977,13 @@ static VkResult qd_acquire(struct qd_swapchain *sc, uint64_t timeout, VkSemaphor
 	uint64_t t0 = now_ns();
 	pthread_mutex_lock(&sc->mutex);
 	int found = -1;
-	for (;;) {
+	if (sc->reserved1) { // scene mode rendered into this image's buffers before the acquire (qs_reserve)
+		uint32_t r = sc->reserved1 - 1;
+		sc->reserved1 = 0;
+		if (!sc->app_owned[r] && !sc->driver_owned[r])
+			found = (int)r;
+	}
+	for (; found < 0;) {
 		for (uint32_t k = 0; k < sc->count && found < 0; k++) {
 			uint32_t i = (sc->next + k) % sc->count;
 			if (!sc->app_owned[i] && !sc->driver_owned[i])

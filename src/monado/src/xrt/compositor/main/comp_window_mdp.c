@@ -218,6 +218,9 @@ struct mdp_direct
 
 	struct direct_buf buf[Q1D_MAX_IMAGES][2];
 	uint32_t count, height;
+	//! the layer's buffers: the panel's size, or (scene mode, /etc/quest1-warp-lens "2") vrcompositor's undistorted eye
+	//! renders, of its render size, which only the warp (lens mode) can show
+	uint32_t in_w, in_h;
 	bool bgra;
 	bool held[Q1D_MAX_IMAGES]; //!< the layer gave us this image (Q1D_FRAME) and it has not been released
 
@@ -823,7 +826,9 @@ direct_thread_func(void *ptr)
 			b->stride_px = m.stride_px;
 			b->ubwc = m.ubwc;
 			D->count = m.count < Q1D_MAX_IMAGES ? m.count : Q1D_MAX_IMAGES;
-			D->height = m.height;
+			D->in_w = m.width ? m.width : MDP_HALF;
+			D->in_h = m.height;
+			D->height = D->in_w == MDP_HALF ? m.height : MDP_H; // the warp's output: the panels
 			D->bgra = m.bgra;
 			pthread_mutex_unlock(&D->lock);
 		} else if (m.type == Q1D_FRAME && m.index < D->count) {
@@ -1405,7 +1410,8 @@ warp_free_buf_vk(struct vk_bundle *vk, struct direct_buf *b)
 	b->set = VK_NULL_HANDLE;
 }
 
-//! Import the gralloc buffer as a 1440 x height R8G8B8A8_UNORM image (sampled, or rendered to).
+//! Import the gralloc buffer as a R8G8B8A8_UNORM image: one of ours, 1440 x height, rendered to, or one of the layer's
+//! (in_w x in_h), sampled.
 static bool
 warp_import(struct mdp_target *t, struct direct_buf *b, bool output)
 {
@@ -1433,7 +1439,7 @@ warp_import(struct mdp_target *t, struct direct_buf *b, bool output)
 	    .pNext = &ext,
 	    .imageType = VK_IMAGE_TYPE_2D,
 	    .format = VK_FORMAT_R8G8B8A8_UNORM,
-	    .extent = {MDP_HALF, D->height, 1},
+	    .extent = {output ? MDP_HALF : D->in_w, output ? D->height : D->in_h, 1},
 	    .mipLevels = 1,
 	    .arrayLayers = 1,
 	    .samples = VK_SAMPLE_COUNT_1_BIT,
@@ -1809,10 +1815,13 @@ warp_lens_setup(struct mdp_target *t)
 	}
 	D->lens_read = true;
 	FILE *lf = fopen(WARP_LENS_FILE, "r");
-	D->lens = lf != NULL && fgetc(lf) == '1';
+	int mode = lf != NULL ? fgetc(lf) : 0;
 	if (lf != NULL) {
 		fclose(lf);
 	}
+	// "1": vrcompositor's distortion pass is an identity copy; "2" (scene mode): the layer hands over the eye renders
+	// themselves, whatever their size (in_w x in_h), and drops that pass
+	D->lens = mode == '1' || mode == '2' || D->in_w != MDP_HALF;
 	struct xrt_device *xdev = t->base.c->xdev;
 	if (D->lens && (xdev == NULL || xdev->hmd == NULL)) {
 		U_LOG_E("mdp: warp: no HMD views, the lens distortion stays with SteamVR");

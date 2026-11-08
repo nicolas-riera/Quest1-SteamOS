@@ -3,6 +3,30 @@
 Where the frame time goes and what was tried. Current numbers and the direct scanout path:
 docs/direct-scanout.md; Steam's UI: docs/steam-gpu.md.
 
+## 2026-11-08 (evening): scene mode, the eyes render straight into Monado's buffers (`/etc/quest1-warp-lens` 2)
+
+vrcompositor's distortion pass resampled each 1500x1664 eye render into a 1440x1600 panel image (~2 ms an eye, all
+memory traffic: as much as an identity copy), which Monado's warp then resampled again. In scene mode the layer
+gives the eye's render passes a twin framebuffer whose colour attachment is the eye's gralloc buffer (an sRGB view;
+the buffers are made at the scene's size, cached in `~/.cache/quest1-scene-size`), drops the distortion pass, and
+Monado's warp does the lens distortion, its chromatic aberration and the re-projection in one pass (its lens mode, the
+geometry checked on 2026-11-03 for mode 1). vrcompositor acquires the frame's swapchain image only after recording
+the first eye: the layer reserves the index when that eye's first pass begins and that acquire returns it. When no
+index is free, the eye renders into vrcompositor's own image and is copied in (slow, ~4 ms an eye).
+
+Benchmark as below (second run, warm):
+
+| Case | Mode 0 | Scene mode |
+| --- | --- | --- |
+| Dashboard | 71.6 fps, GPU 8.55 ms | 71.8 fps, GPU 4.19 ms |
+| Dashboard in use | 71.1 fps, 8.32 ms | 71.2 fps, 3.81 ms |
+| Passthrough + dashboard | 71.7 fps, 8.11 ms | 70.9 fps, 3.39 ms |
+| Passthrough + dashboard in use | 70.8 fps, 7.92 ms | 70.7 fps, 3.92 ms |
+
+GPU = vrcompositor's per frame; Monado's warp goes from ~1.1 to ~2.1 ms a vsync. Total ~6 ms of the 13.9 instead of
+~9.7: the headroom is for games, streaming and the desktop. The frame rate stays where vrcompositor's running start
+puts it (render-thread CPU). Off by default until checked in the headset (sharpness, geometry, chromatic aberration).
+
 ## 2026-11-08 (afternoon): render passes merged, Steam's GPU work below vrcompositor's
 
 Where the GPU goes (kgsl trace of every batch, `adreno_cmdbatch_submitted/retired`; per pass with
@@ -35,12 +59,9 @@ time is the lever.
 
 Tried and dropped:
 
-- **Scene mode with a copy** (`/etc/quest1-warp-lens` 2: the layer copies each eye's 1500x1664 render into Monado's
-  buffer and drops vrcompositor's distortion pass, Monado's warp does the lens): the copy into the UBWC gralloc
-  buffer costs ~4.4 ms an eye and Monado's lens warp ~2 ms a vsync instead of ~1.1. 15 fps. A zero-copy version
-  (the eye passes rendering straight into the gralloc buffers) is still worth it: the distortion pass is pure memory
-  traffic (~2 ms an eye even as an identity copy, `/etc/quest1-warp-lens` 1), Monado's lens warp adds only ~0.9 ms.
-  Needs the swapchain image before vrcompositor acquires it (it acquires after recording the first eye).
+- **Scene mode with a copy** (the layer copying each eye's render into Monado's buffer): the copy into the UBWC
+  gralloc buffer costs ~4.4 ms an eye, 15 fps. Replaced by the zero-copy scene mode above (the copy stays as its
+  fallback).
 - **Vblank event fences signalled from the CPU** (the layer answering the waits): present-to-rendered 17 -> 14 ms,
   but 69.6 against 71.0 fps (alternated A/B): with less slack, the running start misses more vblanks.
 - **Anisotropic filtering** (vrcompositor asks for 16x on most samplers): capped to 1x, no difference.

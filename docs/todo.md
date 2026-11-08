@@ -46,7 +46,8 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 
 - 90 Hz mode, selectable from the refresh rate setting (low priority). Base: github.com/TheCez/quest1-90hz-orangefox.
 - Per-panel lens decenter and roll from the calibration (`*_screen_offset.json`), once Meta's convention is known.
-- Lens distortion in Monado's warp (`/etc/quest1-warp-lens`, off): compare sharpness with the user once perf allows.
+- Scene mode (`/etc/quest1-warp-lens` 2, docs/performance.md: GPU per frame ~9.7 -> ~6 ms): check it in the headset
+  (sharpness, geometry, chromatic aberration, the dashboard and passthrough), then make it the default.
 - Steam's VR UI: check the right controller's Oculus button logo in the headset (user).
 
 ## Passthrough

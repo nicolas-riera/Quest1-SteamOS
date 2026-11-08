@@ -1614,6 +1614,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL BeginCommandBuffer(VkCommandBuffer cb, con
 		a->pos = 0;
 	}
 	rm_cb_begin(device_of(cb), cb);
+	qs_scene_cb_begin(cb);
 	return device_of(cb)->BeginCommandBuffer(cb, bi);
 }
 
@@ -1892,6 +1893,8 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateImage(VkDevice device, const VkImage
 			ci = &samp;
 		}
 		VkResult r = d->CreateImage(device, ci, alloc, out);
+		if (r == VK_SUCCESS)
+			qs_scene_note(*out, ci); // scene mode: vrcompositor's eye render targets (quest1_scanout.c)
 		if (r != VK_SUCCESS && fail_logs < 40) {
 			fail_logs++;
 			LOG("vkCreateImage %ux%ux%u format %d mips %u layers %u samples %d usage 0x%x flags 0x%x tiling %d: %d\n",

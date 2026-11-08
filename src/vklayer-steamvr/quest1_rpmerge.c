@@ -894,6 +894,8 @@ static VKAPI_ATTR void VKAPI_CALL rm_CmdDrawIndirect(VkCommandBuffer cb, VkBuffe
 	static PFN_vkCmdDrawIndirect next;
 	if (!next)
 		next = (PFN_vkCmdDrawIndirect)device_of(cb)->gdpa(device_of(cb)->handle, "vkCmdDrawIndirect");
+	if (qs_skipping(cb))
+		return;
 	rm_draw(cb);
 	next(cb, b, o, n, st);
 }
@@ -904,6 +906,8 @@ static VKAPI_ATTR void VKAPI_CALL rm_CmdDrawIndexedIndirect(VkCommandBuffer cb, 
 	static PFN_vkCmdDrawIndexedIndirect next;
 	if (!next)
 		next = (PFN_vkCmdDrawIndexedIndirect)device_of(cb)->gdpa(device_of(cb)->handle, "vkCmdDrawIndexedIndirect");
+	if (qs_skipping(cb))
+		return;
 	rm_draw(cb);
 	next(cb, b, o, n, st);
 }

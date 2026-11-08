@@ -97,7 +97,7 @@ PORT = {
         "sharpening": False,
         "overlayMips": 1,
         "overlayRenderQuality_2": 1,
-        "renderSystemLayerInDistortPass": False,
+        "renderSystemLayerInDistortPass": False,  # True (the Steam Frame's): vrcompositor crashes at start (2026-11-08)
         "useFacetRenderer": False,
         "depthReprojectionMesh": False,
         "enableSimplifiedShaders": False,
@@ -126,7 +126,7 @@ def main():
     # vrcompositor's distortion pass is a copy: one sample per pixel instead of three
     try:
         with open("/etc/quest1-warp-lens") as f:
-            monado_lens = f.read(1) == "1"
+            monado_lens = f.read(1) in ("1", "2")
     except OSError:
         monado_lens = False
     d["steamvr"]["enableAchromaticDistortion"] = monado_lens

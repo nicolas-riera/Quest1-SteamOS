@@ -70,6 +70,156 @@ static bool qs_enabled(void)
 	return on;
 }
 
+// Scene mode (/etc/quest1-warp-lens "2", 2026-11-08): Monado's warp does the lens distortion, its chromatic aberration and
+// the re-projection in one pass straight from vrcompositor's eye render, as Meta's TimeWarp does. vrcompositor renders
+// each eye into a scene image (its render size, 1500x1664) and resamples it into the eye's panel image with its
+// distortion pass (~2 ms an eye, memory traffic: as much when the distortion is an identity), which Monado's warp then
+// resamples again. Here the eye's passes render straight into the eye's gralloc buffer, of the scene's size (a twin
+// of vrcompositor's framebuffer with that buffer as its colour attachment, through an sRGB view), and the distortion
+// pass is dropped. The frame's swapchain image is only acquired after the first eye is recorded: the index is
+// reserved when that eye's first pass begins (qs_reserve) and that acquire returns it. Monado's lens warp costs
+// ~0.9 ms a vsync more than its plain one.
+// The buffers are made with the display, before vrcompositor creates its render targets: their size is the one seen
+// last time (QS_SCENE_SIZE_FILE, written when a distortion pass reads a scene image of another size: SteamVR's render
+// resolution changed; until vrcompositor starts again the eye renders are copied, as when no index was free).
+#define QS_SCENE_SIZE_FILE ".cache/quest1-scene-size" // in $HOME
+static uint32_t qs_scene_w, qs_scene_h; // 0: off
+static bool qs_scene_on;                // asked for (qs_scene_w may still be 0: size unknown)
+static int qs_first_eye = 1;            // the half vrcompositor renders first (its first distortion pass: x = 1440)
+
+static void qs_scene_size_path(char *out, size_t n)
+{
+	const char *home = getenv("HOME");
+	snprintf(out, n, "%s/%s", home ? home : "/tmp", QS_SCENE_SIZE_FILE);
+}
+
+static void qs_scene_mode_read(void)
+{
+	static bool done;
+	if (done)
+		return;
+	done = true;
+	FILE *f = fopen("/etc/quest1-warp-lens", "r");
+	int c = f ? fgetc(f) : 0;
+	if (f)
+		fclose(f);
+	if (c != '2')
+		return;
+	qs_scene_on = true;
+	unsigned w = 0, h = 0;
+	char path[256];
+	qs_scene_size_path(path, sizeof(path));
+	f = fopen(path, "r");
+	if (!f || fscanf(f, "%u %u", &w, &h) != 2 || w < QS_PANEL_W / 2 || h < QS_PANEL_H / 2 || w > 4096 || h > 4096)
+		LOG("direct scanout: scene mode: render size not known yet (%s): from vrcompositor's next start\n", path);
+	else {
+		qs_scene_w = w;
+		qs_scene_h = h;
+		LOG("direct scanout: scene mode: the eyes render %ux%u straight into Monado's buffers, it does the lens\n", w, h);
+	}
+	if (f)
+		fclose(f);
+}
+
+// vrcompositor's colour render targets (vkCreateImage, quest1_compat.c), its views of them and framebuffers on them
+static struct { uint64_t image; uint32_t w, h; } qs_scene_imgs[32];
+static unsigned qs_nscene;
+static struct { uint64_t view; VkImageViewCreateInfo ci; } qs_scene_views[32];
+static unsigned qs_nsviews;
+#define QS_SFB_ATT 4
+static struct
+{
+	uint64_t fb;
+	VkFramebufferCreateInfo ci;
+	VkImageView att[QS_SFB_ATT];
+	uint32_t color; //!< which attachment is the scene image
+	VkImageViewCreateInfo vci;
+} qs_scene_fbs[16];
+static unsigned qs_nsfbs;
+// their twins on the gralloc buffers, made when first used
+static struct { uint64_t fb, half, view, twin; } qs_stwins[64];
+static unsigned qs_nstwins;
+static pthread_mutex_t qs_scene_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void qs_scene_note(VkImage image, const VkImageCreateInfo *ci)
+{
+	const VkImageUsageFlags want = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+	if (!qs_enabled() || (ci->usage & want) != want || ci->samples != VK_SAMPLE_COUNT_1_BIT || ci->mipLevels != 1 ||
+	    ci->arrayLayers != 1 || ci->imageType != VK_IMAGE_TYPE_2D ||
+	    (ci->format != VK_FORMAT_R8G8B8A8_SRGB && ci->format != VK_FORMAT_R8G8B8A8_UNORM) || ci->extent.width < 1024)
+		return;
+	pthread_mutex_lock(&qs_scene_lock);
+	qs_scene_imgs[qs_nscene++ % 32] = (typeof(qs_scene_imgs[0])){(uint64_t)image, ci->extent.width, ci->extent.height};
+	pthread_mutex_unlock(&qs_scene_lock);
+}
+
+//! Call with qs_scene_lock held: the size of a noted render target, 0 if it is none.
+static uint32_t qs_scene_img_size(uint64_t image, uint32_t *h)
+{
+	for (unsigned k = 0; k < 32 && k < qs_nscene; k++)
+		if (qs_scene_imgs[k].image == image) {
+			*h = qs_scene_imgs[k].h;
+			return qs_scene_imgs[k].w;
+		}
+	return 0;
+}
+
+// per command buffer: the scene image last made SHADER_READ_ONLY (a distortion pass's source, for the copy), the
+// eye being rendered (run), and whether a dropped distortion pass is being recorded
+static struct
+{
+	VkCommandBuffer cb;
+	uint64_t scene;
+	uint32_t w, h;
+	bool skipping;
+	bool in_run, redirect; //!< an eye's passes are being recorded; into its gralloc buffer
+	int eye, idx;          //!< that eye's half, the frame's reserved swapchain index (-1: none)
+	unsigned runs;         //!< eyes begun in this recording
+} qs_cbst[16];
+static pthread_mutex_t qs_cbst_lock = PTHREAD_MUTEX_INITIALIZER;
+
+//! Call with qs_cbst_lock held.
+static typeof(qs_cbst[0]) *qs_cbst_get(VkCommandBuffer cb, bool add)
+{
+	for (unsigned i = 0; i < 16; i++)
+		if (qs_cbst[i].cb == cb)
+			return &qs_cbst[i];
+	if (!add)
+		return NULL;
+	static unsigned next;
+	typeof(qs_cbst[0]) *e = &qs_cbst[next++ % 16];
+	memset(e, 0, sizeof(*e));
+	e->cb = cb;
+	e->idx = -1;
+	return e;
+}
+
+//! vkBeginCommandBuffer (quest1_compat.c): a new recording.
+static void qs_scene_cb_begin(VkCommandBuffer cb)
+{
+	if (!qs_scene_w)
+		return;
+	pthread_mutex_lock(&qs_cbst_lock);
+	typeof(qs_cbst[0]) *e = qs_cbst_get(cb, false);
+	if (e) {
+		memset(e, 0, sizeof(*e));
+		e->cb = cb;
+		e->idx = -1;
+	}
+	pthread_mutex_unlock(&qs_cbst_lock);
+}
+
+static bool qs_skipping(VkCommandBuffer cb)
+{
+	if (!qs_scene_w)
+		return false;
+	pthread_mutex_lock(&qs_cbst_lock);
+	typeof(qs_cbst[0]) *e = qs_cbst_get(cb, false);
+	bool r = e && e->skipping;
+	pthread_mutex_unlock(&qs_cbst_lock);
+	return r;
+}
+
 static void qs_remove_flag(void)
 {
 	if (qs_flag_written)
@@ -215,6 +365,7 @@ struct qs_twin
 {
 	uint64_t handle;  //!< app's image view / framebuffer
 	uint64_t twin[2]; //!< ours on half_image[0] / half_image[1]
+	uint64_t img[2];  //!< half_image[0] / [1]
 };
 static struct qs_twin qs_views[64], qs_fbs[64];
 static unsigned qs_nviews, qs_nfbs;
@@ -275,7 +426,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL qs_CreateImageView(VkDevice device, const 
 	pthread_mutex_lock(&qs_twin_lock);
 	VkImage halves[2];
 	if (qs_halves_of(ci->image, halves) && qs_nviews < sizeof(qs_views) / sizeof(qs_views[0])) {
-		struct qs_twin t = {(uint64_t)*out, {0, 0}};
+		struct qs_twin t = {(uint64_t)*out, {0, 0}, {(uint64_t)halves[0], (uint64_t)halves[1]}};
 		for (int h = 0; h < 2; h++) {
 			VkImageViewCreateInfo c = *ci;
 			c.image = halves[h];
@@ -291,6 +442,11 @@ static VKAPI_ATTR VkResult VKAPI_CALL qs_CreateImageView(VkDevice device, const 
 					destroy(device, (VkImageView)t.twin[h], alloc);
 	}
 	pthread_mutex_unlock(&qs_twin_lock);
+	uint32_t sh = 0;
+	pthread_mutex_lock(&qs_scene_lock);
+	if (qs_scene_w && qs_scene_img_size((uint64_t)ci->image, &sh))
+		qs_scene_views[qs_nsviews++ % 32] = (typeof(qs_scene_views[0])){(uint64_t)*out, *ci};
+	pthread_mutex_unlock(&qs_scene_lock);
 	return r;
 }
 
@@ -317,12 +473,30 @@ static VKAPI_ATTR VkResult VKAPI_CALL qs_CreateFramebuffer(VkDevice device, cons
 	PFN_vkCreateFramebuffer next = (PFN_vkCreateFramebuffer)d->gdpa(device, "vkCreateFramebuffer");
 	PFN_vkDestroyFramebuffer destroy = (PFN_vkDestroyFramebuffer)d->gdpa(device, "vkDestroyFramebuffer");
 	VkResult r = next(device, ci, alloc, out);
+	if (r == VK_SUCCESS && qs_scene_w && ci->width == qs_scene_w && ci->height == qs_scene_h &&
+	    ci->attachmentCount <= QS_SFB_ATT && !ci->pNext) { // on vrcompositor's scene image: kept for its twins
+		pthread_mutex_lock(&qs_scene_lock);
+		for (uint32_t a = 0; a < ci->attachmentCount; a++)
+			for (unsigned k = 0; k < 32 && k < qs_nsviews; k++)
+				if (qs_scene_views[k].view == (uint64_t)ci->pAttachments[a] && qs_nsfbs < 16) {
+					typeof(qs_scene_fbs[0]) *e = &qs_scene_fbs[qs_nsfbs++];
+					e->fb = (uint64_t)*out;
+					e->ci = *ci;
+					memcpy(e->att, ci->pAttachments, ci->attachmentCount * sizeof(VkImageView));
+					e->ci.pAttachments = NULL;
+					e->color = a;
+					e->vci = qs_scene_views[k].ci;
+					a = ci->attachmentCount;
+					break;
+				}
+		pthread_mutex_unlock(&qs_scene_lock);
+	}
 	if (r != VK_SUCCESS || ci->attachmentCount != 1 || (ci->width != 2 * QS_PANEL_W && ci->width != QS_PANEL_W))
 		return r;
 	pthread_mutex_lock(&qs_twin_lock);
 	const struct qs_twin *v = qs_twin_find(qs_views, qs_nviews, (uint64_t)ci->pAttachments[0]);
 	if (v && qs_nfbs < sizeof(qs_fbs) / sizeof(qs_fbs[0])) {
-		struct qs_twin t = {(uint64_t)*out, {0, 0}};
+		struct qs_twin t = {(uint64_t)*out, {0, 0}, {v->img[0], v->img[1]}};
 		for (int h = 0; h < 2; h++) {
 			VkFramebufferCreateInfo c = *ci;
 			VkImageView a = (VkImageView)v->twin[h];
@@ -347,6 +521,21 @@ static VKAPI_ATTR void VKAPI_CALL qs_DestroyFramebuffer(VkDevice device, VkFrame
 {
 	struct device *d = device_of(device);
 	PFN_vkDestroyFramebuffer next = (PFN_vkDestroyFramebuffer)d->gdpa(device, "vkDestroyFramebuffer");
+	PFN_vkDestroyImageView destroy_view = (PFN_vkDestroyImageView)d->gdpa(device, "vkDestroyImageView");
+	pthread_mutex_lock(&qs_scene_lock);
+	for (unsigned i = 0; i < qs_nsfbs;)
+		if (qs_scene_fbs[i].fb == (uint64_t)fb)
+			qs_scene_fbs[i] = qs_scene_fbs[--qs_nsfbs];
+		else
+			i++;
+	for (unsigned i = 0; i < qs_nstwins;)
+		if (qs_stwins[i].fb == (uint64_t)fb) {
+			next(device, (VkFramebuffer)qs_stwins[i].twin, alloc);
+			destroy_view(device, (VkImageView)qs_stwins[i].view, alloc);
+			qs_stwins[i] = qs_stwins[--qs_nstwins];
+		} else
+			i++;
+	pthread_mutex_unlock(&qs_scene_lock);
 	pthread_mutex_lock(&qs_twin_lock);
 	for (unsigned i = 0; i < qs_nfbs; i++)
 		if (qs_fbs[i].handle == (uint64_t)fb) {
@@ -422,6 +611,12 @@ static VkResult qs_create_images(struct qd_swapchain *sc, const VkSwapchainCreat
 	VkImageCreateInfo half = ici;
 	half.extent.width = QS_PANEL_W;
 	half.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT; // snapshots of UBWC buffers are GPU copies (qs_snapshot)
+	qs_scene_mode_read();
+	if (qs_scene_w) { // scene mode: the eyes render into them (or are copied in)
+		half.extent.width = qs_scene_w;
+		half.extent.height = qs_scene_h;
+		half.usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+	}
 	for (uint32_t i = 0; i < sc->count; i++) {
 		sc->release_fence[i] = -1;
 		VkResult r = qs_plain_image(sc, &plain, &sc->images[i], &sc->memory[i]);
@@ -436,8 +631,8 @@ static VkResult qs_create_images(struct qd_swapchain *sc, const VkSwapchainCreat
 		}
 	}
 	qs_twins_register(sc);
-	LOG("direct scanout: %u x 2 gralloc buffers %ux%u, one per panel (stride %u px, %s)\n", sc->count, QS_PANEL_W,
-	    ci->imageExtent.height, sc->half_stride_px[0][0], sc->half_ubwc[0][0] ? "UBWC" : "linear");
+	LOG("direct scanout: %u x 2 gralloc buffers %ux%u, one per panel (stride %u px, %s)\n", sc->count, half.extent.width,
+	    half.extent.height, sc->half_stride_px[0][0], sc->half_ubwc[0][0] ? "UBWC" : "linear");
 	return VK_SUCCESS;
 }
 
@@ -855,6 +1050,143 @@ static VkRenderPass qs_rp_load_variant(VkRenderPass rp)
 	return load;
 }
 
+//! Scene mode: the index the next acquire of the direct swapchain returns, -1 if none is free now.
+static int qs_reserve(struct qd_swapchain **out)
+{
+	pthread_mutex_lock(&qs_twin_lock);
+	struct qd_swapchain *sc = qs_direct_scs[0];
+	pthread_mutex_unlock(&qs_twin_lock);
+	*out = sc;
+	if (!sc)
+		return -1;
+	pthread_mutex_lock(&sc->mutex);
+	int r = sc->reserved1 ? (int)sc->reserved1 - 1 : -1;
+	for (uint32_t k = 0; k < sc->count && r < 0; k++) {
+		uint32_t i = (sc->next + k) % sc->count;
+		if (!sc->app_owned[i] && !sc->driver_owned[i])
+			r = (int)i;
+	}
+	if (r >= 0)
+		sc->reserved1 = (uint32_t)r + 1;
+	pthread_mutex_unlock(&sc->mutex);
+	return r;
+}
+
+//! Scene mode: the twin of scene framebuffer `fb` whose scene attachment is gralloc buffer `half` (made at first use).
+static VkFramebuffer qs_scene_twin(VkDevice device, VkFramebuffer fb, VkImage half)
+{
+	VkFramebuffer twin = VK_NULL_HANDLE;
+	pthread_mutex_lock(&qs_scene_lock);
+	for (unsigned i = 0; i < qs_nstwins && !twin; i++)
+		if (qs_stwins[i].fb == (uint64_t)fb && qs_stwins[i].half == (uint64_t)half)
+			twin = (VkFramebuffer)qs_stwins[i].twin;
+	int s = -1;
+	for (unsigned i = 0; i < qs_nsfbs && s < 0; i++)
+		if (qs_scene_fbs[i].fb == (uint64_t)fb)
+			s = (int)i;
+	if (twin || s < 0 || qs_nstwins == 64) {
+		pthread_mutex_unlock(&qs_scene_lock);
+		return twin;
+	}
+	struct device *d = device_of(device);
+	PFN_vkCreateImageView create_view = (PFN_vkCreateImageView)d->gdpa(device, "vkCreateImageView");
+	PFN_vkCreateFramebuffer create_fb = (PFN_vkCreateFramebuffer)d->gdpa(device, "vkCreateFramebuffer");
+	PFN_vkDestroyImageView destroy_view = (PFN_vkDestroyImageView)d->gdpa(device, "vkDestroyImageView");
+	VkImageViewCreateInfo vci = qs_scene_fbs[s].vci;
+	vci.pNext = NULL;
+	vci.image = half;
+	VkImageView view = VK_NULL_HANDLE;
+	VkImageView att[QS_SFB_ATT];
+	memcpy(att, qs_scene_fbs[s].att, sizeof(att));
+	VkFramebufferCreateInfo fci = qs_scene_fbs[s].ci;
+	fci.pAttachments = att;
+	if (create_view(device, &vci, NULL, &view) == VK_SUCCESS) {
+		att[qs_scene_fbs[s].color] = view;
+		if (create_fb(device, &fci, NULL, &twin) == VK_SUCCESS)
+			qs_stwins[qs_nstwins++] = (typeof(qs_stwins[0])){(uint64_t)fb, (uint64_t)half, (uint64_t)view, (uint64_t)twin};
+		else {
+			destroy_view(device, view, NULL);
+			twin = VK_NULL_HANDLE;
+		}
+	}
+	pthread_mutex_unlock(&qs_scene_lock);
+	if (!twin)
+		LOG("direct scanout: scene mode: no twin of framebuffer %p on %p\n", (void *)fb, (void *)half);
+	return twin;
+}
+
+//! Scene mode, at the start of a distortion pass into `half` whose eye was rendered into vrcompositor's own image (no
+//! swapchain index was free): copies the scene image it made ready for the pass into `half` and marks the pass's
+//! commands to be dropped. False (the pass runs) when no scene image of the size is known.
+static bool qs_scene_copy(VkCommandBuffer cb, VkImage half)
+{
+	pthread_mutex_lock(&qs_cbst_lock);
+	typeof(qs_cbst[0]) *e = qs_cbst_get(cb, false);
+	VkImage scene = e ? (VkImage)e->scene : VK_NULL_HANDLE;
+	uint32_t sw = e ? e->w : 0, sh = e ? e->h : 0;
+	if (e)
+		e->scene = 0;
+	pthread_mutex_unlock(&qs_cbst_lock);
+	if (scene && (sw != qs_scene_w || sh != qs_scene_h)) {
+		static uint32_t saved_w, saved_h;
+		if (sw != saved_w || sh != saved_h) { // the size for the next start
+			saved_w = sw;
+			saved_h = sh;
+			char path[256], tmp[272];
+			qs_scene_size_path(path, sizeof(path));
+			snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+			FILE *f = fopen(tmp, "w");
+			if (f) {
+				fprintf(f, "%u %u\n", sw, sh);
+				fclose(f);
+				rename(tmp, path);
+			}
+			LOG("direct scanout: scene mode: vrcompositor renders the eyes at %ux%u (buffers %ux%u): saved in %s, "
+			    "used from its next start\n", sw, sh, qs_scene_w, qs_scene_h, path);
+		}
+		return false;
+	}
+	if (!scene) {
+		static int logged;
+		if (!logged++)
+			LOG("direct scanout: scene mode: no %ux%u scene image before a distortion pass, it runs (logged once)\n",
+			    qs_scene_w, qs_scene_h);
+		return false;
+	}
+	struct device *d = device_of(cb);
+	static PFN_vkCmdPipelineBarrier barrier;
+	static PFN_vkCmdCopyImage copy;
+	if (!barrier) {
+		barrier = (PFN_vkCmdPipelineBarrier)d->gdpa(d->handle, "vkCmdPipelineBarrier");
+		copy = (PFN_vkCmdCopyImage)d->gdpa(d->handle, "vkCmdCopyImage");
+	}
+	const VkImageSubresourceRange all = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+	VkImageMemoryBarrier b[2] = {
+	    {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT,
+	     VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+	     VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, scene, all},
+	    {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+	     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, half, all},
+	};
+	barrier(cb, VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 2, b);
+	const VkImageSubresourceLayers l = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+	VkImageCopy r = {l, {0, 0, 0}, l, {0, 0, 0}, {qs_scene_w, qs_scene_h, 1}};
+	copy(cb, scene, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, half, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &r);
+	b[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+	b[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+	b[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+	b[0].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	b[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	b[1].dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+	b[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	b[1].newLayout = VK_IMAGE_LAYOUT_GENERAL;
+	barrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 2, b);
+	pthread_mutex_lock(&qs_cbst_lock);
+	qs_cbst_get(cb, true)->skipping = true;
+	pthread_mutex_unlock(&qs_cbst_lock);
+	return true;
+}
+
 static VKAPI_ATTR void VKAPI_CALL qs_CmdBeginRenderPass(VkCommandBuffer cb, const VkRenderPassBeginInfo *bi,
                                                        VkSubpassContents contents)
 {
@@ -870,13 +1202,89 @@ static VKAPI_ATTR void VKAPI_CALL qs_CmdBeginRenderPass(VkCommandBuffer cb, cons
 	qs_ts_begin_pass(cb, &a, (uint64_t)bi->renderPass);
 	bool eye_pass = a.extent.width == QS_PANEL_W && a.extent.height == QS_PANEL_H && a.offset.y == 0 &&
 	                (a.offset.x == 0 || a.offset.x == QS_PANEL_W);
-	if (rm_begin(cb, bi, contents, eye_pass))
-		return; // it continues the open render pass
 	pthread_mutex_lock(&qs_twin_lock);
 	const struct qs_twin *t = eye_pass ? qs_twin_find(qs_fbs, qs_nfbs, (uint64_t)bi->framebuffer) : NULL;
 	int h = a.offset.x == QS_PANEL_W;
 	VkFramebuffer twin = t ? (VkFramebuffer)t->twin[h] : VK_NULL_HANDLE;
+	VkImage half_img = t ? (VkImage)t->img[h] : VK_NULL_HANDLE;
 	pthread_mutex_unlock(&qs_twin_lock);
+	VkRenderPassBeginInfo sb;
+	if (qs_scene_w && !eye_pass) { // an eye's pass into the scene image: into the eye's gralloc buffer instead
+		bool scene_fb = false;
+		pthread_mutex_lock(&qs_scene_lock);
+		for (unsigned i = 0; i < qs_nsfbs; i++)
+			scene_fb |= qs_scene_fbs[i].fb == (uint64_t)bi->framebuffer;
+		pthread_mutex_unlock(&qs_scene_lock);
+		struct qd_swapchain *sc = NULL;
+		int idx = -1;
+		pthread_mutex_lock(&qs_cbst_lock);
+		typeof(qs_cbst[0]) *e = scene_fb ? qs_cbst_get(cb, true) : NULL;
+		bool start = e && !e->in_run;
+		pthread_mutex_unlock(&qs_cbst_lock);
+		if (start && e->runs == 0)
+			idx = qs_reserve(&sc);
+		pthread_mutex_lock(&qs_cbst_lock);
+		if (start) {
+			e->in_run = true;
+			e->eye = e->runs == 0 ? qs_first_eye : 1 - qs_first_eye;
+			if (e->runs++ == 0)
+				e->idx = idx;
+			e->redirect = e->idx >= 0;
+		}
+		VkImage target = VK_NULL_HANDLE;
+		if (e && e->redirect) {
+			pthread_mutex_lock(&qs_twin_lock);
+			sc = qs_direct_scs[0];
+			if (sc && (uint32_t)e->idx < sc->count)
+				target = sc->half_image[e->eye][e->idx];
+			pthread_mutex_unlock(&qs_twin_lock);
+		}
+		pthread_mutex_unlock(&qs_cbst_lock);
+		VkFramebuffer stw = target ? qs_scene_twin(device_of(cb)->handle, bi->framebuffer, target) : VK_NULL_HANDLE;
+		if (stw) {
+			sb = *bi;
+			sb.framebuffer = stw;
+			bi = &sb;
+		} else if (e && e->redirect) { // (cannot happen once the first pass of the eye had its twin)
+			pthread_mutex_lock(&qs_cbst_lock);
+			e->redirect = false;
+			pthread_mutex_unlock(&qs_cbst_lock);
+		}
+	}
+	if (twin && qs_scene_on) { // a distortion pass: its eye is in its gralloc buffer already, or gets copied there
+		pthread_mutex_lock(&qs_cbst_lock);
+		typeof(qs_cbst[0]) *e = qs_cbst_get(cb, false);
+		bool rendered = e && e->in_run && e->redirect, run = e && e->in_run;
+		int eye = e ? e->eye : -1, idx = e ? e->idx : -1;
+		unsigned runs = e ? e->runs : 0;
+		if (e)
+			e->in_run = false;
+		pthread_mutex_unlock(&qs_cbst_lock);
+		if (rendered) {
+			struct qd_swapchain *sc = qs_direct_scs[0];
+			bool right = eye == h && sc && (uint32_t)idx < sc->count && sc->half_image[h][idx] == half_img;
+			if (!right) {
+				static int logged;
+				if (logged++ < 4)
+					LOG("direct scanout: scene mode: eye %d rendered into %d/%d, distortion pass for %d: learnt\n", eye,
+					    eye, idx, h);
+				qs_first_eye = runs == 1 ? h : 1 - h;
+			}
+			rm_flush(cb);
+			pthread_mutex_lock(&qs_cbst_lock);
+			qs_cbst_get(cb, true)->skipping = true;
+			pthread_mutex_unlock(&qs_cbst_lock);
+			return; // dropped: Monado's warp does the lens from the eye's render
+		}
+		if (half_img) { // (also notes the render size when it differs: qs_scene_copy)
+			(void)run;
+			rm_flush(cb);
+			if (qs_scene_copy(cb, half_img))
+				return;
+		}
+	}
+	if (rm_begin(cb, bi, contents, eye_pass))
+		return; // it continues the open render pass
 	if (twin) { // the eye's own buffer (half_image[h]) at x = 0
 		VkRenderPassBeginInfo b = *bi;
 		b.framebuffer = twin;
@@ -965,6 +1373,8 @@ static VKAPI_ATTR void VKAPI_CALL qs_CmdDispatchBase(VkCommandBuffer cb, uint32_
 static VKAPI_ATTR void VKAPI_CALL qs_CmdDraw(VkCommandBuffer cb, uint32_t vc, uint32_t ic, uint32_t fv, uint32_t fi)
 {
 	QS_TRACE_NEXT(PFN_vkCmdDraw, "vkCmdDraw")
+	if (qs_skipping(cb))
+		return;
 	rm_draw(cb);
 	if (qs_trace_left > 0 && qs_trace_left--)
 		LOG("trace: cb %p Draw %u x%u\n", (void *)cb, vc, ic);
@@ -976,6 +1386,8 @@ static VKAPI_ATTR void VKAPI_CALL qs_CmdDrawIndexed(VkCommandBuffer cb, uint32_t
                                                    uint32_t fin)
 {
 	QS_TRACE_NEXT(PFN_vkCmdDrawIndexed, "vkCmdDrawIndexed")
+	if (qs_skipping(cb))
+		return;
 	rm_draw(cb);
 	if (qs_trace_left > 0 && qs_trace_left--)
 		LOG("trace: cb %p DrawIndexed %u x%u first %u\n", (void *)cb, n, ic, fi);
@@ -997,6 +1409,12 @@ static VKAPI_ATTR void VKAPI_CALL qs_CmdEndRenderPass(VkCommandBuffer cb)
 	QS_TRACE_NEXT(PFN_vkCmdEndRenderPass, "vkCmdEndRenderPass")
 	if (qs_trace_left > 0 && qs_trace_left--)
 		LOG("trace: cb %p EndRenderPass\n", (void *)cb);
+	if (qs_skipping(cb)) { // a dropped distortion pass ends
+		pthread_mutex_lock(&qs_cbst_lock);
+		qs_cbst_get(cb, true)->skipping = false;
+		pthread_mutex_unlock(&qs_cbst_lock);
+		return;
+	}
 	if (rm_end(cb)) { // held back: the next pass may continue it
 		qs_ts_end_pass(cb);
 		return;
@@ -1017,6 +1435,23 @@ static VKAPI_ATTR void VKAPI_CALL qs_CmdPipelineBarrier(VkCommandBuffer cb, VkPi
 		for (uint32_t i = 0; i < ni; i++)
 			LOG("trace:   image %p layout %d -> %d access 0x%x -> 0x%x\n", (void *)im[i].image, im[i].oldLayout,
 			    im[i].newLayout, im[i].srcAccessMask, im[i].dstAccessMask);
+	}
+	for (uint32_t i = 0; qs_scene_on && i < ni; i++) {
+		if (im[i].oldLayout != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL ||
+		    im[i].newLayout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+			continue;
+		uint32_t sh = 0, sw;
+		pthread_mutex_lock(&qs_scene_lock);
+		sw = qs_scene_img_size((uint64_t)im[i].image, &sh);
+		pthread_mutex_unlock(&qs_scene_lock);
+		if (sw) {
+			pthread_mutex_lock(&qs_cbst_lock);
+			typeof(qs_cbst[0]) *e = qs_cbst_get(cb, true);
+			e->scene = (uint64_t)im[i].image;
+			e->w = sw;
+			e->h = sh;
+			pthread_mutex_unlock(&qs_cbst_lock);
+		}
 	}
 	if (rm_barrier(cb, nm, nb, b, ni))
 		return; // the uniform buffers it covers are read through copies
@@ -1075,8 +1510,27 @@ static VKAPI_ATTR void VKAPI_CALL qs_CmdPushConstants(VkCommandBuffer cb, VkPipe
 	next(cb, pl, st, off, size, v);
 }
 
+static VKAPI_ATTR void VKAPI_CALL qs_CmdClearAttachments(VkCommandBuffer cb, uint32_t n, const VkClearAttachment *a,
+                                                        uint32_t nr, const VkClearRect *r)
+{
+	QS_TRACE_NEXT(PFN_vkCmdClearAttachments, "vkCmdClearAttachments")
+	if (!qs_skipping(cb))
+		next(cb, n, a, nr, r);
+}
+
+static VKAPI_ATTR void VKAPI_CALL qs_CmdNextSubpass(VkCommandBuffer cb, VkSubpassContents c)
+{
+	QS_TRACE_NEXT(PFN_vkCmdNextSubpass, "vkCmdNextSubpass")
+	if (!qs_skipping(cb))
+		next(cb, c);
+}
+
 static PFN_vkVoidFunction qs_trace_proc(const char *name)
 {
+	if (strcmp(name, "vkCmdClearAttachments") == 0)
+		return (PFN_vkVoidFunction)qs_CmdClearAttachments;
+	if (strcmp(name, "vkCmdNextSubpass") == 0)
+		return (PFN_vkVoidFunction)qs_CmdNextSubpass;
 	PFN_vkVoidFunction f = rm_proc(name);
 	if (f)
 		return f;
@@ -1163,10 +1617,11 @@ static bool qs_mon_connect(struct qd_swapchain *sc)
 			m.index = i;
 			m.half = (uint32_t)h;
 			m.count = sc->count;
-			m.width = QS_PANEL_W;
-			m.height = sc->ici.extent.height;
+			m.width = qs_scene_w ? qs_scene_w : QS_PANEL_W;
+			m.height = qs_scene_w ? qs_scene_h : sc->ici.extent.height;
 			m.stride_px = sc->half_stride_px[h][i];
-			m.bgra = qs_mdp_format(sc, i, h) == MDP_BGRA_8888;
+			// scene mode: vrcompositor's R8G8B8A8 (sRGB) eye renders
+			m.bgra = !qs_scene_w && qs_mdp_format(sc, i, h) == MDP_BGRA_8888;
 			m.ubwc = sc->half_ubwc[h][i];
 			ok = send(fd, &m, sizeof(m), MSG_NOSIGNAL) == (ssize_t)sizeof(m) &&
 			     qs_ahb.send_handle(sc->half_ahb[h][i], fd) == 0;
@@ -1435,6 +1890,19 @@ static void qs_destroy(struct qd_swapchain *sc)
 				qs_ahb.release(sc->half_ahb[h][i]);
 	}
 	qs_twins_forget(sc);
+	pthread_mutex_lock(&qs_scene_lock);
+	for (unsigned i = 0; i < qs_nstwins;) {
+		bool mine = false;
+		for (uint32_t k = 0; k < QD_MAX_IMAGES; k++)
+			mine |= qs_stwins[i].half == (uint64_t)sc->half_image[0][k] || qs_stwins[i].half == (uint64_t)sc->half_image[1][k];
+		if (mine) {
+			((PFN_vkDestroyFramebuffer)sc->d->gdpa(sc->device, "vkDestroyFramebuffer"))(sc->device, (VkFramebuffer)qs_stwins[i].twin, NULL);
+			((PFN_vkDestroyImageView)sc->d->gdpa(sc->device, "vkDestroyImageView"))(sc->device, (VkImageView)qs_stwins[i].view, NULL);
+			qs_stwins[i] = qs_stwins[--qs_nstwins];
+		} else
+			i++;
+	}
+	pthread_mutex_unlock(&qs_scene_lock);
 	if (sc->mon_sock >= 0)
 		close(sc->mon_sock);
 	if (sc->wake_fd[0] >= 0) {
