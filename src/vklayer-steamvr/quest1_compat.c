@@ -73,6 +73,34 @@ static void logf_(const char *fmt, ...)
 }
 #define LOG(...) logf_(__VA_ARGS__)
 
+//! Highest real-time priority SteamVR's threads keep. vrcompositor makes its RenderThread and SignalThread SCHED_RR 99
+//! (it has CAP_SYS_NICE, as on desktop Linux); its RenderThread works several ms a frame on cores 4-6. Monado's vsync
+//! thread (warp and commit, FIFO 98) and the MDP's display kernel thread (FIFO 97) must run the moment they wake:
+//! behind those threads they woke up to 6 ms late while Steam worked, and the view trembled (worn, 2026-11-08).
+//! Above Meta's tracking threads (FIFO 48 and 49) and every normal thread still.
+#define Q1_RT_MAX 50
+
+//! The calling thread's real-time priority brought down to Q1_RT_MAX, once per thread. Called from the Vulkan entry
+//! points SteamVR's real-time threads use.
+static void q1_rt_cap(void)
+{
+	static __thread bool done;
+	if (done)
+		return;
+	done = true;
+	int policy;
+	struct sched_param sp;
+	if (pthread_getschedparam(pthread_self(), &policy, &sp) != 0 || policy == SCHED_OTHER ||
+	    sp.sched_priority <= Q1_RT_MAX)
+		return;
+	int was = sp.sched_priority;
+	sp.sched_priority = Q1_RT_MAX;
+	char name[16] = "";
+	pthread_getname_np(pthread_self(), name, sizeof(name));
+	int e = pthread_setschedparam(pthread_self(), policy, &sp);
+	LOG("%s: real-time priority %d -> %d: %s\n", name, was, Q1_RT_MAX, e ? strerror(e) : "ok");
+}
+
 static uint64_t now_ns(void)
 {
 	struct timespec ts;
@@ -415,6 +443,7 @@ static VKAPI_ATTR void VKAPI_CALL DestroySemaphore(VkDevice device, VkSemaphore 
 static VKAPI_ATTR VkResult VKAPI_CALL GetSemaphoreCounterValue(VkDevice device, VkSemaphore s, uint64_t *v)
 {
 	(void)device;
+	q1_rt_cap();
 	struct tsem *t = tsem_get(s);
 	if (!t)
 		return VK_ERROR_UNKNOWN;
@@ -426,6 +455,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL GetSemaphoreCounterValue(VkDevice device, 
 static VKAPI_ATTR VkResult VKAPI_CALL SignalSemaphore(VkDevice device, const VkSemaphoreSignalInfo *info)
 {
 	(void)device;
+	q1_rt_cap();
 	struct tsem *t = tsem_get(info->semaphore);
 	if (!t)
 		return VK_ERROR_UNKNOWN;
@@ -437,6 +467,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL SignalSemaphore(VkDevice device, const VkS
 static VKAPI_ATTR VkResult VKAPI_CALL WaitSemaphores(VkDevice device, const VkSemaphoreWaitInfo *info, uint64_t timeout)
 {
 	(void)device;
+	q1_rt_cap();
 	uint64_t deadline = timeout == UINT64_MAX ? UINT64_MAX : now_ns() + timeout;
 	bool any = info->flags & VK_SEMAPHORE_WAIT_ANY_BIT;
 	for (;;) {
@@ -814,6 +845,7 @@ static void ft(const char *what, int64_t arg); // quest1_display.c (frame trace)
 static VKAPI_ATTR VkResult VKAPI_CALL QueueSubmit(VkQueue queue, uint32_t n, const VkSubmitInfo *submits, VkFence fence)
 {
 	struct device *d = device_of(queue);
+	q1_rt_cap();
 	ft("submit", (int64_t)(uint64_t)fence);
 	struct submit_job *j = job_build(queue, n, submits, fence);
 	pthread_mutex_lock(&d->mutex);
@@ -1066,6 +1098,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL WaitForFences(VkDevice device, uint32_t n,
                                                     uint64_t timeout)
 {
 	struct device *d = device_of(device);
+	q1_rt_cap();
 	const uint64_t step = 100000000ull; // 100 ms
 	ft("waitfences", n ? (int64_t)(uint64_t)fences[0] : 0);
 	if (timeout <= step) {
@@ -1134,6 +1167,7 @@ static void *qr_thread(void *arg)
 {
 	(void)arg;
 	pthread_setname_np(pthread_self(), "q1-queryresults");
+	q1_rt_cap(); // started from the RenderThread: its priority is inherited
 	uint8_t buf[QR_MAX];
 	pthread_mutex_lock(&qr_lock);
 	for (;;) {

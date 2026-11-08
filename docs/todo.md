@@ -52,6 +52,14 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - The 4x MSAA system layer costs ~25 ms a frame in mode 0 (~37 fps): Steam's loading screen at each start. Force it to
   1 sample there too (the user allows no MSAA), or see why Steam's VR UI stayed "not ready" after many SteamVR
   restarts (2026-11-08: "SteamLoadingThrobber timed out after 120 seconds"; a Steam restart fixed it).
+- Steam's VR overlay path (docs/performance.md, 2026-11-08 late night): every 1920x1080 frame of Steam's VR UI goes
+  through the CPU (GPU readback, llvmpipe GL upload, vrclient's GL fallback readback into its ring, vrcompositor's
+  copy): Steam shows a few frames a second, seconds behind, and SteamVR drops to 59-69 fps while it works (user:
+  "unusable"). Make it zero-copy: e.g. Adreno (ion/dma-buf) linear images that llvmpipe imports through
+  GL_EXT_memory_object_fd (it mmaps the fd) so vrclient's shared-texture path works, or another route from the CEF
+  frame to vrcompositor without CPU copies. Must leave room for streaming later (user).
+- Memory while Steam is browsed: 40-110 MB/s swapped out and hundreds of direct reclaims a second (worn,
+  2026-11-08); Steam's renderers had ~575 MB in swap after 20 min.
 - Steam's main page animating costs ~14 ms of GPU per repaint in Steam's CEF (1280x720 at device scale 1.5):
   51-66 fps while it runs (72 with the library static, docs/performance.md). Cap Steam's repaint rate or find what
   makes the raster and readback this expensive; a lower device scale is visible (user's call). Not RenderMode=Direct

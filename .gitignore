@@ -34,3 +34,6 @@ src/camtap/depth_test
 src/vklayer-steamvr/pipetest
 src/vklayer-steamvr/sdftest
 src/vklayer-steamvr/sdftest_cs.h
+
+# The user's private requests and plans (closed testing etc.): never in history
+private/

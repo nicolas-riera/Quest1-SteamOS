@@ -1258,7 +1258,8 @@ static uint64_t qd_vblank_count(void) { return (now_ns() - qd_epoch_ns) / qd_per
 //! vrcompositor's VulkanVblankThread (it calls vkGetSwapchainCounterEXT) polls its vblank fence then sleeps until
 //! the next one with SCHED_OTHER: with the CPUs loaded (load ~11 on 8 cores: Steam, Meta's tracking) it woke up to
 //! 7 ms late, its RenderThread then aimed at the vblank after and a frame was missed (~1 a second with the Steam
-//! library open, 2026-11-08 frame trace). Its RenderThread is SCHED_RR 99 already; these two get less.
+//! library open, 2026-11-08 frame trace). Its RenderThread is SCHED_RR too; all of them at Q1_RT_MAX (quest1_compat.c),
+//! below Monado's vsync thread and the MDP's display kernel thread.
 static void qd_realtime(const char *who, int prio)
 {
 	int policy;
@@ -1272,7 +1273,7 @@ static void qd_realtime(const char *who, int prio)
 
 static void *qd_vblank_thread(void *arg)
 {
-	qd_realtime("display: the layer's vblank thread", 95);
+	qd_realtime("display: the layer's vblank thread", Q1_RT_MAX);
 	for (;;) {
 		uint64_t next = qd_epoch_ns + (qd_vblank_count() + 1) * qd_period_ns();
 		struct timespec ts = {(time_t)(next / 1000000000ull), (long)(next % 1000000000ull)};
@@ -1336,7 +1337,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL qd_GetSwapchainCounterEXT(VkDevice device,
 	static __thread bool rt;
 	if (!rt) {
 		rt = true;
-		qd_realtime("display: vrcompositor's vblank thread", 90);
+		qd_realtime("display: vrcompositor's vblank thread", Q1_RT_MAX);
 	}
 	pthread_once(&qd_vblank_once, qd_vblank_start);
 	*value = qd_vblank_count();

@@ -3,6 +3,41 @@
 Where the frame time goes and what was tried. Current numbers and the direct scanout path:
 docs/direct-scanout.md; Steam's UI: docs/steam-gpu.md.
 
+## 2026-11-08 (late night): the view trembled while Steam worked; real-time priorities; Steam's overlay path
+
+Worn, the view trembled as soon as Steam was touched (and in desktop mode), with half-second freezes. Two causes in the
+display path, both fixed, and a third that is Steam's own:
+
+- **A chain of late commits.** Monado's `direct_tick` lines showed stretches of 2-10 s where every commit was late
+  ("late 144" per 2 s) and MSMFB_ATOMIC_COMMIT took ~5 ms instead of 0.1. Kernel stacks sampled during them (a
+  recorder reading `/proc/<tid>/stack` at ~1 kHz): Monado's vsync thread in `mdss_fb_pan_idle`, the MDP's display
+  thread (`mdss_fb0`) in `mdss_mdp_video_wait4comp`. Once one commit reaches the display thread too late for its vsync,
+  that thread waits for the vsync after, the next commit waits for it in pan_idle and is taken at that vsync, too late
+  again, and so on while the head moves (a warp at every tick). Each frame was shown a vsync after the time its warp
+  was made for. Monado now skips the tick after a commit that waited in the kernel (> 1 ms) and came late
+  (`commit_late`): one image comes late, the next tick is on time (worn: "late 7 (ticks skipped after one 7)").
+  A forced late commit that does not wait in the kernel (lead=2) does not chain and is not skipped.
+- **Real-time priorities upside down.** Monado's vsync thread (FIFO 40) woke up to 6 ms late behind vrcompositor's
+  RenderThread (SCHED_RR 99, several ms of CPU a frame on cores 4-6) and Meta's ELEVATED tracking threads (FIFO 48,
+  big cores); the kernel's display thread was at FIFO 16, below all of them. Now: Monado's vsync thread FIFO 98, the
+  display kernel thread FIFO 97 (Monado sets it after each unblank, `boost_display_kthread`), and the compat layer
+  brings SteamVR's real-time threads down to 50 (`q1_rt_cap`, from the Vulkan calls they make: RenderThread,
+  q1-queryresults, the vblank threads; SignalThread stays at 99 but only sleeps). Worn afterwards: 71.8 warps/s,
+  late ~0, wake max 0.1-0.4 ms.
+- **Steam's CPU priority.** At nice 10 (previous section) Steam's threads waited for a CPU longer than they ran (2.4 s
+  against 1.4 s over 20 s of browsing; 1.0 s at nice 0, SteamVR still at 71.6-71.8 fps). Steam's UI is back at nice 0;
+  quest1_vkredirect keeps only the lowest best-effort I/O priority.
+
+What is left is Steam's VR overlay path: while Steam works, SteamVR drops to 59-69 fps (Monado then re-projects the
+rotation only: moving objects and the controllers judder) and Steam itself shows a few frames a second, seconds behind.
+Its VR UI pages are 1920x1080 textures (fixed in Steam's code: 1280x720 CSS pixels at device scale 1.5, no setting)
+and each frame goes through the CPU: the GPU process reads it back (VizCompositorThread), the browser uploads it into
+an OpenGL texture on Mesa llvmpipe, vrclient's GL fallback reads it back (`MESA_EXTENSION_OVERRIDE` hides
+GL_EXT_memory_object, since llvmpipe can't import the Adreno's memory) into its 256 MB ring ("Ring Buffer Wrapped!"
+every 5-10 s while browsing: ~50 MB/s, about 6 frames a second), and vrcompositor's RenderThread copies it in. Measured
+worn while browsing: load 13-16 on 8 cores, GPU 100 % busy, 40-110 MB/s swapped out, vrcompositor's RenderThread
+at about a full core (~4 ms of CPU a frame at rest). Next: a zero-copy overlay path (docs/todo.md).
+
 ## 2026-11-08 (night): the Steam library at 72 fps, Steam's UI behind SteamVR
 
 With Steam's library open in the dashboard SteamVR was at 57-60 fps (70 with Steam's CEF GPU process stopped). Three
@@ -13,10 +48,11 @@ causes, three fixes:
   tracking loading the CPUs (load ~11 on 8 cores) it woke up to 7 ms late; the RenderThread then aimed at the vblank
   after and a frame was missed (about one a second, frame trace). quest1_display.c makes that thread SCHED_RR 90 on its
   first call, and the layer's own vblank thread SCHED_RR 95 (SteamVR has CAP_SYS_NICE; its RenderThread is RR 99).
+  (Both at 50 since: section above.)
 - **Steam's UI shared the CPUs with SteamVR.** The kernel's cgroup v2 has only the memory and pids controllers (4.4: no
-  cpu, no io), so quest1_vkredirect (preloaded in the Steam client) gives every steamwebhelper process nice 10 and best-
-  effort I/O priority 7 (`QUEST1_STEAM_UI_NICE`, 0 = off). Games are children of the steam client, not of
-  steamwebhelper: they keep normal priorities. Steam's GPU work was already LOW priority (below).
+  cpu, no io), so quest1_vkredirect (preloaded in the Steam client) gave every steamwebhelper process nice 10 and best-
+  effort I/O priority 7. Games are children of the steam client, not of steamwebhelper: they keep normal priorities.
+  Steam's GPU work was already LOW priority (below). (The nice 10 made Steam unusable and is gone: section above.)
 - **The memory protections did nothing.** On 4.4 a cgroup's memory.low only protects it while all its ancestors are
   below their own memory.low (mem_cgroup_low()), and system.slice had none. holo-perf.sh now gives system.slice 8G, so
   the per-unit MemoryLow of SteamVR, the dashboard, Monado and Meta's tracking take effect and steam.service (none) is

@@ -104,6 +104,13 @@ android_dlsym(void *handle, const char *symbol);
 //! 0-9, 7 and 8 ms none; vrcompositor at 70-72 fps in each case. 8 leaves room for heavier GPU work worn.
 //! "lead=<ms>" in /tmp/quest1-reproj sets it, 0 = right after the vsync (as before).
 #define MDP_TICK_LEAD_DEFAULT_MS 8.0f
+//! Real-time priorities (SCHED_FIFO): the vsync thread (warp + commit) above everything else of the VR stack, the
+//! MDP's display thread ("mdss_fb0", FIFO 16 from the kernel) just below. That kernel thread takes each commit to
+//! the hardware before the vsync that latches it; behind vrcompositor's and Meta's real-time threads it took one
+//! late now and then, and from then on every commit waited for it and came late as well (see commit_late).
+//! The compat layer keeps SteamVR's own real-time threads at 50 or below (quest1_display.c).
+#define MDP_VSYNC_RT_PRIO 98
+#define MDP_DISPLAY_KTHREAD_RT_PRIO 97
 //! Exists while the panels are (going) off: an external scanout must not commit then.
 #define MDP_PANELS_OFF "/tmp/quest1-panels-off"
 //! Exists while the headset sleeps (quest1-standby): panels off as if the headset was removed.
@@ -196,6 +203,7 @@ struct mdp_direct_stats
 	double age_ms_sum, age_ms_min, age_ms_max; //!< new frames: display time - the time their pose was predicted for
 	uint32_t age_n;
 	uint32_t late;      //!< commits that returned after the next vsync: that vsync showed the previous image again
+	uint32_t late_skips; //!< ticks without a commit after one that waited in the kernel and came late (commit_late)
 	uint32_t gaps;      //!< vsync events never seen (the thread woke more than a period late)
 	double wake_ms_max; //!< vsync event -> this thread running
 };
@@ -283,6 +291,15 @@ struct mdp_direct
 	struct mdp_direct_stats stats;
 	int64_t prev_vsync; //!< the last vsync direct_tick saw (gap detection)
 	int64_t tick_offset_ns; //!< how long after its vsync the vsync thread meant to tick (the lead's sleep)
+	int64_t commit_ioctl_ns; //!< how long the last MSMFB_ATOMIC_COMMIT took
+	//! The last commit waited in the kernel (mdss_fb_pan_idle: the MDP's display thread was still in
+	//! mdss_mdp_video_wait4comp for the commit before) and was only taken at the vsync it was meant for: too late to
+	//! be latched there, the display thread waits for the vsync after it, and the next tick's commit waits for that
+	//! one in turn. Seen worn on 2026-11-08 as soon as Steam worked (its GPU work made one warp late): every commit
+	//! of 2-10 s stretches blocked ~5 ms and came late, each frame shown a vsync after the time its warp was made for,
+	//! and the view trembled. The tick after such a commit commits nothing (that commit is what the next vsync shows):
+	//! one image comes late, the next tick is on time again.
+	bool commit_late;
 
 	int (*recv_handle)(int, AHardwareBuffer **);
 };
@@ -577,6 +594,38 @@ poll_brightness_locked(struct mdp_target *t)
 	}
 }
 
+//! The MDP's display kernel thread ("mdss_fb0") to MDP_DISPLAY_KTHREAD_RT_PRIO. The kernel starts it when the panels
+//! are powered on, at FIFO 16, so this runs after each unblank.
+static void
+boost_display_kthread(void)
+{
+	DIR *d = opendir("/proc");
+	if (d == NULL) {
+		return;
+	}
+	struct dirent *e;
+	while ((e = readdir(d)) != NULL) {
+		if (e->d_name[0] < '1' || e->d_name[0] > '9') {
+			continue;
+		}
+		char path[300], comm[32] = {0};
+		snprintf(path, sizeof(path), "/proc/%s/comm", e->d_name);
+		int fd = open(path, O_RDONLY | O_CLOEXEC);
+		if (fd < 0) {
+			continue;
+		}
+		ssize_t n = read(fd, comm, sizeof(comm) - 1);
+		close(fd);
+		if (n > 0 && strcmp(comm, "mdss_fb0\n") == 0) {
+			struct sched_param sp = {.sched_priority = MDP_DISPLAY_KTHREAD_RT_PRIO};
+			int r = sched_setscheduler(atoi(e->d_name), SCHED_FIFO, &sp);
+			U_LOG_W("mdp: display kernel thread %s: SCHED_FIFO %d %s", e->d_name, MDP_DISPLAY_KTHREAD_RT_PRIO,
+			        r == 0 ? "ok" : strerror(errno));
+		}
+	}
+	closedir(d);
+}
+
 /*!
  * Panels on while frames come in, off otherwise: when the last app goes away
  * the compositor stops presenting and the display engine would keep scanning
@@ -621,6 +670,7 @@ set_panels_locked(struct mdp_target *t, bool on)
 		unsigned int vsync_on = 1;
 		ioctl(t->fb_fd, MSMFB_OVERLAY_VSYNC_CTRL, &vsync_on);
 		set_brightness(t);
+		boost_display_kthread();
 	}
 	t->unblanked = on;
 	U_LOG_W("mdp: panels %s", on ? "on" : "off");
@@ -941,8 +991,10 @@ direct_commit(struct mdp_target *t, const struct direct_buf *b2, int idx, int ou
 
 	// serialized with the panel power changes (they hold the vsync thread's mutex)
 	os_thread_helper_lock(&t->vsync_thread);
+	int64_t t0 = os_monotonic_get_ns();
 	bool ok = t->unblanked && t->worn && ioctl(t->fb_fd, MSMFB_ATOMIC_COMMIT, &c) == 0;
 	int err = errno;
+	D->commit_ioctl_ns = os_monotonic_get_ns() - t0;
 	bool unblanked = t->unblanked;
 	os_thread_helper_unlock(&t->vsync_thread);
 	if (!ok) {
@@ -2099,6 +2151,10 @@ direct_tick(struct mdp_target *t, int64_t vsync)
 			D->fresh = false;
 		}
 		D->need_refresh = true;
+		D->commit_late = false;
+	} else if (vsync > 0 && D->latest >= 0 && D->commit_late) {
+		D->commit_late = false; // see commit_late: the last commit is latched at the coming vsync
+		D->stats.late_skips++;
 	} else if (vsync > 0 && D->latest >= 0) {
 		warp_lens_setup(t);
 		bool commit_raw = D->fresh || D->need_refresh;
@@ -2278,9 +2334,11 @@ direct_tick(struct mdp_target *t, int64_t vsync)
 			D->fresh = false;
 			D->need_refresh = false;
 		}
-		if (committed && os_monotonic_get_ns() - vsync > MDP_PERIOD_NS) {
+		int64_t done = os_monotonic_get_ns() - vsync;
+		if (committed && done > MDP_PERIOD_NS) {
 			D->stats.late++;
 		}
+		D->commit_late = committed && D->commit_ioctl_ns > U_TIME_1MS_IN_NS && done > MDP_PERIOD_NS - U_TIME_1MS_IN_NS / 2;
 	}
 	direct_release_unused(D);
 	if (D->stats.since_ns == 0) {
@@ -2291,7 +2349,7 @@ direct_tick(struct mdp_target *t, int64_t vsync)
 		U_LOG_W("mdp: direct: %.1f/s warped (%.1f/s of them fresh), %.1f/s raw, %.1f/s kept; warp gpu %.2f ms avg (max %.2f), "
 		        "cpu %.2f ms (mesh %.2f, gpu wait %.2f, commit %.2f); delta %.2f deg avg (max %.2f), "
 		        "per axis x %.2f y %.2f z %.2f; o jitter %.2f deg avg (max %.2f); no free set %u; "
-		        "late %u, vsyncs missed %u, wake max %.2f ms; not warped (over %.0f deg) %u; pose age %.1f ms avg (%.1f..%.1f); tick %.1f ms before the "
+		        "late %u (ticks skipped after one %u), vsyncs missed %u, wake max %.2f ms; not warped (over %.0f deg) %u; pose age %.1f ms avg (%.1f..%.1f); tick %.1f ms before the "
 		        "vsync, display at vsync + %.1f ms",
 		        s->warp_commits / el, s->fresh_warped / el, s->raw_commits / el, s->skipped / el,
 		        s->warp_commits ? s->gpu_ms_sum / s->warp_commits : 0.0, s->gpu_ms_max,
@@ -2302,7 +2360,7 @@ direct_tick(struct mdp_target *t, int64_t vsync)
 		        s->angle_max,
 		        s->angle_n ? s->ax_sum / s->angle_n : 0.0, s->angle_n ? s->ay_sum / s->angle_n : 0.0,
 		        s->angle_n ? s->az_sum / s->angle_n : 0.0, s->oe_n ? s->oe_sum / s->oe_n : 0.0, s->oe_max,
-		        s->no_set, s->late, s->gaps, s->wake_ms_max, (double)WARP_MAX_DEG, s->wild, s->age_n ? s->age_ms_sum / s->age_n : 0.0, s->age_ms_min,
+		        s->no_set, s->late, s->late_skips, s->gaps, s->wake_ms_max, (double)WARP_MAX_DEG, s->wild, s->age_n ? s->age_ms_sum / s->age_n : 0.0, s->age_ms_min,
 		        s->age_ms_max, D->tick_offset_ns > 0 ? (double)(MDP_PERIOD_NS - D->tick_offset_ns) / 1e6 : 0.0,
 		        D->knobs.display_delay_ms);
 		if (s->age_n > 0) {
@@ -2330,8 +2388,10 @@ vsync_thread_func(void *ptr)
 	// Each vsync this thread warps and commits the next image within one 13.9 ms period. As a normal
 	// thread under SteamVR's load (load average 10+) it was sometimes scheduled too late, and the panels
 	// showed the previous image again for a vsync: a one-frame jump while the head turns. Real-time,
-	// on the big cores (Meta's real-time tracking threads are pinned to the little ones, 0-3).
-	struct sched_param sp = {.sched_priority = 40};
+	// on the big cores, above every other real-time thread of the VR stack (MDP_VSYNC_RT_PRIO): at 40 it
+	// woke up to 6 ms late behind vrcompositor's render thread (SCHED_RR 99 then, on cores 4-6) and Meta's
+	// ELEVATED tracking threads (FIFO 48, big cores) while Steam worked (worn, 2026-11-08).
+	struct sched_param sp = {.sched_priority = MDP_VSYNC_RT_PRIO};
 	int se = pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
 	cpu_set_t big;
 	CPU_ZERO(&big);
