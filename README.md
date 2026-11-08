@@ -56,8 +56,8 @@ from Valve's servers and from Meta's last Quest 1 update image.
   image's double page cache (direct I/O, ~335 MB), SteamVR's 256 MB GPU upload rings allocated
   on first use (~500 MB, ~250 MB more with the desktop), zstd swap compression. Steam's web
   processes are next.
-- **Passthrough.** The depth is a fixed sphere, so near objects are not at their true distance: a depth
-  mesh from the bottom camera pair is being written.
+- **Passthrough.** Each eye sees a composite of its bottom and top camera, but the depth is a fixed sphere,
+  so near objects (controllers, hands) are not at their true distance: a stereo depth mesh is being tuned.
 - **Sleep.** Suspend to RAM loses Meta's tracking and the sound on resume.
 - **Streaming** from a PC (Steam Link), **x86 games** (FEX, Proton), and the
   remaining distortion and chromatic aberration.
