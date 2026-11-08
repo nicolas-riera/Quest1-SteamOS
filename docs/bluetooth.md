@@ -81,3 +81,22 @@ the link key is thrown away, BlueZ shows the pad "Paired: no / Bonded: no" and r
 (`hidp_add_connection() Rejected connection from !bonded device`; the pad turns off). `holo-bluetooth.sh` sets
 `AlwaysPairable = true` in `/etc/bluetooth/main.conf`. Restarting bluetoothd under a running Steam leaves Steam with
 stale D-Bus proxies (its Bluetooth page then finds nothing): restart Steam after it.
+
+
+## Notes moved from the to-do list (2026-11-08): Hardware
+
+History of measurements, fixes and open points as they were written in docs/todo.md (the to-do list now only
+lists what is left to do).
+
+- Power LED: Meta's battery colours since 2026-11-03 (`device/holo-battery.sh`). Later (low
+  priority): let the user control it, e.g. from the quick menu.
+- Bluetooth lost events (user, 2026-11-05: DualSense pairing failed, discovery hung): the UART's runtime PM
+  suspended it 100 ms after each transfer and bytes the chip sent later were lost (no Inquiry Complete,
+  Disconnection Complete or incoming connection). Fixed 2026-11-06 (quest1-bt keeps it on, docs/bluetooth.md):
+  BR/EDR inquiries complete and find several times more devices. A DualSense pairs and works since AlwaysPairable (user, 2026-11-06). Left: the
+  power cost (in-band sleep would let the UART sleep).
+- Bluetooth (docs/bluetooth.md): up since 2026-11-05 evening (hci0 up, LE scans find devices). Left: pairing
+  a keyboard/mouse, a gamepad, audio (A2DP); Steam's and Plasma's Bluetooth settings; `rfkill block bluetooth`
+  cuts the chip's power (bt_power rfkill) under the attached hci0: check what Plasma's toggle does; a faster
+  patch download (~11 s).
+- USB OTG (low priority): keyboards, storage and other USB devices on the headset's port.

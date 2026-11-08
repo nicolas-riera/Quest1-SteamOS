@@ -1,0 +1,99 @@
+# Performance
+
+Where the frame time goes and what was tried. Current numbers and the direct scanout path:
+docs/direct-scanout.md; Steam's UI: docs/steam-gpu.md.
+
+## Notes moved from the to-do list (2026-11-08): Performance
+
+History of measurements, fixes and open points as they were written in docs/todo.md (the to-do list now only
+lists what is left to do).
+
+- Target (user, 2026-11-05): 72 fps with a usable Steam (the dashboard is very slow), with headroom left
+  for streaming and desktop mode. Fewer translation/emulation layers is an avenue to weigh.
+- 2026-11-06 night: 72 fps with the dashboard shown, head still, passthrough on (was 53): vkCmdUpdateBuffer
+  staging, UBWC scanout buffers, 4 swapchain images (docs/direct-scanout.md). Measured on a table with the panels
+  forced on; to confirm worn, with the controllers in view (they cost ~5 ms of GPU a frame, see below) and
+  moving the head (Monado's warp). Next: the LSE trap path (do_undefinstr takes a global spinlock per trap and
+  emulate_atomic does two exclusive loops: ~18 % of vrcompositor's render thread), the passthrough mesh pass
+  (~1.4 ms per eye), the controller models.
+- 2026-11-07: worn it was 37-46 fps (user: "un peu mieux"): ~18 ms of GPU with the controllers in view, each of
+  their parts in a render pass of its own. vrcompositor now renders straight to memory (RenderMode=Direct, SteamVR
+  only): 14.1 -> 9.3 ms a frame on the table, 72 fps with the dashboard. To measure worn again. The controller
+  models stay as they are (user: no visible change); the ovrstub log flood (~850 kernel log lines a second with the
+  controllers on) is gone.
+- Memory (user, 2026-11-05: "faut bien gérer ce problème de saturation"): right after boot, with
+  SteamVR up, only ~500 MB is available and ~550 MB is already swapped (zram). Per process (Pss + swap
+  + KGSL): Steam's webhelpers ~1.65 GB (two of them with 270 + 185 MB of GPU memory), vrcompositor
+  ~610 MB (470 MB GPU), vrwebhelper (dashboard) ~560 MB (274 MB GPU), steam ~130 MB; KGSL total
+  1.26 GB. After ~12 stack restarts in one boot the headset fell to 12-15 fps (kswapd 35 %, GPU trace
+  buffer allocation failing): reboot rather than restart the stack many times. Leads: Steam's
+  gamepadui window rendered in Xvfb for nobody, CEF memory flags, vrcompositor's textures,
+  extra_free_kbytes so kswapd starts before allocations stall.
+  2026-11-05 evening: holo.img's loop device now uses direct I/O (335 MB of double page cache gone), and
+  vrclient's 256 MB transfer ring (one per OpenVR Vulkan process: vrcompositor, the dashboard, Steam's
+  webhelper, q1desktop, every game) is backed on first CPU touch (kernel/kgsl-lazy.patch). Next: zram
+  with zstd/lz4 instead of lzo, Steam's webhelper ring (fully used: its CPU-drawn pages), the dashboard's
+  and Steam's CEF processes.
+- vrcompositor, head still, panels on (2026-11-02): 22-28 fps in the morning, 36 with Monado's "early"
+  ack, 45 with the layer's present waits returning at once. The limit is GPU time: the kgsl trace
+  (adreno_cmdbatch_retired start/retire ticks) shows vrcompositor's one batch per frame running
+  ~17.8 ms (gpu_busy_percentage under-reports, ~40 %). The layer's profiler (`touch
+  /tmp/quest1-gputime`) splits it per eye: 12 scene passes at 1500x1664 (~5.6 ms, the controller
+  models ~1.5 ms of it) and the distortion pass at 1440x1600 (~3.2 ms). Tried without useful gain:
+  merging the scene passes (same time merged), dropping the distortion draws (-3 to -4 ms only),
+  GpuSpeed.gpuSpeedRenderTargetScale (the scene stays 1500x1664), live vrcmd settings
+  (enableSimplifiedShaders, overlay quality, skydome, supersampleScale: < 1 ms), SteamVR's realtime
+  priority, GPU bus floors, Steam on the little cores. Left: lighter controller models, Facet, or
+  ~45 fps with a clean 72 Hz re-projection. Never lower the resolution (user: it is already low). Tracking on all 8
+  cores (it is pinned to the busy little cores) seemed to make the shaking worse: back to 0-3.
+- SteamVR's Facet renderer (tip from a user, 2026-11-02) runs and draws correctly behind
+  `/etc/quest1-facet` (off by default, `src/vklayer-steamvr/quest1_facet.c`): ~29-32 fps, eye passes
+  6-7 ms each. Needs a fair A/B against the old renderer in one quiet window
+  (`/root/facet-iter2.sh 0|1 <dir>`), with the dashboard shown (dropped stencil dynamic states).
+  Leave it off unless it wins.
+- Light, safe overclocks (user, 2026-11-03): GPU (A540 max 710 MHz on the Quest 1) and CPU OPPs a
+  step above stock, only within ranges other MSM8998 devices run stable, watching tsens and the
+  fan. Kernel DT/OPP tables, so a new boot image (fastboot boot only).
+
+- User, 2026-11-02 (after the present-wait, UBWC warp and memory changes): "no more shaking, much
+  better perf", but controllers are still not smooth (vrcompositor's frame rate), and the dashboard
+  and Steam's UI lag.
+- The controllers cost ~10 fps (2026-11-03, headset on a table, dashboard shown, no re-projection):
+  ~46 fps while SteamVR draws no controller, 34-36 fps with both drawn (vrcompositor's GPU batch
+  20 -> 25-27 ms). The layer's profiler shows each visible controller as a ~0.6 ms pass (9792
+  vertices, the body) plus 6 small passes (~0.1 ms each, the buttons), per eye: ~5 ms a frame.
+  Monado's build, achromatic distortion and the vm settings made no difference (bench in
+  /root/bench-20261103/). Next: why each render model component is its own render pass, and a
+  lighter render model (could also fix the Oculus button texture below).
+- Frame rate drops while the controllers move fast, until they stop (user, 2026-11-03): Meta's
+  controller tracking threads (CtrllrCam, CtrlTracking, SCHED_FIFO on cores 0-3) work harder. In
+  part (only in part) the laser pointer passing over Steam UI elements: their hover animations cost
+  frames (user).
+- Re-projection off when the headset is put on, then swinging slowly into place while fresh frames
+  sit right (user, 2026-11-03): Monado's warp averaged the device-to-LOCAL rotation `o` at 5 % a
+  frame and never reset it, but driver_quest1's LOCAL space is created at the head's yaw with each
+  SteamVR start. Now seeded again per layer connection and when far for 8 frames (comp_window_mdp.c);
+  to confirm in the headset after a SteamVR restart.
+- Slim the install: drop what this headset never uses (other controllers' render models, SteamVR
+  Home if present, etc.): less storage, memory and load time (user, 2026-11-03).
+- Steam's UI and the dashboard lag, and so does Steam's VR keyboard (it is Steam's: it types fine,
+  the lag is Steam's UI). Faster Steam fixes both (user, 2026-11-03).
+  Measured 2026-11-06 (CDP, arrow keys every 150 ms on the library home): requestAnimationFrame falls from 60 to
+  ~9 fps (median frame 100 ms, max ~470 ms). The renderer's main thread runs ~80 % of a big core (libcef + V8:
+  the gamepadui's own work), the GPU process's VizCompositorThread ~70 % (half of it memcpy: the off-screen
+  frames copied for the VR overlay), the browser process uploads them with Mesa GL (libgallium). Steam itself
+  pins its webhelpers to CPUs 2-6 (two little, three big cores; `STEAM_DESKTOP_APP_AFFINITY_LIST` is read but
+  unset), though the hot threads ran on the big ones. Leads: fewer copies on the overlay path (shared textures
+  instead of the CPU fallback), less UI work (animations, blur).
+- LSE atomics emulation (kernel/lse_emul.c): ~100,000 traps/s while SteamVR runs (vrserver ~38k,
+  vrcompositor ~29k, steamwebhelper ~24k), 0.8 us each on a big core and 1.6 us on a little one,
+  against ~20 ns native: ~10-15 % of one core. Make the emulation itself faster (trap path, hook
+  lookup, decode). Not binary rewriting: patched Valve binaries break with Steam updates and
+  can't be shipped (user, 2026-11-03).
+- The kernel logs "SPI transaction rejected by SyncBoss" / "Bad magic number 0xcacacaca" several
+  times a minute (2026-11-03): check against Android, and whether IMU or controller data is lost.
+- Lens distortion in Monado's warp (`/etc/quest1-warp-lens` = 1, off by default): vrcompositor hands
+  over undistorted eyes, Monado does distortion, chromatic aberration and re-projection in one pass
+  like Meta's TimeWarp. Geometry right since Meta's lens centre (2026-11-03), but vrcompositor's
+  distortion pass costs the same as a copy (3.6 ms per eye, bandwidth) and the warp then runs at
+  every vsync with 3 samples: more GPU in total. Compare sharpness with the user once perf allows.

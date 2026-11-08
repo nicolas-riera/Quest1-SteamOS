@@ -32,6 +32,8 @@ from Valve's servers and from Meta's last Quest 1 update image.
 | Boot | Linux 4.4 (Meta's kernel with backports for systemd 258), then SteamOS Holo with systemd as PID 1. No Android |
 | Steam Frame mode | Steam and SteamVR start in the Steam Frame's mode: Steam recognises the headset as a Steam Frame and its VR UI is the main panel |
 | Display | Both panels at 72 Hz with Meta's lens distortion model and chromatic correction, a zero-copy path to the display controller, and a 72 Hz rotational re-projection in [Monado](https://monado.freedesktop.org/) |
+| Brightness | SteamVR's own brightness setting (dashboard and Steam's quick menu), applied in the display controller with the panels' factory calibration so both eyes match |
+| SteamVR settings | An "Oculus Quest" page in SteamVR's settings, with a button that clears the spatial anchor map |
 | Head tracking | 6DoF with Meta's own tracking service, run natively from the headset's partitions |
 | Controllers | Touch controllers with Meta's tracking (6DoF, with Meta's prediction), buttons, triggers, grips, sticks and vibration |
 | IPD | The physical IPD slider is read live and sets SteamVR's eye separation |
@@ -118,7 +120,8 @@ the headset they are used from its own partitions, mounted read-only.
 | [Passthrough](docs/passthrough.md) | The Steam Frame's room view from the Quest's tracking cameras |
 | [Playspace](docs/boundary.md) | Floor, playspace and boundary, and Meta's map persistence |
 | [Installer](installer/README.md) | Download, build and flash from a PC |
-| [To do](docs/todo.md) | Open items |
+| [Performance](docs/performance.md) | Where the frame time goes, what was measured and tried |
+| [To do](docs/todo.md) | What is left to do (done work moves to the pages above) |
 | [SteamOS image](docs/rootfs-build.md) | What the system image holds, and the plan to build and install it reproducibly |
 | [Phase 0](docs/phase0-recon.md) | First survey of the headset (in French) |
 

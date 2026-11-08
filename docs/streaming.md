@@ -97,3 +97,20 @@ So it is solved by plans 1-3 of section 1 (hardware decode, then the frames to t
 | 3 | `/dev/video-dec0` and `CV4L2Accel` on msm_vidc, then zero-copy frames to the compositor | 1-2 weeks | 2D games and the PC desktop in VR |
 | 4 | Vulkan dma-buf import shim | 1-2 weeks | proper VR streaming and compositor sharing |
 | 5 | ALVR or WiVRn alternative | 1-2 weeks | fallback if vrlink stays blocked |
+
+
+## Notes moved from the to-do list (2026-11-08): Streaming
+
+History of measurements, fixes and open points as they were written in docs/todo.md (the to-do list now only
+lists what is left to do).
+
+- Steam Link streaming from a PC fails (2026-11-01): VR streaming leaves the PC's SteamVR waiting
+  for the connection and the stream app on the headset closes; a 2D game started in cinema mode,
+  its audio stuttered, then the headset's SteamVR crashed. Logs saved on the headset in
+  `/root/stream-crash-20261101/`.
+- Again 2026-11-02 20:29 (user): a SteamVR-tree process crashed (`/tmp/dumps/crash_20261102202929_2.dmp`,
+  libllvm-qgl mapped), Steam shut down and restarted, vrserver quit with it and nothing restarts
+  it, so the headset stays black. The stream's `streaming_client` (GL) can't share images with the
+  compositor: libhybris GL lacks GL_EXT_memory_object(_fd) and GL_EXT_semaphore(_fd) (ASSERTs in
+  sharedresource_linux.cpp), so the stream shows black. Logs in `/root/stream-crash-20261102/`.
+  SteamVR now restarts by itself when it quits.

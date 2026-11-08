@@ -258,3 +258,18 @@ The brightness is SteamVR's own setting, as on the Steam Frame: driver_quest1 se
 percent is 100 * gain^(1/2.2)). The driver writes the gain in percent of linear light (clamped to 2-100: SteamVR's
 default gain is 1.3) to `/tmp/quest1-brightness`, which Monado polls twice a second. Tested through the
 dashboard's slider (CEF remote debugging): 47 % on the slider -> gain 0.196 -> PCC 0.476.
+
+
+## Notes moved from the to-do list (2026-11-08): Display
+
+History of measurements, fixes and open points as they were written in docs/todo.md (the to-do list now only
+lists what is left to do).
+
+- Apply the per-panel calibration from `/persist/calibration/display` (decenter, roll, mura).
+- 90 Hz mode, selectable from the headset refresh rate setting (the Frame's quick menu / SteamVR's
+  setting) (low priority). Base: github.com/TheCez/quest1-90hz-orangefox.
+
+- Steam's VR UI: the right controller's Oculus button used the menu button's texture (SteamVR's
+  Quest render model, user 2026-11-03). Fixed 2026-11-07: src/steamvr-quest1/mkrendermodel.py copies the model
+  into driver_quest1's resources with the Quest 2 controller's logo on that button (holo-steamvr.sh runs it).
+  Checked through IVRRenderModels; to look at in the headset (user).

@@ -26,3 +26,37 @@ Revert: put the old args back (`/etc/systemd/system/steam.service.d/vr.conf.bak-
   Call sites seen: 13 in steamclient.so, 10 in steamui.so, 1 in chromehtml.so (offsets are for the 2026-10-21 build). Not required by default.
 - The log line "IClientVR::BServeVRGamepadUIOverlay took too long" appears only when the call is slow: not a reliable signal.
   Check the dashboard instead: `runuser -u steamos -- touch /tmp/quest1-snap` writes /tmp/quest1-snap.ppm.
+
+
+## Notes moved from the to-do list (2026-11-08): Power
+
+History of measurements, fixes and open points as they were written in docs/todo.md (the to-do list now only
+lists what is left to do).
+
+- Power button and sleep work (2026-11-02: short press = Steam's sleep, panels off and Meta's
+  tracking asleep with its cameras; 1 s press = Steam's power menu). Left (user, 2026-11-03):
+  - the sleep animation shows inside the dashboard panel instead of full screen, and it is
+    SteamOS's (deck-suspend-animation), the Frame's one if it has its own;
+  - real sleep: suspend to RAM works (`/etc/quest1-sleep` deep, opt-in) but on resume Meta's
+    tracking was lost (head spinning), the sound gone, the proximity sensor kept waking the headset
+    while worn (SyncBoss "wakeup received", irq 271), and the fan and power LED stayed on.
+    syncboss_spi.c (Meta's kernel) eats PROX_ON until a PROX_OFF when suspended while worn.
+- Steam's own startup movie (each Steam start, also after a SteamVR restart) is SteamOS's: Steam
+  picks it from its hardware type (5001 = Frame, read from /proc/device-tree: the Frame's DT says
+  qcom,sm8650-deckard), not from -steamframe. The boot animation (q1splash) plays the Frame's.
+- Restart from Steam: retest. If it works, drop the sshd `pam_systemd` workaround in
+  `device/holo-perf.sh`.
+
+
+## Notes moved from the to-do list (2026-11-08): Steam settings
+
+History of measurements, fixes and open points as they were written in docs/todo.md (the to-do list now only
+lists what is left to do).
+
+- The timezone dropdown (Settings, next to the 24-hour clock) is hidden: Steam shows it only when
+  `IN_GAMESCOPE && IS_STEAMOS` (steamui library.js, export XM). Our Steam runs under Xvfb, not gamescope. The user
+  wants it (2026-11-03); meanwhile the system timezone is set with timedatectl (Europe/Paris). Find what sets
+  IN_GAMESCOPE and whether it can be set without gamescope's other paths; check IS_STEAMOS too (os-release is now
+  ID=steamos, device/holo-identity.sh).
+  2026-11-07: `IN_GAMESCOPE=true` is set by steamui.so itself (native), along with its gamescope controller
+  (CGamescopeControllerLinux, gamescope-control Wayland protocol): not a flag to set alone.

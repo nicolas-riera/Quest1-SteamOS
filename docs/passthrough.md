@@ -391,3 +391,47 @@ reference; shifts from layer snapshots by profile correlation, a band of the das
   dashboard -156/+169. The compositor so corrects rotation only between capture and display (like Monado's warp); a
   head translation in those ~60 ms (a few cm walking) is not corrected, below a degree on the 3 m sphere.
 - To confirm worn (user): the shake and tilt when the head moves. Depth (a real mesh) after that.
+
+
+## Notes moved from the to-do list (2026-11-08): Passthrough
+
+History of measurements, fixes and open points as they were written in docs/todo.md (the to-do list now only
+lists what is left to do).
+
+- 2026-11-07 (user: view frozen, camera LEDs off): Meta's tracking stopped at 09:58:39, ~3 min after boot
+  (q1trackd 0 valid samples, status 85 -> 0), right after "ProcessMaybeDead vrguardianservice/vrruntimeservice" and
+  "MapDB: Deleting 3 corrupted entrees". Restarting the stack failed at first: sb-free's per-descriptor readlink
+  loop outlasted the sensors HAL's start timeout (fixed: one find). `holo-android-tracking meta-on` (Monado after
+  the stack, as at boot) brought it back. Same boot: udev helpers hung ~3 min and were killed (v4l_id on
+  /dev/video1 = msm_jpegdma, scsi_id on sdb/sdd, libinput-device-group on the power key's event0), so event0 kept
+  root 0600 and quest1-powerbutton/volkeys crash-looped (fixed by hand: udevadm trigger --action=add). Find what
+  blocks them at boot and whether it is linked to the tracking loss (first boot of the devpts kernel).
+  That boot the cameras never powered up either (trackingservice: "Timeout: (power: SLEEP) => (power: STANDBY)"
+  every second from 09:56:20, so 3DoF only; restarting the stack did not help). The next boot, same kernel, was
+  clean (6DoF, no udev stall): a boot race in the camera drivers, to catch again with its logs.
+- Shake/tilt (user, 2026-11-06: only the camera image, "almost nauseating"): vrcompositor turned the capture-to-display
+  rotation about the capture pose's position (the head 1.65 m above the floor), so every pitch or roll also moved the image.
+  Fixed 2026-11-07 (ptprovider gives +144 as a rotation only; measured, docs/passthrough.md). To confirm worn (user). Then
+  Meta's depth engine through MrSystemServiceIPCServer instead of our fixed mesh (user's call).
+- Regression (user, 2026-11-05 night): passthrough shakes a lot and tends to tilt when the head moves.
+  Broken by that night's memory work; suspects, in order: the KGSL lazy rings (first-touch page faults in
+  vrcompositor's 256 MB ring, kernel/kgsl-lazy.patch and the compat layer's hint), zram zstd (slower
+  readback of swapped pages), loop0 direct I/O, the fakelogd filter (something reading Meta's logs?).
+  Bisect by booting without each (an image without kgsl-lazy first).
+- Goal (user, 2026-11-03): the cameras seen by SteamVR as a real camera, like on the Steam Frame:
+  its settings adjustable in SteamVR, usable as normal passthrough and as the passthrough used to
+  draw the boundary.
+- 2026-11-03 night: SteamVR's 3D roomview works (docs/passthrough.md, "The 3D roomview works"): one
+  bottom camera per eye, the image's edge stretched above the cameras' view, linear light (sRGB-encoded
+  frames). Installed by `device/holo-passthrough.sh`: driver_quest1 in "props" mode
+  (`/etc/quest1-camera`) and `q1-ptprovider.service` (with SteamVR; 7.5% of a core while shown,
+  0.7% while hidden). Switched by vrcompositor itself: the dashboard's Room View (On = 3D) and eye
+  button, the room setup (with no playspace it follows `camera.enableConstructRoomView`, set by
+  `set_camera_roomview_enabled`). Test scripts in `src/camtap/roomview-test/` (`pt-undo.sh`
+  restores the defaults; `pt-flow.sh`-style tests need no `trackedcam_test`).
+- 2026-11-03 late, user feedback and fixes: eye button OK (Prop 2105); scale OK; shaking reduced (capture
+  poses from Monado, frames without one dropped) - to recheck; left eye lower: fixed by the fisheye fit
+  (to recheck); double click Menu/Oculus = toggle room view (vrcompositor bindings); Edge styles hidden and
+  tint slider shown (props 2122 and 1062) - to check that the slider changes the colour.
+- Later: depth from the bottom stereo pair (a per-frame depth mesh, like Meta's libmrengine) so near
+  objects sit at their true depth (the fixed 3 m sphere and the 11 cm camera baseline make them wrong).

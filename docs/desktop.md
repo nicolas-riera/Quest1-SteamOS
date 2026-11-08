@@ -70,3 +70,43 @@ Everything above is the same, except gamescope:
 - Discover installs Flatpaks system-wide, through flatpak's system helper and polkit. SteamOS's rule allows it to wheel
   members in an active local session; here steamos has no seat session and is not in wheel, so our polkit rule
   (device/holo-frame-mode.sh) grants it Flatpak's actions (except overriding parental controls).
+
+
+## Notes moved from the to-do list (2026-11-08): Steam and desktop
+
+History of measurements, fixes and open points as they were written in docs/todo.md (the to-do list now only
+lists what is left to do).
+
+- The "+" menu's Desktop entry took several clicks (user, 2026-11-06). Found: a click during the first seconds of a
+  launch signalled `q1desktop` before it had its SIGUSR1 handler and ended the desktop; a click while the last desktop
+  was ending was dropped. Both fixed (docs/desktop.md); a click on the entry (DOM events) launches it once, and four
+  launches 1 s apart give one desktop. Left: confirm with the laser in the headset (user).
+- 2026-11-07, still several clicks with the laser (user): a click in the menu's first ~3 s was dropped by Steam while
+  its icon loaders (bubblewrap) failed one after the other; the kernel now has multi-instance devpts. To confirm in
+  the headset (icons in the "+" menu, one click). "Desktop" from Plasma's own menu no longer starts a nested desktop.
+- Discover showed no apps and asked for flatpak (user, 2026-11-06): polkit refused Flatpak's system actions to steamos
+  (SteamOS's rule wants wheel and an active seat session), so the Flathub catalogue was never deployed ("DeployAppstream
+  not allowed"). Fixed in holo-frame-mode.sh's polkit rule; Discover lists Flathub's apps (checked on the desktop's
+  screen). Left: install an app from it in the headset (user).
+- Desktop mode launcher (user, 2026-11-05 night: failed to start again): kcminit outlived the desktop and held
+  the launcher's lock; fixed 2026-11-06 (docs/desktop.md), 9 launch/close cycles and a double launch OK from a
+  shell with Steam's environment. Left: confirm from Steam's "+" menu in the headset; once, the first launch
+  after killing old leftovers hung 48 s (plasma_session up, kwin silent) and closed fine.
+- Desktop mode (docs/desktop.md): the nested Plasma runs and shows in the dashboard (user, 2026-11-05: Dolphin
+  started, the headset struggling). Open:
+  - lag, and the whole dashboard freezing while the desktop is used (memory: ~2 GB swapped with Plasma and
+    an app; llvmpipe threads competing with vrcompositor and the tracking);
+  - start it from Steam's "+" menu (the Frame's entry is installed) and check the overlay key the dashboard
+    ties to the running app (`valve.steam.desktopgame.<appid>`), the control bar's keyboard and close;
+  - check the Vapor look (wallpaper, dark theme, Steam Deck logo) on a fresh user, and that the "+" menu shows
+    only Desktop and user-installed apps;
+  - mouse orientation, scroll and keyboard typing in the headset;
+  - snapshots (/root/snap.sh) show q1desktop's overlay turned by 180 degrees while it is right in the headset
+    (user, 2026-11-05; Steam's overlays are right in both): don't trust snapshots for that overlay's
+    orientation, find why they differ.
+- Steam crashed while the desktop was used (user, 2026-11-05 ~18:07) and its VR UI did not come back:
+  vrdashboard asserts "stalled cross-thread pipe (pipe is disconnected)" (/tmp/dumps), the headset deep in swap.
+  The dashboard's vrwebhelper (started by vrdashboard) died with it and vrdashboard never restarted it. The
+  next OpenVR client to start (here q1desktop) started a new one in its own cgroup, so stopping that client
+  killed the dashboard again. Fixed 2026-11-07: quest1-frame-dashboard runs a watcher that ends a vrdashboard left
+  without vrwebhelper; vrserver starts a new one (tested: all vrwebhelpers killed, the dashboard back in ~35 s).

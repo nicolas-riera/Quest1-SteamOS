@@ -478,3 +478,20 @@ Do not commit these files: they contain the device serial number.
   (`~/q1/re/parts/cal/`, not in git).
 * Monado: `~/src/monado` (main cfa6078; thaytan branches under `refs/remotes/thaytan/*`),
   `~/src/basalt`.
+
+
+## Notes moved from the to-do list (2026-11-08): Tracking
+
+History of measurements, fixes and open points as they were written in docs/todo.md (the to-do list now only
+lists what is left to do).
+
+- When the headset loses tracking it jumped to the floor (user, 2026-11-05). Since 2026-11-07 driver_quest1 keeps the
+  last tracked position while Monado reports none (rotation from the IMU, neck model), checked with a simulated loss;
+  when tracking comes back, a controller the cameras have not seen again shows as searching (connected, buttons
+  working, not drawn) until its first tracked position. To confirm in the headset with a real loss (user).
+- Spatial anchors work very badly (user, 2026-11-05 night): after a tracking loss the headset has a hard
+  time finding where it was (relocalizing in the persisted map; q1anchord, /run/q1track/frame-state).
+  2026-11-07: the saved map had been deleted by the engine (corrupted entries) and q1anchord kept "anchor" mode for
+  good; a tracking loss also re-anchored the room on the head twice. Fixed (docs/boundary.md: map copy and restore,
+  lost-map detection, no "anchor" once found). The playspace must be set up again once (the old map is gone). To
+  confirm worn: reboot, walk around, lose tracking (cover the cameras) and see the room come back in place (user).

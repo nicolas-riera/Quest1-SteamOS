@@ -126,3 +126,21 @@ AnchorUuid = 16 bytes in text order; Parcelables are preceded by an int32 non-nu
 
 Not yet verified: relocalization after a real reboot with the headset worn and moved around the room; whether the
 persisted map keeps growing (mapdb rewritten) while used.
+
+
+## Notes moved from the to-do list (2026-11-08): Boundary
+
+History of measurements, fixes and open points as they were written in docs/todo.md (the to-do list now only
+lists what is left to do).
+
+- The Steam Frame's room setup works (user, 2026-11-05; the Adreno fixes are in docs/boundary.md). Left:
+  - Leaving the setup, Steam showed a "something went wrong" popup (Refresh cleared it); maybe memory.
+  - Frame rate in step 7: ~30 fps after a clean boot, as outside the setup (see Performance).
+  - ComputeInverseDistortion returns identity while direct scanout distorts (distort_geom_* shaders place
+    geometry with the inverse LUT).
+  - Test in the headset: Recenter and Clear playspace, and relocalization after a reboot in the persisted
+    map (`q1anchord`, docs/boundary.md).
+- Pairing Quest controllers from the headset (Steam's UI). Pairing goes through SyncBoss
+  (`syncboss_input_pair`): never call it without the user's explicit go.
+- Controller connection state: a powered-off controller turns disconnected within 0.3 s (tested 2026-11-03); one the
+  cameras have not tracked yet (start, or after the head's tracking came back) shows as searching (2026-11-07, Tracking).

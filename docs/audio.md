@@ -265,3 +265,25 @@ PipeWire 1.4.9's ACP has no option to skip the Pro Audio probe that oopsed the A
 UCM routing itself (`holo-audio output speaker|headphones`). Not yet tested: next boot,
 `holo-audio start`, then restart pipewire/wireplumber for steamos, play a short low-level tone, and
 only then `holo-audio enable`.
+
+
+## Notes moved from the to-do list (2026-11-08): Audio
+
+History of measurements, fixes and open points as they were written in docs/todo.md (the to-do list now only
+lists what is left to do).
+
+- Audio randomly turns crackly for a while, then recovers by itself, sometimes stays stuck crackly
+  (user, 2026-11-02/03). PipeWire sees no xrun at all (pw-top ERR 0, logged every 2 s for 20 min):
+  not the graph. Seen with memory pressure (kswapd 50 %, swappiness raised to 100). Capture:
+  `q1-audioring` (runtime unit on the headset) keeps the last 90 s of the sink monitor and the ALSA
+  status every 20 ms; `systemctl kill -s USR1 q1-audioring` dumps them to /root/audioring-<time>/
+  when the user hears it. Clean monitor + crackle = below PipeWire (ADSP, codec).
+  Capture 2026-11-03 18:07 in `/root/audioring-180736/` (crackle during and after a SteamVR crash
+  loop: load 10-13, kswapd ~46 %, 0.7 GB available; `extra-state.txt` has vmstat and top). Fix later.
+
+- 2026-11-03 22:30: the user recorded the Steam click sound crackling (phone recording, kept on the PC in
+  Downloads/Mobile Devices, not in the repo): bursts of short high-frequency spikes on the clicks.
+- 2026-11-05: crackling still there, coming and going (user). Memory pressure is constant now (see
+  Performance): check the link with it first.
+- A short click is heard each time Steam starts, even with the startup movie silenced (user, 2026-11-05:
+  "on n'est pas censé entendre ça"). Find its source: the audio device being opened (pop), or a Steam UI sound.
