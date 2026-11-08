@@ -117,6 +117,7 @@ struct Calib
 	bool ok = false;
 	double f = 191, cx = 319.5, cy = 239.5;
 	double k[6] = {0.29, 0, -0.15, 0.09, -0.02, 0};
+	double p[2] = {0, 0};                  // Fisheye62 tangential
 	double kb[4] = {0.29, 0, -0.15, 0.09}; // the four coefficients the roomview shader takes, fitted to all six (FitKB)
 	double m[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
 };
@@ -185,12 +186,145 @@ static Calib LoadCalib(int id)
 			c.f = proj[0], c.cx = proj[1], c.cy = proj[2];
 			for (int i = 0; i < 6; i++)
 				c.k[i] = dist[i];
+			c.p[0] = dist[6], c.p[1] = dist[7];
 			FitKB(c.k, c.kb);
 			c.ok = true;
 		}
 		break;
 	}
 	return c;
+}
+
+//! Fisheye62 projection of a camera-frame direction (OpenCV axes) to a raw pixel. False behind or beyond ~92 degrees.
+static bool Project62(const Calib &c, const double d[3], double &px, double &py)
+{
+	double r = sqrt(d[0] * d[0] + d[1] * d[1]);
+	double th = atan2(r, d[2]);
+	if (th > 1.6)
+		return false;
+	double t2 = th * th, poly = 1, tp = 1;
+	for (int i = 0; i < 6; i++)
+		tp *= t2, poly += c.k[i] * tp;
+	double thd = th * poly;
+	double u = r > 1e-12 ? thd * d[0] / r : 0, v = r > 1e-12 ? thd * d[1] / r : 0;
+	double r2 = u * u + v * v;
+	double ut = u + 2 * c.p[0] * u * v + c.p[1] * (r2 + 2 * u * u);
+	double vt = v + 2 * c.p[1] * u * v + c.p[0] * (r2 + 2 * v * v);
+	px = c.f * ut + c.cx, py = c.f * vt + c.cy;
+	return true;
+}
+
+/*
+ * The composite camera. vrcompositor's roomview takes one camera image per eye, and the bottom cameras look ~40 degrees
+ * down: everything above their field of view (half of the view ahead, user 2026-11-08: "the whole top half stretched")
+ * was the edge of their image, clamped and stretched. Meta covers it with the top cameras. So each eye gets a virtual
+ * camera at its bottom camera's position, looking straight ahead (equidistant fisheye, f = kVirtF, ~140 x 104 degrees),
+ * whose image is filled from the bottom and the top camera of that side through a table built once: each pixel's ray
+ * meets the roomview's sphere (kSphereM, the driver's mesh radius) and that point is looked up in both cameras (bilinear),
+ * blended over the band where both see it. The bottom camera's part does not depend on the depth (the virtual camera
+ * sits at its centre); the top camera's does, through its ~6 cm offset. The top camera's gain follows the bottom one's
+ * over the shared band (the two expose separately).
+ */
+static const double kVirtF = 266, kSphereM = 3.0;
+struct CompTap
+{
+	int32_t off[2];      // [0] bottom, [1] top: offset of the bilinear 2x2's top-left pixel in the raw image, -1 = none
+	uint8_t fx[2], fy[2]; // bilinear fractions (0..255)
+	uint8_t wTop;         // the top camera's share (0..255)
+	uint8_t pad[3];
+};
+
+static Calib VirtualCamera(const Calib &bottom)
+{
+	Calib v;
+	v.ok = bottom.ok;
+	v.f = kVirtF, v.cx = (kW - 1) / 2.0, v.cy = (kH - 1) / 2.0;
+	for (double &k : v.k)
+		k = 0;
+	v.kb[0] = 1e-6, v.kb[1] = v.kb[2] = v.kb[3] = 0; // equidistant; all four zero would make the shader a pinhole
+	// DeviceFromCamera: OpenCV axes (x right, y down, z forward) = device (x, -y, -z), at the bottom camera's centre
+	const double m[16] = {1, 0, 0, bottom.m[3], 0, -1, 0, bottom.m[7], 0, 0, -1, bottom.m[11], 0, 0, 0, 1};
+	memcpy(v.m, m, sizeof(m));
+	return v;
+}
+
+//! The lookup table of one eye: virtual camera `v`, real cameras `cam[0]` (bottom) and `cam[1]` (top).
+static std::vector<CompTap> BuildComposite(const Calib &v, const Calib cam[2], int &bothCount)
+{
+	std::vector<CompTap> lut((size_t)kW * kH);
+	const double feather = 40; // px from a camera's image edge over which its weight rises
+	bothCount = 0;
+	for (int y = 0; y < kH; y++)
+		for (int x = 0; x < kW; x++) {
+			CompTap &t = lut[(size_t)y * kW + x];
+			t.off[0] = t.off[1] = -1, t.wTop = 0;
+			double u = (x - v.cx) / v.f, w = (y - v.cy) / v.f, th = sqrt(u * u + w * w);
+			double dc[3] = {th > 1e-9 ? sin(th) * u / th : 0, th > 1e-9 ? sin(th) * w / th : 0, cos(th)};
+			double d[3], o[3] = {v.m[3], v.m[7], v.m[11]};
+			for (int r = 0; r < 3; r++)
+				d[r] = v.m[r * 4] * dc[0] + v.m[r * 4 + 1] * dc[1] + v.m[r * 4 + 2] * dc[2];
+			// |o + s d| = R, s > 0
+			double b = o[0] * d[0] + o[1] * d[1] + o[2] * d[2], cc = o[0] * o[0] + o[1] * o[1] + o[2] * o[2] - kSphereM * kSphereM;
+			double sdist = -b + sqrt(std::max(0.0, b * b - cc));
+			double P[3] = {o[0] + sdist * d[0], o[1] + sdist * d[1], o[2] + sdist * d[2]};
+			double wgt[2] = {0, 0};
+			for (int c = 0; c < 2; c++) {
+				const Calib &k = cam[c];
+				double q[3] = {P[0] - k.m[3], P[1] - k.m[7], P[2] - k.m[11]}, dcam[3], px, py;
+				for (int i = 0; i < 3; i++) // DeviceFromCamera^T
+					dcam[i] = k.m[i] * q[0] + k.m[4 + i] * q[1] + k.m[8 + i] * q[2];
+				if (dcam[2] <= 0 || !Project62(k, dcam, px, py))
+					continue;
+				double sx = px - 0.5, sy = py - 0.5; // pixel centres at integers
+				if (sx < 0 || sy < 0 || sx >= kW - 1 || sy >= kH - 1)
+					continue;
+				int ix = (int)sx, iy = (int)sy;
+				t.off[c] = iy * kW + ix;
+				t.fx[c] = (uint8_t)std::lround((sx - ix) * 255), t.fy[c] = (uint8_t)std::lround((sy - iy) * 255);
+				wgt[c] = std::min(1.0, std::min({sx, sy, kW - 1 - sx, kH - 1 - sy}) / feather);
+			}
+			if (t.off[0] >= 0 && t.off[1] >= 0) {
+				t.wTop = (uint8_t)std::lround(255 * wgt[1] * (1 - wgt[0]) / std::max(1e-6, wgt[1] * (1 - wgt[0]) + wgt[0]));
+				if (t.wTop > 0 && t.wTop < 255)
+					bothCount++;
+			} else if (t.off[1] >= 0)
+				t.wTop = 255;
+		}
+	return lut;
+}
+
+static inline int Bilinear(const uint8_t *img, int stride, const CompTap &t, int c)
+{
+	int off = t.off[c], y = off / kW, x = off - y * kW;
+	const uint8_t *p = img + (size_t)y * stride + x;
+	int fx = t.fx[c], fy = t.fy[c];
+	int top = p[0] * (255 - fx) + p[1] * fx, bot = p[stride] * (255 - fx) + p[stride + 1] * fx;
+	return (top * (255 - fy) + bot * fy + 32512) / 65025;
+}
+
+//! One eye's composite image from its bottom and top camera; topGain (8.8 fixed point) scales the top camera.
+static void RenderComposite(const std::vector<CompTap> &lut, const uint8_t *bottom, const uint8_t *top, int stride,
+                            int topGain, const uint32_t grayPx[256], uint32_t *out, double &sumB, double &sumT, int &n)
+{
+	sumB = sumT = 0, n = 0;
+	for (size_t i = 0; i < lut.size(); i++) {
+		const CompTap &t = lut[i];
+		int vb = t.off[0] >= 0 ? Bilinear(bottom, stride, t, 0) : 0;
+		int vt = t.off[1] >= 0 && top ? Bilinear(top, stride, t, 1) : 0;
+		if (t.off[0] >= 0 && t.off[1] >= 0 && top && t.wTop > 0 && t.wTop < 255 && (i & 7) == 0)
+			sumB += vb, sumT += vt, n++;
+		vt = std::min(255, (vt * topGain) >> 8);
+		int v;
+		if (t.off[0] < 0 && (t.off[1] < 0 || !top))
+			v = 0;
+		else if (!top || t.wTop == 0)
+			v = vb;
+		else if (t.wTop == 255)
+			v = vt;
+		else
+			v = (vb * (255 - t.wTop) + vt * t.wTop + 127) / 255;
+		out[i] = grayPx[v];
+	}
 }
 
 //! The per-frame record descriptor (248 bytes) vrcompositor copies (0x15f4bc) into its camera state (0x15f748..0x15f8b4):
@@ -298,7 +432,21 @@ int main()
 	const int pattern = getenv("PT_PATTERN") ? atoi(getenv("PT_PATTERN")) : 0; // 1 gradient, 2 checkerboard
 	const bool dump = getenv("PT_DUMP") != nullptr;
 	const char *ringPath = getenv("PT_RING") ? getenv("PT_RING") : Q1CAM_RING_DEFAULT_PATH;
-	const Calib calib[2] = {LoadCalib(0), LoadCalib(2)}; // the bottom pair (left, right)
+	const Calib bottomCal[2] = {LoadCalib(0), LoadCalib(2)}, topCal[2] = {LoadCalib(1), LoadCalib(3)};
+	// PT_COMPOSITE=0: the bottom cameras alone, as before 2026-11-08
+	const bool composite = !getenv("PT_COMPOSITE") || atoi(getenv("PT_COMPOSITE")) != 0;
+	const bool useComp[2] = {composite && bottomCal[0].ok && topCal[0].ok, composite && bottomCal[1].ok && topCal[1].ok};
+	const Calib calib[2] = {useComp[0] ? VirtualCamera(bottomCal[0]) : bottomCal[0],
+	                        useComp[1] ? VirtualCamera(bottomCal[1]) : bottomCal[1]};
+	std::vector<CompTap> lut[2];
+	int topGain[2] = {256, 256};
+	for (int c = 0; c < 2; c++)
+		if (useComp[c]) {
+			const Calib pair[2] = {bottomCal[c], topCal[c]};
+			int both = 0;
+			lut[c] = BuildComposite(calib[c], pair, both);
+			printf("ptprovider: eye %d: composite of cameras %d and %d, %d blended pixels" "\n", c, c ? 2 : 0, c ? 3 : 1, both);
+		}
 	// The sensors' values are linear in light; the roomview shader decodes its Y' as sRGB (full-range BT.601, then the sRGB
 	// curve): encode them so that the light reaches the display linear, as Meta's passthrough does (its gamma steps cancel out)
 	uint8_t toSrgb[256];
@@ -532,23 +680,41 @@ int main()
 				uint32_t seq0 = __atomic_load_n(&s.seq, __ATOMIC_ACQUIRE);
 				if (!(seq0 & 1) && (s.frame_type == Q1CAM_FRAME_HEADSET || s.frame_type == 0)) {
 					const uint8_t *base = (const uint8_t *)hdr + hdr->header_size + (size_t)si * hdr->slot_bytes;
-					const int ids[2] = {0, 2};
-					int got = 0;
-					for (int c = 0; c < 2; c++)
+					auto camImage = [&](int id, int &stride) -> const uint8_t * {
 						for (uint32_t ci = 0; ci < s.ncams && ci < Q1CAM_MAX_CAMS; ci++) {
 							const q1cam_ring_cam &rc = s.cam[ci];
-							if (!rc.present || (int)rc.cam_id != ids[c] || rc.width != (uint32_t)kW || rc.height != (uint32_t)kH)
-								continue;
-							const uint8_t *src = base + rc.offset;
-							Img &im = img[c][slot[c]];
+							if (rc.present && (int)rc.cam_id == id && rc.width == (uint32_t)kW && rc.height == (uint32_t)kH) {
+								stride = (int)rc.stride;
+								return base + rc.offset;
+							}
+						}
+						return nullptr;
+					};
+					int got = 0;
+					for (int c = 0; c < 2; c++) {
+						int sb = 0, stt = 0;
+						const uint8_t *src = camImage(c ? 2 : 0, sb), *top = useComp[c] ? camImage(c ? 3 : 1, stt) : nullptr;
+						if (!src)
+							continue;
+						Img &im = img[c][slot[c]];
+						if (useComp[c] && (!top || stt == sb)) {
+							double sumB, sumT;
+							int n;
+							RenderComposite(lut[c], src, top, sb, topGain[c], grayPx, (uint32_t *)im.map, sumB, sumT, n);
+							if (n > 200 && sumT > n * 4.0) { // follow the bottom camera's brightness, slowly
+								int want = (int)std::lround(256.0 * sumB / sumT);
+								want = std::max(128, std::min(1024, want));
+								topGain[c] += (want - topGain[c]) / 8;
+							}
+						} else
 							for (int y = 0; y < kH; y++) {
-								const uint8_t *row = src + (size_t)y * rc.stride;
+								const uint8_t *row = src + (size_t)y * sb;
 								uint32_t *out = (uint32_t *)im.map + (size_t)y * kW;
 								for (int x = 0; x < kW; x++)
 									out[x] = grayPx[row[x]];
 							}
-							got++;
-						}
+						got++;
+					}
 					if (got == 2 && __atomic_load_n(&s.seq, __ATOMIC_ACQUIRE) == seq0) {
 						fresh = true;
 						lastFrame = now;

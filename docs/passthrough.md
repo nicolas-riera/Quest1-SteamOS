@@ -393,6 +393,37 @@ reference; shifts from layer snapshots by profile correlation, a band of the das
 - To confirm worn (user): the shake and tilt when the head moves. Depth (a real mesh) after that.
 
 
+## The top cameras: one composite image per eye (2026-11-08)
+
+The roomview takes one camera image per eye, and ptprovider gave it the bottom camera of that side. Those look ~40 degrees
+down, so above their field of view (about the upper half of the view when looking ahead) the shader clamped and stretched
+their image's edge (user, 2026-11-08: "the whole top half stretched", a photo through the lens). Meta fills that part with
+the top cameras. ptprovider now hands vrcompositor a virtual camera per eye: at the bottom camera's centre, looking straight
+ahead, equidistant fisheye (f = 266 px on 640 x 480, ~140 x 104 degrees; the KB terms are 1e-6, 0, 0, 0, since all four at
+zero select the pinhole path). Its image is filled through a table built once at start: each pixel's ray meets the roomview's
+3 m sphere, and that point is looked up in the bottom and the top camera of the side (full Fisheye62 model, bilinear), blended
+over the ~30,000 pixels where both see it (40 px feather from each image's edge). The top camera's gain follows the bottom
+one's over that band. The bottom camera's part is independent of the depth (the virtual camera sits at its centre); the top
+one's carries its ~6 cm parallax. `PT_COMPOSITE=0` gives the bottom cameras alone.
+
+## Depth from our own stereo (2026-11-08)
+
+Meta's engine (mrsystemservice) is not used after all: its RuntimeIPC server only grants its passthrough and depth
+calls to the clients it registers itself (Meta's own apps), and getting past that permission check is not a route
+this project takes. The depth now comes from the bottom camera pair (cameras 0 and 2, ~11 cm apart), computed in
+driver_quest1:
+
+- `src/steamvr-quest1/stereo_depth.{h,cpp}`: a plane sweep over a grid of view directions in the device frame
+  (32 x 24 cells, azimuth -50..50 degrees, elevation -50..35), 48 hypotheses uniform in inverse depth from 0.3 to
+  6 m, 5x5 ZNCC on 2x-downsampled images, sub-step refinement, a texture and uniqueness test, a 3x3 median, holes
+  filled from the neighbours, temporal smoothing. The projections of every cell at every depth are precomputed from
+  the factory calibration (Fisheye62, `DeviceFromCamera`).
+- `camera.cpp` (`CompositorGate`): the roomview mesh is a finer sphere (48 x 96); each vertex inside the grid takes the
+  measured depth along its direction (bilinear), fading to 3 m over the grid's last 10 degrees. A new mesh (data block,
+  same layout) is published for each camera frame set while frames flow; the driver reads the ring passively (it never
+  asks for frames: q1-ptprovider does while the roomview is shown). `QUEST1_CAMERA_DEPTH=0` keeps the fixed sphere.
+- `src/camtap/depth_test.cpp`: the same module on the live ring, printing only numbers (timing, a coarse depth map).
+
 ## Notes moved from the to-do list (2026-11-08): Passthrough
 
 History of measurements, fixes and open points as they were written in docs/todo.md (the to-do list now only
