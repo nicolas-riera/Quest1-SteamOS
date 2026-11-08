@@ -141,6 +141,21 @@ static struct { uint64_t fb, half, view, twin; } qs_stwins[64];
 static unsigned qs_nstwins;
 static pthread_mutex_t qs_scene_lock = PTHREAD_MUTEX_INITIALIZER;
 
+// The system layer in 4x MSAA: SteamVR's dashboard asks for it (with the camera roomview) while Steam's VR UI is
+// loading, in the OOBE and on the lock screen (systemui.js, "systemlayer-msaa-enable-override"). Its eyes then render
+// into 4x images that only the distortion pass reads, resolving the samples itself. Scene mode drops that pass and
+// needs 1-sample targets for the eyes to render into its buffers, so there vrcompositor's 4x attachments, render passes
+// and pipelines are made 1-sample (quest1_compat.c): no anti-aliasing on those screens, as on the others. Without it
+// (2026-11-08) the distortion pass ran into the scene-sized buffers, Monado distorted that again: 9 fps and the
+// controllers drawn wrong. (With RenderMode=Direct the 4x layer also costs ~25 ms of GPU a frame.)
+static bool qs_scene_single_sample(VkSampleCountFlagBits samples)
+{
+	if (samples == VK_SAMPLE_COUNT_1_BIT || !qs_enabled())
+		return false;
+	qs_scene_mode_read();
+	return qs_scene_on;
+}
+
 static void qs_scene_note(VkImage image, const VkImageCreateInfo *ci)
 {
 	const VkImageUsageFlags want = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;

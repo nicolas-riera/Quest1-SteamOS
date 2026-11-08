@@ -3,6 +3,38 @@
 Where the frame time goes and what was tried. Current numbers and the direct scanout path:
 docs/direct-scanout.md; Steam's UI: docs/steam-gpu.md.
 
+## 2026-11-08 (night): the Steam library at 72 fps, Steam's UI behind SteamVR
+
+With Steam's library open in the dashboard SteamVR was at 57-60 fps (70 with Steam's CEF GPU process stopped). Three
+causes, three fixes:
+
+- **vrcompositor's vblank thread woke up late.** Its VulkanVblankThread (the one calling vkGetSwapchainCounterEXT)
+  polls the vblank fence, then sleeps until the next vblank under SCHED_OTHER. With Steam's processes and Meta's
+  tracking loading the CPUs (load ~11 on 8 cores) it woke up to 7 ms late; the RenderThread then aimed at the vblank
+  after and a frame was missed (about one a second, frame trace). quest1_display.c makes that thread SCHED_RR 90 on its
+  first call, and the layer's own vblank thread SCHED_RR 95 (SteamVR has CAP_SYS_NICE; its RenderThread is RR 99).
+- **Steam's UI shared the CPUs with SteamVR.** The kernel's cgroup v2 has only the memory and pids controllers (4.4: no
+  cpu, no io), so quest1_vkredirect (preloaded in the Steam client) gives every steamwebhelper process nice 10 and best-
+  effort I/O priority 7 (`QUEST1_STEAM_UI_NICE`, 0 = off). Games are children of the steam client, not of
+  steamwebhelper: they keep normal priorities. Steam's GPU work was already LOW priority (below).
+- **The memory protections did nothing.** On 4.4 a cgroup's memory.low only protects it while all its ancestors are
+  below their own memory.low (mem_cgroup_low()), and system.slice had none. holo-perf.sh now gives system.slice 8G, so
+  the per-unit MemoryLow of SteamVR, the dashboard, Monado and Meta's tracking take effect and steam.service (none) is
+  what goes to swap first.
+
+Measured panels on, scene mode, library open: 71.6-72.1 fps (72.0 after a fresh boot, GPU 75 % busy: vrcompositor
+~8.3 ms and Monado ~2.2 ms a frame). Still open: when Steam's main page animates, every repaint costs ~14 ms of GPU in
+Steam's CEF (the "SteamVR" page is 1280x720 at device scale 1.5): 51-66 fps while it runs (70-72 for an animation in
+the bar). RenderMode=Direct is not a way out for Steam: given to steam.service as a test, a GPU page fault in
+steamwebhelper (`kgsl_iommu_fault_handler`, read translation fault) was followed ~20 s later by a whole-headset freeze
+with nothing in the console log.
+
+Scene mode also works on the 4x MSAA system layer now (the dashboard asks for it while Steam's VR UI loads, in the
+OOBE and on the lock screen: `systemlayer-msaa-enable-override` in systemui.js). In scene mode the layer makes
+vrcompositor's 4x colour/depth images, render passes and pipelines 1-sample (quest1_compat.c, `qs_scene_single_sample`):
+the eyes render straight into Monado's 1-sample buffers, and the distortion pass that used to resolve the samples is
+gone. Before, scene mode ran at 9 fps there with the controllers drawn wrong.
+
 ## 2026-11-08 (evening): vrcompositor's render thread realtime
 
 vrcompositor asks for realtime priority for its RenderThread and SignalThread ("Error establishing real-time priority",

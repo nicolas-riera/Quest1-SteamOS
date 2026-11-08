@@ -1254,8 +1254,25 @@ static uint64_t qd_period_ns(void) { return 1000000000000ull / qd_mhz; }
 
 static uint64_t qd_vblank_count(void) { return (now_ns() - qd_epoch_ns) / qd_period_ns(); }
 
+//! The calling thread made realtime if it is not already (SteamVR runs with CAP_SYS_NICE, as on desktop Linux).
+//! vrcompositor's VulkanVblankThread (it calls vkGetSwapchainCounterEXT) polls its vblank fence then sleeps until
+//! the next one with SCHED_OTHER: with the CPUs loaded (load ~11 on 8 cores: Steam, Meta's tracking) it woke up to
+//! 7 ms late, its RenderThread then aimed at the vblank after and a frame was missed (~1 a second with the Steam
+//! library open, 2026-11-08 frame trace). Its RenderThread is SCHED_RR 99 already; these two get less.
+static void qd_realtime(const char *who, int prio)
+{
+	int policy;
+	struct sched_param sp;
+	if (pthread_getschedparam(pthread_self(), &policy, &sp) == 0 && policy != SCHED_OTHER)
+		return;
+	sp.sched_priority = prio;
+	int e = pthread_setschedparam(pthread_self(), SCHED_RR, &sp);
+	LOG("%s: SCHED_RR %d: %s\n", who, prio, e ? strerror(e) : "ok");
+}
+
 static void *qd_vblank_thread(void *arg)
 {
+	qd_realtime("display: the layer's vblank thread", 95);
 	for (;;) {
 		uint64_t next = qd_epoch_ns + (qd_vblank_count() + 1) * qd_period_ns();
 		struct timespec ts = {(time_t)(next / 1000000000ull), (long)(next % 1000000000ull)};
@@ -1316,6 +1333,11 @@ static VKAPI_ATTR VkResult VKAPI_CALL qd_GetSwapchainCounterEXT(VkDevice device,
 {
 	qd_trace("counter");
 	ft("counter", 0);
+	static __thread bool rt;
+	if (!rt) {
+		rt = true;
+		qd_realtime("display: vrcompositor's vblank thread", 90);
+	}
 	pthread_once(&qd_vblank_once, qd_vblank_start);
 	*value = qd_vblank_count();
 	return VK_SUCCESS;

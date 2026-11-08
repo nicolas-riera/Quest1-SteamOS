@@ -1892,6 +1892,16 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateImage(VkDevice device, const VkImage
 			samp.usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
 			ci = &samp;
 		}
+		// scene mode: the 4x MSAA system layer made 1-sample (qs_scene_single_sample, quest1_scanout.c)
+		VkImageCreateInfo single;
+		if ((ci->usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) &&
+		    qs_scene_single_sample(ci->samples)) {
+			LOG("scene mode: %ux%u format %d image of %d samples made 1-sample\n", ci->extent.width, ci->extent.height,
+			    ci->format, ci->samples);
+			single = *ci;
+			single.samples = VK_SAMPLE_COUNT_1_BIT;
+			ci = &single;
+		}
 		VkResult r = d->CreateImage(device, ci, alloc, out);
 		if (r == VK_SUCCESS)
 			qs_scene_note(*out, ci); // scene mode: vrcompositor's eye render targets (quest1_scanout.c)
@@ -2171,6 +2181,20 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreatePipelineLayout(VkDevice device, cons
 static VKAPI_ATTR VkResult VKAPI_CALL CreateRenderPass(VkDevice device, const VkRenderPassCreateInfo *ci,
                                                        const VkAllocationCallbacks *alloc, VkRenderPass *out)
 {
+	// scene mode: the 4x MSAA system layer made 1-sample (qs_scene_single_sample, quest1_scanout.c)
+	VkRenderPassCreateInfo single;
+	VkAttachmentDescription atts[8];
+	bool msaa = false;
+	for (uint32_t i = 0; i < ci->attachmentCount; i++)
+		msaa |= qs_scene_single_sample(ci->pAttachments[i].samples);
+	if (msaa && ci->attachmentCount <= 8) {
+		single = *ci;
+		memcpy(atts, ci->pAttachments, ci->attachmentCount * sizeof(atts[0]));
+		for (uint32_t i = 0; i < ci->attachmentCount; i++)
+			atts[i].samples = VK_SAMPLE_COUNT_1_BIT;
+		single.pAttachments = atts;
+		ci = &single;
+	}
 	VkResult r = device_of(device)->CreateRenderPass(device, ci, alloc, out);
 	if (r == VK_SUCCESS)
 		rm_note_rp(device_of(device), *out, ci);
@@ -2458,6 +2482,24 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateGraphicsPipelines(VkDevice device, V
 	if (spirv_debug())
 		for (uint32_t i = 0; i < n; i++)
 			log_stages("graphics pipeline", ci[i].pStages, ci[i].stageCount);
+	// scene mode: the 4x MSAA system layer made 1-sample (qs_scene_single_sample, quest1_scanout.c)
+	VkGraphicsPipelineCreateInfo single[16];
+	VkPipelineMultisampleStateCreateInfo ms[16];
+	bool msaa = false;
+	for (uint32_t i = 0; i < n; i++)
+		msaa |= ci[i].pMultisampleState && qs_scene_single_sample(ci[i].pMultisampleState->rasterizationSamples);
+	if (msaa && n <= 16) {
+		for (uint32_t i = 0; i < n; i++) {
+			single[i] = ci[i];
+			if (ci[i].pMultisampleState && ci[i].pMultisampleState->rasterizationSamples != VK_SAMPLE_COUNT_1_BIT) {
+				ms[i] = *ci[i].pMultisampleState;
+				ms[i].rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+				ms[i].sampleShadingEnable = VK_FALSE;
+				single[i].pMultisampleState = &ms[i];
+			}
+		}
+		ci = single;
+	}
 	VkResult r = device_of(device)->CreateGraphicsPipelines(device, cache, n, ci, alloc, out);
 	if (spirv_debug())
 		LOG("  -> %d, pipeline %p\n", r, n ? (void *)out[0] : NULL);

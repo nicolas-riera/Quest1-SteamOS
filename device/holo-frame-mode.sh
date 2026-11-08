@@ -156,6 +156,7 @@ chmod 755 /usr/local/sbin/quest1-frame-settings
 # loads and stores cost a third of its GPU time (docs/direct-scanout.md). SteamVR alone sees this qgl_config.txt
 # (bound over the system's in its unit): the system's, plus that key (hashed name, docs/adreno-vk-extensions.md).
 # Written here, not when the unit starts: there the bind would make the command read the very file it writes.
+# Not for Steam's CEF: tried on steam.service (2026-11-08), a GPU page fault in steamwebhelper, then the headset froze.
 mkdir -p /etc/quest1
 { grep -v "RenderMode" /data/vendor/gpu/qgl_config.txt 2>/dev/null
   echo "0x1fd41fd8=direct   ; RenderMode=Direct (SteamVR only)"; } > /etc/quest1/qgl_config-steamvr.txt

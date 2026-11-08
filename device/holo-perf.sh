@@ -60,8 +60,14 @@ vm.page-cluster=0
 vm.min_free_kbytes=49152
 EOF
 
-# reclaim the Steam client's memory before the compositors' and the tracking's (cgroup v2 memory.low)
-for u in quest1-steamvr:700M monado:150M android-trackingservice:150M; do
+# Reclaim the Steam client's memory before SteamVR's, Monado's, the passthrough's and the tracking's (cgroup v2
+# memory.low). On this 4.4 kernel a cgroup is only protected while all its ancestors are below their own memory.low
+# too (mem_cgroup_low()), so system.slice gets one larger than the RAM: until 2026-11-08 it had none and these
+# protections did nothing. steam.service has none: it is what goes to swap first.
+mkdir -p /etc/systemd/system/system.slice.d
+printf '[Slice]\nMemoryLow=8G\n' >/etc/systemd/system/system.slice.d/quest1-memory.conf
+for u in quest1-steamvr:700M quest1-frame-dashboard:400M monado:150M android-trackingservice:150M \
+	android-sensors-hal:64M android-q1trackd:32M android-ovrstub:16M q1-ptprovider:64M q1-camoverlay:64M; do
 	mkdir -p /etc/systemd/system/${u%%:*}.service.d
 	printf '[Service]\nMemoryLow=%s\n' "${u#*:}" >/etc/systemd/system/${u%%:*}.service.d/quest1-memory.conf
 done
