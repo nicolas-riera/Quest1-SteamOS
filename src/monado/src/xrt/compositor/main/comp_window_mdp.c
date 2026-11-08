@@ -84,7 +84,18 @@ android_dlsym(void *handle, const char *symbol);
 //! the user then found the re-projection laggy (2026-11-07 evening): the pose is not ahead of its stamp (Meta's
 //! own log puts IMU samples 7-8 ms after capture; libossdk extrapolates its ~20 ms old samples to the time asked).
 //! 18 ms (not a user setting: the user wants it fixed, 2026-11-08); "delay=" in /tmp/quest1-reproj overrides it.
-#define MDP_DISPLAY_DELAY_DEFAULT_MS 18.0f
+//! 2026-11-08: replaced by the measured scan-out below; this is now the time of the panel's middle row (the pose
+//! age the driver's prediction follows, and the stats).
+#define MDP_DISPLAY_DELAY_DEFAULT_MS (MDP_SCAN_FIRST_MS + MDP_SCAN_MS / 2)
+//! The panels' scan-out, measured 2026-11-08 (fb0's mdp_line against its vsync_event, 3000 samples): 116 lines a
+//! millisecond (8.6 us a line), line 0 ~0.1 ms after the vsync, the 1600 rows in 13.75 ms. Both panels scan in step,
+//! buffer row 0 first (no flip in the commit). A commit made before vsync N+1 is latched there: its row r is lit at
+//! vsync N + 13.9 + 0.1 + r * 0.0086 ms. While the head turns, the bottom of the image is lit 13.75 ms after the top:
+//! warped for one time, a 100 deg/s turn sheared and stretched it by 1.4 deg (user: "the dashboard and Aurora stretch
+//! when I move"). The warp now takes each mesh row's own lighting time, as Meta's per-slice timewarp does.
+//! "scan=<ms>" in /tmp/quest1-reproj overrides MDP_SCAN_MS (0 = one time for the whole image, as before).
+#define MDP_SCAN_FIRST_MS 14.0f
+#define MDP_SCAN_MS 13.75f
 //! The vsync thread ticks (picks the newest frame, warps and commits it) this long before the vsync that latches
 //! the commit, instead of right after the vsync before: the warp's pose is ~8 ms fresher (less extrapolation)
 //! and a frame finished in the first part of the period reaches the panels a vsync sooner. The warp takes 3-4 ms
@@ -238,7 +249,7 @@ struct mdp_direct
 	struct
 	{
 		bool off;
-		float yaw_deg, thr_deg, delay_ms;
+		float yaw_deg, thr_deg, delay_ms, scan_ms;
 		float display_delay_ms; //!< the effective display delay (setting, or the delay= knob)
 		float lead_ms;          //!< tick lead before the latching vsync (MDP_TICK_LEAD_DEFAULT_MS)
 		float rx_deg, ry_deg, rz_deg; //!< constant frame rotation R: delta' = conj(R) * delta * R
@@ -1090,6 +1101,53 @@ head_orientation(struct mdp_target *t, int64_t at_ns, float *q)
 	return true;
 }
 
+//! The warp's rotation for a display pose qd (Monado's device space) of a frame rendered at qr (LOCAL), with the test
+//! knobs (yaw=, sign=, rx/ry/rz=) applied.
+static void
+warp_delta(const struct mdp_direct *D, const float *qr, const float *qd, float *delta)
+{
+	// delta = conj(q_render) * conj(o) * q_dev(display time) = conj(q_render) * q_local(display time)
+	float co[4], cr[4], a[4];
+	quat_conj(D->o, co);
+	quat_conj(qr, cr);
+	quat_mul(co, qd, a);
+	if (D->knobs.yaw_deg != 0) {
+		float hy = D->knobs.yaw_deg * (float)M_PI / 360.0f;
+		float qy[4] = {0, sinf(hy), 0, cosf(hy)}, b[4];
+		quat_mul(a, qy, b);
+		memcpy(a, b, sizeof(a));
+	}
+	quat_mul(cr, a, delta);
+	if (D->knobs.sign & 1) delta[0] = -delta[0];
+	if (D->knobs.sign & 2) delta[1] = -delta[1];
+	if (D->knobs.sign & 4) delta[2] = -delta[2];
+	quat_normalize(delta);
+	if (D->knobs.rx_deg != 0 || D->knobs.ry_deg != 0 || D->knobs.rz_deg != 0) {
+		float hx = D->knobs.rx_deg * (float)M_PI / 360.0f, hy = D->knobs.ry_deg * (float)M_PI / 360.0f,
+		      hz = D->knobs.rz_deg * (float)M_PI / 360.0f;
+		float qx[4] = {sinf(hx), 0, 0, cosf(hx)}, qy[4] = {0, sinf(hy), 0, cosf(hy)},
+		      qz[4] = {0, 0, sinf(hz), cosf(hz)}, rq[4], rt[4], rc[4], t1[4], t2[4];
+		quat_mul(qx, qy, rt);
+		quat_mul(rt, qz, rq);
+		quat_conj(rq, rc);
+		quat_mul(rc, delta, t1);
+		quat_mul(t1, rq, t2);
+		memcpy(delta, t2, sizeof(t2));
+		quat_normalize(delta);
+	}
+}
+
+//! Normalised linear interpolation of two close rotations (one scan-out apart).
+static void
+quat_nlerp(const float *a, const float *b, float s, float *o)
+{
+	float dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3], sb = dot < 0 ? -s : s;
+	for (int i = 0; i < 4; i++) {
+		o[i] = (1 - s) * a[i] + sb * b[i];
+	}
+	quat_normalize(o);
+}
+
 //! Test and tuning knobs, from the file /tmp/quest1-reproj (read twice a second): "off" shows the layer's frames
 //! as they are, "yaw=<deg>" adds a fixed yaw to the re-projection, "thr=<deg>" is the angle under which a fresh
 //! frame is shown as it is (default 0.2), "delay=<ms>" the time from the vsync before a commit to the pose it is
@@ -1107,7 +1165,11 @@ warp_read_knobs(struct mdp_direct *D, int64_t now)
 	D->knobs.read_ns = now;
 	D->knobs.off = !MDP_WARP_DEFAULT_ON;
 	D->knobs.yaw_deg = 0;
-	D->knobs.thr_deg = 0.2f;
+	// every fresh frame is warped: shown raw when within 0.2 deg (to save the warp's GPU time), the image jumped
+	// between warped and unwarped frames as the head moved a little (user, 2026-11-08: "micro-tremors at each heartbeat";
+	// gone with thr=0, A/B worn). Meta's timewarp never shows a frame unwarped either.
+	D->knobs.thr_deg = 0.0f;
+	D->knobs.scan_ms = MDP_SCAN_MS;
 	D->knobs.delay_ms = 0;
 	D->knobs.lead_ms = MDP_TICK_LEAD_DEFAULT_MS;
 	D->knobs.display_delay_ms = MDP_DISPLAY_DELAY_DEFAULT_MS;
@@ -1157,6 +1219,9 @@ warp_read_knobs(struct mdp_direct *D, int64_t now)
 	}
 	if ((p = strstr(buf, "lead=")) != NULL) {
 		D->knobs.lead_ms = (float)atof(p + 5);
+	}
+	if ((p = strstr(buf, "scan=")) != NULL) {
+		D->knobs.scan_ms = (float)atof(p + 5);
 	}
 	if ((p = strstr(buf, "sign=")) != NULL) {
 		D->knobs.sign = (uint32_t)atoi(p + 5);
@@ -1238,7 +1303,7 @@ q1_chroma(float rsq, float out[3])
 //! the undistorted eye image (its tangent extent). Else the layer's image is already lens-corrected: the
 //! direction goes back through the inverse lens model (green only, the same coordinates for the 3 channels).
 static void
-warp_build_mesh(const struct mdp_direct *D, int h, const float *delta, float *out)
+warp_build_mesh(const struct mdp_direct *D, int h, const float *delta_top, const float *delta_bot, float *out)
 {
 	const int view = 1 - h; // half 0 (x = 0) is the right eye, view 1
 	const float sx = view == 0 ? -1.0f : 1.0f;
@@ -1264,6 +1329,9 @@ warp_build_mesh(const struct mdp_direct *D, int h, const float *delta, float *ou
 	}
 	const float tl = D->tan_l[h], tr = D->tan_r[h], tu = D->tan_u[h], td = D->tan_d[h];
 	for (int j = 0; j <= WARP_GRID; j++) {
+		// this row's rotation: rows are lit one after the other (MDP_SCAN_MS), the buffer's row 0 (NDC y -1) first
+		float delta[4];
+		quat_nlerp(delta_top, delta_bot, (float)j / WARP_GRID, delta);
 		for (int i = 0; i <= WARP_GRID; i++) {
 			float fx = (float)i / WARP_GRID, fy = (float)j / WARP_GRID;
 			float *vtx = out + WARP_VTX_FLOATS * (j * (WARP_GRID + 1) + i);
@@ -1768,7 +1836,7 @@ warp_lens_setup(struct mdp_target *t)
 
 //! Call with D->lock held: draw the latest frame warped by `delta` into output set `o`. GPU time in ms.
 static bool
-warp_render(struct mdp_target *t, int o, const float *delta, double *gpu_ms)
+warp_render(struct mdp_target *t, int o, const float *delta_top, const float *delta_bot, double *gpu_ms)
 {
 	struct mdp_direct *D = &t->direct;
 	struct vk_bundle *vk = &t->base.c->base.vk;
@@ -1782,7 +1850,7 @@ warp_render(struct mdp_target *t, int o, const float *delta, double *gpu_ms)
 	}
 	int64_t tm0 = os_monotonic_get_ns();
 	for (int h = 0; h < 2; h++) {
-		warp_build_mesh(D, h, delta, V->vptr + h * WARP_VTX_FLOATS * (WARP_GRID + 1) * (WARP_GRID + 1));
+		warp_build_mesh(D, h, delta_top, delta_bot, V->vptr + h * WARP_VTX_FLOATS * (WARP_GRID + 1) * (WARP_GRID + 1));
 	}
 	D->stats.mesh_ms_sum += (double)(os_monotonic_get_ns() - tm0) / 1e6;
 
@@ -2044,7 +2112,7 @@ direct_tick(struct mdp_target *t, int64_t vsync)
 			if ((D->fresh || D->need_refresh) && warp_init(t)) {
 				int o = warp_free_set(D);
 				double gpu_ms = 0;
-				if (o >= 0 && warp_render(t, o, identity, &gpu_ms) &&
+				if (o >= 0 && warp_render(t, o, identity, identity, &gpu_ms) &&
 				    direct_commit(t, D->out[o], -1, o, direct_ack_frame(D))) {
 					warped = true;
 					D->held_frame = D->latest_frame.frame;
@@ -2122,34 +2190,18 @@ direct_tick(struct mdp_target *t, int64_t vsync)
 					}
 					D->calibrated_frame = D->latest_frame.frame;
 				}
-				// delta = conj(q_render) * conj(o) * q_dev(display time) = conj(q_render) * q_local(display time)
-				float co[4], cr[4], a[4], delta[4];
-				quat_conj(D->o, co);
-				quat_conj(qr, cr);
-				quat_mul(co, qd, a);
-				if (D->knobs.yaw_deg != 0) {
-					float hy = D->knobs.yaw_deg * (float)M_PI / 360.0f;
-					float qy[4] = {0, sinf(hy), 0, cosf(hy)}, b[4];
-					quat_mul(a, qy, b);
-					memcpy(a, b, sizeof(a));
-				}
-				quat_mul(cr, a, delta);
-				if (D->knobs.sign & 1) delta[0] = -delta[0];
-				if (D->knobs.sign & 2) delta[1] = -delta[1];
-				if (D->knobs.sign & 4) delta[2] = -delta[2];
-				quat_normalize(delta);
-				if (D->knobs.rx_deg != 0 || D->knobs.ry_deg != 0 || D->knobs.rz_deg != 0) {
-					float hx = D->knobs.rx_deg * (float)M_PI / 360.0f, hy = D->knobs.ry_deg * (float)M_PI / 360.0f,
-					      hz = D->knobs.rz_deg * (float)M_PI / 360.0f;
-					float qx[4] = {sinf(hx), 0, 0, cosf(hx)}, qy[4] = {0, sinf(hy), 0, cosf(hy)},
-					      qz[4] = {0, 0, sinf(hz), cosf(hz)}, rq[4], rt[4], rc[4], t1[4], t2[4];
-					quat_mul(qx, qy, rt);
-					quat_mul(rt, qz, rq);
-					quat_conj(rq, rc);
-					quat_mul(rc, delta, t1);
-					quat_mul(t1, rq, t2);
-					memcpy(delta, t2, sizeof(t2));
-					quat_normalize(delta);
+				float delta[4], delta_top[4], delta_bot[4];
+				warp_delta(D, qr, qd, delta);
+				memcpy(delta_top, delta, sizeof(delta));
+				memcpy(delta_bot, delta, sizeof(delta));
+				if (D->knobs.scan_ms > 0) {
+					// the first and the last row's lighting times (MDP_SCAN_MS)
+					float qa[4], qb[4];
+					int64_t half = (int64_t)(D->knobs.scan_ms * 0.5e6);
+					if (head_orientation(t, display_ns - half, qa) && head_orientation(t, display_ns + half, qb)) {
+						warp_delta(D, qr, qa, delta_top);
+						warp_delta(D, qr, qb, delta_bot);
+					}
 				}
 				D->stats.ax_sum += fabsf(delta[0]) * 2 * (180.0f / (float)M_PI);
 				D->stats.ay_sum += fabsf(delta[1]) * 2 * (180.0f / (float)M_PI);
@@ -2177,7 +2229,7 @@ direct_tick(struct mdp_target *t, int64_t vsync)
 					int o = warp_free_set(D);
 					double gpu_ms = 0;
 					int64_t t0 = os_monotonic_get_ns();
-					if (o >= 0 && warp_render(t, o, delta, &gpu_ms)) {
+					if (o >= 0 && warp_render(t, o, delta_top, delta_bot, &gpu_ms)) {
 						warp_snapshot(D, o);
 						int64_t tc0 = os_monotonic_get_ns();
 						bool committed = direct_commit(t, D->out[o], -1, o, direct_ack_frame(D));
