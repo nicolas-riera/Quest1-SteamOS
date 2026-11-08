@@ -3,6 +3,60 @@
 Where the frame time goes and what was tried. Current numbers and the direct scanout path:
 docs/direct-scanout.md; Steam's UI: docs/steam-gpu.md.
 
+## 2026-11-08 (night): Steam's VR UI ran the RAM out and froze the headset; its GPU queue, its readback memory
+
+Measured without the user, with a repeatable load: Steam's CEF remote debugging (`.cef-enable-remote-debugging` in
+Steam's folder, port 8080 on localhost, removed afterwards) and a nearly transparent full-page layer on the VR main page
+(`valve.steam.gamepadui.main`) changing colour on every animation frame, so Steam repaints and sends its whole page all
+the time; also a 64 px square (the cost turned out the same: a fixed cost per frame).
+
+Where the time went, before:
+- Steam's VR page repainted at ~8 frames a second, the CPUs were not saturated (320 % of 800 %) and its VR thread
+  (CVRAPIITask, vrclient's GL fallback) took ~5 %: not the CPU copy chain.
+- Its CEF GPU process: ~20-27 ms of GPU per frame, on the low-priority ring that vrcompositor preempts (each batch took
+  40-220 ms of wall time), and 17-20 batches always waited in the kernel queue (kgsl `ctx/<id>`: queued minus retired),
+  i.e. several frames: Steam reacted seconds after the laser.
+- Its VizCompositorThread spent ~36 ms of CPU a frame in one memcpy: the readback of each 1920x1080 frame out of memory
+  the Adreno blob reports as HOST_CACHED|HOST_COHERENT but maps write-combined (test_readback: 221 MB/s CPU reads; its
+  HOST_CACHED non-coherent type reads at 4 GB/s).
+- Its GPU memory: every frame allocated ~2.7 new 12 MB textures (Skia's scratch textures, with the 192 MB GPU memory
+  budget the launcher gave Chromium) plus an 8 MB readback buffer, 380 MB/s of kgsl allocations (zeroed, mapped, cache
+  flushed, freed later), and ANGLE frees them only once the GPU is done with them: with 17-20 batches pending, the
+  process's kgsl memory went from ~250 to ~1000 MB within seconds of a repaint starting, kswapd ran at 50 %, and
+  vrcompositor dropped to 38-69 fps.
+
+**The freezes.** That is what froze the headset twice this night (and once before, right after a Steam restart): the
+RAM ran out, and every process that needed a page from the disk waited for minutes. The new q1-hangwatch
+(device/q1-hangwatch.py) showed it in the kernel log kept by pstore (read after a reboot from an Android `adb
+bugreport`, LAST KMSG): sshd, steam, vrdashboard, systemd-userwork in D state on `filemap_fault`, `__wait_on_buffer`,
+`jbd2_journal_get_write_access`, swap out at ~3400 pages a second just before. The kernel and Monado (whose pages were
+resident) kept running; when the panels came on, Monado's thread stopped too.
+
+Fixes:
+- **A GPU queue limit in Steam's GPU process** (quest1_wsi_x11.c, `QUEST1_VKSHIM_MAX_INFLIGHT=4`): each submission is
+  followed by an empty one with a fence of the shim's; with 4 in flight the next submission waits for the oldest.
+  Chromium then draws as fast as the GPU finishes. 2, 4 and 8 gave 9-13 fps alike; 4 kept.
+- **Really cached readback memory** (quest1_vkshim.c, `QUEST1_VKSHIM_CACHED_READBACK=1`): the "cached coherent" type
+  is reported without HOST_CACHED and buffers that may use it may use the cached non-coherent one, which ANGLE then
+  takes for its readbacks (it flushes and invalidates non-coherent memory). VizCompositorThread 39-80 % -> 13-15 %.
+- **Chromium's GPU memory budget 384 MB** instead of 192 (the launcher): under one new full-page texture a frame.
+- **Block devices tuned like Android does on this headset** (holo-perf.sh, quest1-io.service): CFQ without idling
+  (slice_idle and group_idle 0), read-ahead 128 KiB instead of 512, dirty pages written back from 5 % and after 2 s.
+
+After, same load: Steam 9-13 fps (avg ~10, small or full damage alike), its kgsl memory flat at 260-290 MB, 1-4 batches
+pending, MemAvailable steady (~600 MB), no kswapd in the top threads, vrcompositor 71.4-72.0 fps for 5 minutes on end,
+no GPU fault, no GPU process restart. Steam's CPU: ~1 core in all for its processes.
+
+What limits Steam now is the GPU: 100 % busy (vrcompositor ~9.5 ms a frame, Monado ~2.2, Steam's ~24 ms per frame in the
+gaps). That fixed cost per frame (any damage) is the full composite of the page plus its capture and readback; the
+next lever (docs/todo.md).
+
+On the way: one GPU hang on Steam's ring (`RB[2]: gpu fault`, kgsl snapshot and recovery, Chromium's watchdog restarted
+its GPU process) happened under memory pressure before the queue limit, with the cached readback on; not seen again in
+the 5-minute soak with both. Also found: at some boots udev's helpers hang for 3 minutes and are killed
+(`libinput-device-group` on the power key's event0, `scsi_id` on UFS LUNs), the power key stayed root 0600 and
+quest1-powerbutton restarted every 2 s for the whole boot (fixed: its unit gives the event nodes udev's default group).
+
 ## 2026-11-08 (late night): the view trembled while Steam worked; real-time priorities; Steam's overlay path
 
 Worn, the view trembled as soon as Steam was touched (and in desktop mode), with half-second freezes. Two causes in the
@@ -36,7 +90,8 @@ an OpenGL texture on Mesa llvmpipe, vrclient's GL fallback reads it back (`MESA_
 GL_EXT_memory_object, since llvmpipe can't import the Adreno's memory) into its 256 MB ring ("Ring Buffer Wrapped!"
 every 5-10 s while browsing: ~50 MB/s, about 6 frames a second), and vrcompositor's RenderThread copies it in. Measured
 worn while browsing: load 13-16 on 8 cores, GPU 100 % busy, 40-110 MB/s swapped out, vrcompositor's RenderThread
-at about a full core (~4 ms of CPU a frame at rest). Next: a zero-copy overlay path (docs/todo.md).
+at about a full core (~4 ms of CPU a frame at rest). Next: a zero-copy overlay path (docs/todo.md). (Measured the next
+night: the CPU copies were not the limit; Steam's GPU queue and memory were, section above.)
 
 ## 2026-11-08 (night): the Steam library at 72 fps, Steam's UI behind SteamVR
 

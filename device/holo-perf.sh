@@ -58,6 +58,39 @@ cat > /etc/sysctl.d/90-quest1-vm.conf <<'EOF'
 vm.swappiness=100
 vm.page-cluster=0
 vm.min_free_kbytes=49152
+# Android's values on this headset (init rc): write dirty pages back early and in small amounts, so that a burst of
+# writes (Steam's caches, the journal) never queues hundreds of MB in front of the page reads everything waits for
+vm.dirty_background_ratio=5
+vm.dirty_expire_centisecs=200
+EOF
+
+# Block devices as Android tunes them: CFQ without idling (slice_idle/group_idle 0: idling is for spinning disks, on
+# flash it holds reads back), 128 KiB read-ahead (512 by default: under memory pressure every code page fault read
+# 512 KiB). On 2026-11-08 the headset froze twice under memory pressure with Steam busy: every process that needed a
+# page from the disk (code, the ext4 journal) waited for minutes (q1-hangwatch), SSH included.
+cat > /usr/local/sbin/quest1-io <<'EOF'
+#!/bin/sh
+for q in /sys/block/sd[a-z]/queue /sys/block/loop[0-9]*/queue; do
+	[ -d "$q" ] || continue
+	echo 128 > "$q/read_ahead_kb" 2>/dev/null
+	[ -e "$q/iosched/slice_idle" ] && echo 0 > "$q/iosched/slice_idle"
+	[ -e "$q/iosched/group_idle" ] && echo 0 > "$q/iosched/group_idle"
+done
+exit 0
+EOF
+chmod 755 /usr/local/sbin/quest1-io
+cat > /etc/systemd/system/quest1-io.service <<'EOF'
+[Unit]
+Description=Quest 1 block device tuning (Android's values)
+DefaultDependencies=no
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/quest1-io
+
+[Install]
+WantedBy=sysinit.target
 EOF
 
 # Reclaim the Steam client's memory before SteamVR's, Monado's, the passthrough's and the tracking's (cgroup v2
@@ -80,9 +113,29 @@ OOMScoreAdjust=-900
 Nice=-10
 EOF
 
+# q1-hangwatch: what blocks the headset (D-state threads with their kernel stacks, spinning real-time threads), into
+# the kernel log that pstore keeps across a reboot (q1-hangwatch.py)
+install -m 755 "$(dirname "$0")/q1-hangwatch.py" /usr/local/sbin/q1-hangwatch
+cat > /etc/systemd/system/q1-hangwatch.service <<'EOF'
+[Unit]
+Description=Log hung and spinning threads to the kernel log (pstore)
+# early: udev's helpers hung for 3 min at some boots (2026-11-08)
+DefaultDependencies=no
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+ExecStart=/usr/local/sbin/q1-hangwatch
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=sysinit.target
+EOF
+
 systemctl daemon-reload
-systemctl enable quest1-zram.service
-systemctl start quest1-zram.service
+systemctl enable quest1-zram.service q1-hangwatch.service quest1-io.service
+systemctl start quest1-zram.service q1-hangwatch.service quest1-io.service
 sysctl -q --system || true
 echo "holo-perf: zram swap on, sshd protected (restart sshd to apply: systemctl restart sshd)"
 

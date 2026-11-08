@@ -28,13 +28,17 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - Brightness: confirm in the headset that both eyes match at low brightness (display-engine dimming, panels'
   calibration, 2026-11-08).
 - Audio: confirm by ear that the crackle and the click at each Steam start are gone (the output now never closes,
-  2026-11-08, docs/audio.md). If not: crackles at random, for a while, sometimes for good (user, 2026-11-02 to 05). PipeWire sees no xrun:
+  2026-11-08; Steam's audio thread real-time and the ADSP's receive thread at FIFO 87, 2026-11-08 night, docs/audio.md).
+  If not: crackles at random, for a while, sometimes for good (user, 2026-11-02 to 05). PipeWire sees no xrun:
   below it (ADSP, codec) or memory pressure. Capture: `q1-audioring` (docs/audio.md). Also a click at each
   Steam start.
 - After each put-on, ~10 s where every commit blocks ~10.7 ms in `MSMFB_ATOMIC_COMMIT` (a frame late each). Reproduced
   without wearing it (2026-11-08): `/run/quest1-standby` for 6 s, then panels on: 58 then 3 late commits in two 2 s windows.
 
 ## Tracking
+
+- Meta's tracking cameras keep running while the headset is not worn (trackingservice IOTcam ~50 % of a core,
+  CtrllrCam ~11 %, 2026-11-08): pause them while the headset is off, if the map and the controllers come back fine.
 
 - Tracking loss: confirm with a real loss that the headset keeps its last position and that the
   controllers come back (user).
@@ -52,18 +56,18 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - The 4x MSAA system layer costs ~25 ms a frame in mode 0 (~37 fps): Steam's loading screen at each start. Force it to
   1 sample there too (the user allows no MSAA), or see why Steam's VR UI stayed "not ready" after many SteamVR
   restarts (2026-11-08: "SteamLoadingThrobber timed out after 120 seconds"; a Steam restart fixed it).
-- Steam's VR overlay path (docs/performance.md, 2026-11-08 late night): every 1920x1080 frame of Steam's VR UI goes
-  through the CPU (GPU readback, llvmpipe GL upload, vrclient's GL fallback readback into its ring, vrcompositor's
-  copy): Steam shows a few frames a second, seconds behind, and SteamVR drops to 59-69 fps while it works (user:
-  "unusable"). Make it zero-copy: e.g. Adreno (ion/dma-buf) linear images that llvmpipe imports through
-  GL_EXT_memory_object_fd (it mmaps the fd) so vrclient's shared-texture path works, or another route from the CEF
-  frame to vrcompositor without CPU copies. Must leave room for streaming later (user).
-- Memory while Steam is browsed: 40-110 MB/s swapped out and hundreds of direct reclaims a second (worn,
-  2026-11-08); Steam's renderers had ~575 MB in swap after 20 min.
-- Steam's main page animating costs ~14 ms of GPU per repaint in Steam's CEF (1280x720 at device scale 1.5):
-  51-66 fps while it runs (72 with the library static, docs/performance.md). Cap Steam's repaint rate or find what
-  makes the raster and readback this expensive; a lower device scale is visible (user's call). Not RenderMode=Direct
-  for Steam: it froze the headset (2026-11-08).
+- Steam's VR UI: confirm worn that Steam answers at once, that the view no longer trembles while it is used and that
+  the headset no longer freezes (GPU queue limit, cached readback, 384 MB budget, I/O tuning, 2026-11-08 night,
+  docs/performance.md). Measured without the user: SteamVR 71.4-72 fps with Steam repainting its whole page for 5 min.
+- Steam's VR UI frame rate: ~10 fps while a page animates, any damage size. The GPU is the limit now (100 % busy):
+  ~24 ms of GPU per Steam frame in the gaps vrcompositor leaves, for the full composite of the 1920x1080 page, its
+  capture and readback. Find what costs that much (backdrop-filter blurs? the capture copy? ANGLE on this blob), or
+  avoid the readback: frames from the GPU process to vrcompositor without the CPU (CEF OSR has no shared texture
+  path in Steam on Linux: only CChromePainterSharedBuffer). A lower device scale is visible (user's call). Not
+  RenderMode=Direct for Steam: it froze the headset (2026-11-08). Must leave room for streaming later (user).
+- Steam's vrclient transfer ring: 256 MB, backed on first touch (kgsl-lazy), but Steam's webhelper cycles through it
+  ("Ring Buffer Wrapped!") so all of it ends up pinned for a few 8 MB frames in flight. Drop the pages far behind the
+  write position (kernel/kgsl-lazy.patch: unmap them and point the GPU back at the scratch page): ~200 MB.
 - Steam's VR UI: check the right controller's Oculus button logo in the headset (user).
 
 ## Passthrough
@@ -72,7 +76,9 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - The cameras as a real SteamVR camera (settings in SteamVR, used by the boundary drawing too), as on the Frame.
 - Tint slider: check that it changes the colour.
 - Camera power-up race at some boots (trackingservice "Timeout: (power: SLEEP) => (power: STANDBY)", 3DoF
-  only), and udev helpers hanging ~3 min at the same boots: catch again with logs.
+  only), and udev helpers hanging ~3 min at the same boots (2026-11-08: `libinput-device-group` on event0 and
+  `scsi_id` on sdd/sde, killed after 2 min 59 s): q1-hangwatch starts at sysinit now and logs D-state threads with
+  their kernel stacks to the kernel log (pstore); read it at the next such boot.
 
 ## Boundary and room setup
 

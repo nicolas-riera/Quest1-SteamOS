@@ -58,6 +58,21 @@ Steam knobs found in the client binaries (`steamclient.so`, `chromehtml.so`): `-
 `STEAM_CEF_GPU_CMD_PREFIX`, `STEAM_DEBUGCEF`. We do not use `-cef-use-vulkan` (Skia-Vulkan compositing in
 Chromium needs more than the WSI); ANGLE-Vulkan with GL compositing is enough.
 
+## Steam's VR pages: GPU queue limit, readback memory, memory budget
+
+While SteamVR runs, Steam's VR UI pages are off-screen (CEF OSR): the GPU process composites each 1920x1080 frame and
+reads it back for the browser process, which hands it to vrclient. Three settings of the launcher keep that from
+eating the headset (measurements: docs/performance.md, 2026-11-08 night):
+
+- `QUEST1_VKSHIM_MAX_INFLIGHT=4` (quest1_wsi_x11.c): at most 4 submissions of this process waiting for the GPU. It
+  runs on the low-priority ring behind vrcompositor; unthrottled, 17-20 batches waited (Steam seconds behind the laser)
+  and the buffers ANGLE frees only when the GPU is done piled up to ~700 MB more GPU memory, which froze the headset.
+- `QUEST1_VKSHIM_CACHED_READBACK=1` (quest1_vkshim.c): the blob's HOST_CACHED|HOST_COHERENT memory type is
+  write-combined (`test_readback`: CPU reads ~220 MB/s); it is reported without HOST_CACHED and buffers may also use
+  the real cached (non-coherent) type, so ANGLE reads each frame back from cached memory (~36 -> a few ms of CPU).
+- `--force-gpu-mem-available-mb=384` (was 192): Skia keeps its scratch textures instead of allocating new 12 MB ones
+  every frame.
+
 ## Adreno 512.555 blob workarounds (ANGLE features)
 
 - `supportsExtendedDynamicState` **off**: with `useVertexInputBindingStrideDynamicState`

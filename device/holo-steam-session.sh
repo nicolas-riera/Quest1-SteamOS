@@ -74,15 +74,21 @@ cat > /usr/local/bin/steam-webhelper-gpu <<'EOF'
 # bounding box (most Steam UI icons of 32 px and more showed as squares/blobs); Chromium's
 # avoid_stencil_buffers workaround makes Skia draw them from coverage masks instead.
 # GPU memory: Chromium's default budget made this process map ~1.5 GB of KGSL memory, which the
-# 3.8 GB shared CPU/GPU RAM cannot afford next to SteamVR (swap storms, SSH timeouts): capped.
+# 3.8 GB shared CPU/GPU RAM cannot afford next to SteamVR (swap storms, SSH timeouts): capped. At 192 MB Skia could not
+# keep its scratch textures and allocated ~2.7 new full-page (12 MB) ones a frame of Steam's VR pages; at 384 under one.
+# Readback: Chromium reads every frame of Steam's off-screen (VR) pages back; the blob's "cached coherent" memory is
+# write-combined (~220 MB/s CPU reads), QUEST1_VKSHIM_CACHED_READBACK gives ANGLE its really cached type instead.
+# QUEST1_VKSHIM_MAX_INFLIGHT: at most 4 submissions waiting for the GPU (quest1_wsi_x11.c): without it 17-20 waited
+# behind vrcompositor, Steam reacted seconds late and the GPU memory held for them ran the RAM out (2026-11-08).
 # Extra GPU process args: QUEST1_STEAM_GPU_ARGS. See docs/steam-gpu.md.
 V=/usr/local/lib/quest1-vk-steam
 export LD_LIBRARY_PATH=$V${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 export LD_PRELOAD=/opt/hybris/lib/libbionictls.so:$V/libquest1_vkredirect.so${LD_PRELOAD:+:$LD_PRELOAD}
-export QUEST1_VKSHIM_WSI=1 QUEST1_VKSHIM_LAYER=none QUEST1_VK_REDIRECT=$V/libvulkan.so.1
+export QUEST1_VKSHIM_WSI=1 QUEST1_VKSHIM_LAYER=none QUEST1_VK_REDIRECT=$V/libvulkan.so.1 QUEST1_VKSHIM_CACHED_READBACK=1 \
+	QUEST1_VKSHIM_MAX_INFLIGHT=4
 exec "$@" --use-angle=vulkan --disable-angle-features=supportsExtendedDynamicState \
 	--enable-angle-features=disableFlippingBlitWithCommand --avoid_stencil_buffers \
-	--force-gpu-mem-available-mb=192 --force-gpu-mem-discardable-limit-mb=64 $QUEST1_STEAM_GPU_ARGS
+	--force-gpu-mem-available-mb=384 --force-gpu-mem-discardable-limit-mb=64 $QUEST1_STEAM_GPU_ARGS
 EOF
 chmod 755 /usr/local/bin/steam-webhelper-gpu
 ln -sfn steam-webhelper-gpu "/usr/local/bin/'steam-webhelper-gpu'"
@@ -134,7 +140,17 @@ User=steamos
 # steamos needs gid 3003 (aid_inet) for IP sockets: the Android kernel has PARANOID_NETWORK
 Environment=DISPLAY=:1 HOME=/home/steamos USER=steamos XDG_RUNTIME_DIR=/run/user/1000
 ExecStartPre=+/usr/bin/install -d -o steamos -g steamos -m 700 /run/user/1000
+# Steam's VR UI (SteamVR overlays from the webhelper's browser process, steam-q1 above). Steam's xcomposite composer
+# is kept (QUEST1_STEAM_CEF_ARGS empty). The browser's OpenGL is Mesa llvmpipe: vrclient must not see its
+# GL_EXT_memory_object/semaphore (llvmpipe can't import the Adreno's memory), so it takes its CPU fallback.
+Environment=QUEST1_STEAM_VR=1 QUEST1_STEAM_CEF_ARGS=
+Environment="MESA_EXTENSION_OVERRIDE=-GL_EXT_memory_object -GL_EXT_memory_object_fd -GL_EXT_semaphore -GL_EXT_semaphore_fd"
 ExecStart=/usr/local/bin/steam-q1 -gamepadui -steamos3 -steamdeck -steamframe
+# Chromium makes its audio threads SCHED_RR 8 itself when RLIMIT_RTPRIO allows it (desktops grant it through rtkit).
+# At 0 Steam's "Realtime AudioW" stayed a normal thread that waited longer for a CPU than it ran (0.99 s against
+# 0.29 s six minutes after boot, up to 24 ms at once): its sounds crackled while the headset was busy (2026-11-08).
+# Below Meta's tracking, SteamVR and Monado (48 and up); games started by Steam inherit it, as rtkit would allow.
+LimitRTPRIO=10
 # Steam exits with status 0 on its own (e.g. when SteamVR restarts); like a console session it must come back
 Restart=always
 RestartSec=5

@@ -278,6 +278,23 @@ NULL` at each open). The `quest1-output` node is now always running (`node.alway
 `session.suspend-timeout-seconds = 0`, `node.pause-on-idle = false`): the PCM stays open and plays silence
 between sounds (PipeWire ~0 % CPU). To confirm by ear in the headset (user).
 
+## 2026-11-08 (night): Steam's sounds starved of CPU; the ADSP's receive thread at FIFO 1
+
+The user still heard crackles while Steam worked. Two threads on the way of a sound waited for a CPU:
+
+- **Steam's audio thread.** Chromium makes its "Realtime AudioW" thread SCHED_RR 8 itself when RLIMIT_RTPRIO allows it
+  (desktops grant it through rtkit); steam.service had LimitRTPRIO=0, so it stayed a normal thread. Six minutes after
+  boot, the headset barely loaded, it had waited 0.99 s for a CPU against 0.29 s of running (`/proc/<pid>/task/<tid>/
+  schedstat`), up to 24 ms at once (`sched`, wait_max). With the load of a Steam page being used, its stream ran dry:
+  short gaps, the crackle the user recorded on Steam's clicks (2026-11-03), which PipeWire does not count as an xrun.
+  steam.service now has `LimitRTPRIO=10` (device/holo-steam-session.sh): the thread is RR 8, below Meta's tracking,
+  SteamVR and Monado (48 and up). Games started by Steam inherit the limit, as rtkit would allow them.
+- **The ADSP's messages** (q6asm "write done", which ends a period: PipeWire waits for it) arrive in the LPASS glink
+  receive kernel thread (`lpass_smem_glin`), which the kernel makes SCHED_FIFO 1, below every other real-time thread
+  here. `holo-audio start` now makes it FIFO 87, just below PipeWire's data loop (88); it works < 1 ms at a time.
+
+To confirm by ear in the headset (user).
+
 ## Notes moved from the to-do list (2026-11-08): Audio
 
 History of measurements, fixes and open points as they were written in docs/todo.md (the to-do list now only

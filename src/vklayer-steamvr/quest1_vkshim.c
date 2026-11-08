@@ -14,6 +14,7 @@
 // Env: QUEST1_VKSHIM_NEXT  (default /opt/hybris/lib/libvulkan.so.1)
 //      QUEST1_VKSHIM_LAYER (default /usr/local/lib/libVkLayer_quest1_steamvr_compat.so, "none": no layer)
 //      QUEST1_VKSHIM_WSI=1 X11 surfaces and swapchains
+//      QUEST1_VKSHIM_CACHED_READBACK=1 really cached memory for CPU readback (see "readback memory" below)
 #define _GNU_SOURCE // program_invocation_short_name
 #include <vulkan/vk_layer.h>
 #include <vulkan/vulkan.h>
@@ -210,6 +211,121 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice pd, const Vk
 	return r;
 }
 
+// --- readback memory (QUEST1_VKSHIM_CACHED_READBACK=1, set by steam-webhelper-gpu) --------------------------------
+// The Adreno 540 blob lists a HOST_VISIBLE|HOST_CACHED|HOST_COHERENT type (2) that is write-combined in fact (kgsl
+// cache mode, test_readback: CPU reads at ~220 MB/s), and a HOST_CACHED non-coherent type (1) that is really cached
+// (~4 GB/s, 2 ms to invalidate 8 MB), which it allows for transfer-destination-only buffers. Chromium reads every
+// frame of Steam's off-screen pages back through ANGLE (whose allocator prefers HOST_CACHED for that), and copying
+// 8 MB out of type 2 took ~36 ms of the VizCompositorThread a frame (2026-11-08). So: type 2 is reported without
+// HOST_CACHED, and buffers that may use it may use type 1 too, so that what wants cached memory gets real cached
+// memory. ANGLE handles non-coherent memory (flush and invalidate around its maps).
+static int cached_type = -1, fake_cached_type = -1; // type 1 and type 2 on the A540, found by their flags
+static pthread_once_t cached_once = PTHREAD_ONCE_INIT;
+static PFN_vkGetPhysicalDeviceMemoryProperties real_mem_props;
+
+static void cached_init_types(VkPhysicalDevice pd)
+{
+	const VkMemoryPropertyFlags hv = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, hc = VK_MEMORY_PROPERTY_HOST_CACHED_BIT,
+	                            coh = VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+	PFN_vkGetPhysicalDeviceMemoryProperties get = real_mem_props;
+	if (!get)
+		get = (PFN_vkGetPhysicalDeviceMemoryProperties)down_gipa(last_instance, "vkGetPhysicalDeviceMemoryProperties");
+	VkPhysicalDeviceMemoryProperties mp;
+	get(pd, &mp);
+	for (uint32_t i = 0; i < mp.memoryTypeCount; i++) {
+		VkMemoryPropertyFlags f = mp.memoryTypes[i].propertyFlags;
+		if ((f & (hv | hc | coh)) == (hv | hc) && cached_type < 0)
+			cached_type = (int)i;
+		if ((f & (hv | hc | coh)) == (hv | hc | coh) && fake_cached_type < 0)
+			fake_cached_type = (int)i;
+	}
+	if (cached_type < 0 || fake_cached_type < 0)
+		cached_type = fake_cached_type = -1;
+	fprintf(stderr, "quest1_vkshim[%d]: cached readback memory: type %d (type %d is reported write-combined)\n",
+	        (int)getpid(), cached_type, fake_cached_type);
+}
+
+static bool cached_readback(void)
+{
+	static int on = -1;
+	if (on < 0) {
+		const char *e = getenv("QUEST1_VKSHIM_CACHED_READBACK");
+		on = e && *e && strcmp(e, "0") != 0;
+	}
+	return on;
+}
+
+static VkPhysicalDevice cached_pd;
+static void cached_init(void) { cached_init_types(cached_pd); }
+
+static void fix_mem_props(VkPhysicalDevice pd, VkPhysicalDeviceMemoryProperties *mp)
+{
+	cached_pd = pd;
+	pthread_once(&cached_once, cached_init);
+	if (fake_cached_type >= 0 && (uint32_t)fake_cached_type < mp->memoryTypeCount)
+		mp->memoryTypes[fake_cached_type].propertyFlags &= ~VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+}
+
+static VKAPI_ATTR void VKAPI_CALL GetPhysicalDeviceMemoryProperties(VkPhysicalDevice pd, VkPhysicalDeviceMemoryProperties *mp)
+{
+	real_mem_props(pd, mp);
+	fix_mem_props(pd, mp);
+}
+
+static PFN_vkGetPhysicalDeviceMemoryProperties2 real_mem_props2;
+static VKAPI_ATTR void VKAPI_CALL GetPhysicalDeviceMemoryProperties2(VkPhysicalDevice pd, VkPhysicalDeviceMemoryProperties2 *mp)
+{
+	real_mem_props2(pd, mp);
+	fix_mem_props(pd, &mp->memoryProperties);
+}
+
+static void fix_bits(uint32_t *bits)
+{
+	if (cached_type >= 0 && (*bits & (1u << fake_cached_type)))
+		*bits |= 1u << cached_type;
+}
+
+static PFN_vkGetBufferMemoryRequirements real_buf_reqs;
+static VKAPI_ATTR void VKAPI_CALL GetBufferMemoryRequirements(VkDevice d, VkBuffer b, VkMemoryRequirements *r)
+{
+	real_buf_reqs(d, b, r);
+	fix_bits(&r->memoryTypeBits);
+}
+
+static PFN_vkGetBufferMemoryRequirements2 real_buf_reqs2, real_buf_reqs2_khr;
+static VKAPI_ATTR void VKAPI_CALL GetBufferMemoryRequirements2(VkDevice d, const VkBufferMemoryRequirementsInfo2 *i,
+                                                               VkMemoryRequirements2 *r)
+{
+	real_buf_reqs2(d, i, r);
+	fix_bits(&r->memoryRequirements.memoryTypeBits);
+}
+static VKAPI_ATTR void VKAPI_CALL GetBufferMemoryRequirements2KHR(VkDevice d, const VkBufferMemoryRequirementsInfo2 *i,
+                                                                  VkMemoryRequirements2 *r)
+{
+	real_buf_reqs2_khr(d, i, r);
+	fix_bits(&r->memoryRequirements.memoryTypeBits);
+}
+
+//! Our wrapper for a memory query when the readback fix is on, else NULL. *real gets the next one.
+static PFN_vkVoidFunction cached_proc(const char *name, PFN_vkVoidFunction next)
+{
+	if (!cached_readback() || !next)
+		return NULL;
+#define W(n, real, fn)                                                                                                 \
+	if (strcmp(name, n) == 0) {                                                                                    \
+		real = (__typeof__(real))next;                                                                         \
+		return (PFN_vkVoidFunction)fn;                                                                         \
+	}
+	W("vkGetPhysicalDeviceMemoryProperties", real_mem_props, GetPhysicalDeviceMemoryProperties)
+	W("vkGetPhysicalDeviceMemoryProperties2", real_mem_props2, GetPhysicalDeviceMemoryProperties2)
+	W("vkGetPhysicalDeviceMemoryProperties2KHR", real_mem_props2, GetPhysicalDeviceMemoryProperties2)
+	W("vkGetBufferMemoryRequirements", real_buf_reqs, GetBufferMemoryRequirements)
+	W("vkGetBufferMemoryRequirements2", real_buf_reqs2, GetBufferMemoryRequirements2)
+	W("vkGetBufferMemoryRequirements2KHR", real_buf_reqs2_khr, GetBufferMemoryRequirements2KHR)
+#undef W
+	return NULL;
+}
+
 static VKAPI_ATTR VkResult VKAPI_CALL CreateDeviceTrampoline(VkPhysicalDevice pd, const VkDeviceCreateInfo *ci,
                                                              const VkAllocationCallbacks *alloc, VkDevice *out)
 {
@@ -226,7 +342,9 @@ EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice dev
 	PFN_vkVoidFunction w = wsi_proc(name);
 	if (w)
 		return w;
-	return down_gdpa(device, name);
+	PFN_vkVoidFunction next = down_gdpa(device, name);
+	PFN_vkVoidFunction c = cached_proc(name, next);
+	return c ? c : next;
 }
 
 EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceExtensionProperties(const char *layer, uint32_t *count,
@@ -315,7 +433,9 @@ EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance
 	PFN_vkVoidFunction w = wsi_proc(name);
 	if (w)
 		return w;
-	return down_gipa(instance, name);
+	PFN_vkVoidFunction next = down_gipa(instance, name);
+	PFN_vkVoidFunction c = cached_proc(name, next);
+	return c ? c : next;
 }
 
 EXPORT VKAPI_ATTR void VKAPI_CALL vkDestroyInstance(VkInstance instance, const VkAllocationCallbacks *alloc)

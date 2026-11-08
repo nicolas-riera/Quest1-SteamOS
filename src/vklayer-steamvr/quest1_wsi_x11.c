@@ -100,6 +100,10 @@ struct dev {
 	DEVFN(ResetFences);
 	DEVFN(QueueWaitIdle);
 #undef DEVFN
+	// submission throttle (QUEST1_VKSHIM_MAX_INFLIGHT): fences of the markers still in flight, oldest first
+	pthread_mutex_t tlock;
+	VkFence tf[16];
+	unsigned th, tc;
 	struct dev *next;
 };
 static struct dev *devices;
@@ -150,6 +154,7 @@ void wsi_device_created(VkInstance instance, VkPhysicalDevice pd, const VkDevice
 	L(ResetFences);
 	L(QueueWaitIdle);
 #undef L
+	pthread_mutex_init(&d->tlock, NULL);
 	d->qfam = ci->queueCreateInfoCount ? ci->pQueueCreateInfos[0].queueFamilyIndex : 0;
 	// ANGLE creates its queue with VK_DEVICE_QUEUE_CREATE_PROTECTED_BIT when the device supports
 	// protected memory; such queues are only returned by vkGetDeviceQueue2 with the same flags
@@ -201,15 +206,99 @@ static VKAPI_ATTR void VKAPI_CALL hook_DestroyDevice(VkDevice device, const VkAl
 		DOWN(PFN_vkDestroyDevice, "vkDestroyDevice")(device, alloc);
 		return;
 	}
+	if (d->tc) {
+		d->QueueWaitIdle(d->queue);
+		for (unsigned i = 0; i < d->tc; i++)
+			d->DestroyFence(device, d->tf[(d->th + i) % 16], NULL);
+	}
 	d->DestroyDevice(device, alloc);
 	free(d);
 }
 
+// --- submission throttle (QUEST1_VKSHIM_MAX_INFLIGHT=N, set by steam-webhelper-gpu) ---------------------------------
+// Steam's CEF GPU process runs on the low-priority ring, behind vrcompositor, and nothing held its submissions back:
+// while a page animated, 17-20 of its batches waited in the kernel (several frames: Steam reacted seconds late), and
+// ANGLE, which frees its per-frame buffers once the GPU is done with them, held up to ~700 MB more GPU memory (the
+// headset froze twice when that ran the RAM out, 2026-11-08). Here every submission is followed by an empty one with a
+// fence of ours; with N of those in flight, the next submission first waits for the oldest. Chromium then draws
+// frames as fast as the GPU finishes them, not faster.
+static int max_inflight(void)
+{
+	static int n = -1;
+	if (n < 0) {
+		const char *e = getenv("QUEST1_VKSHIM_MAX_INFLIGHT");
+		n = e ? atoi(e) : 0;
+		if (n < 0 || n > 15)
+			n = 0;
+	}
+	return n;
+}
+
+static struct dev *dev_of_queue(VkQueue q)
+{
+	pthread_mutex_lock(&g_lock);
+	struct dev *d = devices;
+	while (d && d->queue != q)
+		d = d->next;
+	pthread_mutex_unlock(&g_lock);
+	return d;
+}
+
+//! Wait (outside the queue lock) until fewer than max markers are in flight; returns a reset fence for the next one.
+static VkFence throttle_wait(struct dev *d, int max)
+{
+	VkFence f = VK_NULL_HANDLE;
+	pthread_mutex_lock(&d->tlock);
+	while (d->tc >= (unsigned)max) {
+		VkFence old = d->tf[d->th];
+		// the blob returns VK_TIMEOUT at once for UINT64_MAX: wait in finite steps
+		VkResult r;
+		do
+			r = d->WaitForFences(d->device, 1, &old, VK_TRUE, 100000000ull);
+		while (r == VK_TIMEOUT);
+		d->th = (d->th + 1) % 16;
+		d->tc--;
+		if (f == VK_NULL_HANDLE && r == VK_SUCCESS && d->ResetFences(d->device, 1, &old) == VK_SUCCESS)
+			f = old;
+		else
+			d->DestroyFence(d->device, old, NULL);
+	}
+	pthread_mutex_unlock(&d->tlock);
+	if (f == VK_NULL_HANDLE) {
+		VkFenceCreateInfo fci = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+		if (d->CreateFence(d->device, &fci, NULL, &f) != VK_SUCCESS)
+			f = VK_NULL_HANDLE;
+	}
+	return f;
+}
+
 static VKAPI_ATTR VkResult VKAPI_CALL hook_QueueSubmit(VkQueue q, uint32_t n, const VkSubmitInfo *s, VkFence f)
 {
+	int max = max_inflight();
+	struct dev *d = max ? dev_of_queue(q) : NULL;
+	VkFence marker = d ? throttle_wait(d, max) : VK_NULL_HANDLE;
 	pthread_mutex_lock(&q_lock);
 	VkResult r = down_QueueSubmit(q, n, s, f);
+	if (marker != VK_NULL_HANDLE && (r != VK_SUCCESS || down_QueueSubmit(q, 0, NULL, marker) != VK_SUCCESS)) {
+		d->DestroyFence(d->device, marker, NULL);
+		marker = VK_NULL_HANDLE;
+	}
 	pthread_mutex_unlock(&q_lock);
+	if (marker != VK_NULL_HANDLE) {
+		pthread_mutex_lock(&d->tlock);
+		if (d->tc < 16) { // concurrent submitters can overshoot max a little; never the array
+			d->tf[(d->th + d->tc) % 16] = marker;
+			d->tc++;
+			marker = VK_NULL_HANDLE;
+		}
+		pthread_mutex_unlock(&d->tlock);
+		if (marker != VK_NULL_HANDLE) {
+			pthread_mutex_lock(&q_lock); // never reached in practice; the fence must not be destroyed while pending
+			down_QueueWaitIdle(q);
+			pthread_mutex_unlock(&q_lock);
+			d->DestroyFence(d->device, marker, NULL);
+		}
+	}
 	return r;
 }
 

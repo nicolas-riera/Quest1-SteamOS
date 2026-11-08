@@ -538,6 +538,11 @@ After=steam.service
 User=steamos
 SupplementaryGroups=input
 Environment=HOME=/home/steamos
+# At some boots udev's helpers hang for 3 min and are killed (libinput-device-group on event0 = qpnp_pon, the power
+# key; scsi_id on UFS LUNs), and udev never gives those nodes their group: root 0600, this daemon failed on
+# PermissionError and restarted every 2 s for the whole boot (2026-11-08). Give the event nodes what udev's default
+# rules give them (group input, 0660).
+ExecStartPre=+/bin/sh -c 'for e in /dev/input/event*; do [ "$(stat -c %%G "$e")" = input ] || { chgrp input "$e"; chmod 660 "$e"; }; done'
 ExecStart=/usr/local/sbin/quest1-powerbutton
 Restart=always
 RestartSec=2

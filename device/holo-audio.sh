@@ -81,6 +81,10 @@ start() {
 	# routing: WirePlumber does not drive the card (install_pipewire_nodes), so the UCM verb and
 	# devices are applied here; the mixer keeps them after alsaucm exits
 	output speaker
+	# The ADSP's messages (q6asm write done -> period elapsed, which PipeWire waits for) arrive in the LPASS glink
+	# receive thread, which the kernel makes SCHED_FIFO 1: below Meta's tracking (FIFO 48-49), SteamVR (50) and
+	# Monado. Just below PipeWire's data loop (88); it works < 1 ms at a time.
+	for p in $(pgrep -x lpass_smem_glin); do chrt -f -p 87 "$p" || true; done
 	echo "holo-audio: card $c ready"
 	# the user's PipeWire may have started before the card existed: restart it to pick it up
 	systemctl --user -M steamos@ try-restart pipewire.service pipewire-pulse.service wireplumber.service 2>/dev/null ||
