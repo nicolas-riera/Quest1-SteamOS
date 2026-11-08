@@ -6,3 +6,5 @@ aarch64-linux-gnu-g++ -std=c++17 -O2 -I/root/openvr-sdk/headers -o ptres_test pt
 	-L/opt/q1libs -l:libopenvr_api.so -Wl,-rpath,/opt/steamvr/bin/linuxarm64 -Wl,--allow-shlib-undefined
 aarch64-linux-gnu-g++ -std=c++17 -O2 -I/root/openvr-sdk/headers -o ptprovider ptprovider.cpp \
 	-L/opt/q1libs -l:libopenvr_api.so -Wl,-rpath,/opt/steamvr/bin/linuxarm64 -Wl,--allow-shlib-undefined
+aarch64-linux-gnu-g++ -std=c++17 -O2 -I/root/openvr-sdk/headers -o composite_bench composite_bench.cpp \
+	-L/opt/q1libs -l:libopenvr_api.so -Wl,-rpath,/opt/steamvr/bin/linuxarm64 -Wl,--allow-shlib-undefined

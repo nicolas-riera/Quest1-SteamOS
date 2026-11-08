@@ -29,6 +29,8 @@ src/camtap/ptres_test
 src/camtap/trackedcam_test
 src/camtap/vrmailbox
 src/camtap/vrscene_idle
+src/camtap/composite_bench
+src/camtap/depth_test
 src/vklayer-steamvr/pipetest
 src/vklayer-steamvr/sdftest
 src/vklayer-steamvr/sdftest_cs.h

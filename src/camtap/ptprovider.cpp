@@ -225,20 +225,18 @@ static bool Project62(const Calib &c, const double d[3], double &px, double &py)
  * sits at its centre); the top camera's does, through its ~6 cm offset. The top camera's gain follows the bottom one's
  * over the shared band (the two expose separately).
  */
-static const double kVirtF = 266, kSphereM = 3.0;
-struct CompTap
-{
-	int32_t off[2];      // [0] bottom, [1] top: offset of the bilinear 2x2's top-left pixel in the raw image, -1 = none
-	uint8_t fx[2], fy[2]; // bilinear fractions (0..255)
-	uint8_t wTop;         // the top camera's share (0..255)
-	uint8_t pad[3];
-};
+static const double kSphereM = 3.0;
+//! The rendered part of the virtual image: within these angles of straight ahead (the panels show ~50 degrees each way;
+//! the rest is margin for the head's turn between capture and display). The other pixels stay black.
+static const double kMaxAzDeg = 70, kMaxElDeg = 62;
 
 static Calib VirtualCamera(const Calib &bottom)
 {
 	Calib v;
 	v.ok = bottom.ok;
-	v.f = kVirtF, v.cx = (kW - 1) / 2.0, v.cy = (kH - 1) / 2.0;
+	// the bottom camera's own pixel density (its f): a finer virtual image only interpolates (266 px/rad was 1.4 times
+	// the cameras' and covered 52 degrees up and down: the bottom of the view was the image's stretched edge)
+	v.f = bottom.f, v.cx = (kW - 1) / 2.0, v.cy = (kH - 1) / 2.0;
 	for (double &k : v.k)
 		k = 0;
 	v.kb[0] = 1e-6, v.kb[1] = v.kb[2] = v.kb[3] = 0; // equidistant; all four zero would make the shader a pinhole
@@ -248,25 +246,73 @@ static Calib VirtualCamera(const Calib &bottom)
 	return v;
 }
 
-//! The lookup table of one eye: virtual camera `v`, real cameras `cam[0]` (bottom) and `cam[1]` (top).
-static std::vector<CompTap> BuildComposite(const Calib &v, const Calib cam[2], int &bothCount)
+//! A bilinear sample of a raw camera image (stride kW): its 2x2's top-left pixel and the four weights (sum 256).
+struct Tap
 {
-	std::vector<CompTap> lut((size_t)kW * kH);
+	uint32_t off;
+	uint8_t w[4]; // (x, y), (x + 1, y), (x, y + 1), (x + 1, y + 1); w[0] is 256 - the others, may wrap to 0 for 256
+	uint16_t w0;
+	uint16_t pad;
+};
+struct OneTap
+{
+	uint32_t out;
+	Tap t;
+};
+struct TwoTaps
+{
+	uint32_t out;
+	Tap b, t;
+	uint16_t wTop; // the top camera's share, 0..256
+	uint16_t pad;
+};
+//! One eye's composite, as three lists (no per-pixel branch): pixels from the bottom camera only, the top only, both.
+struct Composite
+{
+	std::vector<OneTap> bottom, top;
+	std::vector<TwoTaps> both;
+	size_t empty = 0; //!< pixels in the window that no camera sees (black)
+};
+
+static inline int Sample(const uint8_t *img, const Tap &t)
+{
+	const uint8_t *p = img + t.off;
+	return (p[0] * t.w0 + p[1] * t.w[1] + p[kW] * t.w[2] + p[kW + 1] * t.w[3] + 128) >> 8;
+}
+
+/*
+ * The composite camera. vrcompositor's roomview takes one camera image per eye, and the bottom cameras look ~40 degrees
+ * down: everything above their field of view (half of the view ahead, user 2026-11-08: "the whole top half stretched")
+ * was the edge of their image, clamped and stretched. Meta covers it with the top cameras. So each eye gets a virtual
+ * camera at its bottom camera's position, looking straight ahead (equidistant fisheye, the bottom camera's f), whose image
+ * is filled from the bottom and the top camera of that side through tables built once: each pixel's ray meets the
+ * roomview's sphere (kSphereM, the driver's mesh radius) and that point is looked up in both cameras (bilinear), blended
+ * over the band where both see it. The bottom camera's part does not depend on the depth (the virtual camera sits at its
+ * centre); the top camera's does, through its ~6 cm offset. The top camera's gain follows the bottom one's over the shared
+ * band (the two expose separately). Cost (composite_bench, big core): 8.6 ms an eye with one table entry per pixel and
+ * a branch per pixel at f = 266, 2026-11-08 morning; now see docs/passthrough.md.
+ */
+static Composite BuildComposite(const Calib &v, const Calib cam[2])
+{
+	Composite out;
 	const double feather = 40; // px from a camera's image edge over which its weight rises
-	bothCount = 0;
+	const double deg = 180 / M_PI;
 	for (int y = 0; y < kH; y++)
 		for (int x = 0; x < kW; x++) {
-			CompTap &t = lut[(size_t)y * kW + x];
-			t.off[0] = t.off[1] = -1, t.wTop = 0;
 			double u = (x - v.cx) / v.f, w = (y - v.cy) / v.f, th = sqrt(u * u + w * w);
 			double dc[3] = {th > 1e-9 ? sin(th) * u / th : 0, th > 1e-9 ? sin(th) * w / th : 0, cos(th)};
 			double d[3], o[3] = {v.m[3], v.m[7], v.m[11]};
 			for (int r = 0; r < 3; r++)
 				d[r] = v.m[r * 4] * dc[0] + v.m[r * 4 + 1] * dc[1] + v.m[r * 4 + 2] * dc[2];
+			if (fabs(atan2(d[0], -d[2])) * deg > kMaxAzDeg || fabs(asin(std::max(-1.0, std::min(1.0, d[1])))) * deg > kMaxElDeg ||
+			    th > M_PI / 2)
+				continue; // never on the panels: stays black
 			// |o + s d| = R, s > 0
-			double b = o[0] * d[0] + o[1] * d[1] + o[2] * d[2], cc = o[0] * o[0] + o[1] * o[1] + o[2] * o[2] - kSphereM * kSphereM;
-			double sdist = -b + sqrt(std::max(0.0, b * b - cc));
+			double bb = o[0] * d[0] + o[1] * d[1] + o[2] * d[2], cc = o[0] * o[0] + o[1] * o[1] + o[2] * o[2] - kSphereM * kSphereM;
+			double sdist = -bb + sqrt(std::max(0.0, bb * bb - cc));
 			double P[3] = {o[0] + sdist * d[0], o[1] + sdist * d[1], o[2] + sdist * d[2]};
+			Tap tap[2];
+			bool have[2] = {false, false};
 			double wgt[2] = {0, 0};
 			for (int c = 0; c < 2; c++) {
 				const Calib &k = cam[c];
@@ -279,52 +325,64 @@ static std::vector<CompTap> BuildComposite(const Calib &v, const Calib cam[2], i
 				if (sx < 0 || sy < 0 || sx >= kW - 1 || sy >= kH - 1)
 					continue;
 				int ix = (int)sx, iy = (int)sy;
-				t.off[c] = iy * kW + ix;
-				t.fx[c] = (uint8_t)std::lround((sx - ix) * 255), t.fy[c] = (uint8_t)std::lround((sy - iy) * 255);
+				double fx = sx - ix, fy = sy - iy;
+				int w1 = (int)std::lround(fx * (1 - fy) * 256), w2 = (int)std::lround((1 - fx) * fy * 256),
+				    w3 = (int)std::lround(fx * fy * 256);
+				w3 = std::min(w3, 256 - w1 - w2); // the roundings may sum past 256
+				tap[c].off = (uint32_t)(iy * kW + ix);
+				tap[c].w0 = (uint16_t)(256 - w1 - w2 - w3);
+				tap[c].w[0] = 0, tap[c].w[1] = (uint8_t)w1, tap[c].w[2] = (uint8_t)w2, tap[c].w[3] = (uint8_t)w3;
+				tap[c].pad = 0;
+				have[c] = true;
 				wgt[c] = std::min(1.0, std::min({sx, sy, kW - 1 - sx, kH - 1 - sy}) / feather);
 			}
-			if (t.off[0] >= 0 && t.off[1] >= 0) {
-				t.wTop = (uint8_t)std::lround(255 * wgt[1] * (1 - wgt[0]) / std::max(1e-6, wgt[1] * (1 - wgt[0]) + wgt[0]));
-				if (t.wTop > 0 && t.wTop < 255)
-					bothCount++;
-			} else if (t.off[1] >= 0)
-				t.wTop = 255;
+			const uint32_t i = (uint32_t)(y * kW + x);
+			if (have[0] && have[1]) {
+				int wTop = (int)std::lround(256 * wgt[1] * (1 - wgt[0]) / std::max(1e-6, wgt[1] * (1 - wgt[0]) + wgt[0]));
+				if (wTop <= 0)
+					out.bottom.push_back({i, tap[0]});
+				else if (wTop >= 256)
+					out.top.push_back({i, tap[1]});
+				else
+					out.both.push_back({i, tap[0], tap[1], (uint16_t)wTop, 0});
+			} else if (have[0])
+				out.bottom.push_back({i, tap[0]});
+			else if (have[1])
+				out.top.push_back({i, tap[1]});
+			else
+				out.empty++;
 		}
-	return lut;
+	return out;
 }
 
-static inline int Bilinear(const uint8_t *img, int stride, const CompTap &t, int c)
-{
-	int off = t.off[c], y = off / kW, x = off - y * kW;
-	const uint8_t *p = img + (size_t)y * stride + x;
-	int fx = t.fx[c], fy = t.fy[c];
-	int top = p[0] * (255 - fx) + p[1] * fx, bot = p[stride] * (255 - fx) + p[stride + 1] * fx;
-	return (top * (255 - fy) + bot * fy + 32512) / 65025;
-}
-
-//! One eye's composite image from its bottom and top camera; topGain (8.8 fixed point) scales the top camera.
-static void RenderComposite(const std::vector<CompTap> &lut, const uint8_t *bottom, const uint8_t *top, int stride,
-                            int topGain, const uint32_t grayPx[256], uint32_t *out, double &sumB, double &sumT, int &n)
+//! One eye's composite image from its bottom and top camera (stride kW); topGain (8.8 fixed point) scales the top camera.
+//! Only the pixels some camera sees are written: `out` (ordinary memory, copied to the shared image in one pass: scattered
+//! writes there are slow) keeps the black it was filled with everywhere else.
+static void RenderComposite(const Composite &cp, const uint8_t *bottom, const uint8_t *top, int topGain,
+                            const uint32_t grayPx[256], uint32_t *out, double &sumB, double &sumT, int &n)
 {
 	sumB = sumT = 0, n = 0;
-	for (size_t i = 0; i < lut.size(); i++) {
-		const CompTap &t = lut[i];
-		int vb = t.off[0] >= 0 ? Bilinear(bottom, stride, t, 0) : 0;
-		int vt = t.off[1] >= 0 && top ? Bilinear(top, stride, t, 1) : 0;
-		if (t.off[0] >= 0 && t.off[1] >= 0 && top && t.wTop > 0 && t.wTop < 255 && (i & 7) == 0)
-			sumB += vb, sumT += vt, n++;
-		vt = std::min(255, (vt * topGain) >> 8);
-		int v;
-		if (t.off[0] < 0 && (t.off[1] < 0 || !top))
-			v = 0;
-		else if (!top || t.wTop == 0)
-			v = vb;
-		else if (t.wTop == 255)
-			v = vt;
-		else
-			v = (vb * (255 - t.wTop) + vt * t.wTop + 127) / 255;
-		out[i] = grayPx[v];
+	for (const OneTap &e : cp.bottom)
+		out[e.out] = grayPx[Sample(bottom, e.t)];
+	if (!top) { // no top image: the bottom camera where it sees, black elsewhere
+		for (const OneTap &e : cp.top)
+			out[e.out] = grayPx[0];
+		for (const TwoTaps &e : cp.both)
+			out[e.out] = grayPx[Sample(bottom, e.b)];
+		return;
 	}
+	for (const OneTap &e : cp.top)
+		out[e.out] = grayPx[std::min(255, (Sample(top, e.t) * topGain) >> 8)];
+	long sb = 0, st = 0;
+	for (size_t k = 0; k < cp.both.size(); k++) {
+		const TwoTaps &e = cp.both[k];
+		int vb = Sample(bottom, e.b), vt = Sample(top, e.t);
+		if ((k & 7) == 0)
+			sb += vb, st += vt, n++;
+		vt = std::min(255, (vt * topGain) >> 8);
+		out[e.out] = grayPx[(vb * (256 - e.wTop) + vt * e.wTop + 128) >> 8];
+	}
+	sumB = (double)sb, sumT = (double)st;
 }
 
 //! Test pattern 5: each pixel of the image as the shader's model (FillDesc: KB fisheye, the record's pose) places it, in
@@ -475,14 +533,16 @@ int main()
 	const bool useComp[2] = {composite && bottomCal[0].ok && topCal[0].ok, composite && bottomCal[1].ok && topCal[1].ok};
 	const Calib calib[2] = {useComp[0] ? VirtualCamera(bottomCal[0]) : bottomCal[0],
 	                        useComp[1] ? VirtualCamera(bottomCal[1]) : bottomCal[1]};
-	std::vector<CompTap> lut[2];
+	Composite lut[2];
 	int topGain[2] = {256, 256};
 	for (int c = 0; c < 2; c++)
 		if (useComp[c]) {
 			const Calib pair[2] = {bottomCal[c], topCal[c]};
-			int both = 0;
-			lut[c] = BuildComposite(calib[c], pair, both);
-			printf("ptprovider: eye %d: composite of cameras %d and %d, %d blended pixels" "\n", c, c ? 2 : 0, c ? 3 : 1, both);
+			lut[c] = BuildComposite(calib[c], pair);
+			printf("ptprovider: eye %d: composite of cameras %d and %d, f %.1f: %zu pixels from the bottom one, %zu from the top "
+			       "one, %zu blended, %zu seen by neither\n",
+			       c, c ? 2 : 0, c ? 3 : 1, calib[c].f, lut[c].bottom.size(), lut[c].top.size(), lut[c].both.size(),
+			       lut[c].empty);
 		}
 	std::vector<uint8_t> gridLuma[2], gridRed[2];
 	if (pattern == 5)
@@ -597,6 +657,9 @@ int main()
 	int64_t lastTake = 0;       // when the compositor last took a frame of ours
 	int64_t stallSince = 0, lastStallLog = 0;
 	auto Rec = [&](int c, int k) { return (uint32_t *)(b + kRec0 + c * kCamStride + k * kRecStride); };
+	// each eye's composite in ordinary memory (black where no camera sees, written once)
+	std::vector<uint32_t> compImg[2] = {std::vector<uint32_t>((size_t)kW * kH, grayPx[0]),
+	                                    std::vector<uint32_t>((size_t)kW * kH, grayPx[0])};
 	const int64_t period = 1000000000LL / hz;
 	int64_t next = NowNs();
 	while (!g_quit) {
@@ -741,22 +804,24 @@ int main()
 						if (!src)
 							continue;
 						Img &im = img[c][slot[c]];
-						if (useComp[c] && (!top || stt == sb)) {
+						if (useComp[c] && sb == kW && (!top || stt == sb)) {
 							double sumB, sumT;
 							int n;
-							RenderComposite(lut[c], src, top, sb, topGain[c], grayPx, (uint32_t *)im.map, sumB, sumT, n);
+							RenderComposite(lut[c], src, top, topGain[c], grayPx, compImg[c].data(), sumB, sumT, n);
+							memcpy(im.map, compImg[c].data(), (size_t)kW * kH * 4);
 							if (n > 200 && sumT > n * 4.0) { // follow the bottom camera's brightness, slowly
 								int want = (int)std::lround(256.0 * sumB / sumT);
 								want = std::max(128, std::min(1024, want));
 								topGain[c] += (want - topGain[c]) / 8;
 							}
-						} else
+						} else {
 							for (int y = 0; y < kH; y++) {
 								const uint8_t *row = src + (size_t)y * sb;
 								uint32_t *out = (uint32_t *)im.map + (size_t)y * kW;
 								for (int x = 0; x < kW; x++)
 									out[x] = grayPx[row[x]];
 							}
+						}
 						got++;
 					}
 					if (got == 2 && __atomic_load_n(&s.seq, __ATOMIC_ACQUIRE) == seq0) {
