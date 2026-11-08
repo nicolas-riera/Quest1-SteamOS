@@ -46,8 +46,18 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 
 - 90 Hz mode, selectable from the refresh rate setting (low priority). Base: github.com/TheCez/quest1-90hz-orangefox.
 - Per-panel lens decenter and roll from the calibration (`*_screen_offset.json`), once Meta's convention is known.
-- Scene mode (`/etc/quest1-warp-lens` 2, docs/performance.md: GPU per frame ~9.7 -> ~6 ms): check it in the headset
-  (sharpness, geometry, chromatic aberration, the dashboard and passthrough), then make it the default.
+- Scene mode (`/etc/quest1-warp-lens` 2, docs/performance.md: GPU per frame ~9.7 -> ~6 ms): broken when the system
+  layer is 4x MSAA (2026-11-08, worn: 9 fps and the controllers drawn wrong). The dashboard asks for MSAA and roomview
+  while Steam's VR UI is not ready (its loading throbber), in the OOBE and on the lock screen
+  (`systemlayer-msaa-enable-override` in systemui.js). The layer only knows 1-sample scene images, so the distortion
+  pass runs into the scene-sized halves and Monado's lens warp distorts again. Handle the MSAA scene (render the
+  resolve into the halves) or fall back to mode 0 whole, then check in the headset before making it the default.
+- The 4x MSAA system layer (above) costs ~25 ms a frame with RenderMode=Direct (~37 fps in mode 0): Steam's loading
+  screen at each start. Force it to 1 sample in the layer (the user allows no MSAA), or see why Steam's VR UI stayed
+  "not ready" after many SteamVR restarts (2026-11-08: "SteamLoadingThrobber timed out after 120 seconds"; a Steam
+  restart fixed it).
+- With Steam's library open in the dashboard: 57-60 fps, 70 with Steam's CEF GPU process stopped (2026-11-08,
+  panels on). vrcompositor alone uses ~11.5 ms of GPU a frame there (the library panel's quads ~0.7 ms each).
 - Steam's VR UI: check the right controller's Oculus button logo in the headset (user).
 
 ## Passthrough
