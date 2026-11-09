@@ -25,3 +25,6 @@ bluez bluez-utils
 plasma-desktop plasma-workspace kwin dolphin konsole discover flatpak systemsettings plasma-pa plasma-nm
 bluedevil xdg-desktop-portal-kde polkit-kde-agent kio-extras breeze breeze-icons kde-gtk-config
 kdeplasma-addons vlc qt6-virtualkeyboard libxtst
+# VLC's decoders for H.264, HEVC, MPEG-4... (libavcodec): Arch splits them out of vlc, which then plays no H.264
+# ("Codec not supported", user 2026-11-10)
+vlc-plugin-ffmpeg

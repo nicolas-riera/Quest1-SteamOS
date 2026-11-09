@@ -45,7 +45,10 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   logs "All submaps have bad map tracking" seconds later, evicts the context and starts over, again and again, and
   while it tracks two contexts it skips map building, so the saved map never grows. Next (user: "as on Android, no
   constant delocalization"): clear the map with the user and walk the room before setting the playspace again; persist
-  only once the room is covered, then again while tracking is good, so the saved map grows.
+  only once the room is covered, then again while tracking is good, so the saved map grows. 2026-11-10 00:53-00:54
+  (user: "the tracking sneezed and I flew off", the headset pushed hard, desktop mode + a stream + passthrough, all 8
+  cores busy and kswapd at 30 %): "Bad map tracking" on submap 0, "big search" relocalizations, both controllers
+  "Lost position tracking, waiting for 6DoF reset". See whether a starved trackingservice makes it worse.
 - Meta's tracking runs from boot, worn or not (trackingservice IOTcam ~50 % of a core, CtrllrCam ~11 %,
   2026-11-08). Do as Meta's OS (user, 2026-11-09): after power-on, tracking stays off until the headset is worn the
   first time; from then on it stays on, even when the headset is taken off. It stops only when the headset goes to
@@ -106,6 +109,11 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 ## Passthrough
 
 - Confirm worn that the camera image no longer shakes or tilts.
+- Passthrough sometimes goes black and comes back with its fade-in, as if turned off and on at once (user,
+  2026-11-10, with desktop mode and a stream open: the CPU was saturated). q1-ptprovider logged no disable and
+  vrcompositor no roomview restart then: catch it with `PT_DUMP=1` (record states once a second) while it happens.
+- q1-ptprovider composites the cameras on the CPU (~25 % of a core while passthrough shows, a third of it the
+  memcpy of each composite into the shared image): do it on the GPU.
 - The cameras as a real SteamVR camera (settings in SteamVR, used by the boundary drawing too), as on the Frame.
 - Tint slider: check that it changes the colour.
 - Camera power-up race at some boots (trackingservice "Timeout: (power: SLEEP) => (power: STANDBY)", 3DoF
@@ -142,6 +150,12 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - Slim the install: drop what this headset never uses (other controllers' render models, etc.).
 
 ## Streaming (after everything above, user 2026-11-08)
+
+- Hardware video decoding for the whole system (user, 2026-11-09: "décodage vidéo matériel system wide, dont
+  Chromium"). VLC now decodes in software (vlc-plugin-ffmpeg was missing, 2026-11-10). Plan: the venus decoder in
+  quest1_v4l2 (below), then apps that speak V4L2 M2M: ffmpeg's `h264_v4l2m2m`/`hevc_v4l2m2m` (VLC 3's avcodec
+  module takes `--avcodec-codec`, mpv `--hwdec=v4l2m2m-copy`), GStreamer's v4l2 decoders; Chromium on desktop Linux
+  decodes with VA-API only (Arch's build has no V4L2 decoder).
 
 - Steam Link from a PC: the decoder in quest1_v4l2 (`/dev/video-dec0`, docs/streaming.md); the stream app's GL can't
   share images with the compositor (libhybris GL lacks GL_EXT_memory_object_fd / semaphore_fd); the theater mode
