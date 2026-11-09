@@ -58,7 +58,9 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   1 sample there too (the user allows no MSAA), or see why Steam's VR UI stayed "not ready" after many SteamVR
   restarts (2026-11-08: "SteamLoadingThrobber timed out after 120 seconds"; a Steam restart fixed it).
 - Trembling under load (user, 2026-11-09: "zero tolerance"; frames shown twice): late commits gone under the Steam
-  load (docs/performance.md, 2026-11-09). Confirm worn. Next: frames that reach Monado's warp late (~61 of ~70 a
+  load (docs/performance.md, 2026-11-09). Worn just before the end of that session the user still saw it: image
+  jumps, sometimes several in a row (then it looks like trembling); possibly with the measurement load still running.
+  Next: frames that reach Monado's warp late (~61 of ~70 a
   second fresh under load, 68 idle): build and measure the frame path's threads made real-time (layer and
   driver_quest1, written, uncommitted on 2026-11-09), then Monado's "Quest1 direct" receiver; `vsyncs missed 2` in
   one 240 s run. Measurement tools: /root/tmp/jitter.sh, posegap.py, measure.sh on|off (headset, temporary).
