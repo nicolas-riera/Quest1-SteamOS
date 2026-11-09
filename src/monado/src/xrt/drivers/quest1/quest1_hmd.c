@@ -37,6 +37,8 @@
 
 #include <dlfcn.h>
 #include <fcntl.h>
+#include <pthread.h>
+#include <sched.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -65,6 +67,8 @@ DEBUG_GET_ONCE_BOOL_OPTION(quest1_meta_velocity, "QUEST1_META_VELOCITY", true)
 #define Q1_PANEL_W 1440
 #define Q1_PANEL_H 1600
 #define Q1_REFRESH_HZ 72
+//! SCHED_FIFO priority of the thread that takes q1trackd's poses (see meta_thread)
+#define QUEST1_META_RT_PRIO 52
 
 
 /*
@@ -739,6 +743,16 @@ meta_thread(void *ptr)
 {
 	struct quest1_hmd *h = ptr;
 	os_thread_helper_name(&h->mt.oth, "Quest1 Meta trk");
+	// Real-time, as q1trackd's publishing thread: the warp predicts the head from the newest pose this thread
+	// pushed. As normal threads under Steam's load (load average ~10) q1trackd went up to 28 ms between poses
+	// (36 gaps over 8 ms a minute, 2026-11-09): the warp extrapolated that much further and the image
+	// trembled. Above Meta's own tracking threads (FIFO 48-51) and SteamVR's (50 at most), below the
+	// compositor's vsync thread (98). It works ~1 % of a core.
+	struct sched_param sp = {.sched_priority = QUEST1_META_RT_PRIO};
+	int se = pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
+	if (se != 0) {
+		Q1_ERROR(h, "Meta tracking thread: SCHED_FIFO %d: %s", QUEST1_META_RT_PRIO, strerror(se));
+	}
 
 	int64_t next_map = 0;
 	os_thread_helper_lock(&h->mt.oth);

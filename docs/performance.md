@@ -3,6 +3,44 @@
 Where the frame time goes and what was tried. Current numbers and the direct scanout path:
 docs/direct-scanout.md; Steam's UI: docs/steam-gpu.md.
 
+## 2026-11-09 (night): the view trembled while the headset was loaded: frames shown twice
+
+The user: the view still trembles now and then while Steam works, "as if the previous frame were shown again". That
+is what a late commit does: Monado's warp for a vsync is committed after that vsync, so the panels show the previous
+warped image a second time (a one-frame jump while the head moves).
+
+Measured without the user (panels forced on with a volatile `QUEST1_IGNORE_PROX=1` drop-in, dashboard shown), 20 s idle
+then 60-240 s of Steam load (its VR page repainted on every animation frame through CEF remote debugging, and switched
+between games/store/library every 2 s), from Monado's `direct_tick` lines and a watcher of q1trackd's shared memory.
+Before: 6 late commits a minute (none idle), and q1trackd's 2 ms pose updates up to 28 ms apart (36 gaps over 8 ms a
+minute, up to 12 ms even idle). Fixed, in order:
+
+- **Poses**: q1trackd's publishing thread and Monado's "Quest1 Meta trk" thread (which copies q1trackd's poses into
+  the head pose history the warp predicts from) ran as normal threads. Both are SCHED_FIFO 52 now, above Meta's own
+  tracking threads (48-51) and SteamVR's (50 at most): updates at most 2.9 ms apart under the load.
+- **Where each late commit's time went**: a log line per late commit (`late commit, done at vsync + ...`, 10 per 10 s
+  at most): when the tick woke, the warp's mesh, GPU wait and GPU time, the commit ioctl, and the stage times. It
+  showed three causes besides the GPU:
+  - an `unlink()` of the snapshot trigger in /tmp on every tick took 4-5 ms now and then. All the files the vsync
+    thread read or wrote (test knobs, snapshot trigger, standby and brightness flags, the pose age for driver_quest1)
+    are now handled by a normal thread of their own ("Quest1 files", every 100 ms); the vsync thread reads memory.
+  - 2-4 ms before the warp started: the head pose history's mutex, shared with Monado's normal IPC threads. Every
+    Monado mutex (`os_mutex`, the thread helpers') now has priority inheritance.
+  - a commit made in the last ~3.5 ms before the vsync blocks in `MSMFB_ATOMIC_COMMIT` until that vsync.
+  After these: 0 late in 120 s, 1 in 240 s.
+- **The GPU**: the warp's 2.5-3 ms of GPU work sometimes waited 7-12 ms (vrcompositor's and Steam's draws are
+  preempted only at their end; every context already uses fine-grained preemption, Monado has the highest ring).
+  kgsl's dispatcher kthread at FIFO 96 instead of 2 changed nothing (not kept). The tick now starts 10 ms before the
+  latching vsync instead of 8 (`MDP_TICK_LEAD_DEFAULT_MS`): no late commit in 150 + 240 s of the load; the warp
+  extrapolates 2 ms further (libossdk's prediction: 0.04 deg p90 at 26 ms).
+
+Left: vrcompositor runs ~70 fps under the load but only ~61 of its frames a second reach the warp fresh (68 idle):
+a frame that reaches Monado after the tick is shown a vsync later or replaced. The head's rotation stays smooth (every
+vsync is warped), moving content and position jump. Written, not yet built or tested: the layer's threads on the
+frame's path (vrcompositor's submissions and their completion, the frame handed to Monado, its fences) and
+driver_quest1's present/pose and frame threads SCHED_RR 50 (they ran as normal threads); Monado's frame receiver
+("Quest1 direct") is still a normal thread.
+
 ## 2026-11-08 (night): Steam's VR UI ran the RAM out and froze the headset; its GPU queue, its readback memory
 
 Measured without the user, with a repeatable load: Steam's CEF remote debugging (`.cef-enable-remote-debugging` in

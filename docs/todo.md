@@ -57,6 +57,11 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - The 4x MSAA system layer costs ~25 ms a frame in mode 0 (~37 fps): Steam's loading screen at each start. Force it to
   1 sample there too (the user allows no MSAA), or see why Steam's VR UI stayed "not ready" after many SteamVR
   restarts (2026-11-08: "SteamLoadingThrobber timed out after 120 seconds"; a Steam restart fixed it).
+- Trembling under load (user, 2026-11-09: "zero tolerance"; frames shown twice): late commits gone under the Steam
+  load (docs/performance.md, 2026-11-09). Confirm worn. Next: frames that reach Monado's warp late (~61 of ~70 a
+  second fresh under load, 68 idle): build and measure the frame path's threads made real-time (layer and
+  driver_quest1, written, uncommitted on 2026-11-09), then Monado's "Quest1 direct" receiver; `vsyncs missed 2` in
+  one 240 s run. Measurement tools: /root/tmp/jitter.sh, posegap.py, measure.sh on|off (headset, temporary).
 - Steam's VR UI: confirm worn that Steam answers at once, that the view no longer trembles while it is used and that
   the headset no longer freezes (GPU queue limit, cached readback, 384 MB budget, I/O tuning, 2026-11-08 night,
   docs/performance.md). Measured without the user: SteamVR 71.4-72 fps with Steam repainting its whole page for 5 min.
@@ -70,6 +75,13 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   ("Ring Buffer Wrapped!") so all of it ends up pinned for a few 8 MB frames in flight. Drop the pages far behind the
   write position (kernel/kgsl-lazy.patch: unmap them and point the GPU back at the scratch page): ~200 MB.
 - Steam's VR UI: check the right controller's Oculus button logo in the headset (user).
+- Starting a stream from the PC (Steam Link / Remote Play to the headset) crashes Steam and SteamVR (not implemented,
+  user 2026-11-09): fail cleanly until streaming exists.
+- SteamVR's global render resolution slider: remove it as on the Steam Frame, later (user, 2026-11-09). Found:
+  `Prop_Hmd_RecommendedResolutionIsPerApp_Bool` (2121) hides it, but games without their own setting then get
+  vrcompositor's automatic 150 % (1496x1664), and `GpuSpeed/ignoreGpuSpeed` (back to 1224x1360) also drops
+  vrcompositor's own scene to 1224x1360 and broke scene mode (reverted, docs/frame-mode.md has no section: see
+  commit 10eb27f).
 
 ## Passthrough
 

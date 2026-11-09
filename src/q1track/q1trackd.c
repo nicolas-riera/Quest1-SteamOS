@@ -25,6 +25,7 @@
  */
 #include <dlfcn.h>
 #include <fcntl.h>
+#include <sched.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -385,6 +386,13 @@ static int do_serve(double hz)
 	rename(Q1TRACK_SHM_PATH ".tmp", Q1TRACK_SHM_PATH);
 	fprintf(stderr, "q1trackd: publishing at %.0f Hz in %s\n", hz, Q1TRACK_SHM_PATH);
 
+	/* Real-time (this thread only; libossdk's binder threads stay normal): as a normal thread under Steam's
+	 * load (load average ~10) the 2 ms period stretched up to 28 ms (36 gaps over 8 ms a minute, 2026-11-09)
+	 * and Monado's warp extrapolated the head that much further: the image trembled. Above Meta's own
+	 * tracking threads (FIFO 48-51) and SteamVR's (50 at most), as Monado's thread that reads this memory. */
+	struct sched_param sp = {.sched_priority = 52};
+	if (sched_setscheduler(0, SCHED_FIFO, &sp) != 0)
+		fprintf(stderr, "q1trackd: SCHED_FIFO 52 refused\n");
 	int64_t next = now_ns(), last_log = 0, last_ipd = 0, last_dev = 0, last_battery = 0;
 	uint64_t valid = 0, n = 0;
 	float ipd = 0;

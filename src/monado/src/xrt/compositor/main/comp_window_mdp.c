@@ -101,9 +101,13 @@ android_dlsym(void *handle, const char *symbol);
 //! and a frame finished in the first part of the period reaches the panels a vsync sooner. The warp takes 3-4 ms
 //! (mesh 1.1-1.4, GPU wait 1.6-2.2 with vrcompositor's work preempted, commit 0.1). Measured with a warp every
 //! vsync, head still, 2026-11-07: commits after the latching vsync per 2 s: lead 3 ms 51-143, 4 ms 60-99, 6 ms
-//! 0-9, 7 and 8 ms none; vrcompositor at 70-72 fps in each case. 8 leaves room for heavier GPU work worn.
+//! 0-9, 7 and 8 ms none; vrcompositor at 70-72 fps in each case. 8 left no room under Steam's load (2026-11-09,
+//! panels on, Steam's VR page repainted every frame and switched every 2 s, after the priority fixes): the warp's GPU
+//! wait went up to 7-12 ms now and then (2.5-3 ms of work: vrcompositor's and Steam's draws are preempted only at
+//! their end), and a commit made in the last ~3.5 ms before the vsync blocks in the kernel until it: 1-4 late commits
+//! a minute, each a frame shown twice. 10: none in 6.5 minutes of that load; the warp extrapolates 2 ms further.
 //! "lead=<ms>" in /tmp/quest1-reproj sets it, 0 = right after the vsync (as before).
-#define MDP_TICK_LEAD_DEFAULT_MS 8.0f
+#define MDP_TICK_LEAD_DEFAULT_MS 10.0f
 //! Real-time priorities (SCHED_FIFO): the vsync thread (warp + commit) above everything else of the VR stack, the
 //! MDP's display thread ("mdss_fb0", FIFO 16 from the kernel) just below. That kernel thread takes each commit to
 //! the hardware before the vsync that latches it; behind vrcompositor's and Meta's real-time threads it took one
@@ -292,6 +296,10 @@ struct mdp_direct
 	int64_t prev_vsync; //!< the last vsync direct_tick saw (gap detection)
 	int64_t tick_offset_ns; //!< how long after its vsync the vsync thread meant to tick (the lead's sleep)
 	int64_t commit_ioctl_ns; //!< how long the last MSMFB_ATOMIC_COMMIT took
+	//! This tick's warp (for the late-commit log): mesh build, submit-to-fence wait, GPU execution
+	int64_t tick_mesh_ns, tick_wait_ns;
+	int64_t tick_st[4]; //!< warp start, warp done, commit start, commit done (CLOCK_MONOTONIC)
+	double tick_gpu_ms;
 	//! The last commit waited in the kernel (mdss_fb_pan_idle: the MDP's display thread was still in
 	//! mdss_mdp_video_wait4comp for the commit before) and was only taken at the vsync it was meant for: too late to
 	//! be latched there, the display thread waits for the vsync after it, and the next tick's commit waits for that
@@ -498,9 +506,109 @@ load_panel_calibration(void)
 	        panel_gain[0][1], panel_gain[0][2], panel_gain[1][0], panel_gain[1][1], panel_gain[1][2]);
 }
 
-//! The brightness setting in percent (1-100), 100 without one.
+/*
+ * Files the vsync thread used to read or write itself (the brightness and standby flags, the test knobs, the
+ * snapshot trigger, the pose age for driver_quest1), now read and written by a normal thread of their own: under
+ * Steam's load a plain unlink() of the snapshot trigger in /tmp took 4-5 ms now and then in the middle of a tick,
+ * and the commit came after the vsync (2026-11-09, late-commit log). The vsync thread only reads this memory.
+ */
+#define MDP_FILES_PERIOD_MS 100
+#define MDP_SNAP_TRIGGER "/tmp/quest1-snap-monado"
+static struct
+{
+	pthread_mutex_t lock; //!< perf and reproj; the vsync thread only try-locks it
+	char perf[64], reproj[160];
+	bool reproj_exists;
+	int standby;           //!< MDP_STANDBY exists (atomic)
+	int brightness_x100;   //!< the brightness setting * 100 (atomic)
+	int snap;              //!< the snapshot trigger exists (atomic)
+	unsigned long age_seq; //!< pose age for driver_quest1: the vsync thread sets age_ms, then bumps this
+	double age_ms;
+} mdp_files = {.lock = PTHREAD_MUTEX_INITIALIZER, .brightness_x100 = 10000};
+
+static float
+brightness_from_file(void);
+
+static void
+read_text(const char *path, char *buf, size_t size, bool *exists)
+{
+	buf[0] = 0;
+	FILE *f = fopen(path, "r");
+	if (exists != NULL) {
+		*exists = f != NULL;
+	}
+	if (f != NULL) {
+		size_t n = fread(buf, 1, size - 1, f);
+		fclose(f);
+		buf[n] = 0;
+	}
+}
+
+static void
+mdp_files_poll(void)
+{
+	char perf[sizeof(mdp_files.perf)], reproj[sizeof(mdp_files.reproj)];
+	bool reproj_exists;
+	read_text("/tmp/quest1-perf", perf, sizeof(perf), NULL);
+	read_text("/tmp/quest1-reproj", reproj, sizeof(reproj), &reproj_exists);
+	pthread_mutex_lock(&mdp_files.lock);
+	memcpy(mdp_files.perf, perf, sizeof(perf));
+	memcpy(mdp_files.reproj, reproj, sizeof(reproj));
+	mdp_files.reproj_exists = reproj_exists;
+	pthread_mutex_unlock(&mdp_files.lock);
+	__atomic_store_n(&mdp_files.standby, access(MDP_STANDBY, F_OK) == 0, __ATOMIC_RELAXED);
+	__atomic_store_n(&mdp_files.brightness_x100, (int)(brightness_from_file() * 100.0f + 0.5f), __ATOMIC_RELAXED);
+	__atomic_store_n(&mdp_files.snap, access(MDP_SNAP_TRIGGER, F_OK) == 0, __ATOMIC_RELAXED);
+	static unsigned long written;
+	unsigned long seq = __atomic_load_n(&mdp_files.age_seq, __ATOMIC_ACQUIRE);
+	if (seq != written) {
+		// for driver_quest1's pose prediction (ReadPoseAge): "<sequence> <ms>", replaced atomically
+		written = seq;
+		FILE *af = fopen("/run/monado/quest1-pose-age.tmp", "w");
+		if (af != NULL) {
+			fprintf(af, "%lu %.2f\n", seq, mdp_files.age_ms);
+			fclose(af);
+			chmod("/run/monado/quest1-pose-age.tmp", 0644);
+			rename("/run/monado/quest1-pose-age.tmp", "/run/monado/quest1-pose-age");
+		}
+	}
+}
+
+static void *
+mdp_files_thread(void *arg)
+{
+	(void)arg;
+	struct sched_param sp = {0};
+	pthread_setschedparam(pthread_self(), SCHED_OTHER, &sp);
+	pthread_setname_np(pthread_self(), "Quest1 files");
+	for (;;) {
+		os_nanosleep(MDP_FILES_PERIOD_MS * U_TIME_1MS_IN_NS);
+		mdp_files_poll();
+	}
+	return NULL;
+}
+
+static void
+mdp_files_start(void)
+{
+	mdp_files_poll();
+	pthread_t th;
+	if (pthread_create(&th, NULL, mdp_files_thread, NULL) == 0) {
+		pthread_detach(th);
+	} else {
+		U_LOG_E("mdp: cannot start the files thread");
+	}
+}
+
+//! The brightness setting in percent (1-100), 100 without one (mdp_files' copy).
 static float
 brightness_wanted(void)
+{
+	return (float)__atomic_load_n(&mdp_files.brightness_x100, __ATOMIC_RELAXED) / 100.0f;
+}
+
+static float
+brightness_from_file(void)
 {
 	FILE *f = fopen(MDP_BRIGHTNESS_FILE, "r");
 	if (f != NULL) {
@@ -714,7 +822,7 @@ read_prox_locked(struct mdp_target *t)
 static void
 update_worn_locked(struct mdp_target *t)
 {
-	bool standby = access(MDP_STANDBY, F_OK) == 0;
+	bool standby = __atomic_load_n(&mdp_files.standby, __ATOMIC_RELAXED) != 0;
 	if (standby != t->standby) {
 		U_LOG_W("mdp: standby %s", standby ? "on" : "off");
 		t->standby = standby;
@@ -1219,6 +1327,15 @@ warp_read_knobs(struct mdp_direct *D, int64_t now)
 	if (now - D->knobs.read_ns < 500 * U_TIME_1MS_IN_NS) {
 		return;
 	}
+	char pb[sizeof(mdp_files.perf)], buf[sizeof(mdp_files.reproj)];
+	bool reproj_exists;
+	if (pthread_mutex_trylock(&mdp_files.lock) != 0) {
+		return; // the files thread is copying them: next tick
+	}
+	memcpy(pb, mdp_files.perf, sizeof(pb));
+	memcpy(buf, mdp_files.reproj, sizeof(buf));
+	reproj_exists = mdp_files.reproj_exists;
+	pthread_mutex_unlock(&mdp_files.lock);
 	D->knobs.read_ns = now;
 	D->knobs.off = !MDP_WARP_DEFAULT_ON;
 	D->knobs.yaw_deg = 0;
@@ -1236,28 +1353,16 @@ warp_read_knobs(struct mdp_direct *D, int64_t now)
 	// committed instead of when it is on the panels, so vrcompositor starts its next frame one vsync sooner
 	// (2026-11-02, head still, panels on: 28 -> 36 fps, present-wait errors 740 -> 40 per 25 s; the default)
 	D->knobs.ack_mode = 1;
-	FILE *pf = fopen("/tmp/quest1-perf", "r");
-	if (pf != NULL) {
-		char pb[64] = {0};
-		size_t pn = fread(pb, 1, sizeof(pb) - 1, pf);
-		fclose(pf);
-		pb[pn] = 0;
-		if (strstr(pb, "retire") != NULL) {
-			D->knobs.ack_mode = 0;
-		} else if (strstr(pb, "early") != NULL) {
-			D->knobs.ack_mode = 1;
-		} else if (strstr(pb, "vsync") != NULL) {
-			D->knobs.ack_mode = 2;
-		}
+	if (strstr(pb, "retire") != NULL) {
+		D->knobs.ack_mode = 0;
+	} else if (strstr(pb, "early") != NULL) {
+		D->knobs.ack_mode = 1;
+	} else if (strstr(pb, "vsync") != NULL) {
+		D->knobs.ack_mode = 2;
 	}
-	FILE *f = fopen("/tmp/quest1-reproj", "r");
-	if (f == NULL) {
+	if (!reproj_exists) {
 		return;
 	}
-	char buf[160] = {0};
-	size_t n = fread(buf, 1, sizeof(buf) - 1, f);
-	fclose(f);
-	buf[n] = 0;
 	if (strstr(buf, "off") != NULL) {
 		D->knobs.off = true;
 	} else if (strstr(buf, "on") != NULL || buf[0] != 0) {
@@ -1913,7 +2018,8 @@ warp_render(struct mdp_target *t, int o, const float *delta_top, const float *de
 	for (int h = 0; h < 2; h++) {
 		warp_build_mesh(D, h, delta_top, delta_bot, V->vptr + h * WARP_VTX_FLOATS * (WARP_GRID + 1) * (WARP_GRID + 1));
 	}
-	D->stats.mesh_ms_sum += (double)(os_monotonic_get_ns() - tm0) / 1e6;
+	D->tick_mesh_ns = os_monotonic_get_ns() - tm0;
+	D->stats.mesh_ms_sum += (double)D->tick_mesh_ns / 1e6;
 
 	vk->vkResetCommandPool(vk->device, V->cpool, 0);
 	VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -1967,7 +2073,8 @@ warp_render(struct mdp_target *t, int o, const float *delta_top, const float *de
 	}
 	r = vk->vkWaitForFences(vk->device, 1, &V->fence, VK_TRUE, 50 * U_TIME_1MS_IN_NS);
 	vk->vkResetFences(vk->device, 1, &V->fence);
-	D->stats.wait_ms_sum += (double)(os_monotonic_get_ns() - tw0) / 1e6;
+	D->tick_wait_ns = os_monotonic_get_ns() - tw0;
+	D->stats.wait_ms_sum += (double)D->tick_wait_ns / 1e6;
 	if (r != VK_SUCCESS) {
 		U_LOG_E("mdp: warp: the GPU did not finish in 50 ms (%d)", r);
 		return false;
@@ -1976,6 +2083,7 @@ warp_render(struct mdp_target *t, int o, const float *delta_top, const float *de
 	if (vk->vkGetQueryPoolResults(vk->device, V->qp, 0, 2, sizeof(ts), ts, sizeof(uint64_t),
 	                              VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
 		*gpu_ms = (double)(ts[1] - ts[0]) * vk->features.timestamp_period * 1e-6;
+		D->tick_gpu_ms = *gpu_ms;
 	}
 	return true;
 }
@@ -1984,9 +2092,10 @@ warp_render(struct mdp_target *t, int o, const float *delta_top, const float *de
 static void
 warp_snapshot(struct mdp_direct *D, int o)
 {
-	if (unlink("/tmp/quest1-snap-monado") != 0) {
+	if (!__atomic_load_n(&mdp_files.snap, __ATOMIC_RELAXED) || unlink(MDP_SNAP_TRIGGER) != 0) {
 		return;
 	}
+	__atomic_store_n(&mdp_files.snap, 0, __ATOMIC_RELAXED);
 	if (D->out[o][0].ubwc || D->out[o][1].ubwc) {
 		U_LOG_W("mdp: snapshot of a UBWC buffer not supported");
 		return;
@@ -2110,6 +2219,7 @@ direct_tick(struct mdp_target *t, int64_t vsync)
 	if (D->client_fd < 0) {
 		return;
 	}
+	int64_t entered = os_monotonic_get_ns();
 	pthread_mutex_lock(&D->lock);
 	if (D->client_fd < 0) {
 		pthread_mutex_unlock(&D->lock);
@@ -2156,6 +2266,9 @@ direct_tick(struct mdp_target *t, int64_t vsync)
 		D->commit_late = false; // see commit_late: the last commit is latched at the coming vsync
 		D->stats.late_skips++;
 	} else if (vsync > 0 && D->latest >= 0) {
+		D->tick_mesh_ns = D->tick_wait_ns = D->commit_ioctl_ns = 0;
+		memset(D->tick_st, 0, sizeof(D->tick_st));
+		D->tick_gpu_ms = 0;
 		warp_lens_setup(t);
 		bool commit_raw = D->fresh || D->need_refresh;
 		bool warped = false;
@@ -2294,10 +2407,14 @@ direct_tick(struct mdp_target *t, int64_t vsync)
 					int o = warp_free_set(D);
 					double gpu_ms = 0;
 					int64_t t0 = os_monotonic_get_ns();
+					D->tick_st[0] = t0;
 					if (o >= 0 && warp_render(t, o, delta_top, delta_bot, &gpu_ms)) {
+						D->tick_st[1] = os_monotonic_get_ns();
 						warp_snapshot(D, o);
 						int64_t tc0 = os_monotonic_get_ns();
+						D->tick_st[2] = tc0;
 						bool committed = direct_commit(t, D->out[o], -1, o, direct_ack_frame(D));
+						D->tick_st[3] = os_monotonic_get_ns();
 						D->stats.commit_ms_sum += (double)(os_monotonic_get_ns() - tc0) / 1e6;
 						if (committed) {
 							warped = true;
@@ -2337,6 +2454,22 @@ direct_tick(struct mdp_target *t, int64_t vsync)
 		int64_t done = os_monotonic_get_ns() - vsync;
 		if (committed && done > MDP_PERIOD_NS) {
 			D->stats.late++;
+			// each one is a frame shown a vsync late (a jump while the head moves): where its time went
+			static int64_t log_since;
+			static unsigned logged;
+			if (now - log_since > 10 * (int64_t)U_TIME_1S_IN_NS) {
+				log_since = now;
+				logged = 0;
+			}
+			if (logged++ < 10) {
+				U_LOG_W("mdp: direct: late commit, done at vsync + %.2f ms: tick woke %.2f ms late, lock %.2f, mesh %.2f, "
+				        "gpu wait %.2f (gpu %.2f), commit ioctl %.2f; at vsync + %.2f warp, %.2f warped, %.2f commit, %.2f committed",
+				        (double)done / 1e6, (double)(entered - vsync - D->tick_offset_ns) / 1e6,
+				        (double)(now - entered) / 1e6, (double)D->tick_mesh_ns / 1e6, (double)D->tick_wait_ns / 1e6,
+				        D->tick_gpu_ms, (double)D->commit_ioctl_ns / 1e6, (double)(D->tick_st[0] - vsync) / 1e6,
+				        (double)(D->tick_st[1] - vsync) / 1e6, (double)(D->tick_st[2] - vsync) / 1e6,
+				        (double)(D->tick_st[3] - vsync) / 1e6);
+			}
 		}
 		D->commit_late = committed && D->commit_ioctl_ns > U_TIME_1MS_IN_NS && done > MDP_PERIOD_NS - U_TIME_1MS_IN_NS / 2;
 	}
@@ -2364,15 +2497,9 @@ direct_tick(struct mdp_target *t, int64_t vsync)
 		        s->age_ms_max, D->tick_offset_ns > 0 ? (double)(MDP_PERIOD_NS - D->tick_offset_ns) / 1e6 : 0.0,
 		        D->knobs.display_delay_ms);
 		if (s->age_n > 0) {
-			// for driver_quest1's pose prediction (ReadPoseAge): "<sequence> <ms>", replaced atomically
-			static unsigned long age_seq;
-			FILE *af = fopen("/run/monado/quest1-pose-age.tmp", "w");
-			if (af != NULL) {
-				fprintf(af, "%lu %.2f\n", ++age_seq, s->age_ms_sum / s->age_n);
-				fclose(af);
-				chmod("/run/monado/quest1-pose-age.tmp", 0644);
-				rename("/run/monado/quest1-pose-age.tmp", "/run/monado/quest1-pose-age");
-			}
+			// for driver_quest1's pose prediction, written by the files thread
+			mdp_files.age_ms = s->age_ms_sum / s->age_n;
+			__atomic_add_fetch(&mdp_files.age_seq, 1, __ATOMIC_RELEASE);
 		}
 		*s = (struct mdp_direct_stats){.since_ns = now};
 	}
@@ -2953,6 +3080,7 @@ factory_create_target(const struct comp_target_factory *ctf, struct comp_composi
 	}
 
 	load_panel_calibration();
+	mdp_files_start();
 	struct mdp_target *t = U_TYPED_CALLOC(struct mdp_target);
 	t->fb_fd = open("/dev/fb0", O_RDWR | O_CLOEXEC);
 	t->vsync_fd = open("/sys/class/graphics/fb0/vsync_event", O_RDONLY | O_CLOEXEC);
