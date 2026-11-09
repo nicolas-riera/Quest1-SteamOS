@@ -127,6 +127,9 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 
 - Steam Link from a PC: hardware HEVC decode with msm_vidc (docs/streaming.md); the stream app's GL can't share
   images with the compositor (libhybris GL lacks GL_EXT_memory_object_fd / semaphore_fd).
+- Reference for making Steam Link accept a Quest 1 (device identity, etc.):
+  github.com/MisterAnderson91/quest1-steamlink-patcher (it patches Valve's Steam Link VR APK; we use it as a guide
+  only, for SteamOS's native streaming, user 2026-11-09).
 
 ## Hardware
 
