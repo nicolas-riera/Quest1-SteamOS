@@ -259,7 +259,8 @@ SteamVR controllers:
   dashboard bindings of `oculus_touch` from its own Oculus driver, so the driver selects ours
   (`quest1_touch_vrcompositor_bindings.json`, setting `oculus_touch_250820_CurrentURL_steamvrinput`) unless the
   user picked another. Laser always shown, trigger clicks, Menu (left) or Oculus (right) = system (dashboard,
-  double click = room view), A/X home, B/Y back, grips middle click and laser hand, sticks scroll, locomotion and
+  double click = room view, held 1 s = SteamVR's quick recenter `/actions/quickrecenter/in/Recenter`, the Frame's
+  binding), A/X home, B/Y back, grips middle click and laser hand, sticks scroll, locomotion and
   room setup (floor adjust, A/X accept, B/Y back). No gamepad mode (user, 2026-11-07: it does not suit these
   controllers): no property 2117, no grip mode switch.
   Render models: the Quest's (`oculus_quest_controller_left`, and the right one

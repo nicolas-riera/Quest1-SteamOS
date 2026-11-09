@@ -5,7 +5,7 @@
 	"category": "steamvr_input",
 	"controller_type": "oculus_touch",
 	"name": "Quest 1 Touch: SteamVR dashboard",
-	"description": "Menu (left) or Oculus (right) button toggles the dashboard, a double click the camera view (passthrough); trigger clicks; stick scrolls; A/X home, B/Y back; the laser is always shown (no gamepad mode)",
+	"description": "Menu (left) or Oculus (right) button toggles the dashboard, a double click the camera view (passthrough), held 1 s recenters (as on the Steam Frame); trigger clicks; stick scrolls; A/X home, B/Y back; the laser is always shown (no gamepad mode)",
 	"options": {},
 	"simulated_actions": [],
 	"bindings": {
@@ -25,6 +25,26 @@
 					"inputs": {
 						"single": { "output": "/actions/system/in/toggledashboard" },
 						"double": { "output": "/actions/system/in/toggleroomview" }
+					}
+				}
+			]
+		},
+		"/actions/quickrecenter": {
+			"sources": [
+				{
+					"path": "/user/hand/left/input/system",
+					"mode": "button",
+					"parameters": { "long_press_delay": 1.0, "long_press_expiry": 4.0 },
+					"inputs": {
+						"long": { "output": "/actions/quickrecenter/in/Recenter" }
+					}
+				},
+				{
+					"path": "/user/hand/right/input/system",
+					"mode": "button",
+					"parameters": { "long_press_delay": 1.0, "long_press_expiry": 4.0 },
+					"inputs": {
+						"long": { "output": "/actions/quickrecenter/in/Recenter" }
 					}
 				}
 			]
