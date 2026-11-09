@@ -14,7 +14,7 @@
 #   /opt/monado        Monado @ MONADO_COMMIT + src/monado/quest1-monado.patch
 #   /opt/quest1-steamvr/quest1   driver_quest1 (src/steamvr-quest1) and its resources
 #   /usr/local/lib     libVkLayer_quest1_steamvr_compat.so (src/vklayer-steamvr), libvncserver,
-#                      libquest1_v4l2.so (src/v4l2shim), qt6/plugins/ksystemstats (src/ksysgpu)
+#                      libquest1_v4l2.so (src/v4l2shim), libquest1_rpspectator.so, qt6/plugins/ksystemstats (src/ksysgpu)
 #   /usr/local/lib/quest1-vk, quest1-vk-steam   the Vulkan shim (vrcompositor; Steam's webhelper + vkredirect)
 #   /usr/local/lib/q1track/q1trackd, /data/local/tmp/libq1camtap.so   bionic tools (src/q1track, src/camtap)
 #   /usr/local/lib/q1splash/q1splash, /usr/local/bin/{ovrstub,q1black,xscreen,x11vnc,q1-camoverlay,
@@ -88,6 +88,8 @@ cp $D/usr/local/lib/quest1-vk-steam/libvulkan.so.1 $D/usr/local/lib/quest1-vk/li
 cc -fPIC -shared -o $D/usr/local/lib/quest1-vk-steam/libquest1_vkredirect.so vklayer-steamvr/quest1_vkredirect.c -ldl
 # Remote Play hardware encoding: Steam's V4L2 encoder calls on msm_vidc (preloaded by steam-q1)
 cc -fPIC -shared -fvisibility=hidden -Wextra -o $D/usr/local/lib/libquest1_v4l2.so v4l2shim/quest1_v4l2.c -lpthread
+# Remote Play spectator: the PC's input, cursor and gamepads kept out of the headset (preloaded by steam-q1)
+cc -fPIC -shared -fvisibility=hidden -Wextra -o $D/usr/local/lib/libquest1_rpspectator.so rpspectator/quest1_rpspectator.c -ldl
 cc -Wextra -o $D/usr/local/bin/ovrstub ovrstub/ovrstub.c
 gcc -O2 -Wall -o $D/usr/local/bin/q1black q1black/q1black.c $HY
 gcc -O2 -Wall -o $D/usr/local/lib/q1splash/q1splash q1splash/q1splash.c $HY

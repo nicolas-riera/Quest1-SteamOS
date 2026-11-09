@@ -143,6 +143,19 @@ during a session q1apps paints the VR view on its cover window:
 - No VR frame for 0.5 s (the headset taken off and asleep: Monado renders nothing) turns the cover dark blue
   (#1b2838), as the Frame's stream does.
 - Xvfb runs at 1280x720, the Frame's gamescope size (it was 1280x800).
+- The PC only watches (user, 2026-11-09: its mouse moved and clicked the apps under the laser, its keyboard typed in
+  them, and the apps' black cursor showed on the PC). `src/rpspectator` is preloaded into the Steam client
+  (steam-q1) and, while `/tmp/quest1-spectator` exists:
+  - drops Steam's injection of the PC's mouse and keyboard (`XTestFake{Key,Button,Motion,RelativeMotion}Event`,
+    imported by steamui.so and steamclient.so); releases still pass, so nothing stays held;
+  - returns the cursor image (`XFixesGetCursorImage`) fully transparent;
+  - refuses `/dev/uinput` to Steam, so the PC's gamepads (the stream forwards them, "Remote Device Found" in
+    logs/controller.txt) get no virtual gamepad on the headset. The PC's controllers come with the session's start,
+    up to a second before q1apps makes the trigger, so here a session also counts from the moment Steam's
+    `CGameStreamVide...` thread exists. Steam has no setting to stop the forwarding itself.
+
+  The "Microsoft X-Box 360 pad" (045e:028e) seen on the headset is xscreen's (the Touch controllers in flat mode)
+  and its Steam Input wrapper "Microsoft X-Box 360 pad 0" (28de:11ff) is made when Steam starts, not by the stream.
 - SteamVR's own headset view (`system.HeadsetView`, `IVRHeadsetView`) was tried first: vrcompositor renders it in
   two 256x256 passes, ignores `SetHeadsetViewSize` and the image is black here, and Steam's own VR capture
   (`CVRStreamThread`, GL) only runs on the Frame's hardware type and needs GL interop that llvmpipe lacks.

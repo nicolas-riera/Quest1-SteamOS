@@ -12,9 +12,10 @@
 # Remote Play encodes on the headset's venus encoder: /dev/video-enc0 (the Frame's node name) and
 # libquest1_v4l2.so preloaded into the client, which turns Steam's mainline V4L2 calls into what the
 # downstream msm_vidc driver takes (src/v4l2shim, docs/streaming.md).
-# Usage (on the headset): [VKSRC=<src/vklayer-steamvr copy>] [V4L2SRC=<src/v4l2shim copy>] holo-steam-session.sh install
+# Usage (on the headset): [VKSRC=<src/vklayer-steamvr copy>] [V4L2SRC=<src/v4l2shim copy>] [RPSRC=<src/rpspectator copy>] holo-steam-session.sh install
 #   VKSRC: build and install the Vulkan shim + dlopen redirect into /usr/local/lib/quest1-vk-steam
 #   V4L2SRC: build and install /usr/local/lib/libquest1_v4l2.so (the image has it from tools/build-native.sh)
+#   RPSRC: build and install /usr/local/lib/libquest1_rpspectator.so (src/rpspectator; same)
 set -e
 
 # --- Steam launcher -------------------------------------------------------------------------------
@@ -57,6 +58,10 @@ if [ "${QUEST1_STEAM_VR:-0}" = 1 ]; then
 fi
 # Remote Play's hardware encoder (CGameStreamVideoStageV4L2 on /dev/video-enc0) through the msm_vidc translation
 [ -f /usr/local/lib/libquest1_v4l2.so ] && export LD_PRELOAD=/usr/local/lib/libquest1_v4l2.so${LD_PRELOAD:+:$LD_PRELOAD}
+# Remote Play from the headset is a spectator view: the PC's mouse, keyboard, cursor and gamepads stay out
+# (src/rpspectator)
+[ -f /usr/local/lib/libquest1_rpspectator.so ] &&
+	export LD_PRELOAD=/usr/local/lib/libquest1_rpspectator.so${LD_PRELOAD:+:$LD_PRELOAD}
 # exit status 42 = "restart me" (after a self-update), as steam.sh handles it
 while :; do
 	$S/steamrtarm64/steam "$@"
@@ -113,6 +118,10 @@ fi
 if [ -n "$V4L2SRC" ]; then
 	gcc -std=gnu11 -O2 -Wall -fPIC -shared -fvisibility=hidden -o /usr/local/lib/libquest1_v4l2.so \
 		"$V4L2SRC/quest1_v4l2.c" -lpthread
+fi
+if [ -n "$RPSRC" ]; then
+	gcc -std=gnu11 -O2 -Wall -fPIC -shared -fvisibility=hidden -o /usr/local/lib/libquest1_rpspectator.so \
+		"$RPSRC/quest1_rpspectator.c" -ldl
 fi
 # the venus encoder under the Frame's name (msm_vidc's nodes are video32 = decoder, video33 = encoder; their
 # sysfs name is empty); the video group (steamos) already has it
