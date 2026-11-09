@@ -92,6 +92,11 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - Steam's VR UI: check the right controller's Oculus button logo in the headset (user).
 - Starting a stream from the PC (Steam Link / Remote Play to the headset) crashes Steam and SteamVR (not implemented,
   user 2026-11-09): fail cleanly until streaming exists.
+- Remote Play from the headset (spectator, docs/streaming.md section 0): confirm in a real stream that Steam takes
+  the venus encoder ("Capture method set to ... + V4L2 H264" in streaming_log.txt) and the frame rate; then the
+  capture ("Desktop OpenGL NV12" on llvmpipe, 25-30 ms a frame) and the spectator copy's cost.
+- Steam Link to the headset: the decoder in quest1_v4l2 (`/dev/video-dec0`), the theater mode crash (user's lead:
+  the floor reflections), then VR (vrlink).
 - SteamVR's global render resolution slider: remove it as on the Steam Frame, later (user, 2026-11-09). Found:
   `Prop_Hmd_RecommendedResolutionIsPerApp_Bool` (2121) hides it, but games without their own setting then get
   vrcompositor's automatic 150 % (1496x1664), and `GpuSpeed/ignoreGpuSpeed` (back to 1224x1360) also drops

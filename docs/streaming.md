@@ -14,8 +14,9 @@ Status 2026-11-06: feasibility survey with read-only probes. Nothing here was ma
   (USERPTR + ION, one access unit per buffer, the reconfiguration order, the coded size on CAPTURE) is in the header of `src/vdectest/vdectest.c`.
   Two traps: a capture STREAMOFF while the firmware holds buffers kills the firmware (Err_Fatal, SYS_ERROR; the driver recovers on the
   next open), and split mode scales its linear output to the CAPTURE size (1920x1080 squeezes H.264's 1088 decoded lines).
-- [H] No `/dev/video-dec0` / `/dev/video-enc0` (the Frame's `steam-video-codec-setup.service` makes them from `vrdevice_path`; it does not exist here).
-  Steam's `streaming_client` logs `CGameStreamVideoStageV4L2::BInitEncoder: Failed to open device: /dev/video-enc0`.
+- [H] No `/dev/video-dec0` (the Frame's `steam-video-codec-setup.service` makes it and `/dev/video-enc0` from `vrdevice_path`; it does not exist here).
+  `/dev/video-enc0` is a udev link to `video33` since 2026-11-09 (section 0); before, Steam logged
+  `CGameStreamVideoStageV4L2::BInitEncoder: Failed to open device: /dev/video-enc0` and encoded with x264.
 - [H] ffmpeg has `h264/hevc/vp9_v4l2m2m` wrappers, but `ffmpeg -c:v hevc_v4l2m2m` fails here (`Could not find a valid device`, EBUSY). It probes every
   `/dev/video*`, including the msm camera nodes (querycap on them logs harmless kernel WARNINGs `Bad caps for driver`, v4l2-ioctl.c:1039).
   GStreamer has no `v4l2*dec` elements (only src/sink/convert).
@@ -25,6 +26,38 @@ Status 2026-11-06: feasibility survey with read-only probes. Nothing here was ma
 - [H] Steam (arm64) has `streaming_client` 2.17.10, which runs as an OpenVR overlay inside SteamVR (`vrclient type=VRApplication_Overlay`, `--openvr`).
 - [H] Vulkan on the headset: streaming_client reports `VK_KHR_external_memory_fd`, `external_semaphore_fd` and `timeline_semaphore: TRUE`, but
   `vkGetPhysicalDeviceFormatProperties2 returned zero modifiers ... Supports dmabuf formats + modifiers? - No!`.
+
+## 0. Remote Play from the headset (spectator) and the hardware encoder
+
+2026-11-09: a Remote Play stream from the headset to the PC shows the VR view, as on the Frame (q1apps + Monado,
+docs/desktop.md "Remote Play spectator"). It ran at about 5 fps: Steam encoded with libx264 (4 threads, ~1.7
+cores, "encode 54-58 ms" in its "Slow framerate" log) on top of its "Desktop OpenGL NV12" capture on llvmpipe
+("capture 25-30 ms"). The encoder now runs on venus.
+
+Steam's encoder (steamui.so, read from its disassembly): `CGameStreamVideoStageV4L2` opens `/dev/video-enc0`
+(the Frame's node name) and uses the mainline stateful encoder API with MMAP buffers on both queues; without the
+node it falls back to x264. The downstream msm_vidc wants something else in a dozen places, so
+`src/v4l2shim/quest1_v4l2.c` (libquest1_v4l2.so, preloaded by steam-q1; udev links `/dev/video-enc0` to
+`video33`) translates. Its header lists each difference; the main ones:
+- ION-backed USERPTR buffers, each registered with the firmware (`VIDIOC_PREPARE_BUF`) right after REQBUFS.
+  Without that, the session's START killed the firmware (`Err_Fatal venus_venc_host_driver.c:1754`) whatever the
+  controls. Found by running Android's own encoder (the vendor libOmxVenc, through libhybris: `omxprobe.c`) with
+  the firmware log on (`fw_level` 0x3f) and comparing: its log shows the bitstream buffers' `BufferChk` before
+  LOAD_RESOURCES, ours did not.
+- NV12's UV plane: venus reads it at stride x height aligned to 32 (736 lines for 720), Steam writes it right
+  under 720 lines. At 1280x720 that offset is a whole number of pages, so Steam's mapping of each buffer is two
+  mappings of the ION buffer and its UV rows land where venus reads them (no copy).
+- `bytesperline` filled in (msm_vidc leaves 0, and Steam copies rows with it), the CAPTURE format sent before
+  the OUTPUT one, controls mapped (GOP, keyframe request, HEVC profile/level), the sequence headers in every IDR
+  from the firmware (msm_vidc's header mode 2), H.264 picture order count type 2 (no reordering).
+
+Measured with `src/v4l2shim/venctest.c` (Steam's exact call sequence, 1280x720 at 60 fps, 20 Mbit/s): H.264 12 ms
+from QBUF to bitstream, HEVC 9 ms; both decode cleanly in ffmpeg with the right colours. Left: a real stream
+(Steam picks the encoder only when a session starts), then the capture's cost.
+
+Notes for the decoder (`/dev/video-dec0`, Steam Link to the headset): the same layer is the place for it (same
+buffer translation; vdectest.c lists the decoder's own rules), and `omxprobe.c` can run the vendor decoder the
+same way to compare firmware logs.
 
 ## 1. 2D streaming (Steam Remote Play / Steam Link)
 

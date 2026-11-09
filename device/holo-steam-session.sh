@@ -9,8 +9,12 @@
 # The webhelper's GPU process (Chromium) renders on the Adreno: ANGLE Vulkan through libhybris, with
 # X11 presentation by quest1_vkshim (docs/steam-gpu.md). QUEST1_STEAM_GPU=0 in steam.service's
 # environment goes back to Mesa llvmpipe.
-# Usage (on the headset): [VKSRC=<src/vklayer-steamvr copy>] holo-steam-session.sh install
+# Remote Play encodes on the headset's venus encoder: /dev/video-enc0 (the Frame's node name) and
+# libquest1_v4l2.so preloaded into the client, which turns Steam's mainline V4L2 calls into what the
+# downstream msm_vidc driver takes (src/v4l2shim, docs/streaming.md).
+# Usage (on the headset): [VKSRC=<src/vklayer-steamvr copy>] [V4L2SRC=<src/v4l2shim copy>] holo-steam-session.sh install
 #   VKSRC: build and install the Vulkan shim + dlopen redirect into /usr/local/lib/quest1-vk-steam
+#   V4L2SRC: build and install /usr/local/lib/libquest1_v4l2.so (the image has it from tools/build-native.sh)
 set -e
 
 # --- Steam launcher -------------------------------------------------------------------------------
@@ -51,6 +55,8 @@ if [ "${QUEST1_STEAM_VR:-0}" = 1 ]; then
 	export LD_PRELOAD=/opt/hybris/lib/libbionictls.so:$V/libquest1_vkredirect.so${LD_PRELOAD:+:$LD_PRELOAD}
 	export QUEST1_VK_REDIRECT=$V/libvulkan.so.1 QUEST1_VKSHIM_WSI=1 QUEST1_STEAMVR_COMPAT=1
 fi
+# Remote Play's hardware encoder (CGameStreamVideoStageV4L2 on /dev/video-enc0) through the msm_vidc translation
+[ -f /usr/local/lib/libquest1_v4l2.so ] && export LD_PRELOAD=/usr/local/lib/libquest1_v4l2.so${LD_PRELOAD:+:$LD_PRELOAD}
 # exit status 42 = "restart me" (after a self-update), as steam.sh handles it
 while :; do
 	$S/steamrtarm64/steam "$@"
@@ -103,6 +109,17 @@ if [ -n "$VKSRC" ]; then
 		"$VKSRC/quest1_vkshim.c" "$VKSRC/quest1_wsi_x11.c" -ldl -lpthread -lxcb -lxcb-shm
 	gcc -std=gnu11 -O2 -Wall -fPIC -shared -o $V/libquest1_vkredirect.so "$VKSRC/quest1_vkredirect.c" -ldl
 fi
+
+if [ -n "$V4L2SRC" ]; then
+	gcc -std=gnu11 -O2 -Wall -fPIC -shared -fvisibility=hidden -o /usr/local/lib/libquest1_v4l2.so \
+		"$V4L2SRC/quest1_v4l2.c" -lpthread
+fi
+# the venus encoder under the Frame's name (msm_vidc's nodes are video32 = decoder, video33 = encoder; their
+# sysfs name is empty); the video group (steamos) already has it
+cat > /etc/udev/rules.d/70-quest1-video.rules <<'EOF'
+SUBSYSTEM=="video4linux", KERNEL=="video33", SYMLINK+="video-enc0"
+EOF
+ln -sfn video33 /dev/video-enc0
 
 # the GPU (kgsl) and ion for the render group (steamos); binder nodes are opened too (gralloc)
 cat > /etc/udev/rules.d/70-quest1-gpu.rules <<'EOF'
