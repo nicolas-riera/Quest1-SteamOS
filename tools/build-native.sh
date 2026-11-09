@@ -17,7 +17,7 @@
 #                      libquest1_v4l2.so (src/v4l2shim), libquest1_rpspectator.so, qt6/plugins/ksystemstats (src/ksysgpu)
 #   /usr/local/lib/quest1-vk, quest1-vk-steam   the Vulkan shim (vrcompositor; Steam's webhelper + vkredirect)
 #   /usr/local/lib/q1track/q1trackd, /data/local/tmp/libq1camtap.so   bionic tools (src/q1track, src/camtap)
-#   /usr/local/lib/q1splash/q1splash, /usr/local/bin/{ovrstub,q1black,xscreen,x11vnc,q1-camoverlay,
+#   /usr/local/lib/q1splash/q1splash, /usr/local/bin/{ovrstub,q1black,xscreen,x11vnc,q1-camoverlay,q1screencast,
 #   q1-ptprovider,vrdash,q1desktop,q1apps}
 # To check against the development headset (built by hand there, recipe not recorded until now):
 #   the libhybris commit, Monado's CMake options, the vrcompositor shim (here the same build as Steam's).
@@ -90,6 +90,10 @@ cc -fPIC -shared -o $D/usr/local/lib/quest1-vk-steam/libquest1_vkredirect.so vkl
 cc -fPIC -shared -fvisibility=hidden -Wextra -o $D/usr/local/lib/libquest1_v4l2.so v4l2shim/quest1_v4l2.c -lpthread
 # Remote Play spectator: the PC's input, cursor and gamepads kept out of the headset (preloaded by steam-q1)
 cc -fPIC -shared -fvisibility=hidden -Wextra -o $D/usr/local/lib/libquest1_rpspectator.so rpspectator/quest1_rpspectator.c -ldl
+# Remote Play's capture: the ScreenCast portal backend for Steam's X screen (device/holo-steam-session.sh installs
+# its portal and D-Bus files)
+gcc -std=gnu11 -O3 -Wall -Wextra -o $D/usr/local/bin/q1screencast q1screencast/q1screencast.c \
+	$(pkg-config --cflags --libs libpipewire-0.3 libsystemd x11 xext xdamage xfixes)
 cc -Wextra -o $D/usr/local/bin/ovrstub ovrstub/ovrstub.c
 gcc -O2 -Wall -o $D/usr/local/bin/q1black q1black/q1black.c $HY
 gcc -O2 -Wall -o $D/usr/local/lib/q1splash/q1splash q1splash/q1splash.c $HY

@@ -57,6 +57,57 @@ from QBUF to bitstream, HEVC 9 ms; both decode cleanly in ffmpeg with the right 
 frame instead of x264's 55. It still lags (user): its "Slow framerate" lines blame the capture, ~20 ms a frame,
 with Steam at ~250 % CPU (its GL capture of Xvfb and NV12 conversion run on llvmpipe).
 
+### The capture: Steam's PipeWire path, fed by q1screencast (2026-11-10)
+
+Steam's desktop capture (`CDesktopCaptureComposite` in steamui.so) holds three captures and tries them in this
+order: PipeWire (`CDesktopCapturePipeWire`), OpenGL (`CDesktopCaptureX11GL`, "Desktop OpenGL NV12") and plain X11
+(`CDesktopCaptureX11`, XShmGetImage, "Desktop X11 RGB"). The PipeWire one is only on with the `-pipewire` command
+line option (also `-pipewire-dmabuf`, `-pipewire-fresh-start`, `-pipewire-record-deck-ui`). Outside gamescope
+(`Plat_IsGamescope`) it asks the ScreenCast portal for persistent permission once at start ("Finished obtaining
+persistent permissions, exiting PipeWire until streaming or recording"), keeps the restore token
+(`DesktopCaptureRestoreToken`) and opens a portal session for each stream. Under gamescope it reads the "gamescope"
+node instead. It takes NV12 or RGB, as MemFd/MemPtr or dmabuf ("Desktop PipeWire NV12", "... NV12 DMABUF",
+"... RGB DMABUF"); without a DRM render node GBM is off ("Couldn't find any DRM devices"), so SHM only here.
+
+The headset's portal (xdg-desktop-portal 1.20, gtk backend) has no ScreenCast, so before this Steam fell back to
+OpenGL. `src/q1screencast` is that backend: `org.freedesktop.impl.portal.ScreenCast` as
+`org.freedesktop.impl.portal.desktop.quest1` (D-Bus activated user unit `q1screencast.service`;
+`/etc/xdg-desktop-portal/portals.conf` routes only ScreenCast to it, the rest stays on gtk; a `*` there woke the KDE
+backend, which never ran before). Each started session gets a PipeWire video source node; no dialog; Flatpak apps
+(non-empty app id) are refused. Frames:
+- While the VR view is streamed: straight from Monado's double buffer `/dev/shm/quest1-spectator`, each frame once
+  its header's `seq` says it is complete. The X server and q1apps' cover are not in the path, and nothing tears.
+  After 0.5 s without a new one (headset off, Monado renders nothing) it reads the X screen again, where q1apps'
+  cover has turned dark blue as the Frame's stream does.
+- Otherwise (Steam's own screen): XShmGetImage of the root, 3.7-7.5 ms a frame, when the screen changed (XDamage on
+  the root) or the pointer moved. Xlib queues the events read along with a reply (XQueryPointer), so they are
+  drained on every tick: waiting on the socket alone missed them and gave 1 frame a second. Steam asks cursor mode
+  "hidden" and draws the X cursor itself (rpspectator hides it while spectating).
+- Tried and dropped: reading Xvfb's framebuffer file (`-fbdir /run/xvfb`, the XWD image Xvfb draws into) saved the
+  3.7 ms but tore in the stream (user) whenever the screen was drawn during the read.
+- Converted to NV12 with NEON: 3.4 ms on a big core, 7.1 ms on a little one, at 1280x720; memory bound (a 1.4 MB
+  memcpy alone takes 0.6 ms on a big core). Steam's NV12 format asks for **BT.709 full range** (`pw-cli
+  enum-params <steam node> EnumFormat`: colorMatrix 3 = BT709, colorRange 1 = 0-255). BT.601 limited range looked
+  washed out on the PC, and declaring BT.601 in our format made the NV12 formats not match, so Steam took BGRx
+  (colours right, Steam converting, less smooth).
+- At most 60 frames a second, one a second when nothing changes.
+
+Result in a real stream: "Capture method set to Desktop PipeWire NV12 + V4L2 HEVC", capture 3-4.5 ms a frame
+(was 20-80), Steam ~100 % CPU (was ~250 %). "Smoother, not smooth enough" (user). The next limits measured then:
+- The VR view itself: Monado's spectator copy ran at 16-21 frames/s, 27-37 ms a copy: its host buffer was in the
+  Adreno blob's HOST_CACHED|HOST_COHERENT memory type, which is write-combined in fact (CPU reads ~220 MB/s, see
+  docs/performance.md). It now takes the cached non-coherent type (~4 GB/s) and invalidates before each read
+  (comp_window_mdp.c, `spect_init`/`spect_thread`): 4-7 ms a copy. It then ran at 24 a second: the 1/30 s period is
+  checked once a vsync, and at 72 Hz that takes three (41.7 ms); now every second vsync, 36 a second.
+  `5 * U_TIME_1S_IN_NS` also overflowed an int there (the idle timeout was 0.7 s, the log every 1.4 s).
+- Encode 14-16 ms a frame in the stream (8 ms measured earlier with a quieter headset).
+
+Layers per frame now, VR view to encoder: GPU blit + copy to a host buffer (Monado), memcpy into
+`/dev/shm/quest1-spectator`, XShmPutImage onto q1apps' cover (the X server copies into its framebuffer),
+q1screencast's NV12 conversion into a PipeWire buffer, Steam's copy into the V4L2 buffer, venus. The fewer-layer
+path (user: "le plus matériel possible, avec le moins de couches possible") is NV12 made on the GPU by Monado and
+handed to the encoder without the X server and the CPU conversion; see docs/todo.md.
+
 Notes for the decoder (`/dev/video-dec0`, Steam Link to the headset): the same layer is the place for it (same
 buffer translation; vdectest.c lists the decoder's own rules), and `omxprobe.c` can run the vendor decoder the
 same way to compare firmware logs.

@@ -249,10 +249,10 @@ index eb41c3c..5214613 100644
  
 diff --git a/src/xrt/compositor/main/comp_window_mdp.c b/src/xrt/compositor/main/comp_window_mdp.c
 new file mode 100644
-index 0000000..98b371d
+index 0000000..15bbda2
 --- /dev/null
 +++ b/src/xrt/compositor/main/comp_window_mdp.c
-@@ -0,0 +1,3840 @@
+@@ -0,0 +1,3870 @@
 +// Copyright 2026, Quest1-SteamOS contributors
 +// SPDX-License-Identifier: BSL-1.0
 +/*!
@@ -474,6 +474,9 @@ index 0000000..98b371d
 +	VkBuffer buf;
 +	VkDeviceMemory buf_mem;
 +	uint8_t *map;
++	VkDevice device;                               //!< for the thread's invalidate
++	PFN_vkInvalidateMappedMemoryRanges invalidate; //!< not in vk_bundle
++	bool noncoherent; //!< buf_mem needs an invalidate before the thread reads it
 +	VkCommandPool cpool;
 +	VkCommandBuffer cmd;
 +	VkFence fence;
@@ -2593,17 +2596,18 @@ index 0000000..98b371d
 + * Remote Play spectator (docs/streaming.md). Remote Play streams Steam's X display :1 from the headset; on the Steam
 + * Frame that screen shows what the headset shows. While SPECT_TRIGGER exists (q1apps makes it during a Remote Play
 + * session), the left eye's render, cropped to 16:10 around the view's axis and scaled to SPECT_W x SPECT_H, goes to
-+ * SPECT_FILE at most 30 times a second, for q1apps to put on :1. Lens mode only (the layer's buffers are the
-+ * undistorted eye renders). The copy (a blit, then into a host buffer) is a submission of its own after the warp's,
-+ * never waited for on the vsync thread: a later tick sees its fence and hands the buffer to the "Quest1 spectator"
-+ * thread, which copies it into the file. The file holds two frames after a header that says which one is complete.
++ * SPECT_FILE every second vsync (36 a second), for q1apps to put on :1 and for q1screencast, which streams it. Lens
++ * mode only (the layer's buffers are the undistorted eye renders). The copy (a blit, then into a host buffer) is a
++ * submission of its own after the warp's, never waited for on the vsync thread: a later tick sees its fence and hands
++ * the buffer to the "Quest1 spectator" thread, which copies it into the file. The file holds two frames after a header that says which one is complete.
 + * Nothing of this exists while nobody asks: the objects and the file go 5 s after the last request.
 + */
 +#define SPECT_FILE "/dev/shm/quest1-spectator"
 +#define SPECT_W 1280
 +#define SPECT_H 720
-+#define SPECT_PERIOD_NS (U_TIME_1S_IN_NS / 30)
-+#define SPECT_IDLE_NS (5 * U_TIME_1S_IN_NS)
++// every second vsync at 72 Hz (36 a second): checked once a vsync, 1/30 s took three of them (24 a second)
++#define SPECT_PERIOD_NS (U_TIME_1S_IN_NS / 45)
++#define SPECT_IDLE_NS (5 * (int64_t)U_TIME_1S_IN_NS)
 +#define SPECT_MAGIC 0x31535051u // "QPS1"
 +#define SPECT_HEADER 4096
 +
@@ -2632,13 +2636,19 @@ index 0000000..98b371d
 +		struct spect_header *hd = (struct spect_header *)S->shm;
 +		uint32_t i = hd->seq == 0 ? 0 : hd->index ^ 1;
 +		int64_t t0 = os_monotonic_get_ns();
++		if (S->noncoherent) {
++			VkMappedMemoryRange r = {.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
++			                         .memory = S->buf_mem,
++			                         .size = VK_WHOLE_SIZE};
++			S->invalidate(S->device, 1, &r);
++		}
 +		memcpy(S->shm + SPECT_HEADER + (size_t)i * hd->frame_bytes, S->map, hd->frame_bytes);
 +		static int64_t since, sum;
 +		static uint32_t n;
 +		int64_t t1 = os_monotonic_get_ns();
 +		sum += t1 - t0;
 +		n++;
-+		if (t1 - since > 10 * U_TIME_1S_IN_NS) {
++		if (t1 - since > 10 * (int64_t)U_TIME_1S_IN_NS) {
 +			if (since != 0) {
 +				U_LOG_W("mdp: spectator: %.1f frames/s, copy %.2f ms each", n * 1e9 / (double)(t1 - since),
 +				        (double)sum / n / 1e6);
@@ -2745,11 +2755,30 @@ index 0000000..98b371d
 +		goto fail;
 +	}
 +	vk->vkGetBufferMemoryRequirements(vk->device, S->buf, &mr);
-+	// the thread reads it: cached memory if there is (uncached reads are several times slower)
++	// the thread reads it: cached memory if there is (uncached reads are several times slower). The Adreno 540
++	// blob's HOST_CACHED|HOST_COHERENT type is write-combined in fact (CPU reads ~220 MB/s, 28 ms a frame here); its
++	// cached non-coherent one reads at ~4 GB/s (docs/performance.md), so that one first, invalidated before each read.
 +	mai.allocationSize = mr.size;
-+	mai.memoryTypeIndex = warp_memory_type(vk, mr.memoryTypeBits,
-+	                                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
-+	                                           VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
++	mai.memoryTypeIndex = UINT32_MAX;
++	S->device = vk->device;
++	S->invalidate = (PFN_vkInvalidateMappedMemoryRanges)vk->vkGetDeviceProcAddr(vk->device,
++	                                                                           "vkInvalidateMappedMemoryRanges");
++	for (uint32_t i = 0; S->invalidate != NULL && i < vk->device_memory_props.memoryTypeCount; i++) {
++		VkMemoryPropertyFlags f = vk->device_memory_props.memoryTypes[i].propertyFlags;
++		if ((mr.memoryTypeBits & (1u << i)) && (f & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) &&
++		    (f & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) && !(f & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
++			mai.memoryTypeIndex = i;
++			S->noncoherent = true;
++			break;
++		}
++	}
++	if (mai.memoryTypeIndex == UINT32_MAX) {
++		S->noncoherent = false;
++		mai.memoryTypeIndex = warp_memory_type(vk, mr.memoryTypeBits,
++		                                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
++		                                           VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
++		                                           VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
++	}
 +	if (mai.memoryTypeIndex == UINT32_MAX) {
 +		mai.memoryTypeIndex = warp_memory_type(vk, mr.memoryTypeBits,
 +		                                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
@@ -2801,7 +2830,8 @@ index 0000000..98b371d
 +	}
 +	S->failed = false;
 +	S->ready = true;
-+	U_LOG_W("mdp: spectator: %ux%u copies of the left eye to %s", SPECT_W, SPECT_H, SPECT_FILE);
++	U_LOG_W("mdp: spectator: %ux%u copies of the left eye to %s (%s host memory)", SPECT_W, SPECT_H, SPECT_FILE,
++	        S->noncoherent ? "cached" : "coherent");
 +	return true;
 +fail:
 +	U_LOG_E("mdp: spectator: setup failed");

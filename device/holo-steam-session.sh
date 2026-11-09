@@ -12,10 +12,12 @@
 # Remote Play encodes on the headset's venus encoder: /dev/video-enc0 (the Frame's node name) and
 # libquest1_v4l2.so preloaded into the client, which turns Steam's mainline V4L2 calls into what the
 # downstream msm_vidc driver takes (src/v4l2shim, docs/streaming.md).
-# Usage (on the headset): [VKSRC=<src/vklayer-steamvr copy>] [V4L2SRC=<src/v4l2shim copy>] [RPSRC=<src/rpspectator copy>] holo-steam-session.sh install
+# Usage (on the headset): [VKSRC=<src/vklayer-steamvr copy>] [V4L2SRC=<src/v4l2shim copy>] [RPSRC=<src/rpspectator copy>]
+#   [SCSRC=<src/q1screencast copy>] holo-steam-session.sh install
 #   VKSRC: build and install the Vulkan shim + dlopen redirect into /usr/local/lib/quest1-vk-steam
 #   V4L2SRC: build and install /usr/local/lib/libquest1_v4l2.so (the image has it from tools/build-native.sh)
 #   RPSRC: build and install /usr/local/lib/libquest1_rpspectator.so (src/rpspectator; same)
+#   SCSRC: build and install /usr/local/bin/q1screencast (src/q1screencast; same)
 set -e
 
 # --- Steam launcher -------------------------------------------------------------------------------
@@ -123,6 +125,41 @@ if [ -n "$RPSRC" ]; then
 	gcc -std=gnu11 -O2 -Wall -fPIC -shared -fvisibility=hidden -o /usr/local/lib/libquest1_rpspectator.so \
 		"$RPSRC/quest1_rpspectator.c" -ldl
 fi
+if [ -n "$SCSRC" ]; then
+	gcc -std=gnu11 -O3 -Wall -o /usr/local/bin/q1screencast "$SCSRC/q1screencast.c" \
+		$(pkg-config --cflags --libs libpipewire-0.3 libsystemd x11 xext xdamage xfixes)
+fi
+# Remote Play's capture: the ScreenCast portal backend for :1 (src/q1screencast), so Steam takes the screen through
+# PipeWire instead of reading it back with OpenGL on llvmpipe. Started by D-Bus when a client asks the portal; the
+# portal (xdg-desktop-portal, XDG_CURRENT_DESKTOP unset) reads /etc/xdg-desktop-portal/portals.conf, where only
+# ScreenCast changes: the rest stays on gtk, as before (no "*": it would wake the KDE backend).
+cat > /usr/share/xdg-desktop-portal/portals/quest1.portal <<'EOF'
+[portal]
+DBusName=org.freedesktop.impl.portal.desktop.quest1
+Interfaces=org.freedesktop.impl.portal.ScreenCast;
+EOF
+mkdir -p /etc/xdg-desktop-portal
+cat > /etc/xdg-desktop-portal/portals.conf <<'EOF'
+[preferred]
+default=gtk
+org.freedesktop.impl.portal.ScreenCast=quest1
+EOF
+cat > /usr/share/dbus-1/services/org.freedesktop.impl.portal.desktop.quest1.service <<'EOF'
+[D-BUS Service]
+Name=org.freedesktop.impl.portal.desktop.quest1
+Exec=/usr/local/bin/q1screencast
+SystemdService=q1screencast.service
+EOF
+cat > /etc/systemd/user/q1screencast.service <<'EOF'
+[Unit]
+Description=ScreenCast portal backend for the Steam client's X screen (:1)
+
+[Service]
+Type=dbus
+BusName=org.freedesktop.impl.portal.desktop.quest1
+Environment=DISPLAY=:1
+ExecStart=/usr/local/bin/q1screencast
+EOF
 # the venus encoder under the Frame's name (msm_vidc's nodes are video32 = decoder, video33 = encoder; their
 # sysfs name is empty); the video group (steamos) already has it
 cat > /etc/udev/rules.d/70-quest1-video.rules <<'EOF'
@@ -175,7 +212,8 @@ ExecStartPre=+/usr/bin/install -d -o steamos -g steamos -m 700 /run/user/1000
 # GL_EXT_memory_object/semaphore (llvmpipe can't import the Adreno's memory), so it takes its CPU fallback.
 Environment=QUEST1_STEAM_VR=1 QUEST1_STEAM_CEF_ARGS=
 Environment="MESA_EXTENSION_OVERRIDE=-GL_EXT_memory_object -GL_EXT_memory_object_fd -GL_EXT_semaphore -GL_EXT_semaphore_fd"
-ExecStart=/usr/local/bin/steam-q1 -gamepadui -steamos3 -steamdeck -steamframe
+# -pipewire: Remote Play captures the screen through the ScreenCast portal (q1screencast above), not with OpenGL
+ExecStart=/usr/local/bin/steam-q1 -gamepadui -steamos3 -steamdeck -steamframe -pipewire
 # Chromium makes its audio threads SCHED_RR 8 itself when RLIMIT_RTPRIO allows it (desktops grant it through rtkit).
 # At 0 Steam's "Realtime AudioW" stayed a normal thread that waited longer for a CPU than it ran (0.99 s against
 # 0.29 s six minutes after boot, up to 24 ms at once): its sounds crackled while the headset was busy (2026-11-08).

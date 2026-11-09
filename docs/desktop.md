@@ -133,11 +133,14 @@ during a session q1apps paints the VR view on its cover window:
   headset).
 - While a session runs q1apps creates `/tmp/quest1-spectator`; Monado's warp (comp_window_mdp.c, `spect_tick`)
   then blits the left eye's undistorted image (scene mode), cropped to 16:10 around the view axis, into a 1280x720
-  image 30 times a second, copies it to a host buffer and a thread of its own writes it to
+  image every second vsync (36 a second; "30 a second" checked once a vsync gave 24), copies it to a host buffer
+  (cached memory, ~6 ms a copy; the write-combined type took ~28 ms) and a thread of its own writes it to
   `/dev/shm/quest1-spectator` (two frames + a header with a sequence number). Monado frees all of it 5 s after the
   file goes away. The copy time is logged every 10 s ("spectator: ... frames/s, copy ... ms each").
 - q1apps maps that file and hands it to the X server with MIT-SHM (`xcb_shm_attach_fd`): each new frame is one
-  `XShmPutImage` on the cover, no copy on our side.
+  `XShmPutImage` on the cover, no copy on our side. The stream itself does not go through X: Steam captures through
+  PipeWire and q1screencast reads that file directly (docs/streaming.md "The capture"); it goes back to the X screen
+  after 0.5 s without a new VR frame, so the dark blue cover shows.
 - The cover's cursor and the root's are an empty pixmap cursor: Remote Play draws the X cursor into the stream
   (XFixes' cursor image, hidden or not). The cover takes the pointer 1 s after the last laser input on an app.
 - No VR frame for 0.5 s (the headset taken off and asleep: Monado renders nothing) turns the cover dark blue
@@ -149,9 +152,13 @@ during a session q1apps paints the VR view on its cover window:
   - drops Steam's injection of the PC's mouse and keyboard (`XTestFake{Key,Button,Motion,RelativeMotion}Event`,
     imported by steamui.so and steamclient.so); releases still pass, so nothing stays held;
   - returns the cursor image (`XFixesGetCursorImage`) fully transparent;
-  - refuses `/dev/uinput` to Steam, so the PC's gamepads (the stream forwards them, "Remote Device Found" in
-    logs/controller.txt) get no virtual gamepad on the headset. The PC's controllers come with the session's start,
-    up to a second before q1apps makes the trigger, so here a session also counts from the moment Steam's
+  - keeps the PC's gamepads (the stream forwards them, "Remote Device Found" in logs/controller.txt) from getting a
+    virtual gamepad on the headset, and only them (user: gamepads plugged into the headset must keep working).
+    Steam Input makes one uinput device per controller it drives; a gamepad of the headset's is an input device
+    with BTN_GAMEPAD before Steam wraps it, the PC's are not. So `/dev/uinput` opens only while the headset has
+    more gamepads of its own (Steam's 28de:11ff ones left out) than Steam holds uinput devices; each decision is
+    logged ("quest1_rpspectator: Remote Play session: ..."). The PC's controllers come with the session's start, up
+    to a second before q1apps makes the trigger, so here a session also counts from the moment Steam's
     `CGameStreamVide...` thread exists. Steam has no setting to stop the forwarding itself.
 
   The "Microsoft X-Box 360 pad" (045e:028e) seen on the headset is xscreen's (the Touch controllers in flat mode)
