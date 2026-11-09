@@ -37,20 +37,21 @@ mkdir -p /usr/local/lib/q1splash
 cat > /usr/local/sbin/q1splash-play <<'EOF'
 #!/bin/sh
 # Plays the Steam Frame's startup movie on the panels (q1splash), its sound on PipeWire when the user
-# session is up (else the video alone, still paced by GStreamer's clock).
+# session is up. Picture and sound are two pipelines: in one, a sound sink that is not ready (the ADSP's card
+# comes up late on some boots) held the whole pipeline before its first frame, and the boot showed nothing
+# (2026-11-09: "0 frames shown", no sound, the unit timed out).
 M=/home/steamos/.local/share/Steam/steamui/movies/steamframe_startup_450x450.webm
 [ -f "$M" ] || { echo "q1splash-play: no $M (Steam not installed yet)"; systemd-notify --ready; exit 0; }
 P=/run/user/1000/pulse/native
 for i in $(seq 1 20); do [ -S $P ] && break; sleep 0.25; done
 if [ -S $P ]; then
-	AUDIO="audioconvert ! audioresample ! pulsesink server=unix:$P"
-else
-	AUDIO="fakesink sync=true"
+	timeout 15 gst-launch-1.0 -q filesrc location="$M" ! matroskademux ! opusdec ! audioconvert ! audioresample ! \
+		pulsesink server=unix:$P &
 fi
-gst-launch-1.0 -q filesrc location="$M" ! matroskademux name=d \
-	d. ! queue ! vp9dec ! videoconvert ! video/x-raw,format=RGBA ! fdsink fd=1 sync=true \
-	d. ! queue ! opusdec ! $AUDIO |
-	LD_PRELOAD=/opt/hybris/lib/libbionictls.so /usr/local/lib/q1splash/q1splash 450 450
+gst-launch-1.0 -q filesrc location="$M" ! matroskademux ! vp9dec ! videoconvert ! video/x-raw,format=RGBA ! \
+	fdsink fd=1 sync=true |
+	LD_PRELOAD=/opt/hybris/lib/libbionictls.so /usr/local/lib/q1splash/q1splash 450 450 ||
+	systemd-notify --ready # nothing shown: Monado must not wait for the timeout
 EOF
 chmod 755 /usr/local/sbin/q1splash-play
 
