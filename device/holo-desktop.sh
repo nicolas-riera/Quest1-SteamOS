@@ -46,4 +46,32 @@ echo 'export FLATPAK_BWRAP=/usr/local/libexec/quest1-bwrap' > /etc/profile.d/que
 echo 'd /dev/dri 0755 root root -' > /etc/tmpfiles.d/quest1-dev-dri.conf
 systemd-tmpfiles --create /etc/tmpfiles.d/quest1-dev-dri.conf 2>/dev/null || true
 
+# Apps Steam starts from its "+" menu run on Steam's X display (:1), which Remote Play streams: q1apps (built by
+# tools/build-native.sh) covers it and shows each app in its own dashboard overlay, gamescope's part on the Frame
+[ -x /usr/local/bin/q1apps ] || echo "holo-desktop: /usr/local/bin/q1apps missing (tools/build-native.sh)" >&2
+cat > /etc/systemd/system/quest1-apps.service <<'EOF'
+[Unit]
+Description=Apps started by Steam, each in its own SteamVR dashboard overlay (q1apps)
+Requires=quest1-steamvr.service
+After=quest1-steamvr.service xvfb.service
+PartOf=quest1-steamvr.service
+
+[Service]
+User=steamos
+Environment=HOME=/home/steamos USER=steamos XDG_RUNTIME_DIR=/run/user/1000 DISPLAY=:1
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+# Vulkan on the Adreno, as SteamVR's own clients
+Environment=LD_PRELOAD=/opt/hybris/lib/libbionictls.so
+Environment=LD_LIBRARY_PATH=/usr/local/lib/quest1-vk-steam:/opt/hybris/lib QUEST1_STEAMVR_COMPAT=1
+Nice=5
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do pgrep -u steamos -x vrcompositor >/dev/null && exit 0; sleep 2; done; exit 1'
+ExecStart=/usr/local/bin/q1apps
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=quest1-steamvr.service
+EOF
+
 systemctl daemon-reload 2>/dev/null || true
+systemctl enable quest1-apps.service 2>/dev/null || true

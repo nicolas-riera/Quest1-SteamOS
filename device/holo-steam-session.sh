@@ -133,12 +133,16 @@ cat > /etc/systemd/system/steam.service <<'EOF'
 [Unit]
 Description=Steam client (arm64, Big Picture)
 Requires=xvfb.service
-After=xvfb.service network-online.target
+Wants=user@1000.service
+After=xvfb.service network-online.target user@1000.service
 
 [Service]
 User=steamos
 # steamos needs gid 3003 (aid_inet) for IP sockets: the Android kernel has PARANOID_NETWORK
 Environment=DISPLAY=:1 HOME=/home/steamos USER=steamos XDG_RUNTIME_DIR=/run/user/1000
+# the user's session bus, as in a desktop session: the apps Steam starts ("+" menu) inherit Steam's environment, and
+# without it every Flatpak failed ("Failed to get portal proxy": flatpak looks for a bus with dbus-launch)
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
 ExecStartPre=+/usr/bin/install -d -o steamos -g steamos -m 700 /run/user/1000
 # Steam's VR UI (SteamVR overlays from the webhelper's browser process, steam-q1 above). Steam's xcomposite composer
 # is kept (QUEST1_STEAM_CEF_ARGS empty). The browser's OpenGL is Mesa llvmpipe: vrclient must not see its
@@ -209,6 +213,12 @@ mkdir -p /usr/local/share/applications
 for a in avahi-discover bssh bvnc cmake-gui org.freedesktop.IBus.Setup x11vnc; do
 	printf '[Desktop Entry]\nType=Application\nName=%s\nHidden=true\n' "$a" > /usr/local/share/applications/$a.desktop
 done
+
+# The user's own services (xdg-desktop-portal-gtk: file choosers, settings for apps) open their windows on Steam's X
+# display, like the apps Steam starts; q1apps shows them in the dashboard. Without DISPLAY the GTK portal failed
+# ("cannot open display").
+mkdir -p /etc/environment.d
+echo DISPLAY=:1 > /etc/environment.d/quest1-display.conf
 
 mkdir -p /etc/x11vnc
 [ -f /etc/x11vnc/passwd ] || /usr/local/bin/x11vnc -storepasswd quest1 /etc/x11vnc/passwd

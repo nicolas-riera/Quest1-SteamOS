@@ -48,8 +48,11 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   while it tracks two contexts it skips map building, so the saved map never grows. Next (user: "as on Android, no
   constant delocalization"): clear the map with the user and walk the room before setting the playspace again; persist
   only once the room is covered, then again while tracking is good, so the saved map grows.
-- Meta's tracking cameras keep running while the headset is not worn (trackingservice IOTcam ~50 % of a core,
-  CtrllrCam ~11 %, 2026-11-08): pause them while the headset is off, if the map and the controllers come back fine.
+- Meta's tracking runs from boot, worn or not (trackingservice IOTcam ~50 % of a core, CtrllrCam ~11 %,
+  2026-11-08). Do as Meta's OS (user, 2026-11-09): after power-on, tracking stays off until the headset is worn the
+  first time; from then on it stays on, even when the headset is taken off. It stops only when the headset goes to
+  sleep (standby), and after waking it starts again only once the headset is worn. Check that the map and the
+  controllers come back fine after each start.
 
 - Tracking loss: confirm with a real loss that the headset keeps its last position and that the
   controllers come back (user).

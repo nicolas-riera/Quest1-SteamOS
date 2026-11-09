@@ -93,8 +93,29 @@ Everything above is the same, except gamescope:
   line with no empty line after it; kernel/cpuinfo-blank-line.patch adds one.
 - Apps from Steam's "+" menu start on Steam's own X display (`:1`, Xvfb), which nobody sees: Steam launches them
   as they are, and on the Frame gamescope shows each one as an overlay. That display is also what Remote Play
-  streams from the headset; on the Frame it shows the VR view. To do: each app in its own dashboard overlay, kept
-  out of the streamed screen.
+  streams from the headset; on the Frame it shows the VR view. Steam also had no session bus
+  (`DBUS_SESSION_BUS_ADDRESS`), so Flatpak apps it launched failed ("Failed to get portal proxy"): steam.service now
+  sets it (device/holo-steam-session.sh), and user units get `DISPLAY=:1` (environment.d) for the portals.
+
+## Apps from Steam's "+": q1apps
+
+`q1apps` (src/q1desktop/q1apps.cpp, quest1-apps.service, started with SteamVR) does for `:1` what gamescope does on
+the Frame: every app gets its own SteamVR dashboard overlay (tab with the app's name and icon), side by side in the
+dashboard like on the Frame.
+
+- A black, override-redirect cover window sits on top of `:1` with an empty input shape and the X cursor hidden: the
+  streamed screen shows no app windows and no Linux cursor, and clicks still reach the windows under it.
+- App windows are grouped by X client (one app = one client). Each window is redirected on its own
+  (`XCompositeRedirectWindow`); the root's subwindows are not, because that changed the pixmaps of Steam's own
+  windows and Steam's VR UI lost the dashboard bar. Steam's windows (WM_CLASS steam/steamwebhelper, or the PID's
+  name) are never touched.
+- XDamage marks what changed; the app's windows are composed into a screen-sized canvas (XShm) and uploaded to the
+  overlay texture (Vulkan, shared code with q1desktop in src/q1desktop/q1overlay.h), only while the overlay is
+  shown and at most at `Q1A_HZ` (default 60). Main windows fill the screen, dialogs are centred.
+- Laser input goes through XTest: pointing at an overlay raises its app (then the cover again) and gives it the
+  focus. Closing the tab sends `WM_DELETE_WINDOW`, then kills the client 5 s later.
+- The apps themselves draw with llvmpipe (no GPU in X), so they are slow; SteamVR keeps its frame rate (q1apps runs
+  at Nice 5 and only uploads changed rows).
 
 
 ## Notes moved from the to-do list (2026-11-08): Steam and desktop
