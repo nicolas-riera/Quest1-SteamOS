@@ -97,6 +97,8 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   capture ("Desktop OpenGL NV12" on llvmpipe, 25-30 ms a frame) and the spectator copy's cost.
 - Steam Link to the headset: the decoder in quest1_v4l2 (`/dev/video-dec0`), the theater mode crash (user's lead:
   the floor reflections), then VR (vrlink).
+- Confirm in the headset (user): System Monitor's GPU tile (src/ksysgpu, 2026-11-09), and the boot animation with
+  its sound at the next native boot (separate picture and sound pipelines since 2026-11-09).
 - SteamVR's global render resolution slider: remove it as on the Steam Frame, later (user, 2026-11-09). Found:
   `Prop_Hmd_RecommendedResolutionIsPerApp_Bool` (2121) hides it, but games without their own setting then get
   vrcompositor's automatic 150 % (1496x1664), and `GpuSpeed/ignoreGpuSpeed` (back to 1224x1360) also drops
