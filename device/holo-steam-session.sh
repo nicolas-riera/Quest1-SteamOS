@@ -1,7 +1,7 @@
 #!/bin/sh
 # Steam session on the native Quest 1: the arm64 Steam client (Big Picture) on a virtual X server,
 # shown in the headset by xscreen (an OpenXR quad layer on Monado) and controllable from the PC over VNC.
-#   xvfb.service      Xvfb :1, 1280x800, framebuffer exported as an XWD file in /run/xvfb
+#   xvfb.service      Xvfb :1, 1280x720 (the Frame's gamescope screen), framebuffer exported as an XWD file in /run/xvfb
 #   steam.service     steam-q1 -gamepadui -steamos3 -steamdeck -steamframe (Frame identity: ON_FRAME, Frame OOBE; docs/frame-mode.md) as steamos (restarts itself after client self-updates)
 #   x11vnc.service    VNC on port 5900, password in /etc/x11vnc/passwd
 #   steam-screen.service  shows the Steam screen in VR (xscreen); the Monado target keeps the
@@ -122,7 +122,7 @@ Description=Virtual X server for the Steam client (:1)
 
 [Service]
 ExecStartPre=/usr/bin/mkdir -p /run/xvfb
-ExecStart=/usr/sbin/Xvfb :1 -screen 0 1280x800x24 -fbdir /run/xvfb -nolisten tcp
+ExecStart=/usr/sbin/Xvfb :1 -screen 0 1280x720x24 -fbdir /run/xvfb -nolisten tcp
 Restart=on-failure
 
 [Install]

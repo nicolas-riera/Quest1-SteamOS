@@ -117,6 +117,30 @@ dashboard like on the Frame.
 - The apps themselves draw with llvmpipe (no GPU in X), so they are slow; SteamVR keeps its frame rate (q1apps runs
   at Nice 5 and only uploads changed rows).
 
+### Remote Play spectator (the VR view in the stream)
+
+On the Frame, a Remote Play stream from the headset shows what the wearer sees. Here the streamed screen is `:1`, so
+during a session q1apps paints the VR view on its cover window:
+
+- Session detection: Steam's stream threads (`CGameStreamVide...`) exist only while a session runs; q1apps looks for
+  them once a second. Nothing else runs outside a session (user's rule: active only when used, no cost in the
+  headset).
+- While a session runs q1apps creates `/tmp/quest1-spectator`; Monado's warp (comp_window_mdp.c, `spect_tick`)
+  then blits the left eye's undistorted image (scene mode), cropped to 16:10 around the view axis, into a 1280x720
+  image 30 times a second, copies it to a host buffer and a thread of its own writes it to
+  `/dev/shm/quest1-spectator` (two frames + a header with a sequence number). Monado frees all of it 5 s after the
+  file goes away. The copy time is logged every 10 s ("spectator: ... frames/s, copy ... ms each").
+- q1apps maps that file and hands it to the X server with MIT-SHM (`xcb_shm_attach_fd`): each new frame is one
+  `XShmPutImage` on the cover, no copy on our side.
+- The cover's cursor and the root's are an empty pixmap cursor: Remote Play draws the X cursor into the stream
+  (XFixes' cursor image, hidden or not). The cover takes the pointer 1 s after the last laser input on an app.
+- No VR frame for 0.5 s (the headset taken off and asleep: Monado renders nothing) turns the cover dark blue
+  (#1b2838), as the Frame's stream does.
+- Xvfb runs at 1280x720, the Frame's gamescope size (it was 1280x800).
+- SteamVR's own headset view (`system.HeadsetView`, `IVRHeadsetView`) was tried first: vrcompositor renders it in
+  two 256x256 passes, ignores `SetHeadsetViewSize` and the image is black here, and Steam's own VR capture
+  (`CVRStreamThread`, GL) only runs on the Frame's hardware type and needs GL interop that llvmpipe lacks.
+
 
 ## Notes moved from the to-do list (2026-11-08): Steam and desktop
 

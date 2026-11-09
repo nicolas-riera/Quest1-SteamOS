@@ -127,7 +127,7 @@ cd "$R/src/q1desktop"
 g++ -std=c++17 -O2 -Wall -o $D/usr/local/bin/q1desktop q1desktop.cpp $OVR -ldl -lX11 -lXdamage -lXtst
 # apps started by Steam ("+" menu): each in its own overlay, Steam's X display covered (device/holo-desktop.sh)
 g++ -std=c++17 -O2 -Wall -o $D/usr/local/bin/q1apps q1apps.cpp $OVR -ldl -lX11 -lX11-xcb -lxcb -lXext -lXdamage \
-	-lXfixes -lXcomposite -lXtst
+	-lXfixes -lXcomposite -lXtst -lxcb-shm
 
 step monado
 fetch $MONADO $MONADO_COMMIT $S/monado

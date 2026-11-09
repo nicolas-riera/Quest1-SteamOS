@@ -14,7 +14,12 @@
 //  - the overlay's mouse, scroll and keyboard events become XTest input on :1: pointing at an app's overlay (or
 //    the dashboard showing it) raises that app's windows under the cover and gives it the keyboard focus;
 //  - closing the overlay from its control bar asks the app's windows to close (WM_DELETE_WINDOW), then kills
-//    the client if it is still there 5 s later.
+//    the client if it is still there 5 s later;
+//  - during a Remote Play session (Steam's stream threads exist) the cover shows the VR view instead of black, as the
+//    Frame's screen does: Monado copies the left eye to SPECT_FILE while SPECT_TRIGGER exists (comp_window_mdp.c,
+//    spect_tick), and the frames go on the cover straight from that file (MIT-SHM on its fd). The cover's cursor is
+//    empty, and it takes the pointer 1 s after the last laser input, so no app's cursor is streamed either.
+//    Without VR frames for 0.5 s (headset taken off and asleep) it turns dark blue, as the Frame's stream does.
 // Usage (as steamos, SteamVR running): DISPLAY=:1 q1apps. Env: Q1A_HZ (max uploads per second per app, 60),
 // Q1A_WIDTH (overlay width in m, 2.67), Q1A_DEBUG=1. Exits when SteamVR quits (systemd starts it again).
 #include "q1overlay.h"
@@ -27,6 +32,9 @@
 #include <X11/extensions/Xfixes.h>
 #include <X11/extensions/shape.h>
 
+#include <xcb/shm.h>
+
+#include <dirent.h>
 #include <poll.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
@@ -92,6 +100,233 @@ struct Shm {
 	XImage *img = nullptr;
 };
 static Shm shm24, shm32;
+
+// --- Remote Play spectator ---------------------------------------------------------------------------------
+
+#define SPECT_TRIGGER "/tmp/quest1-spectator"
+#define SPECT_FILE "/dev/shm/quest1-spectator"
+#define SPECT_MAGIC 0x31535051u
+#define SPECT_HEADER 4096
+struct SpectHeader {
+	uint32_t magic, width, height, stride, frame_bytes;
+	uint32_t index, seq;
+};
+
+static struct {
+	bool on = false;    // a Remote Play session runs
+	double checked = 0; // last look at Steam's threads
+	pid_t steam = 0;
+	int fd = -1;
+	ino_t ino = 0;
+	uint8_t *map = nullptr;
+	size_t size = 0;
+	XShmSegmentInfo seg{};
+	XImage *img[2] = {};
+	uint32_t seq = 0;
+	GC gc = nullptr;
+	bool cover_catches = false; // the cover takes the pointer (its empty cursor is what gets streamed)
+	double last_input = 0;
+	double last_frame = 0; // when the last VR frame came (or the session started)
+	bool idle = false;     // the cover shows SPECT_IDLE_RGB: no VR frame for SPECT_IDLE_S
+} spect;
+
+// the headset asleep (taken off: Monado renders nothing) shows as this dark blue in the stream, as on the Frame
+#define SPECT_IDLE_S 0.5
+#define SPECT_IDLE_RGB 0x1b2838
+
+static bool read_comm(const char *path, char *out, size_t n)
+{
+	FILE *f = fopen(path, "r");
+	if (!f)
+		return false;
+	bool ok = fgets(out, (int)n, f) != nullptr;
+	fclose(f);
+	return ok;
+}
+
+// Steam's Remote Play session: its video stream threads exist only while one runs (made when it starts)
+static bool remote_play_session()
+{
+	char path[300], comm[32];
+	if (spect.steam) {
+		snprintf(path, sizeof(path), "/proc/%d/comm", spect.steam);
+		if (!read_comm(path, comm, sizeof(comm)) || strcmp(comm, "steam\n"))
+			spect.steam = 0;
+	}
+	if (!spect.steam) {
+		DIR *d = opendir("/proc");
+		for (dirent *e; d && (e = readdir(d));) {
+			if (e->d_name[0] < '1' || e->d_name[0] > '9')
+				continue;
+			snprintf(path, sizeof(path), "/proc/%s/comm", e->d_name);
+			struct stat st;
+			if (read_comm(path, comm, sizeof(comm)) && !strcmp(comm, "steam\n") && stat(path, &st) == 0 &&
+			    st.st_uid == getuid()) {
+				spect.steam = atoi(e->d_name);
+				break;
+			}
+		}
+		if (d)
+			closedir(d);
+	}
+	if (!spect.steam)
+		return false;
+	snprintf(path, sizeof(path), "/proc/%d/task", spect.steam);
+	DIR *d = opendir(path);
+	bool found = false;
+	for (dirent *e; d && !found && (e = readdir(d));) {
+		if (e->d_name[0] == '.')
+			continue;
+		char p2[300];
+		snprintf(p2, sizeof(p2), "/proc/%d/task/%s/comm", spect.steam, e->d_name);
+		found = read_comm(p2, comm, sizeof(comm)) && !strncmp(comm, "CGameStreamVide", 15);
+	}
+	if (d)
+		closedir(d);
+	return found;
+}
+
+static void spect_detach()
+{
+	for (auto &im : spect.img)
+		if (im) {
+			im->data = nullptr; // the file's, not Xlib's
+			XDestroyImage(im);
+			im = nullptr;
+		}
+	if (spect.seg.shmseg) {
+		xcb_shm_detach(XGetXCBConnection(dpy), spect.seg.shmseg);
+		spect.seg = XShmSegmentInfo{};
+	}
+	if (spect.map)
+		munmap(spect.map, spect.size);
+	if (spect.fd >= 0)
+		close(spect.fd);
+	spect.map = nullptr;
+	spect.fd = -1;
+	spect.ino = 0;
+}
+
+// Monado's file, attached to the X server read-only: its two frames as images
+static bool spect_attach()
+{
+	int fd = open(SPECT_FILE, O_RDONLY | O_CLOEXEC);
+	struct stat st;
+	if (fd < 0 || fstat(fd, &st) < 0 || (size_t)st.st_size < SPECT_HEADER) {
+		if (fd >= 0)
+			close(fd);
+		return false;
+	}
+	uint8_t *map = (uint8_t *)mmap(nullptr, st.st_size, PROT_READ, MAP_SHARED, fd, 0);
+	const SpectHeader *hd = (const SpectHeader *)map;
+	if (map == MAP_FAILED || hd->magic != SPECT_MAGIC || hd->stride != hd->width * 4 ||
+	    SPECT_HEADER + 2 * (size_t)hd->frame_bytes > (size_t)st.st_size ||
+	    (size_t)hd->frame_bytes < (size_t)hd->stride * hd->height) {
+		if (map != MAP_FAILED)
+			munmap(map, st.st_size);
+		close(fd);
+		return false;
+	}
+	spect.fd = fd;
+	spect.ino = st.st_ino;
+	spect.map = map;
+	spect.size = st.st_size;
+	xcb_connection_t *c = XGetXCBConnection(dpy);
+	spect.seg.shmseg = xcb_generate_id(c);
+	spect.seg.shmid = -1;
+	spect.seg.shmaddr = (char *)map;
+	spect.seg.readOnly = True;
+	xcb_generic_error_t *err = xcb_request_check(c, xcb_shm_attach_fd_checked(c, spect.seg.shmseg, dup(fd), 1));
+	if (err) {
+		free(err);
+		spect.seg.shmseg = 0;
+		spect_detach();
+		fprintf(stderr, "q1apps: spectator: the X server refused the frames' file\n");
+		return false;
+	}
+	XVisualInfo vi;
+	XMatchVisualInfo(dpy, DefaultScreen(dpy), 24, TrueColor, &vi);
+	for (int i = 0; i < 2; i++)
+		spect.img[i] = XShmCreateImage(dpy, vi.visual, 24, ZPixmap,
+		                               (char *)map + SPECT_HEADER + (size_t)i * hd->frame_bytes, &spect.seg,
+		                               hd->width, hd->height);
+	spect.seq = 0;
+	fprintf(stderr, "q1apps: spectator: %ux%u frames from %s\n", hd->width, hd->height, SPECT_FILE);
+	return true;
+}
+
+static void cover_input(bool catches)
+{
+	if (spect.cover_catches == catches)
+		return;
+	spect.cover_catches = catches;
+	if (catches) {
+		XFixesSetWindowShapeRegion(dpy, cover, ShapeInput, 0, 0, None); // its whole area
+	} else {
+		XserverRegion none = XFixesCreateRegion(dpy, nullptr, 0);
+		XFixesSetWindowShapeRegion(dpy, cover, ShapeInput, 0, 0, none);
+		XFixesDestroyRegion(dpy, none);
+	}
+	XFlush(dpy);
+}
+
+// once a loop: the session's start and end (checked every second), the latest frame on the cover
+static void spect_poll(double t)
+{
+	if (t - spect.checked >= 1) {
+		spect.checked = t;
+		bool on = remote_play_session();
+		if (on != spect.on) {
+			spect.on = on;
+			fprintf(stderr, "q1apps: Remote Play session %s\n", on ? "started: the cover shows the VR view" : "ended");
+			if (on) {
+				spect.last_frame = t;
+				spect.idle = false;
+				int fd = open(SPECT_TRIGGER, O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
+				if (fd >= 0)
+					close(fd);
+			} else {
+				unlink(SPECT_TRIGGER);
+				spect_detach();
+				cover_input(false);
+				XClearWindow(dpy, cover);
+				XFlush(dpy);
+			}
+		}
+		struct stat st;
+		if (spect.on && spect.map && (stat(SPECT_FILE, &st) != 0 || st.st_ino != spect.ino))
+			spect_detach(); // Monado made it again
+	}
+	if (!spect.on)
+		return;
+	if (!spect.cover_catches && t - spect.last_input > 1)
+		cover_input(true);
+	const SpectHeader *hd = spect.map || spect_attach() ? (const SpectHeader *)spect.map : nullptr;
+	uint32_t seq = hd ? __atomic_load_n(&hd->seq, __ATOMIC_ACQUIRE) : spect.seq;
+	if (seq == spect.seq) {
+		if (!spect.idle && t - spect.last_frame > SPECT_IDLE_S) {
+			spect.idle = true;
+			XSetForeground(dpy, spect.gc, SPECT_IDLE_RGB);
+			XFillRectangle(dpy, cover, spect.gc, 0, 0, W, H);
+			XFlush(dpy);
+		}
+		return;
+	}
+	spect.seq = seq;
+	spect.last_frame = t;
+	spect.idle = false;
+	XImage *im = spect.img[__atomic_load_n(&hd->index, __ATOMIC_RELAXED) & 1];
+	int w = std::min((int)hd->width, W), h = std::min((int)hd->height, H);
+	XShmPutImage(dpy, cover, spect.gc, im, 0, 0, (W - w) / 2, (H - h) / 2, w, h, False);
+	XSync(dpy, False); // done with that frame before Monado writes it again (two frames later)
+}
+
+// laser input for an app: the pointer must reach the apps again
+static void spect_input(double t)
+{
+	spect.last_input = t;
+	cover_input(false);
+}
 
 static int on_x_error(Display *, XErrorEvent *e)
 {
@@ -513,6 +748,18 @@ int main()
 	XStoreName(dpy, cover, "q1apps");
 	XMapRaised(dpy, cover);
 	XFixesHideCursor(dpy, root);
+	// an empty cursor: Remote Play draws the X cursor into the stream (XFixes' cursor image, hidden or not)
+	{
+		static char zero = 0;
+		Pixmap pm = XCreateBitmapFromData(dpy, root, &zero, 1, 1);
+		XColor black{};
+		Cursor none = XCreatePixmapCursor(dpy, pm, pm, &black, &black, 0, 0);
+		XDefineCursor(dpy, cover, none);
+		XDefineCursor(dpy, root, none);
+		XFreePixmap(dpy, pm);
+	}
+	spect.gc = XCreateGC(dpy, cover, 0, nullptr);
+	unlink(SPECT_TRIGGER); // a session is looked for at once
 
 	XGrabServer(dpy); // no window missed between the listing and the event selection
 	XSelectInput(dpy, root, SubstructureNotifyMask);
@@ -590,6 +837,9 @@ int main()
 				if (ev.eventType == VREvent_MouseMove || ev.eventType == VREvent_MouseButtonDown ||
 				    ev.eventType == VREvent_KeyboardCharInput)
 					bring_front(client);
+				if (ev.eventType == VREvent_MouseMove || ev.eventType == VREvent_MouseButtonDown ||
+				    ev.eventType == VREvent_MouseButtonUp || ev.eventType == VREvent_ScrollDiscrete)
+					spect_input(t);
 				if (x_input_event(xi, ev, W, H))
 					continue;
 				if (ev.eventType == VREvent_OverlayClosed) {
@@ -633,6 +883,7 @@ int main()
 		}
 		for (XID c : done)
 			app_destroy(c);
+		spect_poll(t);
 
 		VREvent_t ev;
 		while (VRSystem()->PollNextEvent(&ev, sizeof(ev)))

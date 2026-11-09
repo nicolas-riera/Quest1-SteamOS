@@ -249,10 +249,10 @@ index eb41c3c..5214613 100644
  
 diff --git a/src/xrt/compositor/main/comp_window_mdp.c b/src/xrt/compositor/main/comp_window_mdp.c
 new file mode 100644
-index 0000000..4420c78
+index 0000000..98b371d
 --- /dev/null
 +++ b/src/xrt/compositor/main/comp_window_mdp.c
-@@ -0,0 +1,3417 @@
+@@ -0,0 +1,3840 @@
 +// Copyright 2026, Quest1-SteamOS contributors
 +// SPDX-License-Identifier: BSL-1.0
 +/*!
@@ -426,6 +426,7 @@ index 0000000..4420c78
 +	VkImageView view;
 +	VkFramebuffer fb;      //!< outputs
 +	VkDescriptorSet set;   //!< sources
++	bool transfer_src;     //!< sources: can be blitted from (spect_tick)
 +};
 +
 +//! Re-project when /tmp/quest1-reproj does not say otherwise (it says "on" or "off", and tuning values, see warp_read_knobs)
@@ -461,6 +462,32 @@ index 0000000..4420c78
 +	VkCommandBuffer cmd;
 +	VkFence fence;
 +	VkQueryPool qp;
++};
++
++//! Remote Play spectator (see spect_tick): its copy objects and shared file
++struct direct_spect
++{
++	bool ready, failed;
++	VkFormat format;
++	VkImage image;
++	VkDeviceMemory image_mem;
++	VkBuffer buf;
++	VkDeviceMemory buf_mem;
++	uint8_t *map;
++	VkCommandPool cpool;
++	VkCommandBuffer cmd;
++	VkFence fence;
++	bool submitted;   //!< a copy is on the GPU
++	int busy;         //!< atomic: from a copy's submit until the thread has published it
++	int64_t last_ns;  //!< last copy submitted
++	int64_t want_ns;  //!< last tick that wanted copies
++	int fd;           //!< the shared file, mapped at shm
++	uint8_t *shm;
++	size_t shm_size;
++	bool thread_running;
++	pthread_mutex_t mtx;
++	pthread_cond_t cond;
++	bool go;
 +};
 +
 +struct mdp_direct_stats
@@ -549,6 +576,7 @@ index 0000000..4420c78
 +	//! Warp: output buffers, Vulkan objects, tuning knobs (warp_read_knobs)
 +	struct direct_buf out[WARP_OUT_SETS][2];
 +	struct direct_vk vk;
++	struct direct_spect spect;
 +	struct
 +	{
 +		bool off;
@@ -811,6 +839,8 @@ index 0000000..4420c78
 + */
 +#define MDP_FILES_PERIOD_MS 100
 +#define MDP_SNAP_TRIGGER "/tmp/quest1-snap-monado"
++//! Remote Play spectator: q1apps asks for the copies with this file (see spect_tick)
++#define SPECT_TRIGGER "/tmp/quest1-spectator"
 +static struct
 +{
 +	pthread_mutex_t lock; //!< perf and reproj; the vsync thread only try-locks it
@@ -819,6 +849,7 @@ index 0000000..4420c78
 +	int standby;           //!< MDP_STANDBY exists (atomic)
 +	int brightness_x100;   //!< the brightness setting * 100 (atomic)
 +	int snap;              //!< the snapshot trigger exists (atomic)
++	int spect;             //!< SPECT_TRIGGER exists (atomic)
 +	unsigned long age_seq; //!< pose age for driver_quest1: the vsync thread sets age_ms, then bumps this
 +	double age_ms;
 +} mdp_files = {.lock = PTHREAD_MUTEX_INITIALIZER, .brightness_x100 = 10000};
@@ -856,6 +887,7 @@ index 0000000..4420c78
 +	__atomic_store_n(&mdp_files.standby, access(MDP_STANDBY, F_OK) == 0, __ATOMIC_RELAXED);
 +	__atomic_store_n(&mdp_files.brightness_x100, (int)(brightness_from_file() * 100.0f + 0.5f), __ATOMIC_RELAXED);
 +	__atomic_store_n(&mdp_files.snap, access(MDP_SNAP_TRIGGER, F_OK) == 0, __ATOMIC_RELAXED);
++	__atomic_store_n(&mdp_files.spect, access(SPECT_TRIGGER, F_OK) == 0, __ATOMIC_RELAXED);
 +	static unsigned long written;
 +	unsigned long seq = __atomic_load_n(&mdp_files.age_seq, __ATOMIC_ACQUIRE);
 +	if (seq != written) {
@@ -1244,6 +1276,9 @@ index 0000000..4420c78
 +
 +static void
 +warp_free(struct mdp_target *t);
++
++static void
++spect_stop(struct mdp_target *t);
 +
 +//! Call with D->lock held.
 +static void
@@ -1978,7 +2013,21 @@ index 0000000..4420c78
 +//! Import the gralloc buffer as a R8G8B8A8_UNORM image: one of ours, 1440 x height, rendered to, or one of the layer's
 +//! (in_w x in_h), sampled.
 +static bool
++warp_import_usage(struct mdp_target *t, struct direct_buf *b, bool output, VkImageUsageFlags usage);
++
++static bool
 +warp_import(struct mdp_target *t, struct direct_buf *b, bool output)
++{
++	if (output) {
++		return warp_import_usage(t, b, true, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
++	}
++	// sources can also be blitted from (the spectator's copy), if the buffer allows it
++	b->transfer_src = warp_import_usage(t, b, false, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
++	return b->transfer_src || warp_import_usage(t, b, false, VK_IMAGE_USAGE_SAMPLED_BIT);
++}
++
++static bool
++warp_import_usage(struct mdp_target *t, struct direct_buf *b, bool output, VkImageUsageFlags usage)
 +{
 +	struct mdp_direct *D = &t->direct;
 +	struct vk_bundle *vk = &t->base.c->base.vk;
@@ -2009,10 +2058,11 @@ index 0000000..4420c78
 +	    .arrayLayers = 1,
 +	    .samples = VK_SAMPLE_COUNT_1_BIT,
 +	    .tiling = VK_IMAGE_TILING_OPTIMAL,
-+	    .usage = output ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT : VK_IMAGE_USAGE_SAMPLED_BIT,
++	    .usage = usage,
 +	    .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
 +	};
 +	if (vk->vkCreateImage(vk->device, &ici, NULL, &b->image) != VK_SUCCESS) {
++		b->image = VK_NULL_HANDLE;
 +		return false;
 +	}
 +	VkImportAndroidHardwareBufferInfoANDROID imp = {
@@ -2317,6 +2367,7 @@ index 0000000..4420c78
 +	if (!t->has_init_vulkan) {
 +		return;
 +	}
++	spect_stop(t);
 +	for (int i = 0; i < Q1D_MAX_IMAGES; i++) {
 +		for (int h = 0; h < 2; h++) {
 +			warp_free_buf_vk(vk, &D->buf[i][h]);
@@ -2536,6 +2587,377 @@ index 0000000..4420c78
 +			munmap(p[k], size[k]);
 +		}
 +	}
++}
++
++/*
++ * Remote Play spectator (docs/streaming.md). Remote Play streams Steam's X display :1 from the headset; on the Steam
++ * Frame that screen shows what the headset shows. While SPECT_TRIGGER exists (q1apps makes it during a Remote Play
++ * session), the left eye's render, cropped to 16:10 around the view's axis and scaled to SPECT_W x SPECT_H, goes to
++ * SPECT_FILE at most 30 times a second, for q1apps to put on :1. Lens mode only (the layer's buffers are the
++ * undistorted eye renders). The copy (a blit, then into a host buffer) is a submission of its own after the warp's,
++ * never waited for on the vsync thread: a later tick sees its fence and hands the buffer to the "Quest1 spectator"
++ * thread, which copies it into the file. The file holds two frames after a header that says which one is complete.
++ * Nothing of this exists while nobody asks: the objects and the file go 5 s after the last request.
++ */
++#define SPECT_FILE "/dev/shm/quest1-spectator"
++#define SPECT_W 1280
++#define SPECT_H 720
++#define SPECT_PERIOD_NS (U_TIME_1S_IN_NS / 30)
++#define SPECT_IDLE_NS (5 * U_TIME_1S_IN_NS)
++#define SPECT_MAGIC 0x31535051u // "QPS1"
++#define SPECT_HEADER 4096
++
++//! SPECT_FILE's header; frame i (B,G,R,X) at SPECT_HEADER + i * frame_bytes
++struct spect_header
++{
++	uint32_t magic, width, height, stride, frame_bytes;
++	uint32_t index; //!< the complete frame
++	uint32_t seq;   //!< bumped (release) after each frame
++};
++
++static void *
++spect_thread(void *arg)
++{
++	struct direct_spect *S = arg;
++	struct sched_param sp = {0};
++	pthread_setschedparam(pthread_self(), SCHED_OTHER, &sp);
++	pthread_setname_np(pthread_self(), "Quest1 spectator");
++	for (;;) {
++		pthread_mutex_lock(&S->mtx);
++		while (!S->go) {
++			pthread_cond_wait(&S->cond, &S->mtx);
++		}
++		S->go = false;
++		pthread_mutex_unlock(&S->mtx);
++		struct spect_header *hd = (struct spect_header *)S->shm;
++		uint32_t i = hd->seq == 0 ? 0 : hd->index ^ 1;
++		int64_t t0 = os_monotonic_get_ns();
++		memcpy(S->shm + SPECT_HEADER + (size_t)i * hd->frame_bytes, S->map, hd->frame_bytes);
++		static int64_t since, sum;
++		static uint32_t n;
++		int64_t t1 = os_monotonic_get_ns();
++		sum += t1 - t0;
++		n++;
++		if (t1 - since > 10 * U_TIME_1S_IN_NS) {
++			if (since != 0) {
++				U_LOG_W("mdp: spectator: %.1f frames/s, copy %.2f ms each", n * 1e9 / (double)(t1 - since),
++				        (double)sum / n / 1e6);
++			}
++			since = t1;
++			sum = 0;
++			n = 0;
++		}
++		__atomic_store_n(&hd->index, i, __ATOMIC_RELAXED);
++		__atomic_add_fetch(&hd->seq, 1, __ATOMIC_RELEASE);
++		__atomic_store_n(&S->busy, 0, __ATOMIC_RELEASE);
++	}
++	return NULL;
++}
++
++//! Call with D->lock held, no copy in flight (!submitted, !busy).
++static void
++spect_free(struct mdp_target *t)
++{
++	struct direct_spect *S = &t->direct.spect;
++	struct vk_bundle *vk = &t->base.c->base.vk;
++	if (S->map != NULL) {
++		vk->vkUnmapMemory(vk->device, S->buf_mem);
++	}
++	if (S->fence != VK_NULL_HANDLE) vk->vkDestroyFence(vk->device, S->fence, NULL);
++	if (S->cpool != VK_NULL_HANDLE) vk->vkDestroyCommandPool(vk->device, S->cpool, NULL);
++	if (S->buf != VK_NULL_HANDLE) vk->vkDestroyBuffer(vk->device, S->buf, NULL);
++	if (S->buf_mem != VK_NULL_HANDLE) vk->vkFreeMemory(vk->device, S->buf_mem, NULL);
++	if (S->image != VK_NULL_HANDLE) vk->vkDestroyImage(vk->device, S->image, NULL);
++	if (S->image_mem != VK_NULL_HANDLE) vk->vkFreeMemory(vk->device, S->image_mem, NULL);
++	if (S->shm != NULL) {
++		munmap(S->shm, S->shm_size);
++		unlink(SPECT_FILE);
++	}
++	if (S->fd >= 0 && S->ready) {
++		close(S->fd);
++	}
++	S->ready = false;
++	S->image = VK_NULL_HANDLE;
++	S->image_mem = S->buf_mem = VK_NULL_HANDLE;
++	S->buf = VK_NULL_HANDLE;
++	S->map = S->shm = NULL;
++	S->cpool = VK_NULL_HANDLE;
++	S->cmd = VK_NULL_HANDLE;
++	S->fence = VK_NULL_HANDLE;
++	S->fd = -1;
++	U_LOG_W("mdp: spectator: stopped");
++}
++
++//! Call with D->lock held: the copy's objects, the shared file and the thread. False (once) on failure.
++static bool
++spect_init(struct mdp_target *t, const struct direct_buf *src)
++{
++	struct mdp_direct *D = &t->direct;
++	struct direct_spect *S = &D->spect;
++	struct vk_bundle *vk = &t->base.c->base.vk;
++	if (S->ready) {
++		return true;
++	}
++	if (S->failed) {
++		return false;
++	}
++	S->failed = true;
++	S->fd = -1;
++	// B,G,R,X bytes for X11: the layer's UBWC buffers hold R,G,B,A (a blit converts), its linear ones B,G,R,A already
++	S->format = src->ubwc || !D->bgra ? VK_FORMAT_B8G8R8A8_UNORM : VK_FORMAT_R8G8B8A8_UNORM;
++	VkFormatProperties fs, fd;
++	vk->vkGetPhysicalDeviceFormatProperties(vk->physical_device, VK_FORMAT_R8G8B8A8_UNORM, &fs);
++	vk->vkGetPhysicalDeviceFormatProperties(vk->physical_device, S->format, &fd);
++	if (!(fs.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT) ||
++	    !(fs.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) ||
++	    !(fd.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_DST_BIT)) {
++		U_LOG_E("mdp: spectator: no blit between these formats");
++		return false;
++	}
++	VkImageCreateInfo ici = {
++	    .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
++	    .imageType = VK_IMAGE_TYPE_2D,
++	    .format = S->format,
++	    .extent = {SPECT_W, SPECT_H, 1},
++	    .mipLevels = 1,
++	    .arrayLayers = 1,
++	    .samples = VK_SAMPLE_COUNT_1_BIT,
++	    .tiling = VK_IMAGE_TILING_OPTIMAL,
++	    .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
++	    .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
++	};
++	VkBufferCreateInfo bci = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
++	                          .size = (VkDeviceSize)SPECT_W * SPECT_H * 4,
++	                          .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
++	                          .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
++	VkMemoryRequirements mr;
++	if (vk->vkCreateImage(vk->device, &ici, NULL, &S->image) != VK_SUCCESS) {
++		goto fail;
++	}
++	vk->vkGetImageMemoryRequirements(vk->device, S->image, &mr);
++	VkMemoryAllocateInfo mai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
++	                            .allocationSize = mr.size,
++	                            .memoryTypeIndex =
++	                                warp_memory_type(vk, mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)};
++	if (mai.memoryTypeIndex == UINT32_MAX || vk->vkAllocateMemory(vk->device, &mai, NULL, &S->image_mem) != VK_SUCCESS ||
++	    vk->vkBindImageMemory(vk->device, S->image, S->image_mem, 0) != VK_SUCCESS ||
++	    vk->vkCreateBuffer(vk->device, &bci, NULL, &S->buf) != VK_SUCCESS) {
++		goto fail;
++	}
++	vk->vkGetBufferMemoryRequirements(vk->device, S->buf, &mr);
++	// the thread reads it: cached memory if there is (uncached reads are several times slower)
++	mai.allocationSize = mr.size;
++	mai.memoryTypeIndex = warp_memory_type(vk, mr.memoryTypeBits,
++	                                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
++	                                           VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
++	if (mai.memoryTypeIndex == UINT32_MAX) {
++		mai.memoryTypeIndex = warp_memory_type(vk, mr.memoryTypeBits,
++		                                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
++	}
++	void *map = NULL;
++	if (mai.memoryTypeIndex == UINT32_MAX || vk->vkAllocateMemory(vk->device, &mai, NULL, &S->buf_mem) != VK_SUCCESS ||
++	    vk->vkBindBufferMemory(vk->device, S->buf, S->buf_mem, 0) != VK_SUCCESS ||
++	    vk->vkMapMemory(vk->device, S->buf_mem, 0, VK_WHOLE_SIZE, 0, &map) != VK_SUCCESS) {
++		goto fail;
++	}
++	S->map = map;
++	VkCommandPoolCreateInfo cpci = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
++	                                .flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
++	                                .queueFamilyIndex = vk->main_queue->family_index};
++	VkFenceCreateInfo fci = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
++	if (vk->vkCreateCommandPool(vk->device, &cpci, NULL, &S->cpool) != VK_SUCCESS ||
++	    vk->vkCreateFence(vk->device, &fci, NULL, &S->fence) != VK_SUCCESS) {
++		goto fail;
++	}
++	VkCommandBufferAllocateInfo cbai = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
++	                                    .commandPool = S->cpool,
++	                                    .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
++	                                    .commandBufferCount = 1};
++	if (vk->vkAllocateCommandBuffers(vk->device, &cbai, &S->cmd) != VK_SUCCESS) {
++		goto fail;
++	}
++	uint32_t frame_bytes = SPECT_W * SPECT_H * 4;
++	S->shm_size = SPECT_HEADER + 2 * (size_t)frame_bytes;
++	S->fd = open(SPECT_FILE, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
++	if (S->fd < 0 || fchmod(S->fd, 0644) != 0 || ftruncate(S->fd, (off_t)S->shm_size) != 0) {
++		goto fail;
++	}
++	S->shm = mmap(NULL, S->shm_size, PROT_READ | PROT_WRITE, MAP_SHARED, S->fd, 0);
++	if (S->shm == MAP_FAILED) {
++		S->shm = NULL;
++		goto fail;
++	}
++	struct spect_header *hd = (struct spect_header *)S->shm;
++	*hd = (struct spect_header){SPECT_MAGIC, SPECT_W, SPECT_H, SPECT_W * 4, frame_bytes, 0, 0};
++	if (!S->thread_running) {
++		pthread_mutex_init(&S->mtx, NULL);
++		pthread_cond_init(&S->cond, NULL);
++		pthread_t th;
++		if (pthread_create(&th, NULL, spect_thread, S) != 0) {
++			goto fail;
++		}
++		pthread_detach(th);
++		S->thread_running = true;
++	}
++	S->failed = false;
++	S->ready = true;
++	U_LOG_W("mdp: spectator: %ux%u copies of the left eye to %s", SPECT_W, SPECT_H, SPECT_FILE);
++	return true;
++fail:
++	U_LOG_E("mdp: spectator: setup failed");
++	S->ready = true; // spect_free frees what was made
++	spect_free(t);
++	S->failed = true;
++	return false;
++}
++
++/*!
++ * Vsync thread, D->lock held, after a warp's commit: the spectator's copy (see above). Its cost on this thread: a
++ * fence status, and every 33 ms the recording and submission of one command buffer.
++ */
++static void
++spect_tick(struct mdp_target *t)
++{
++	struct mdp_direct *D = &t->direct;
++	struct direct_spect *S = &D->spect;
++	struct vk_bundle *vk = &t->base.c->base.vk;
++	int64_t now = os_monotonic_get_ns();
++	if (S->submitted && vk->vkGetFenceStatus(vk->device, S->fence) == VK_SUCCESS) {
++		vk->vkResetFences(vk->device, 1, &S->fence);
++		S->submitted = false;
++		pthread_mutex_lock(&S->mtx);
++		S->go = true;
++		pthread_cond_signal(&S->cond);
++		pthread_mutex_unlock(&S->mtx);
++	}
++	bool want = __atomic_load_n(&mdp_files.spect, __ATOMIC_RELAXED) && D->lens && D->latest >= 0;
++	bool busy = __atomic_load_n(&S->busy, __ATOMIC_ACQUIRE);
++	if (!want) {
++		if (S->ready && !S->submitted && !busy && now - S->want_ns > SPECT_IDLE_NS) {
++			spect_free(t);
++		}
++		return;
++	}
++	S->want_ns = now;
++	if (S->submitted || busy || now - S->last_ns < SPECT_PERIOD_NS) {
++		return;
++	}
++	const struct direct_buf *src = &D->buf[D->latest][1]; // half 1: the left eye's view
++	if (src->image == VK_NULL_HANDLE || !src->transfer_src || !spect_init(t, src)) {
++		return;
++	}
++	S->last_ns = now;
++
++	// a 16:10 crop around the view's axis (its tangents: half 1 is view 0), as wide as the render allows
++	float ax = -D->tan_l[1] / (D->tan_r[1] - D->tan_l[1]);
++	float ay = D->tan_u[1] / (D->tan_u[1] - D->tan_d[1]);
++	int32_t cw = (int32_t)D->in_w, ch = (int32_t)((int64_t)D->in_w * SPECT_H / SPECT_W);
++	if (ch > (int32_t)D->in_h) {
++		ch = (int32_t)D->in_h;
++		cw = (int32_t)((int64_t)ch * SPECT_W / SPECT_H);
++	}
++	int32_t cx = (int32_t)(ax * (float)D->in_w) - cw / 2, cy = (int32_t)(ay * (float)D->in_h) - ch / 2;
++	cx = cx < 0 ? 0 : cx + cw > (int32_t)D->in_w ? (int32_t)D->in_w - cw : cx;
++	cy = cy < 0 ? 0 : cy + ch > (int32_t)D->in_h ? (int32_t)D->in_h - ch : cy;
++
++	vk->vkResetCommandPool(vk->device, S->cpool, 0);
++	VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
++	                               .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
++	VkCommandBuffer cmd = S->cmd;
++	vk->vkBeginCommandBuffer(cmd, &bi);
++	VkImageMemoryBarrier ib[2] = {
++	    {
++	        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
++	        .srcAccessMask = VK_ACCESS_SHADER_READ_BIT,
++	        .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
++	        .oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, // as the warp left it
++	        .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
++	        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++	        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++	        .image = src->image,
++	        .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
++	    },
++	    {
++	        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
++	        .srcAccessMask = 0,
++	        .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
++	        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
++	        .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
++	        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++	        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++	        .image = S->image,
++	        .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
++	    },
++	};
++	vk->vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
++	                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 2, ib);
++	VkImageBlit blit = {
++	    .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
++	    .srcOffsets = {{cx, cy, 0}, {cx + cw, cy + ch, 1}},
++	    .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
++	    .dstOffsets = {{0, 0, 0}, {SPECT_W, SPECT_H, 1}},
++	};
++	vk->vkCmdBlitImage(cmd, src->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, S->image,
++	                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
++	// the source back as the warp reads it; the copy ready to be read
++	ib[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
++	ib[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
++	ib[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
++	ib[0].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
++	ib[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
++	ib[1].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
++	ib[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
++	ib[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
++	vk->vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
++	                         VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL,
++	                         2, ib);
++	VkBufferImageCopy copy = {
++	    .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
++	    .imageExtent = {SPECT_W, SPECT_H, 1},
++	};
++	vk->vkCmdCopyImageToBuffer(cmd, S->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, S->buf, 1, &copy);
++	VkBufferMemoryBarrier bb = {
++	    .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
++	    .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
++	    .dstAccessMask = VK_ACCESS_HOST_READ_BIT,
++	    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++	    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++	    .buffer = S->buf,
++	    .size = VK_WHOLE_SIZE,
++	};
++	vk->vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, NULL, 1, &bb, 0,
++	                         NULL);
++	vk->vkEndCommandBuffer(cmd);
++	VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cmd};
++	vk_queue_lock(vk->main_queue);
++	VkResult r = vk->vkQueueSubmit(vk->main_queue->queue, 1, &si, S->fence);
++	vk_queue_unlock(vk->main_queue);
++	if (r != VK_SUCCESS) {
++		U_LOG_E("mdp: spectator: vkQueueSubmit: %d", r);
++		return;
++	}
++	S->submitted = true;
++	__atomic_store_n(&S->busy, 1, __ATOMIC_RELEASE);
++}
++
++//! Call with D->lock held, before the warp's objects go: the spectator's, once no copy is in flight.
++static void
++spect_stop(struct mdp_target *t)
++{
++	struct direct_spect *S = &t->direct.spect;
++	struct vk_bundle *vk = &t->base.c->base.vk;
++	if (!S->ready) {
++		return;
++	}
++	if (S->submitted) {
++		vk->vkWaitForFences(vk->device, 1, &S->fence, VK_TRUE, 100 * U_TIME_1MS_IN_NS);
++		S->submitted = false;
++		__atomic_store_n(&S->busy, 0, __ATOMIC_RELEASE); // never handed to the thread
++	}
++	for (int i = 0; i < 100 && __atomic_load_n(&S->busy, __ATOMIC_ACQUIRE); i++) {
++		os_nanosleep(U_TIME_1MS_IN_NS); // the thread is copying it out
++	}
++	spect_free(t);
 +}
 +
 +/*!
@@ -2842,6 +3264,7 @@ index 0000000..4420c78
 +						D->tick_st[2] = tc0;
 +						bool committed = direct_commit(t, D->out[o], -1, o, direct_ack_frame(D));
 +						D->tick_st[3] = os_monotonic_get_ns();
++						spect_tick(t);
 +						D->stats.commit_ms_sum += (double)(os_monotonic_get_ns() - tc0) / 1e6;
 +						if (committed) {
 +							warped = true;

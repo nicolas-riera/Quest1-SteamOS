@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""q1-steamui-throttle.py hide|show|status: unmap/map Steam's Big Picture window (the 1280x800 steamwebhelper top-level) on the Xvfb display.
+"""q1-steamui-throttle.py hide|show|status: unmap/map Steam's Big Picture window (the screen-sized steamwebhelper top-level) on the Xvfb display.
 
 While the SteamVR dashboard is hidden nobody sees Steam's UI, yet Chromium keeps animating it (GPU +
 CPU). An unmapped X window makes Chromium treat the page as hidden (no frames); mapping it again
@@ -38,7 +38,9 @@ if not d:
 root = x.XDefaultRootWindow(d)
 import re, subprocess
 out = subprocess.run(["xwininfo", "-root", "-children"], capture_output=True, text=True).stdout
-for m in re.finditer(r'^\s+(0x[0-9a-f]+) "[^"]*": \("steamwebhelper" "steam"\)\s+1280x800', out, re.M):
+scr = x.XDefaultScreen(d)
+size = "%dx%d" % (x.XDisplayWidth(d, scr), x.XDisplayHeight(d, scr))
+for m in re.finditer(r'^\s+(0x[0-9a-f]+) "[^"]*": \("steamwebhelper" "steam"\)\s+' + size, out, re.M):
     win = int(m.group(1), 16)
     a = Attr()
     x.XGetWindowAttributes(d, win, ctypes.byref(a))
