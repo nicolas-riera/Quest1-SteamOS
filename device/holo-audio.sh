@@ -352,6 +352,11 @@ context.objects = [
       api.alsa.disable-tsched = true
       api.alsa.period-size = 1024
       api.alsa.period-num = 4
+      # read/write instead of mmap: with mmap the msm PCM hands the ADSP one period at a time, the next one
+      # only when the ADSP's "write done" for the last has come back through glink, so any delay on that round
+      # trip starved the ADSP (crackle on sounds, never heard on silence); with writes each period PipeWire
+      # writes goes to the ADSP at once, so it holds what is buffered (2026-11-09)
+      api.alsa.disable-mmap = true
       audio.format = "S16LE"
       audio.rate = 48000
       audio.channels = 2

@@ -295,6 +295,23 @@ The user still heard crackles while Steam worked. Two threads on the way of a so
 
 To confirm by ear in the headset (user).
 
+## 2026-11-09: the ADSP fed one period at a time (mmap); the output now writes
+
+The crackle came back after a reboot (the headset's installed `holo-audio` lacked the FIFO 87 line above; the repo
+had it) and stayed once that was fixed: only while a sound played, never on silence, with or without a Remote Play
+stream, while the stream's own sound (taken from Steam) was clean on the PC. PipeWire saw no xrun, its data thread
+no page fault, the ALSA ring never ran dry (fill 1-2 periods of 1024), and the sink monitor carried clean samples.
+
+The cause is in the msm PCM driver (`sound/soc/msm/qdsp6v2/msm-pcm-q6-v2.c`): with mmap access it hands the ADSP one
+period, and the next one only from the handler of the ADSP's `ASM_DATA_EVENT_WRITE_DONE_V2` for the last, so the
+ADSP never holds more than that one period and any delay on the round trip (ADSP -> glink -> kernel thread -> APR ->
+ADSP) leaves it without data: a gap, inaudible on silence. With read/write access every period PipeWire writes is
+sent to the ADSP at once (`msm_pcm_playback_copy`), so it holds what is buffered. The sink has
+`api.alsa.disable-mmap = true` (device/holo-audio.sh); the PCM's access is then RW_INTERLEAVED. The user heard no
+crackle afterwards, a stream running or not (2026-11-09).
+
+Restarting PipeWire cuts Steam's audio until Steam restarts (it does not reconnect to the PulseAudio server).
+
 ## Notes moved from the to-do list (2026-11-08): Audio
 
 History of measurements, fixes and open points as they were written in docs/todo.md (the to-do list now only
