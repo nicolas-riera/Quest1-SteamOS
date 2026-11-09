@@ -8,8 +8,10 @@
 //    pressed before the session never stays stuck.
 //  - The cursor image Steam draws into the stream (XFixesGetCursorImage) comes back fully transparent, so the
 //    app's cursor under the laser does not show on the PC.
-//  - The PC's gamepads, which the stream forwards to the headset, get no virtual gamepad there: Steam cannot open
-//    /dev/uinput during a session (Steam Input makes each one as a uinput device, "Steam Virtual Gamepad").
+//  - The PC's gamepads, which the stream forwards to the headset, get no virtual gamepad there (Steam Input makes
+//    one uinput device, "Steam Virtual Gamepad" 28de:11ff, per controller it drives). A gamepad plugged into the
+//    headset is an input device here before Steam wraps it; the PC's are not. So during a session Steam may open
+//    /dev/uinput only while the headset has more gamepads of its own than Steam holds uinput devices.
 //    q1apps makes the trigger up to a second after the video stream starts, and the PC's controllers come with
 //    the session's start, so a session also counts from the moment Steam's video stream thread exists.
 // Outside a session everything goes through untouched. The state is looked up at most every 250 ms.
@@ -22,6 +24,7 @@
 #include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -128,14 +131,79 @@ EXPORT XFixesCursorImage *XFixesGetCursorImage(Display *d)
 	return c;
 }
 
-// /dev/uinput during a session: no virtual gamepad for the PC's controllers
+static int read_line(const char *path, char *buf, size_t n)
+{
+	FILE *f = fopen(path, "re");
+	if (!f)
+		return 0;
+	int ok = fgets(buf, (int)n, f) != NULL;
+	fclose(f);
+	return ok;
+}
+
+// the headset's own gamepads: input devices with BTN_GAMEPAD (0x130), Steam's virtual ones (28de:11ff) left out
+static int local_gamepads(void)
+{
+	DIR *d = opendir("/sys/class/input");
+	int n = 0;
+	for (struct dirent *e; d && (e = readdir(d));) {
+		if (strncmp(e->d_name, "event", 5))
+			continue;
+		char path[300], vendor[16] = "", product[16] = "", key[1024] = "";
+		snprintf(path, sizeof(path), "/sys/class/input/%s/device/id/vendor", e->d_name);
+		read_line(path, vendor, sizeof(vendor));
+		snprintf(path, sizeof(path), "/sys/class/input/%s/device/id/product", e->d_name);
+		read_line(path, product, sizeof(product));
+		if (!strncmp(vendor, "28de", 4) && !strncmp(product, "11ff", 4))
+			continue;
+		snprintf(path, sizeof(path), "/sys/class/input/%s/device/capabilities/key", e->d_name);
+		if (!read_line(path, key, sizeof(key)))
+			continue;
+		// longs in hex, the highest first: bit 0x130 is bit 48 of the fifth from the end
+		char *w[64];
+		int nw = 0;
+		for (char *t = strtok(key, " \n"); t && nw < 64; t = strtok(NULL, " \n"))
+			w[nw++] = t;
+		if (nw >= 5 && (strtoull(w[nw - 5], NULL, 16) >> 48) & 1)
+			n++;
+	}
+	if (d)
+		closedir(d);
+	return n;
+}
+
+// the uinput devices this process holds
+static int held_uinputs(void)
+{
+	DIR *d = opendir("/proc/self/fd");
+	int n = 0;
+	for (struct dirent *e; d && (e = readdir(d));) {
+		char path[300], target[64];
+		snprintf(path, sizeof(path), "/proc/self/fd/%s", e->d_name);
+		ssize_t l = readlink(path, target, sizeof(target) - 1);
+		if (l > 0) {
+			target[l] = 0;
+			n += !strcmp(target, "/dev/uinput");
+		}
+	}
+	if (d)
+		closedir(d);
+	return n;
+}
+
+// /dev/uinput during a session: a virtual gamepad for a gamepad of the headset's, none for the PC's
 static int uinput_refused(const char *path)
 {
 	if (!path || strcmp(path, "/dev/uinput") || (!spectating() && !streaming()))
 		return 0;
-	static int logged;
-	if (!__atomic_exchange_n(&logged, 1, __ATOMIC_RELAXED))
-		fprintf(stderr, "quest1_rpspectator: Remote Play session: no virtual gamepad for the PC's controllers\n");
+	int local = local_gamepads(), held = held_uinputs();
+	if (local > held) {
+		fprintf(stderr, "quest1_rpspectator: Remote Play session: virtual gamepad allowed (%d gamepads here, %d "
+		                "virtual)\n", local, held);
+		return 0;
+	}
+	fprintf(stderr, "quest1_rpspectator: Remote Play session: no virtual gamepad for the PC's controller (%d "
+	                "gamepads here, %d virtual)\n", local, held);
 	errno = EACCES;
 	return 1;
 }
