@@ -20,12 +20,17 @@
 #             ~steamos/.local/share/Steam/config/steamvr.vrsettings.pre-frame)
 set -e
 UNITS="quest1-steamvr.service quest1-vrsession.service quest1-frame-dashboard.service quest1-powerbutton.service"
+# The pre-Frame way of showing Steam (device/holo-steam-session.sh): xscreen's flat quad on Monado and its virtual
+# Xbox 360 pad from the Touch controllers. In Frame mode Steam's UI is SteamVR overlays and the controllers are
+# SteamVR's, so it only left a ghost "controller" in Steam's settings (user, 2026-11-10): off while Frame mode is on.
+OLD=steam-screen.service
 
 case "${1:-install}" in
-enable)  systemctl enable $UNITS; exit 0 ;;
-disable) systemctl disable $UNITS; exit 0 ;;
+enable)  systemctl enable $UNITS; systemctl disable $OLD 2>/dev/null || true; exit 0 ;;
+disable) systemctl disable $UNITS; systemctl enable $OLD 2>/dev/null || true; exit 0 ;;
 uninstall)
 	systemctl disable --now $UNITS 2>/dev/null || true
+	systemctl enable $OLD 2>/dev/null || true
 	rm -f /etc/systemd/system/quest1-steamvr.service /etc/systemd/system/quest1-vrsession.service \
 		/etc/systemd/system/quest1-frame-dashboard.service /etc/systemd/system/quest1-powerbutton.service \
 		/etc/systemd/system/systemd-suspend.service.d/quest1-standby.conf \
@@ -569,5 +574,6 @@ chmod 755 /usr/local/sbin/quest1-frame
 
 systemctl daemon-reload
 systemctl enable $UNITS
+systemctl disable $OLD 2>/dev/null || true
 echo "Frame mode installed. logind picks up the power key settings at its next start (boot, or"
 echo "systemctl restart systemd-logind); SteamVR starts at boot, or now with: quest1-frame start"
