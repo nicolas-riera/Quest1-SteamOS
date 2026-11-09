@@ -249,10 +249,10 @@ index eb41c3c..5214613 100644
  
 diff --git a/src/xrt/compositor/main/comp_window_mdp.c b/src/xrt/compositor/main/comp_window_mdp.c
 new file mode 100644
-index 0000000..6e3bd33
+index 0000000..764cdfc
 --- /dev/null
 +++ b/src/xrt/compositor/main/comp_window_mdp.c
-@@ -0,0 +1,3290 @@
+@@ -0,0 +1,3357 @@
 +// Copyright 2026, Quest1-SteamOS contributors
 +// SPDX-License-Identifier: BSL-1.0
 +/*!
@@ -361,8 +361,12 @@ index 0000000..6e3bd33
 +//! wait went up to 7-12 ms now and then (2.5-3 ms of work: vrcompositor's and Steam's draws are preempted only at
 +//! their end), and a commit made in the last ~3.5 ms before the vsync blocks in the kernel until it: 1-4 late commits
 +//! a minute, each a frame shown twice. 10: none in 6.5 minutes of that load; the warp extrapolates 2 ms further.
++//! Worn, with Steam and the desktop in use (2026-11-09), 10 still left ~20 late commits a minute at times, each a jump
++//! of the whole image: the warp's GPU work waited up to 8.7 ms behind vrcompositor's and Steam's, and a commit made
++//! after ~vsync + 8 blocked in the kernel until the vsync after (up to 6.4 ms in MSMFB_ATOMIC_COMMIT). 12.5 (the tick
++//! ~1.4 ms after the vsync): none under the same Steam load; the warp extrapolates 2.5 ms further.
 +//! "lead=<ms>" in /tmp/quest1-reproj sets it, 0 = right after the vsync (as before).
-+#define MDP_TICK_LEAD_DEFAULT_MS 10.0f
++#define MDP_TICK_LEAD_DEFAULT_MS 12.5f
 +//! Real-time priorities (SCHED_FIFO): the vsync thread (warp + commit) above everything else of the VR stack, the
 +//! MDP's display thread ("mdss_fb0", FIFO 16 from the kernel) just below. That kernel thread takes each commit to
 +//! the hardware before the vsync that latches it; behind vrcompositor's and Meta's real-time threads it took one
@@ -475,6 +479,10 @@ index 0000000..6e3bd33
 +	//! when the frames came, in 2 ms steps after the last tick (MDP_PERIOD_NS / 2 ms = 7 buckets): a frame that comes
 +	//! right after a tick waits a whole period, two in the same period lose the first
 +	uint32_t phase[7];
++	//! The warp's head prediction, checked once its time has passed (pred): how far the orientation it warped to was
++	//! from the one tracked at that time
++	double perr_sum, perr_max;
++	uint32_t perr_n, perr_over[3]; //!< over 0.1, 0.25, 0.5 deg
 +};
 +
 +#define DIRECT_COMMITS 4
@@ -569,6 +577,13 @@ index 0000000..6e3bd33
 +	struct mdp_direct_stats stats;
 +	int64_t prev_vsync; //!< the last vsync direct_tick saw (gap detection)
 +	int64_t last_tick_ns; //!< when direct_tick last ran for a vsync with the panels on (arrival phase stats)
++	//! The orientations the warp predicted, for the time they were for (direct_check_predictions)
++	struct
++	{
++		int64_t at_ns;
++		float q[4];
++	} pred[16];
++	uint32_t pred_n;
 +	int64_t tick_offset_ns; //!< how long after its vsync the vsync thread meant to tick (the lead's sleep)
 +	int64_t commit_ioctl_ns; //!< how long the last MSMFB_ATOMIC_COMMIT took
 +	//! This tick's warp (for the late-commit log): mesh build, submit-to-fence wait, GPU execution
@@ -1274,8 +1289,8 @@ index 0000000..6e3bd33
 +			D->stats.received++;
 +			if (D->fresh && D->latest >= 0) {
 +				// not on the panels yet: shown at the next tick, before this one (see pend)
-+				if (D->pend >= 0) {
-+					D->stats.superseded++; // three in one period: the oldest is skipped
++				if (D->pend >= 0 && D->last_tick_ns > 0) {
++					D->stats.superseded++; // three in one period: the oldest is skipped (not counted panels off)
 +				}
 +				D->pend = D->latest;
 +				D->pend_frame = D->latest_frame;
@@ -1558,6 +1573,48 @@ index 0000000..6e3bd33
 +	q[2] = rel.pose.orientation.z;
 +	q[3] = rel.pose.orientation.w;
 +	return true;
++}
++
++//! Call with D->lock held: the predictions of past ticks whose time is 40 ms gone (the tracked poses around it are in the
++//! history by then) against the orientation tracked at that time. Worst ones logged.
++static void
++direct_check_predictions(struct mdp_target *t, int64_t now)
++{
++	struct mdp_direct *D = &t->direct;
++	for (uint32_t i = 0; i < 16; i++) {
++		if (D->pred[i].at_ns == 0 || now - D->pred[i].at_ns < 40 * (int64_t)U_TIME_1MS_IN_NS) {
++			continue;
++		}
++		float qa[4];
++		if (head_orientation(t, D->pred[i].at_ns, qa)) {
++			float c[4], d[4];
++			quat_conj(qa, c);
++			quat_mul(c, D->pred[i].q, d);
++			float e = quat_angle_deg(d);
++			e = e > 180.0f ? 360.0f - e : e;
++			struct mdp_direct_stats *st = &D->stats;
++			st->perr_sum += e;
++			st->perr_n++;
++			st->perr_over[0] += e > 0.1f;
++			st->perr_over[1] += e > 0.25f;
++			st->perr_over[2] += e > 0.5f;
++			if (e > st->perr_max) {
++				st->perr_max = e;
++			}
++			static int64_t log_since;
++			static unsigned logged;
++			if (now - log_since > 10 * (int64_t)U_TIME_1S_IN_NS) {
++				log_since = now;
++				logged = 0;
++			}
++			if (e > 0.5f && logged++ < 5) {
++				U_LOG_W("mdp: direct: warp prediction off by %.2f deg for display at %.3f s", e,
++				        (double)D->pred[i].at_ns / 1e9);
++			}
++
++		}
++		D->pred[i].at_ns = 0;
++	}
 +}
 +
 +//! The warp's rotation for a display pose qd (Monado's device space) of a frame rendered at qr (LOCAL), with the test
@@ -2562,6 +2619,7 @@ index 0000000..6e3bd33
 +		D->commit_late = false; // see commit_late: the last commit is latched at the coming vsync
 +		D->stats.late_skips++;
 +	} else if (vsync > 0 && D->latest >= 0) {
++		direct_check_predictions(t, now);
 +		// the older of two frames not shown yet goes first (see pend); `latest` gets the newer back below
 +		int newest = -1;
 +		struct direct_frame newest_frame;
@@ -2612,6 +2670,11 @@ index 0000000..6e3bd33
 +			memcpy(qr, D->latest_frame.q, sizeof(qr));
 +			float qt[4];
 +			if (head_orientation(t, display_ns, qd) && head_orientation(t, D->latest_frame.time_ns, qt)) {
++				// kept to be checked once display_ns has passed (direct_check_predictions)
++				uint32_t pi = D->pred_n++ % 16;
++				D->pred[pi].at_ns = display_ns;
++				memcpy(D->pred[pi].q, qd, sizeof(qd));
++
 +				// the head's speed before the frame's pose time, over the two 50 ms before it (the fastest): o is only
 +				// learnt while the head is still. One 50 ms span at 15 deg/s let through the turn-arounds of a head
 +				// tilted back and forth (no net motion over the span, but the largest prediction error): o took
@@ -2812,6 +2875,10 @@ index 0000000..6e3bd33
 +		        "0-2 ms %u, 2-4 %u, 4-6 %u, 6-8 %u, 8-10 %u, 10-12 %u, 12+ %u",
 +		        s->received / el, s->queued, s->superseded, s->phase[0], s->phase[1], s->phase[2], s->phase[3], s->phase[4],
 +		        s->phase[5], s->phase[6]);
++		U_LOG_W("mdp: direct: warp prediction error %.3f deg avg (max %.2f), over 0.1 deg %u, 0.25 %u, 0.5 %u of %u",
++		        s->perr_n ? s->perr_sum / s->perr_n : 0.0, s->perr_max, s->perr_over[0], s->perr_over[1],
++		        s->perr_over[2], s->perr_n);
++
 +		if (s->age_n > 0) {
 +			// for driver_quest1's pose prediction, written by the files thread
 +			mdp_files.age_ms = s->age_ms_sum / s->age_n;
@@ -7961,10 +8028,10 @@ index 0000000..899204b
 +}
 diff --git a/src/xrt/drivers/quest1/quest1_hmd.c b/src/xrt/drivers/quest1/quest1_hmd.c
 new file mode 100644
-index 0000000..e25365d
+index 0000000..c32d128
 --- /dev/null
 +++ b/src/xrt/drivers/quest1/quest1_hmd.c
-@@ -0,0 +1,1124 @@
+@@ -0,0 +1,1170 @@
 +// Copyright 2026, Quest1-SteamOS contributors
 +// SPDX-License-Identifier: BSL-1.0
 +/*!
@@ -8783,6 +8850,50 @@ index 0000000..e25365d
 +	return strcmp(env, "meta") == 0;
 +}
 +
++//! Head orientation predicted past the newest pose with the angular acceleration too (the gyro's change over the last
++//! 10 ms, at most 60 rad/s^2; p99 of the user's head 32), for the warp (~20 ms ahead) and Monado's clients. With the
++//! angular velocity alone the warp's orientation was off by 0.07-0.28 deg on average while the head moved, over
++//! 0.5 deg up to 10 times in 2 s (~7 px, a different error at each vsync: the whole image trembled, user 2026-11-09).
++//! Offline on 60 s of the user's head poses: 0.060 deg instead of 0.106, over 0.5 deg 0.26 % of the time instead of
++//! 1.2 %; libossdk's own angular acceleration did a little worse, a smoothed velocity worse still. Measured live next
++//! to the old one, worn: 2-3 times less error (e.g. 0.111 against 0.283 deg, none over 0.5 deg against 10). The first
++//! try integrated the base-frame velocity as a body-frame one (wrong axes: nauseating).
++static bool
++predict_orientation_accel(struct quest1_hmd *h, int64_t at_ns, struct xrt_quat *out)
++{
++	int64_t latest_ns;
++	struct xrt_space_relation latest, older;
++	const int need = XRT_SPACE_RELATION_ORIENTATION_VALID_BIT | XRT_SPACE_RELATION_ANGULAR_VELOCITY_VALID_BIT;
++	const int64_t span_ns = 10 * U_TIME_1MS_IN_NS;
++	if (!h->mt.use_velocity || !m_relation_history_get_latest(h->history, &latest_ns, &latest) || at_ns <= latest_ns ||
++	    (latest.relation_flags & need) != need ||
++	    m_relation_history_get(h->history, latest_ns - span_ns, &older) == M_RELATION_HISTORY_RESULT_INVALID ||
++	    (older.relation_flags & need) != need) {
++		return false;
++	}
++	float span = (float)span_ns / 1e9f;
++	struct xrt_vec3 a = {(latest.angular_velocity.x - older.angular_velocity.x) / span,
++	                     (latest.angular_velocity.y - older.angular_velocity.y) / span,
++	                     (latest.angular_velocity.z - older.angular_velocity.z) / span};
++	float an = sqrtf(a.x * a.x + a.y * a.y + a.z * a.z);
++	if (an > 60.0f) {
++		a.x *= 60.0f / an;
++		a.y *= 60.0f / an;
++		a.z *= 60.0f / an;
++	}
++	float dt = (float)(at_ns - latest_ns) / 1e9f;
++	// constant acceleration: the rotation over dt is the mean velocity w + a*dt/2 for dt (base frame)
++	struct xrt_vec3 wm = {latest.angular_velocity.x + 0.5f * a.x * dt, latest.angular_velocity.y + 0.5f * a.y * dt,
++	                      latest.angular_velocity.z + 0.5f * a.z * dt};
++	// math_quat_integrate_velocity wants it in the body frame (q * exp(w dt)), as m_predict.c does
++	struct xrt_quat inv;
++	struct xrt_vec3 wb;
++	math_quat_invert(&latest.pose.orientation, &inv);
++	math_quat_rotate_derivative(&inv, &wm, &wb);
++	math_quat_integrate_velocity(&latest.pose.orientation, &wb, dt, out);
++	return true;
++}
++
 +static xrt_result_t
 +hmd_get_tracked_pose(struct xrt_device *xdev,
 +                     enum xrt_input_name name,
@@ -8799,6 +8910,8 @@ index 0000000..e25365d
 +		rel.pose.orientation.w = 1.0f;
 +		rel.relation_flags = (enum xrt_space_relation_flags)(XRT_SPACE_RELATION_ORIENTATION_VALID_BIT |
 +		                                                     XRT_SPACE_RELATION_POSITION_VALID_BIT);
++	} else {
++		predict_orientation_accel(h, at_timestamp_ns, &rel.pose.orientation); // past the newest pose only
 +	}
 +	*out_relation = rel;
 +	return XRT_SUCCESS;
@@ -9301,6 +9414,36 @@ index 3657498..341bcb3 100644
  
  /*!
   * The type underlying buffers shared between compositor clients and the main
+diff --git a/src/xrt/ipc/server/ipc_server_per_client_thread.c b/src/xrt/ipc/server/ipc_server_per_client_thread.c
+index cfe5cc0..857829e 100644
+--- a/src/xrt/ipc/server/ipc_server_per_client_thread.c
++++ b/src/xrt/ipc/server/ipc_server_per_client_thread.c
+@@ -9,6 +9,9 @@
+  * @ingroup ipc_server
+  */
+ 
++#include <string.h>
++#include <sched.h>
++#include <pthread.h>
+ #include "util/u_misc.h"
+ #include "util/u_trace_marker.h"
+ 
+@@ -484,6 +487,15 @@ ipc_server_client_thread(void *_ics)
+ {
+ 	volatile struct ipc_client_state *ics = (volatile struct ipc_client_state *)_ics;
+ 
++	// Quest 1: real-time. driver_quest1 asks for the head pose of vrcompositor's next frame through this thread
++	// (xrLocateSpace) while vrcompositor waits for it, at most 4 ms (the layer): as a normal thread it answered later
++	// 6-9 times a second even idle, vrcompositor rendered those frames with the previous pose while the warp took the
++	// new one for them, a frame of head motion off: the whole image trembled (2026-11-09). Above the driver's and the
++	// layer's threads (SCHED_RR 50), below Monado's tracking (52), frame receiver (53) and vsync threads.
++	struct sched_param sp = {.sched_priority = 51};
++	int se = pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
++	U_LOG_W("ipc: client thread SCHED_FIFO 51: %s", se ? strerror(se) : "ok");
++
+ 	client_loop(ics);
+ 
+ 	return NULL;
 diff --git a/src/xrt/state_trackers/oxr/oxr_vulkan.c b/src/xrt/state_trackers/oxr/oxr_vulkan.c
 index efcbf2d..b443f93 100644
 --- a/src/xrt/state_trackers/oxr/oxr_vulkan.c

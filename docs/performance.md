@@ -31,6 +31,39 @@ buckets): `frames received ...` lines next to the `direct:` ones.
   the display's head pose), and the queue empties when vrcompositor misses a vsync, without a repeat. Worn
   (user's session, ~100 s): 0 frames never shown, 0 late commits.
 
+- **Late commits again, worn** (the user: the whole image jumps as soon as the headset is loaded): ~70 late commits
+  in 25 minutes with Steam and the desktop in use, each the whole image shown twice. The warp's GPU work waited up
+  to 8.7 ms behind vrcompositor's and Steam's, and a commit made after ~vsync + 8 ms blocks in the kernel until the
+  vsync after (up to 6.4 ms in `MSMFB_ATOMIC_COMMIT`): with the tick at vsync + 3.9 ms (lead 10) the warp had ~4 ms of
+  margin. The tick now comes 12.5 ms before the latching vsync (~1.4 ms after the previous one): 0 late commits under
+  the Steam load. Leads of 7-8 ms made it worse (17 late a minute).
+- **The warp's head prediction**: Monado logs, once their time has passed, how far the orientations the warp predicted
+  were from the ones tracked then (`warp prediction error` lines, and a line for each one over 0.5 deg). With the
+  angular velocity alone, 20 ms ahead (the tick ~1.4 ms after a vsync, the frame lit at vsync + 20.9 ms): 0.07-0.28 deg
+  on average while the head moved, over 0.5 deg up to 10 times in 2 s (~7 px, a different error at each vsync). 60 s
+  of the user's head poses recorded from q1trackd and replayed offline through several predictors: the gyro's change
+  over the last 10 ms as angular acceleration (capped at 60 rad/s^2) cut the error from 0.106 to 0.060 deg on average
+  and the vsyncs over 0.5 deg from 1.2 to 0.26 % (libossdk's own acceleration did a little worse, a smoothed velocity
+  worse still). Measured live next to the old one before switching (worn): 2-3 times less error. quest1_hmd.c uses it
+  past the newest pose (the warp and Monado's clients). The first try integrated the base-frame velocity as a
+  body-frame one (`math_quat_integrate_velocity` wants body frame): the axes were wrong and the user felt sick within
+  seconds; reverted at once, then redone and measured in parallel first.
+- **The pose vrcompositor renders with**: at each present the layer asks the driver to publish the next frame's pose
+  (QD_POSE) and waits for its reply (QD_POSED) before returning, at most 4 ms. When the wait ran out, vrcompositor
+  rendered that frame with the previous pose while the layer told Monado the new one: the warp re-projected it from the
+  wrong pose, a frame of head motion off (over a degree at a normal head speed), the whole image trembling with the
+  head's motion and more under load. The layer now counts it (`pose wait ... ran out N` in its 5 s line): 30-45 times in
+  5 s even idle. Causes and fixes: the layer's thread receiving the driver's replies was a normal thread (now SCHED_RR
+  50, 9-15 -> 0-7); Monado's IPC thread answering the driver's `xrLocateSpace` was a normal thread (now SCHED_FIFO 51);
+  the Monado client library in vrserver dated from 2026-10-06, without the priority-inheriting mutexes: the driver's
+  real-time thread waited up to 72 ms behind a normal thread (controllers, camera) holding the IPC connection under
+  load (rebuilt: `xrLocateSpace` 0.24 ms average, 3.3 ms at most). The wait is now 8 ms (`QD_POSE_WAIT_NS`): a rare
+  late reply costs a late frame (content repeated, rotation right) instead of a wrong warp. Worn with load: the user
+  saw no more trembling (2026-11-09 evening).
+- Tried and dropped: a phase loop moving vrcompositor's vblanks so that its frames reach Monado mid-period. Its frames
+  did not follow (12 ms of offset, no change in their arrival): vrcompositor is not paced by its vblank there; its
+  render thread uses ~36 % of a core and the GPU ~42 %, its 13.2 ms a frame are mostly waiting in series.
+
 Left: the frames vrcompositor itself does not render (its fps below 71.8: ~69-71 worn) show as a repeat; activating
 passthrough stalls it ~0.3 s (16:44:02, 51 frames/s over 2 s, CTrackedCamera's "Late initialization"). More slack in
 its frame time is the lever (GPU-bound, see below).

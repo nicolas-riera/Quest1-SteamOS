@@ -816,6 +816,50 @@ want_meta_tracking(void)
 	return strcmp(env, "meta") == 0;
 }
 
+//! Head orientation predicted past the newest pose with the angular acceleration too (the gyro's change over the last
+//! 10 ms, at most 60 rad/s^2; p99 of the user's head 32), for the warp (~20 ms ahead) and Monado's clients. With the
+//! angular velocity alone the warp's orientation was off by 0.07-0.28 deg on average while the head moved, over
+//! 0.5 deg up to 10 times in 2 s (~7 px, a different error at each vsync: the whole image trembled, user 2026-11-09).
+//! Offline on 60 s of the user's head poses: 0.060 deg instead of 0.106, over 0.5 deg 0.26 % of the time instead of
+//! 1.2 %; libossdk's own angular acceleration did a little worse, a smoothed velocity worse still. Measured live next
+//! to the old one, worn: 2-3 times less error (e.g. 0.111 against 0.283 deg, none over 0.5 deg against 10). The first
+//! try integrated the base-frame velocity as a body-frame one (wrong axes: nauseating).
+static bool
+predict_orientation_accel(struct quest1_hmd *h, int64_t at_ns, struct xrt_quat *out)
+{
+	int64_t latest_ns;
+	struct xrt_space_relation latest, older;
+	const int need = XRT_SPACE_RELATION_ORIENTATION_VALID_BIT | XRT_SPACE_RELATION_ANGULAR_VELOCITY_VALID_BIT;
+	const int64_t span_ns = 10 * U_TIME_1MS_IN_NS;
+	if (!h->mt.use_velocity || !m_relation_history_get_latest(h->history, &latest_ns, &latest) || at_ns <= latest_ns ||
+	    (latest.relation_flags & need) != need ||
+	    m_relation_history_get(h->history, latest_ns - span_ns, &older) == M_RELATION_HISTORY_RESULT_INVALID ||
+	    (older.relation_flags & need) != need) {
+		return false;
+	}
+	float span = (float)span_ns / 1e9f;
+	struct xrt_vec3 a = {(latest.angular_velocity.x - older.angular_velocity.x) / span,
+	                     (latest.angular_velocity.y - older.angular_velocity.y) / span,
+	                     (latest.angular_velocity.z - older.angular_velocity.z) / span};
+	float an = sqrtf(a.x * a.x + a.y * a.y + a.z * a.z);
+	if (an > 60.0f) {
+		a.x *= 60.0f / an;
+		a.y *= 60.0f / an;
+		a.z *= 60.0f / an;
+	}
+	float dt = (float)(at_ns - latest_ns) / 1e9f;
+	// constant acceleration: the rotation over dt is the mean velocity w + a*dt/2 for dt (base frame)
+	struct xrt_vec3 wm = {latest.angular_velocity.x + 0.5f * a.x * dt, latest.angular_velocity.y + 0.5f * a.y * dt,
+	                      latest.angular_velocity.z + 0.5f * a.z * dt};
+	// math_quat_integrate_velocity wants it in the body frame (q * exp(w dt)), as m_predict.c does
+	struct xrt_quat inv;
+	struct xrt_vec3 wb;
+	math_quat_invert(&latest.pose.orientation, &inv);
+	math_quat_rotate_derivative(&inv, &wm, &wb);
+	math_quat_integrate_velocity(&latest.pose.orientation, &wb, dt, out);
+	return true;
+}
+
 static xrt_result_t
 hmd_get_tracked_pose(struct xrt_device *xdev,
                      enum xrt_input_name name,
@@ -832,6 +876,8 @@ hmd_get_tracked_pose(struct xrt_device *xdev,
 		rel.pose.orientation.w = 1.0f;
 		rel.relation_flags = (enum xrt_space_relation_flags)(XRT_SPACE_RELATION_ORIENTATION_VALID_BIT |
 		                                                     XRT_SPACE_RELATION_POSITION_VALID_BIT);
+	} else {
+		predict_orientation_accel(h, at_timestamp_ns, &rel.pose.orientation); // past the newest pose only
 	}
 	*out_relation = rel;
 	return XRT_SUCCESS;

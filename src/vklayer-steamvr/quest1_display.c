@@ -27,6 +27,14 @@ typedef struct AHardwareBuffer AHardwareBuffer;
 #define QD_NAME "Valve Corporation Quest1 (virtual)"
 
 static uint32_t qd_width = 2448, qd_height = 1360, qd_mhz = 72000;
+//! How long a present waits for the driver to publish the next frame's pose (QD_POSED). If it returns before,
+//! vrcompositor may render that frame with the previous pose while Monado's warp re-projects it from the new one: a
+//! frame of head motion off, the whole image trembled (2026-11-09). 4 ms ran out 6-9 times a second with the
+//! driver's reply arriving late (this layer's reply thread and Monado's IPC thread were normal threads), still now
+//! and then once those were real-time (Monado answering xrLocateSpace up to 16 ms late): a late frame (its content
+//! repeated, its rotation right) is better than a wrong warp.
+#define QD_POSE_WAIT_NS 8000000
+
 //! the vblank whose display-event fences were signaled last: vrcompositor starts a frame there
 static _Atomic uint64_t qd_frame_tick;
 
@@ -37,6 +45,10 @@ static struct
 	uint64_t app, acquire, gpu, posed; //!< summed ns
 	_Atomic uint64_t present_wait, present_waits; //!< vkWaitForPresentKHR (another thread)
 	_Atomic uint64_t wait_depth; //!< summed: latest presented id minus the id waited for
+	//! presents returned before the driver had published the next frame's pose (QD_POSE_WAIT_NS ran out): vrcompositor
+	//! may render that frame with the previous pose while Monado's warp takes the new one for it
+	uint64_t pose_timeouts;
+	uint64_t pose_wait_max; //!< ns
 } qd_stats;
 
 //! async present: time from vkQueuePresentKHR to the image being rendered (summed, completer thread)
@@ -50,6 +62,8 @@ static void qd_stats_present(uint64_t entry, uint64_t gpu_done, uint64_t posed_d
 		qd_stats.app += entry - qd_stats.last_return;
 	qd_stats.gpu += gpu_done - entry;
 	qd_stats.posed += posed_done - gpu_done;
+	if (posed_done - gpu_done > qd_stats.pose_wait_max)
+		qd_stats.pose_wait_max = posed_done - gpu_done;
 	qd_stats.n++;
 	qd_stats.last_return = posed_done;
 	if (!qd_stats.since) {
@@ -60,14 +74,16 @@ static void qd_stats_present(uint64_t entry, uint64_t gpu_done, uint64_t posed_d
 		uint64_t wait_ns = atomic_exchange(&qd_stats.present_wait, 0);
 		uint64_t depth = atomic_exchange(&qd_stats.wait_depth, 0);
 		LOG("display: %.1f fps; per frame: vrcompositor %.2f ms (of which acquire %.2f), gpu wait %.2f, "
-		    "pose wait %.2f, present-to-rendered %.2f, present wait %.2f (%.2f frames behind)\n",
+		    "pose wait %.2f (max %.2f, ran out %llu), present-to-rendered %.2f, present wait %.2f (%.2f frames behind)\n",
 		    n * 1e9 / (posed_done - qd_stats.since), qd_stats.app / n / 1e6, qd_stats.acquire / n / 1e6,
-		    qd_stats.gpu / n / 1e6, qd_stats.posed / n / 1e6,
+		    qd_stats.gpu / n / 1e6, qd_stats.posed / n / 1e6, qd_stats.pose_wait_max / 1e6,
+		    (unsigned long long)qd_stats.pose_timeouts,
 		    atomic_exchange(&qd_stats_gpu_latency, 0) / n / 1e6, waits ? wait_ns / (double)waits / 1e6 : 0.0,
 		    waits ? depth / (double)waits : 0.0);
 		uint64_t keep = qd_stats.last_return;
 		qd_stats.since = qd_stats.last_return = keep;
 		qd_stats.n = qd_stats.app = qd_stats.acquire = qd_stats.gpu = qd_stats.posed = 0;
+		qd_stats.pose_timeouts = qd_stats.pose_wait_max = 0;
 	}
 }
 
@@ -549,6 +565,9 @@ static void *qd_reader(void *arg)
 {
 	struct qd_swapchain *sc = arg;
 	struct qd_msg m;
+	// real-time like the rest of the frame's path: vrcompositor waits (at most 4 ms) for the QD_POSED this thread
+	// receives; as a normal thread it woke late and the wait ran out 9-15 times in 5 s even idle (2026-11-09)
+	q1_realtime("display: driver reply thread", Q1_RT_MAX);
 	while (recv(sc->sock, &m, sizeof(m), 0) == sizeof(m)) {
 		if (m.type == QD_POSED) {
 			pthread_mutex_lock(&sc->mutex);
@@ -1109,7 +1128,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL qd_QueuePresentKHR(VkQueue queue, const Vk
 					if (send(sc->sock, &m, sizeof(m), MSG_NOSIGNAL) == sizeof(m)) {
 						struct timespec dl;
 						clock_gettime(CLOCK_REALTIME, &dl);
-						dl.tv_nsec += 4000000;
+						dl.tv_nsec += QD_POSE_WAIT_NS;
 						if (dl.tv_nsec >= 1000000000) {
 							dl.tv_sec++;
 							dl.tv_nsec -= 1000000000;
@@ -1117,6 +1136,8 @@ static VKAPI_ATTR VkResult VKAPI_CALL qd_QueuePresentKHR(VkQueue queue, const Vk
 						while (sc->posed_frame < frame && sc->sock >= 0 &&
 						       pthread_cond_timedwait(&sc->cond, &sc->mutex, &dl) != ETIMEDOUT)
 							;
+						if (sc->posed_frame < frame)
+							qd_stats.pose_timeouts++;
 					}
 				}
 				if (r == VK_SUCCESS) {
@@ -1157,7 +1178,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL qd_QueuePresentKHR(VkQueue queue, const Vk
 					// must only read once we return: wait for it (bounded)
 					struct timespec dl;
 					clock_gettime(CLOCK_REALTIME, &dl);
-					dl.tv_nsec += 4000000;
+					dl.tv_nsec += QD_POSE_WAIT_NS;
 					if (dl.tv_nsec >= 1000000000) {
 						dl.tv_sec++;
 						dl.tv_nsec -= 1000000000;

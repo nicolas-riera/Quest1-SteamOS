@@ -106,8 +106,12 @@ android_dlsym(void *handle, const char *symbol);
 //! wait went up to 7-12 ms now and then (2.5-3 ms of work: vrcompositor's and Steam's draws are preempted only at
 //! their end), and a commit made in the last ~3.5 ms before the vsync blocks in the kernel until it: 1-4 late commits
 //! a minute, each a frame shown twice. 10: none in 6.5 minutes of that load; the warp extrapolates 2 ms further.
+//! Worn, with Steam and the desktop in use (2026-11-09), 10 still left ~20 late commits a minute at times, each a jump
+//! of the whole image: the warp's GPU work waited up to 8.7 ms behind vrcompositor's and Steam's, and a commit made
+//! after ~vsync + 8 blocked in the kernel until the vsync after (up to 6.4 ms in MSMFB_ATOMIC_COMMIT). 12.5 (the tick
+//! ~1.4 ms after the vsync): none under the same Steam load; the warp extrapolates 2.5 ms further.
 //! "lead=<ms>" in /tmp/quest1-reproj sets it, 0 = right after the vsync (as before).
-#define MDP_TICK_LEAD_DEFAULT_MS 10.0f
+#define MDP_TICK_LEAD_DEFAULT_MS 12.5f
 //! Real-time priorities (SCHED_FIFO): the vsync thread (warp + commit) above everything else of the VR stack, the
 //! MDP's display thread ("mdss_fb0", FIFO 16 from the kernel) just below. That kernel thread takes each commit to
 //! the hardware before the vsync that latches it; behind vrcompositor's and Meta's real-time threads it took one
@@ -220,6 +224,10 @@ struct mdp_direct_stats
 	//! when the frames came, in 2 ms steps after the last tick (MDP_PERIOD_NS / 2 ms = 7 buckets): a frame that comes
 	//! right after a tick waits a whole period, two in the same period lose the first
 	uint32_t phase[7];
+	//! The warp's head prediction, checked once its time has passed (pred): how far the orientation it warped to was
+	//! from the one tracked at that time
+	double perr_sum, perr_max;
+	uint32_t perr_n, perr_over[3]; //!< over 0.1, 0.25, 0.5 deg
 };
 
 #define DIRECT_COMMITS 4
@@ -314,6 +322,13 @@ struct mdp_direct
 	struct mdp_direct_stats stats;
 	int64_t prev_vsync; //!< the last vsync direct_tick saw (gap detection)
 	int64_t last_tick_ns; //!< when direct_tick last ran for a vsync with the panels on (arrival phase stats)
+	//! The orientations the warp predicted, for the time they were for (direct_check_predictions)
+	struct
+	{
+		int64_t at_ns;
+		float q[4];
+	} pred[16];
+	uint32_t pred_n;
 	int64_t tick_offset_ns; //!< how long after its vsync the vsync thread meant to tick (the lead's sleep)
 	int64_t commit_ioctl_ns; //!< how long the last MSMFB_ATOMIC_COMMIT took
 	//! This tick's warp (for the late-commit log): mesh build, submit-to-fence wait, GPU execution
@@ -1019,8 +1034,8 @@ direct_thread_func(void *ptr)
 			D->stats.received++;
 			if (D->fresh && D->latest >= 0) {
 				// not on the panels yet: shown at the next tick, before this one (see pend)
-				if (D->pend >= 0) {
-					D->stats.superseded++; // three in one period: the oldest is skipped
+				if (D->pend >= 0 && D->last_tick_ns > 0) {
+					D->stats.superseded++; // three in one period: the oldest is skipped (not counted panels off)
 				}
 				D->pend = D->latest;
 				D->pend_frame = D->latest_frame;
@@ -1303,6 +1318,48 @@ head_orientation(struct mdp_target *t, int64_t at_ns, float *q)
 	q[2] = rel.pose.orientation.z;
 	q[3] = rel.pose.orientation.w;
 	return true;
+}
+
+//! Call with D->lock held: the predictions of past ticks whose time is 40 ms gone (the tracked poses around it are in the
+//! history by then) against the orientation tracked at that time. Worst ones logged.
+static void
+direct_check_predictions(struct mdp_target *t, int64_t now)
+{
+	struct mdp_direct *D = &t->direct;
+	for (uint32_t i = 0; i < 16; i++) {
+		if (D->pred[i].at_ns == 0 || now - D->pred[i].at_ns < 40 * (int64_t)U_TIME_1MS_IN_NS) {
+			continue;
+		}
+		float qa[4];
+		if (head_orientation(t, D->pred[i].at_ns, qa)) {
+			float c[4], d[4];
+			quat_conj(qa, c);
+			quat_mul(c, D->pred[i].q, d);
+			float e = quat_angle_deg(d);
+			e = e > 180.0f ? 360.0f - e : e;
+			struct mdp_direct_stats *st = &D->stats;
+			st->perr_sum += e;
+			st->perr_n++;
+			st->perr_over[0] += e > 0.1f;
+			st->perr_over[1] += e > 0.25f;
+			st->perr_over[2] += e > 0.5f;
+			if (e > st->perr_max) {
+				st->perr_max = e;
+			}
+			static int64_t log_since;
+			static unsigned logged;
+			if (now - log_since > 10 * (int64_t)U_TIME_1S_IN_NS) {
+				log_since = now;
+				logged = 0;
+			}
+			if (e > 0.5f && logged++ < 5) {
+				U_LOG_W("mdp: direct: warp prediction off by %.2f deg for display at %.3f s", e,
+				        (double)D->pred[i].at_ns / 1e9);
+			}
+
+		}
+		D->pred[i].at_ns = 0;
+	}
 }
 
 //! The warp's rotation for a display pose qd (Monado's device space) of a frame rendered at qr (LOCAL), with the test
@@ -2307,6 +2364,7 @@ direct_tick(struct mdp_target *t, int64_t vsync)
 		D->commit_late = false; // see commit_late: the last commit is latched at the coming vsync
 		D->stats.late_skips++;
 	} else if (vsync > 0 && D->latest >= 0) {
+		direct_check_predictions(t, now);
 		// the older of two frames not shown yet goes first (see pend); `latest` gets the newer back below
 		int newest = -1;
 		struct direct_frame newest_frame;
@@ -2357,6 +2415,11 @@ direct_tick(struct mdp_target *t, int64_t vsync)
 			memcpy(qr, D->latest_frame.q, sizeof(qr));
 			float qt[4];
 			if (head_orientation(t, display_ns, qd) && head_orientation(t, D->latest_frame.time_ns, qt)) {
+				// kept to be checked once display_ns has passed (direct_check_predictions)
+				uint32_t pi = D->pred_n++ % 16;
+				D->pred[pi].at_ns = display_ns;
+				memcpy(D->pred[pi].q, qd, sizeof(qd));
+
 				// the head's speed before the frame's pose time, over the two 50 ms before it (the fastest): o is only
 				// learnt while the head is still. One 50 ms span at 15 deg/s let through the turn-arounds of a head
 				// tilted back and forth (no net motion over the span, but the largest prediction error): o took
@@ -2557,6 +2620,10 @@ direct_tick(struct mdp_target *t, int64_t vsync)
 		        "0-2 ms %u, 2-4 %u, 4-6 %u, 6-8 %u, 8-10 %u, 10-12 %u, 12+ %u",
 		        s->received / el, s->queued, s->superseded, s->phase[0], s->phase[1], s->phase[2], s->phase[3], s->phase[4],
 		        s->phase[5], s->phase[6]);
+		U_LOG_W("mdp: direct: warp prediction error %.3f deg avg (max %.2f), over 0.1 deg %u, 0.25 %u, 0.5 %u of %u",
+		        s->perr_n ? s->perr_sum / s->perr_n : 0.0, s->perr_max, s->perr_over[0], s->perr_over[1],
+		        s->perr_over[2], s->perr_n);
+
 		if (s->age_n > 0) {
 			// for driver_quest1's pose prediction, written by the files thread
 			mdp_files.age_ms = s->age_ms_sum / s->age_n;

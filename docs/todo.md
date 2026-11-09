@@ -42,7 +42,12 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   relocalized in the saved map 20 s after boot with the headset on the table, then logged "All submaps have bad map
   tracking" for ~50 s until it relocalized again worn. The headset's rest position in the map frame matched the day
   before within 1 cm (a yaw error would not show there). Maybe the saved anchors cover too little of the room (user):
-  see how much of the room the map holds, and whether to persist the anchor again later in a session.
+  see how much of the room the map holds, and whether to persist the anchor again later in a session. 2026-11-09
+  evening: the saved map holds 2 submaps (~4 MB, persisted on 2026-11-08 from one spot); the engine relocalizes in it,
+  logs "All submaps have bad map tracking" seconds later, evicts the context and starts over, again and again, and
+  while it tracks two contexts it skips map building, so the saved map never grows. Next (user: "as on Android, no
+  constant delocalization"): clear the map with the user and walk the room before setting the playspace again; persist
+  only once the room is covered, then again while tracking is good, so the saved map grows.
 - Meta's tracking cameras keep running while the headset is not worn (trackingservice IOTcam ~50 % of a core,
   CtrllrCam ~11 %, 2026-11-08): pause them while the headset is off, if the map and the controllers come back fine.
 
@@ -62,11 +67,11 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - The 4x MSAA system layer costs ~25 ms a frame in mode 0 (~37 fps): Steam's loading screen at each start. Force it to
   1 sample there too (the user allows no MSAA), or see why Steam's VR UI stayed "not ready" after many SteamVR
   restarts (2026-11-08: "SteamLoadingThrobber timed out after 120 seconds"; a Steam restart fixed it).
-- Trembling / image jumps (user, 2026-11-09: "zero tolerance"): late commits gone, frames now on the panels' real
-  vsync (71.82 Hz) and never skipped by Monado (docs/performance.md, 2026-11-09 afternoon). Confirm worn (user). Left:
-  frames vrcompositor itself does not render (69-71 fps worn) repeat one; it needs more slack in its ~13.2 ms frame.
-  Measurement tools: /root/tmp/jitter.sh (its Steam load flashes the page: never while the user wears the headset),
-  posegap.py, measure.sh on|off (headset, temporary).
+- Trembling / image jumps: the user saw none left worn with load (2026-11-09 evening; late commits, the 71.82 Hz
+  vsync, the head prediction and the render pose fixed, docs/performance.md). Watch for it to come back: Monado's
+  `warp prediction error` and `late commit` lines, the layer's `pose wait ... ran out`. Left: frames vrcompositor
+  itself does not render (69-71 fps worn) repeat their content. Measurement tools: /root/tmp/jitter.sh (its Steam load
+  flashes the page: never while the user wears the headset), posegap.py, measure.sh on|off (headset, temporary).
 - Activating passthrough stalls vrcompositor ~0.3 s (user: "lags half a second", 2026-11-09 16:44:02,
   CTrackedCamera "Late initialization"): find what it builds then (pipelines? camera textures?) and do it at start.
 - Steam's VR UI: confirm worn that Steam answers at once, that the view no longer trembles while it is used and that
