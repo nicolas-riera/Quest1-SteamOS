@@ -3,3 +3,4 @@ base-devel git cmake meson ninja pkgconf autoconf automake libtool python python
 eigen glslang shaderc vulkan-headers vulkan-icd-loader openxr hidapi libdrm wayland wayland-protocols libbsd
 libx11 libxcb libxext libxtst libxdamage libxrandr libxfixes libxinerama libjpeg-turbo libpng openssl zlib
 libpipewire libpulse sdl2-compat zstd
+qt6-base kcoreaddons libksysguard

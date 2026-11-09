@@ -14,7 +14,7 @@
 #   /opt/monado        Monado @ MONADO_COMMIT + src/monado/quest1-monado.patch
 #   /opt/quest1-steamvr/quest1   driver_quest1 (src/steamvr-quest1) and its resources
 #   /usr/local/lib     libVkLayer_quest1_steamvr_compat.so (src/vklayer-steamvr), libvncserver,
-#                      libquest1_v4l2.so (src/v4l2shim)
+#                      libquest1_v4l2.so (src/v4l2shim), qt6/plugins/ksystemstats (src/ksysgpu)
 #   /usr/local/lib/quest1-vk, quest1-vk-steam   the Vulkan shim (vrcompositor; Steam's webhelper + vkredirect)
 #   /usr/local/lib/q1track/q1trackd, /data/local/tmp/libq1camtap.so   bionic tools (src/q1track, src/camtap)
 #   /usr/local/lib/q1splash/q1splash, /usr/local/bin/{ovrstub,q1black,xscreen,x11vnc,q1-camoverlay,
@@ -131,6 +131,10 @@ g++ -std=c++17 -O2 -Wall -o $D/usr/local/bin/q1desktop q1desktop.cpp $OVR -ldl -
 # apps started by Steam ("+" menu): each in its own overlay, Steam's X display covered (device/holo-desktop.sh)
 g++ -std=c++17 -O2 -Wall -o $D/usr/local/bin/q1apps q1apps.cpp $OVR -ldl -lX11 -lX11-xcb -lxcb -lXext -lXdamage \
 	-lXfixes -lXcomposite -lXtst -lxcb-shm
+# System Monitor's GPU sensors (kgsl): replaces ksystemstats' DRM-only GPU plugin (device/holo-desktop.sh)
+cmake -S "$R/src/ksysgpu" -B $W/ksysgpu -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local >/dev/null
+cmake --build $W/ksysgpu -j$J >/dev/null
+DESTDIR=$D cmake --install $W/ksysgpu >/dev/null
 
 step monado
 fetch $MONADO $MONADO_COMMIT $S/monado

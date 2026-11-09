@@ -1,0 +1,6 @@
+{
+    "KPlugin": {
+        "Description": "The Quest 1's Adreno GPU (kgsl)",
+        "Name": "GPU"
+    }
+}

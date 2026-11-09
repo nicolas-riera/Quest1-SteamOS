@@ -46,6 +46,14 @@ echo 'export FLATPAK_BWRAP=/usr/local/libexec/quest1-bwrap' > /etc/profile.d/que
 echo 'd /dev/dri 0755 root root -' > /etc/tmpfiles.d/quest1-dev-dri.conf
 systemd-tmpfiles --create /etc/tmpfiles.d/quest1-dev-dri.conf 2>/dev/null || true
 
+# System Monitor's GPU sensors: ksystemstats' GPU plugin only knows DRM GPUs, so ours (src/ksysgpu, kgsl's sysfs;
+# built by tools/build-native.sh) has its id in /usr/local/lib/qt6/plugins and ksystemstats looks there first
+[ -f /usr/local/lib/qt6/plugins/ksystemstats/ksystemstats_plugin_gpu.so ] ||
+	echo "holo-desktop: the GPU sensor plugin is missing (tools/build-native.sh)" >&2
+install -d /etc/systemd/user/plasma-ksystemstats.service.d
+printf '[Service]\nEnvironment=QT_PLUGIN_PATH=/usr/local/lib/qt6/plugins\n' \
+	> /etc/systemd/user/plasma-ksystemstats.service.d/quest1-gpu.conf
+
 # Apps Steam starts from its "+" menu run on Steam's X display (:1), which Remote Play streams: q1apps (built by
 # tools/build-native.sh) covers it and shows each app in its own dashboard overlay, gamescope's part on the Frame
 [ -x /usr/local/bin/q1apps ] || echo "holo-desktop: /usr/local/bin/q1apps missing (tools/build-native.sh)" >&2

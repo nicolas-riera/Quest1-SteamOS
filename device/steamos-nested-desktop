@@ -138,6 +138,9 @@ chmod a+x $NEW_XDG_RUNTIME_DIR/bin/kwin_wayland_wrapper
 export PATH=$NEW_XDG_RUNTIME_DIR/bin:$PATH
 
 export XDG_RUNTIME_DIR=$NEW_XDG_RUNTIME_DIR
+# Quest 1: our GPU sensor plugin before ksystemstats' own (the session's bus starts ksystemstats itself, without the
+# systemd unit's drop-in; device/holo-desktop.sh)
+export QT_PLUGIN_PATH=/usr/local/lib/qt6/plugins${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}
 
 # Quest 1: in its own process group, ended when the overlay is closed from its control bar (on the Frame,
 # closing the app's window ends it)

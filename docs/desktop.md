@@ -91,6 +91,12 @@ Everything above is the same, except gamescope:
   creates an empty `/dev/dri` at boot (tmpfiles.d). Its sensors (CPU, memory...) were all missing: ksystemstats
   read `/proc/cpuinfo` block by block up to an empty line and spun forever on the last one, Qualcomm's "Hardware"
   line with no empty line after it; kernel/cpuinfo-blank-line.patch adds one.
+  Its GPU tile stayed empty: ksystemstats' GPU plugin only finds DRM GPUs of AMD, Intel or NVIDIA. src/ksysgpu is a
+  plugin with the same id and the same sensor names (`gpu/all/usage`, `gpu/gpu0/usage`, `coreFrequency`,
+  `temperature`, `usedVram`) read from kgsl's sysfs (busy %, clock, temperature, `page_alloc` as used memory, the
+  RAM as total since it is shared). It lives in `/usr/local/lib/qt6/plugins` and ksystemstats gets that path first
+  (`QT_PLUGIN_PATH`: a drop-in of `plasma-ksystemstats.service`, and steamos-nested-desktop for the desktop's own
+  bus); KDE loads the first plugin of an id, so KDE's files stay as they are.
 - Apps from Steam's "+" menu start on Steam's own X display (`:1`, Xvfb), which nobody sees: Steam launches them
   as they are, and on the Frame gamescope shows each one as an overlay. That display is also what Remote Play
   streams from the headset; on the Frame it shows the VR view. Steam also had no session bus
