@@ -34,10 +34,8 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 
 ## Tracking
 
-- A controller that connects while Meta's stack starts was never taken (2026-11-08 and 09, the right one): fixed
-  2026-11-09 (ovrstub announces a controller once the sensors HAL has it connected, docs/tracking-6dof.md), tested on
-  stack restarts with both controllers awake. Confirm at boots (user), and with a controller woken up late (battery
-  out and in while the stack starts).
+- Controller connecting while Meta's stack starts (docs/tracking-6dof.md): confirm at boots (user), and with a
+  controller woken up late (battery out and in while the stack starts).
 - The room (playspace) came back a bit off at the first put-on after a boot, then right (user, 2026-11-09). The engine
   relocalized in the saved map 20 s after boot with the headset on the table, then logged "All submaps have bad map
   tracking" for ~50 s until it relocalized again worn. The headset's rest position in the map frame matched the day
@@ -70,16 +68,12 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - The 4x MSAA system layer costs ~25 ms a frame in mode 0 (~37 fps): Steam's loading screen at each start. Force it to
   1 sample there too (the user allows no MSAA), or see why Steam's VR UI stayed "not ready" after many SteamVR
   restarts (2026-11-08: "SteamLoadingThrobber timed out after 120 seconds"; a Steam restart fixed it).
-- Trembling / image jumps: the user saw none left worn with load (2026-11-09 evening; late commits, the 71.82 Hz
-  vsync, the head prediction and the render pose fixed, docs/performance.md). Watch for it to come back: Monado's
-  `warp prediction error` and `late commit` lines, the layer's `pose wait ... ran out`. Left: frames vrcompositor
-  itself does not render (69-71 fps worn) repeat their content. Measurement tools: /root/tmp/jitter.sh (its Steam load
-  flashes the page: never while the user wears the headset), posegap.py, measure.sh on|off (headset, temporary).
+- Frames vrcompositor itself does not render (69-71 fps worn) repeat their content (docs/performance.md
+  "Trembling: how to watch for it").
 - Activating passthrough stalls vrcompositor ~0.3 s (user: "lags half a second", 2026-11-09 16:44:02,
   CTrackedCamera "Late initialization"): find what it builds then (pipelines? camera textures?) and do it at start.
 - Steam's VR UI: confirm worn that Steam answers at once, that the view no longer trembles while it is used and that
-  the headset no longer freezes (GPU queue limit, cached readback, 384 MB budget, I/O tuning, 2026-11-08 night,
-  docs/performance.md). Measured without the user: SteamVR 71.4-72 fps with Steam repainting its whole page for 5 min.
+  the headset no longer freezes (docs/performance.md).
 - Steam's VR UI frame rate: ~10 fps while a page animates, any damage size. The GPU is the limit now (100 % busy):
   ~24 ms of GPU per Steam frame in the gaps vrcompositor leaves, for the full composite of the 1920x1080 page, its
   capture and readback. Find what costs that much (backdrop-filter blurs? the capture copy? ANGLE on this blob), or
@@ -92,23 +86,16 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - Steam's VR UI: check the right controller's Oculus button logo in the headset (user).
 - Starting a stream from the PC (Steam Link / Remote Play to the headset) crashes Steam and SteamVR (not implemented,
   user 2026-11-09): fail cleanly until streaming exists.
-- Remote Play from the headset (spectator, docs/streaming.md section 0): Steam takes the venus encoder in a real
-  stream ("Desktop OpenGL NV12 + V4L2 HEVC", encode 8 ms instead of x264's 55 ms, 2026-11-09) but it still lags
-  (user): the capture is the bottleneck, "capture 20 ms" a frame with Steam at 250 % CPU (llvmpipe GL reading
-  Xvfb and converting to NV12). Next: a cheaper capture (Steam's "Desktop X11 RGB" + venus RGB32 input, which
-  converts on the encoder; or feed Monado's spectator frame without the X round trip), then the spectator copy.
-- Steam Link to the headset: the decoder in quest1_v4l2 (`/dev/video-dec0`), the theater mode crash (user's lead:
-  the floor reflections), then VR (vrlink).
+- Remote Play from the headset still lags (user): Steam's capture costs ~20 ms a frame on llvmpipe
+  (docs/streaming.md section 0). A cheaper capture (Steam's "Desktop X11 RGB" with venus's RGB32 input, which
+  converts on the encoder, or Monado's spectator frame without the X round trip), then the spectator copy's cost.
 - Confirm in the headset (user): System Monitor's GPU tile (src/ksysgpu, 2026-11-09).
-- SteamVR's global render resolution slider: remove it as on the Steam Frame, later (user, 2026-11-09). Found:
-  `Prop_Hmd_RecommendedResolutionIsPerApp_Bool` (2121) hides it, but games without their own setting then get
-  vrcompositor's automatic 150 % (1496x1664), and `GpuSpeed/ignoreGpuSpeed` (back to 1224x1360) also drops
-  vrcompositor's own scene to 1224x1360 and broke scene mode (reverted, docs/frame-mode.md has no section: see
-  commit 10eb27f).
+- SteamVR's global render resolution slider: remove it as on the Steam Frame, later (user, 2026-11-09), without the
+  side effects found so far (docs/frame-mode.md).
 
 ## Passthrough
 
-- Confirm worn: no more shake/tilt of the camera image (fixed 2026-11-07).
+- Confirm worn that the camera image no longer shakes or tilts.
 - The cameras as a real SteamVR camera (settings in SteamVR, used by the boundary drawing too), as on the Frame.
 - Tint slider: check that it changes the colour.
 - Camera power-up race at some boots (trackingservice "Timeout: (power: SLEEP) => (power: STANDBY)", 3DoF
@@ -128,7 +115,7 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - Timezone dropdown hidden (Steam shows it only under gamescope: `IN_GAMESCOPE` comes from steamui.so itself).
 - Steam's first-run setup of the Frame: untested.
 - The "+" menu's Desktop entry: confirm one click is enough with the laser (user).
-- Desktop mode: lag and dashboard freezes while it is used (memory, llvmpipe; since 2026-11-09 the desktop and Discover's installs run at nice 10, kwin without real-time: vrcompositor 70-71.8 fps at load 21 instead of 50-55); the control bar's keyboard and
+- Desktop mode: lag and dashboard freezes while it is used (memory, llvmpipe; docs/desktop.md); the control bar's keyboard and
   close; mouse, scroll and keyboard in the headset; the Vapor look on a fresh user; install an app from Discover.
 - Snapshots show q1desktop's overlay turned by 180 degrees while it is right in the headset: find why.
 
@@ -146,8 +133,9 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 
 ## Streaming (after everything above, user 2026-11-08)
 
-- Steam Link from a PC: hardware HEVC decode with msm_vidc (docs/streaming.md); the stream app's GL can't share
-  images with the compositor (libhybris GL lacks GL_EXT_memory_object_fd / semaphore_fd).
+- Steam Link from a PC: the decoder in quest1_v4l2 (`/dev/video-dec0`, docs/streaming.md); the stream app's GL can't
+  share images with the compositor (libhybris GL lacks GL_EXT_memory_object_fd / semaphore_fd); the theater mode
+  crash (user's lead: the floor reflections); then VR (vrlink).
 - Reference for making Steam Link accept a Quest 1 (device identity, etc.):
   github.com/MisterAnderson91/quest1-steamlink-patcher (it patches Valve's Steam Link VR APK; we use it as a guide
   only, for SteamOS's native streaming, user 2026-11-09).

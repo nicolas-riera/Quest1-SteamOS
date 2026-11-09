@@ -52,8 +52,10 @@ node it falls back to x264. The downstream msm_vidc wants something else in a do
   from the firmware (msm_vidc's header mode 2), H.264 picture order count type 2 (no reordering).
 
 Measured with `src/v4l2shim/venctest.c` (Steam's exact call sequence, 1280x720 at 60 fps, 20 Mbit/s): H.264 12 ms
-from QBUF to bitstream, HEVC 9 ms; both decode cleanly in ffmpeg with the right colours. Left: a real stream
-(Steam picks the encoder only when a session starts), then the capture's cost.
+from QBUF to bitstream, HEVC 9 ms; both decode cleanly in ffmpeg with the right colours. In a real stream (2026-11-09) Steam logs
+"Created encoder V4L2 for codec 5" and "Capture method set to Desktop OpenGL NV12 + V4L2 HEVC": encode 8 ms a
+frame instead of x264's 55. It still lags (user): its "Slow framerate" lines blame the capture, ~20 ms a frame,
+with Steam at ~250 % CPU (its GL capture of Xvfb and NV12 conversion run on llvmpipe).
 
 Notes for the decoder (`/dev/video-dec0`, Steam Link to the headset): the same layer is the place for it (same
 buffer translation; vdectest.c lists the decoder's own rules), and `omxprobe.c` can run the vendor decoder the

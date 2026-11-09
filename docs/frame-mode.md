@@ -63,3 +63,10 @@ lists what is left to do).
   ID=steamos, device/holo-identity.sh).
   2026-11-07: `IN_GAMESCOPE=true` is set by steamui.so itself (native), along with its gamescope controller
   (CGamescopeControllerLinux, gamescope-control Wayland protocol): not a flag to set alone.
+
+## SteamVR's global render resolution slider (findings, 2026-11-09)
+
+The Frame has no global resolution slider. `Prop_Hmd_RecommendedResolutionIsPerApp_Bool` (2121) hides it here too,
+but games without their own setting then get vrcompositor's automatic 150 % (1496x1664); `GpuSpeed/ignoreGpuSpeed`
+(back to 1224x1360) also drops vrcompositor's own scene to 1224x1360 and broke scene mode. Both reverted (commit
+10eb27f).

@@ -422,3 +422,11 @@ lists what is left to do).
   like Meta's TimeWarp. Geometry right since Meta's lens centre (2026-11-03), but vrcompositor's
   distortion pass costs the same as a copy (3.6 ms per eye, bandwidth) and the warp then runs at
   every vsync with 3 samples: more GPU in total. Compare sharpness with the user once perf allows.
+
+## Trembling: how to watch for it (2026-11-09)
+
+The user saw no trembling or image jumps left, worn and with load, once late commits, the 71.82 Hz vsync, the head
+prediction and the render pose were fixed (sections above). To check that it has not come back: Monado's
+`warp prediction error` and `late commit` lines, the compat layer's `pose wait ... ran out`. Tools (on the headset,
+temporary): /root/tmp/jitter.sh (its Steam load flashes the page: never while the user wears the headset),
+posegap.py, measure.sh on|off.
