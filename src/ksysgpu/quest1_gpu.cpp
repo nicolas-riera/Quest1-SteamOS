@@ -79,9 +79,9 @@ public:
 	void update()
 	{
 		if (m_usage->isSubscribed())
-			m_usage->setValue(read_num("/sys/class/kgsl/kgsl-3d0/gpu_busy_percentage"));
+			m_usage->setValue(double(read_num("/sys/class/kgsl/kgsl-3d0/gpu_busy_percentage")));
 		if (m_freq->isSubscribed())
-			m_freq->setValue(read_num("/sys/class/kgsl/kgsl-3d0/clock_mhz"));
+			m_freq->setValue(double(read_num("/sys/class/kgsl/kgsl-3d0/clock_mhz")));
 		if (m_temp->isSubscribed())
 			m_temp->setValue(read_num("/sys/class/kgsl/kgsl-3d0/temp") / 10.0);
 		if (m_used->isSubscribed())

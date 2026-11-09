@@ -86,10 +86,20 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - Steam's VR UI: check the right controller's Oculus button logo in the headset (user).
 - Starting a stream from the PC (Steam Link / Remote Play to the headset) crashes Steam and SteamVR (not implemented,
   user 2026-11-09): fail cleanly until streaming exists.
-- Remote Play from the headset still lags (user): Steam's capture costs ~20 ms a frame on llvmpipe
-  (docs/streaming.md section 0). A cheaper capture (Steam's "Desktop X11 RGB" with venus's RGB32 input, which
-  converts on the encoder, or Monado's spectator frame without the X round trip), then the spectator copy's cost.
-- Confirm in the headset (user): System Monitor's GPU tile (src/ksysgpu, 2026-11-09).
+- Remote Play from the headset: smoother, "not perfect yet" (user, 2026-11-10; docs/streaming.md "The capture").
+  Confirm in the headset: the VR view at 36 a second (Monado copies every second vsync, deployed at the next Monado
+  restart), the dark blue screen with the headset off, no tearing, the colours. Then, fewer layers and more hardware
+  (user): NV12 made on the GPU by Monado (a shader pass, 1.4 MB read back instead of 3.7 MB, no CPU conversion in
+  q1screencast), and encode at 13-17 ms a frame in the stream (venus at its top clock 355 MHz; 8-9 ms on a quiet
+  headset: the DDR bandwidth vote, `venus_bus_ddr`, or a firmware low-latency mode).
+- Steam's VR overlay copy runs on llvmpipe (user, 2026-11-10: the CPU at ~100 % when the pointer moves over a Steam
+  page): the pages render on the Adreno (webhelper GPU process, ANGLE Vulkan), but Steam's browser process copies
+  each frame for the VR overlay with GLX on Mesa llvmpipe (`webhelper_vr.txt` "Loaded GL 4.5", docs/steam-gpu.md
+  "Known issues"). Move that copy to the GPU.
+- Confirm in the headset (user): System Monitor's GPU tile (src/ksysgpu). It showed 0 % while ksystemstats sent
+  the right value as int64; it sends doubles now (2026-11-10).
+- Remote Play from the headset: a gamepad plugged into the headset during a stream still gets its virtual gamepad
+  and the PC's do not (src/rpspectator, local gamepads vs held uinput devices): confirm with real gamepads (user).
 - SteamVR's global render resolution slider: remove it as on the Steam Frame, later (user, 2026-11-09), without the
   side effects found so far (docs/frame-mode.md).
 
