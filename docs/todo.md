@@ -112,7 +112,7 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - Timezone dropdown hidden (Steam shows it only under gamescope: `IN_GAMESCOPE` comes from steamui.so itself).
 - Steam's first-run setup of the Frame: untested.
 - The "+" menu's Desktop entry: confirm one click is enough with the laser (user).
-- Desktop mode: lag and dashboard freezes while it is used (memory, llvmpipe); the control bar's keyboard and
+- Desktop mode: lag and dashboard freezes while it is used (memory, llvmpipe; since 2026-11-09 the desktop and Discover's installs run at nice 10, kwin without real-time: vrcompositor 70-71.8 fps at load 21 instead of 50-55); the control bar's keyboard and
   close; mouse, scroll and keyboard in the headset; the Vapor look on a fresh user; install an app from Discover.
 - Snapshots show q1desktop's overlay turned by 180 degrees while it is right in the headset: find why.
 

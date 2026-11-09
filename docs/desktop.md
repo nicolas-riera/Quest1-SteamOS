@@ -70,6 +70,11 @@ Everything above is the same, except gamescope:
 - Discover installs Flatpaks system-wide, through flatpak's system helper and polkit. SteamOS's rule allows it to wheel
   members in an active local session; here steamos has no seat session and is not in wheel, so our polkit rule
   (device/holo-frame-mode.sh) grants it Flatpak's actions (except overriding parental controls).
+- CPU priority (2026-11-09): the desktop, everything started from it, and Discover's installs (flatpak's system
+  helper and PackageKit, drop-ins from device/holo-desktop.sh) run at nice 10, and kwin without its real-time main
+  thread (`setpriv --no-new-privs` cancels its `cap_sys_nice` file capability). Before, Discover installing a flatpak
+  with the system monitor open (load ~18) took vrcompositor down to 50-55 fps, an image jump at each missing frame;
+  after, 70-71.8 fps at load 21. The desktop itself may lag instead.
 
 
 ## Notes moved from the to-do list (2026-11-08): Steam and desktop

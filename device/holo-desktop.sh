@@ -21,3 +21,12 @@ if [ -d /usr/share/plasma/look-and-feel/com.valve.vapor.deck.desktop ]; then
 else
 	echo "holo-desktop: the Frame's KDE presets are missing (installer frame step)" >&2
 fi
+
+# Installs from Discover run as system services (flatpak's helper, PackageKit), outside the desktop's nice 10
+# (steamos-nested-desktop): they yield the CPUs and the disk to the VR stack too (an install took vrcompositor down
+# to 50-55 fps, 2026-11-09).
+for u in flatpak-system-helper packagekit; do
+	install -d /etc/systemd/system/$u.service.d
+	printf '[Service]\nNice=10\nIOSchedulingClass=idle\n' > /etc/systemd/system/$u.service.d/quest1-background.conf
+done
+systemctl daemon-reload 2>/dev/null || true

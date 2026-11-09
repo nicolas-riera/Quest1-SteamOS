@@ -13,6 +13,12 @@ set -eu
 # shown. Going on would start a second one inside it (its own Xvfb, kwin, Plasma, an overlay SteamVR refuses).
 case "${XDG_RUNTIME_DIR:-}" in */nested_plasma) exit 0 ;; esac
 
+# Quest 1: the desktop and everything run from it (Xvfb, q1desktop, Plasma, its apps) yield the CPUs to the VR stack:
+# with Discover installing a flatpak and the system monitor open, the load went to ~18 and vrcompositor down to
+# 50-55 fps for half a minute, every missing frame an image jump (user, 2026-11-09). Its frames and input may lag
+# instead.
+renice -n 10 -p $$ >/dev/null 2>&1 || true
+
 # Remove the performance overlay, it meddles with some tasks
 unset LD_PRELOAD
 
@@ -122,9 +128,11 @@ trap - USR1
 ## Shadow kwin_wayland_wrapper so that we can pass args to kwin wrapper
 ## whilst being launched by plasma-session
 mkdir -p $NEW_XDG_RUNTIME_DIR/bin
+# Quest 1: no_new_privs: kwin_wayland's file capability (cap_sys_nice) would make its main thread real-time, above
+# every normal thread of the VR stack
 cat <<EOF > $NEW_XDG_RUNTIME_DIR/bin/kwin_wayland_wrapper
 #!/bin/sh
-/usr/bin/kwin_wayland_wrapper --width $W --height $H --no-lockscreen \$@
+exec setpriv --no-new-privs /usr/bin/kwin_wayland_wrapper --width $W --height $H --no-lockscreen \$@
 EOF
 chmod a+x $NEW_XDG_RUNTIME_DIR/bin/kwin_wayland_wrapper
 export PATH=$NEW_XDG_RUNTIME_DIR/bin:$PATH
