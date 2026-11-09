@@ -1826,6 +1826,7 @@ static void *qs_fence_thread(void *arg)
 {
 	struct qd_swapchain *sc = arg;
 	pthread_setname_np(pthread_self(), "q1 scanout");
+	q1_realtime("scanout: fence thread", Q1_RT_MAX);
 	uint32_t slots = sizeof(sc->retire) / sizeof(sc->retire[0]);
 	pthread_mutex_lock(&sc->mutex);
 	while (!sc->stopping) {

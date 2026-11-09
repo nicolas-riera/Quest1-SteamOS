@@ -34,10 +34,15 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 
 ## Tracking
 
-- A controller asleep when Meta's stack starts is never taken (2026-11-08: the right one; battery out and in gave
-  it its radio link back, white LED, but nothing reached SteamVR although ovrstub announced it every 3 s).
-  `holo-android-tracking restart` (through q1restart.sh, ~30 s without tracking, the headset must be worn for the
-  cameras) brings it back; do it without a restart: what trackingservice needs to take a late controller.
+- A controller that connects while Meta's stack starts was never taken (2026-11-08 and 09, the right one): fixed
+  2026-11-09 (ovrstub announces a controller once the sensors HAL has it connected, docs/tracking-6dof.md), tested on
+  stack restarts with both controllers awake. Confirm at boots (user), and with a controller woken up late (battery
+  out and in while the stack starts).
+- The room (playspace) came back a bit off at the first put-on after a boot, then right (user, 2026-11-09). The engine
+  relocalized in the saved map 20 s after boot with the headset on the table, then logged "All submaps have bad map
+  tracking" for ~50 s until it relocalized again worn. The headset's rest position in the map frame matched the day
+  before within 1 cm (a yaw error would not show there). Maybe the saved anchors cover too little of the room (user):
+  see how much of the room the map holds, and whether to persist the anchor again later in a session.
 - Meta's tracking cameras keep running while the headset is not worn (trackingservice IOTcam ~50 % of a core,
   CtrllrCam ~11 %, 2026-11-08): pause them while the headset is off, if the map and the controllers come back fine.
 
@@ -57,13 +62,13 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - The 4x MSAA system layer costs ~25 ms a frame in mode 0 (~37 fps): Steam's loading screen at each start. Force it to
   1 sample there too (the user allows no MSAA), or see why Steam's VR UI stayed "not ready" after many SteamVR
   restarts (2026-11-08: "SteamLoadingThrobber timed out after 120 seconds"; a Steam restart fixed it).
-- Trembling under load (user, 2026-11-09: "zero tolerance"; frames shown twice): late commits gone under the Steam
-  load (docs/performance.md, 2026-11-09). Worn just before the end of that session the user still saw it: image
-  jumps, sometimes several in a row (then it looks like trembling); possibly with the measurement load still running.
-  Next: frames that reach Monado's warp late (~61 of ~70 a
-  second fresh under load, 68 idle): build and measure the frame path's threads made real-time (layer and
-  driver_quest1, written, uncommitted on 2026-11-09), then Monado's "Quest1 direct" receiver; `vsyncs missed 2` in
-  one 240 s run. Measurement tools: /root/tmp/jitter.sh, posegap.py, measure.sh on|off (headset, temporary).
+- Trembling / image jumps (user, 2026-11-09: "zero tolerance"): late commits gone, frames now on the panels' real
+  vsync (71.82 Hz) and never skipped by Monado (docs/performance.md, 2026-11-09 afternoon). Confirm worn (user). Left:
+  frames vrcompositor itself does not render (69-71 fps worn) repeat one; it needs more slack in its ~13.2 ms frame.
+  Measurement tools: /root/tmp/jitter.sh (its Steam load flashes the page: never while the user wears the headset),
+  posegap.py, measure.sh on|off (headset, temporary).
+- Activating passthrough stalls vrcompositor ~0.3 s (user: "lags half a second", 2026-11-09 16:44:02,
+  CTrackedCamera "Late initialization"): find what it builds then (pipelines? camera textures?) and do it at start.
 - Steam's VR UI: confirm worn that Steam answers at once, that the view no longer trembles while it is used and that
   the headset no longer freezes (GPU queue limit, cached readback, 384 MB budget, I/O tuning, 2026-11-08 night,
   docs/performance.md). Measured without the user: SteamVR 71.4-72 fps with Steam repainting its whole page for 5 min.

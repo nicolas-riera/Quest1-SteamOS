@@ -598,6 +598,7 @@ static void *qd_completer(void *arg)
 {
 	struct qd_swapchain *sc = arg;
 	pthread_setname_np(pthread_self(), "q1 display done");
+	q1_realtime("display: present thread", Q1_RT_MAX);
 	pthread_mutex_lock(&sc->mutex);
 	for (;;) {
 		while (sc->pend_head == sc->pend_tail && !sc->stopping)
@@ -1231,7 +1232,9 @@ static void ft_tick(uint64_t t)
 
 // --- vblank events (VK_EXT_display_control) ---------------------------------------------------------------
 // vrcompositor paces its frames on vkRegisterDisplayEventEXT fences and vkGetSwapchainCounterEXT. The
-// simulated display ticks at the mode's rate on CLOCK_MONOTONIC; a thread signals the registered fences
+// simulated display ticks on the panels' real vsync, which Monado publishes (struct q1d_vsync; driver_quest1's
+// GetTimeSinceLastVsync reads it too), and at the mode's rate on CLOCK_MONOTONIC when there is none (no Monado, panels
+// off); a thread signals the registered fences
 // at every tick (an empty submission, the blob cannot signal a fence from the CPU otherwise). It signals the fence
 // once the GPU has done the work queued before it, often after the tick: tried on 2026-11-08, signalling the
 // fences from the CPU at the tick (the layer answering vkWaitForFences/vkGetFenceStatus on them) cut the
@@ -1248,11 +1251,58 @@ static struct qd_event qd_events[16];
 static uint32_t qd_event_count;
 static pthread_mutex_t qd_event_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_once_t qd_vblank_once = PTHREAD_ONCE_INIT;
-static uint64_t qd_epoch_ns;
+static _Atomic uint64_t qd_vblanks; //!< vblanks so far (vkGetSwapchainCounterEXT)
 
 static uint64_t qd_period_ns(void) { return 1000000000000ull / qd_mhz; }
 
-static uint64_t qd_vblank_count(void) { return (now_ns() - qd_epoch_ns) / qd_period_ns(); }
+static uint64_t qd_vblank_count(void) { return atomic_load(&qd_vblanks); }
+
+//! Monado's page with the panels' real vsync (quest1_direct_proto.h), NULL until mapped
+static const struct q1d_vsync *qd_vsync_page;
+
+//! The panels' last vsync and period from Monado, false when there is none (no Monado, or the panels are off: no
+//! vsync for 0.5 s).
+static bool qd_real_vsync(int64_t *vsync, int64_t *period)
+{
+	if (!qd_vsync_page) {
+		static uint64_t tried;
+		uint64_t t = now_ns();
+		if (tried && t - tried < 1000000000ull)
+			return false;
+		tried = t;
+		int fd = open(Q1D_VSYNC_FILE, O_RDONLY | O_CLOEXEC);
+		if (fd < 0)
+			return false;
+		struct stat st;
+		void *m = MAP_FAILED;
+		if (fstat(fd, &st) == 0 && st.st_size >= (off_t)sizeof(struct q1d_vsync)) // smaller: SIGBUS on read
+			m = mmap(NULL, sizeof(struct q1d_vsync), PROT_READ, MAP_SHARED, fd, 0);
+		close(fd);
+		if (m == MAP_FAILED)
+			return false;
+		qd_vsync_page = m;
+		LOG("display: vblanks follow the panels' vsync (%s)\n", Q1D_VSYNC_FILE);
+	}
+	// Monado writes it right at each vsync, often just when this thread reads it: retry, pausing after a few tries
+	for (int i = 0; i < 200; i++) {
+		if (i >= 20)
+			nanosleep(&(struct timespec){0, 10000}, NULL);
+		uint32_t s0 = __atomic_load_n(&qd_vsync_page->seq, __ATOMIC_ACQUIRE);
+		if (s0 & 1)
+			continue;
+		int64_t v = __atomic_load_n(&qd_vsync_page->vsync_ns, __ATOMIC_RELAXED);
+		int64_t p = __atomic_load_n(&qd_vsync_page->period_ns, __ATOMIC_RELAXED);
+		__atomic_thread_fence(__ATOMIC_ACQUIRE);
+		if (__atomic_load_n(&qd_vsync_page->seq, __ATOMIC_RELAXED) != s0)
+			continue;
+		if (v <= 0 || p < 12000000 || p > 16000000 || (int64_t)now_ns() - v > 500000000)
+			return false;
+		*vsync = v;
+		*period = p;
+		return true;
+	}
+	return false;
+}
 
 //! The calling thread made realtime if it is not already (SteamVR runs with CAP_SYS_NICE, as on desktop Linux).
 //! vrcompositor's VulkanVblankThread (it calls vkGetSwapchainCounterEXT) polls its vblank fence then sleeps until
@@ -1260,30 +1310,43 @@ static uint64_t qd_vblank_count(void) { return (now_ns() - qd_epoch_ns) / qd_per
 //! 7 ms late, its RenderThread then aimed at the vblank after and a frame was missed (~1 a second with the Steam
 //! library open, 2026-11-08 frame trace). Its RenderThread is SCHED_RR too; all of them at Q1_RT_MAX (quest1_compat.c),
 //! below Monado's vsync thread and the MDP's display kernel thread.
-static void qd_realtime(const char *who, int prio)
-{
-	int policy;
-	struct sched_param sp;
-	if (pthread_getschedparam(pthread_self(), &policy, &sp) == 0 && policy != SCHED_OTHER)
-		return;
-	sp.sched_priority = prio;
-	int e = pthread_setschedparam(pthread_self(), SCHED_RR, &sp);
-	LOG("%s: SCHED_RR %d: %s\n", who, prio, e ? strerror(e) : "ok");
-}
+#define qd_realtime q1_realtime
 
 static void *qd_vblank_thread(void *arg)
 {
 	qd_realtime("display: the layer's vblank thread", Q1_RT_MAX);
+	int64_t period = (int64_t)qd_period_ns();
+	int64_t last = (int64_t)now_ns();
+	bool locked = false;
 	for (;;) {
-		uint64_t next = qd_epoch_ns + (qd_vblank_count() + 1) * qd_period_ns();
-		struct timespec ts = {(time_t)(next / 1000000000ull), (long)(next % 1000000000ull)};
+		int64_t vs, per, next;
+		bool real = qd_real_vsync(&vs, &per);
+		if (real) {
+			// the first vsync of the panels at least half a period after the last tick
+			period = per;
+			int64_t from = last + per / 2;
+			next = vs + (from > vs ? (from - vs + per - 1) / per : 0) * per;
+		} else {
+			next = last + period;
+		}
+		if (real != locked) {
+			locked = real;
+			LOG("display: vblanks %s\n", real ? "on the panels' vsync" : "on the layer's own clock (no vsync from Monado)");
+		}
+		int64_t now = (int64_t)now_ns();
+		while (next + period <= now) // woke up late: those vblanks are gone
+			next += period;
+		struct timespec ts = {(time_t)(next / 1000000000ll), (long)(next % 1000000000ll)};
 		while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL) == EINTR)
 			;
-		ft_tick(next);
+		int64_t n = (next - last + period / 2) / period;
+		atomic_fetch_add(&qd_vblanks, n > 0 ? (uint64_t)n : 1);
+		last = next;
+		ft_tick((uint64_t)next);
 		pthread_mutex_lock(&qd_event_mutex);
 		ft("tick", qd_event_count);
 		if (qd_event_count)
-			atomic_store(&qd_frame_tick, next);
+			atomic_store(&qd_frame_tick, (uint64_t)next);
 		for (uint32_t i = 0; i < qd_event_count; i++) {
 			struct qd_event *e = &qd_events[i];
 			pthread_mutex_lock(&e->d->queue_mutex);
@@ -1299,9 +1362,7 @@ static void *qd_vblank_thread(void *arg)
 static void qd_vblank_start(void)
 {
 	pthread_once(&qd_once, qd_init);
-	// ticks at multiples of the period since CLOCK_MONOTONIC's origin: driver_quest1 computes the
-	// same grid to publish one pose per vblank
-	qd_epoch_ns = 0;
+	atomic_store(&qd_vblanks, now_ns() / qd_period_ns());
 	pthread_t t;
 	pthread_create(&t, NULL, qd_vblank_thread, NULL);
 	pthread_detach(t);

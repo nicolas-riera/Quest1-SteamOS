@@ -33,11 +33,15 @@
 
 #include <dlfcn.h>
 #include <pthread.h>
+#include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
 
 #include "../vklayer-steamvr/quest1_display_proto.h"
+#include "../monado/src/xrt/compositor/main/quest1_direct_proto.h"
 #include "battery.h"
 #include "camera.h"
 #include "chaperone_frame.h"
@@ -72,11 +76,78 @@ static void Log(const char *fmt, ...)
 	VRDriverLog()->Log(buf);
 }
 
+//! The calling thread SCHED_RR 50 (vrserver has CAP_SYS_NICE): the threads on the frame's path (each present taken
+//! and the next frame's pose published, the OpenXR frame loop) work well under 1 ms a frame but ran as normal threads:
+//! under Steam's load (load average ~10) they woke late and vrcompositor's frames came late to Monado's warp, which then
+//! showed the previous frame again (2026-11-09). 50 is the layer's cap for SteamVR's real-time threads (Q1_RT_MAX):
+//! below Monado's vsync thread and the MDP's display thread.
+static void Realtime(const char *who)
+{
+	sched_param sp{};
+	sp.sched_priority = 50;
+	int e = pthread_setschedparam(pthread_self(), SCHED_RR, &sp);
+	Log("quest1: %s thread SCHED_RR 50: %s\n", who, e ? strerror(e) : "ok");
+}
+
 static double MonotonicSeconds()
 {
 	timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	return ts.tv_sec + ts.tv_nsec * 1e-9;
+}
+
+//! The panels' real vsync from Monado's page (struct q1d_vsync): the last one (CLOCK_MONOTONIC ns), the period and the
+//! count. vrcompositor times its frames on GetTimeSinceLastVsync and Prop_DisplayFrequency_Float: with the OpenXR frame
+//! loop's wake-ups and 72 Hz it presented every 13.45 ms against the panels' 13.92 (71.82 Hz), its frames slid across
+//! Monado's tick and came two in a period, then none (2026-11-09). `fresh`: only a vsync of the last 0.5 s (the panels
+//! are on); otherwise the last one published, if any, for its period.
+static bool RealVsync(int64_t *vsync, int64_t *period, uint64_t *count, bool fresh = true)
+{
+	static std::atomic<const q1d_vsync *> page{nullptr};
+	static std::atomic<double> tried{0.0};
+	const q1d_vsync *pg = page.load();
+	if (!pg) {
+		double t = MonotonicSeconds();
+		if (tried.load() != 0.0 && t - tried.load() < 1.0)
+			return false;
+		tried = t;
+		int fd = open(Q1D_VSYNC_FILE, O_RDONLY | O_CLOEXEC);
+		if (fd < 0)
+			return false;
+		struct stat st;
+		void *m = MAP_FAILED;
+		if (fstat(fd, &st) == 0 && st.st_size >= (off_t)sizeof(q1d_vsync)) // smaller: SIGBUS on read
+			m = mmap(nullptr, sizeof(q1d_vsync), PROT_READ, MAP_SHARED, fd, 0);
+		close(fd);
+		if (m == MAP_FAILED)
+			return false;
+		const q1d_vsync *expected = nullptr;
+		if (!page.compare_exchange_strong(expected, (const q1d_vsync *)m))
+			munmap(m, sizeof(q1d_vsync));
+		pg = page.load();
+	}
+	for (int i = 0; i < 200; i++) {
+		if (i >= 20) {
+			timespec ts{0, 10000};
+			nanosleep(&ts, nullptr);
+		}
+		uint32_t s0 = __atomic_load_n(&pg->seq, __ATOMIC_ACQUIRE);
+		if (s0 & 1)
+			continue;
+		int64_t v = __atomic_load_n(&pg->vsync_ns, __ATOMIC_RELAXED);
+		int64_t p = __atomic_load_n(&pg->period_ns, __ATOMIC_RELAXED);
+		uint64_t c = __atomic_load_n(&pg->count, __ATOMIC_RELAXED);
+		__atomic_thread_fence(__ATOMIC_ACQUIRE);
+		if (__atomic_load_n(&pg->seq, __ATOMIC_RELAXED) != s0)
+			continue;
+		if (v <= 0 || p < 12000000 || p > 16000000 || (fresh && MonotonicSeconds() - v * 1e-9 > 0.5))
+			return false;
+		*vsync = v;
+		*period = p;
+		*count = c;
+		return true;
+	}
+	return false;
 }
 
 // --- dynamically loaded OpenXR and Vulkan ------------------------------------------------------
@@ -1030,6 +1101,7 @@ bool XrBackend::PoseForFrame(uint64_t frame, XrPosef *pose, int64_t *whenNs)
 void XrBackend::DisplayThread()
 {
 	pthread_setname_np(pthread_self(), "quest1 display");
+	Realtime("display");
 	char path[108];
 	if (const char *p = getenv("QUEST1_DISPLAY_SOCKET"))
 		snprintf(path, sizeof(path), "%s", p);
@@ -1257,6 +1329,13 @@ void XrBackend::WaitForPresent()
 
 bool XrBackend::TimeSinceLastVsync(float *seconds, uint64_t *counter)
 {
+	int64_t v, p;
+	uint64_t c;
+	if (RealVsync(&v, &p, &c)) {
+		*seconds = (float)(MonotonicSeconds() - v * 1e-9);
+		*counter = c;
+		return true;
+	}
 	std::lock_guard<std::mutex> lock(frameMutex);
 	if (vsyncCount == 0)
 		return false;
@@ -1268,6 +1347,7 @@ bool XrBackend::TimeSinceLastVsync(float *seconds, uint64_t *counter)
 void XrBackend::FrameThread()
 {
 	pthread_setname_np(pthread_self(), "quest1 frames");
+	Realtime("frame");
 	XrCompositionLayerProjectionView pv[2] = {{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},
 	                                          {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
 	XrCompositionLayerProjection proj{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
@@ -1478,7 +1558,14 @@ public:
 		VRProperties()->SetStringProperty(c, Prop_ManufacturerName_String, "Oculus");
 		VRProperties()->SetStringProperty(c, Prop_TrackingSystemName_String, "quest1");
 		VRProperties()->SetStringProperty(c, Prop_DriverVersion_String, "0.2");
-		VRProperties()->SetFloatProperty(c, Prop_DisplayFrequency_Float, xr.displayHz);
+		{
+			// the panels' measured rate (71.82 Hz) when Monado has published it (RealVsync)
+			int64_t v, p;
+			uint64_t n;
+			float hz = RealVsync(&v, &p, &n, false) ? (float)(1e9 / (double)p) : xr.displayHz;
+			Log("quest1: display frequency %.3f Hz\n", hz);
+			VRProperties()->SetFloatProperty(c, Prop_DisplayFrequency_Float, hz);
+		}
 		VRProperties()->SetFloatProperty(c, Prop_UserIpdMeters_Float, xr.ipd);
 		VRProperties()->SetFloatProperty(c, Prop_UserHeadToEyeDepthMeters_Float, 0.0f);
 		// Monado wakes the frame thread ~15 ms before the vsync that latches the frame, which is

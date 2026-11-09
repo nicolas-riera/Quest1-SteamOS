@@ -115,6 +115,10 @@ android_dlsym(void *handle, const char *symbol);
 //! The compat layer keeps SteamVR's own real-time threads at 50 or below (quest1_display.c).
 #define MDP_VSYNC_RT_PRIO 98
 #define MDP_DISPLAY_KTHREAD_RT_PRIO 97
+//! The thread that takes vrcompositor's frames from its layer ("Quest1 direct"): just above the layer's own
+//! threads (50) and Meta's pose thread (52). As a normal thread under Steam's load (load average ~10) it woke late
+//! and a frame vrcompositor had finished in time missed the warp: the panels showed the previous one again.
+#define MDP_DIRECT_RT_PRIO 53
 //! Exists while the panels are (going) off: an external scanout must not commit then.
 #define MDP_PANELS_OFF "/tmp/quest1-panels-off"
 //! Exists while the headset sleeps (quest1-standby): panels off as if the headset was removed.
@@ -210,6 +214,12 @@ struct mdp_direct_stats
 	uint32_t late_skips; //!< ticks without a commit after one that waited in the kernel and came late (commit_late)
 	uint32_t gaps;      //!< vsync events never seen (the thread woke more than a period late)
 	double wake_ms_max; //!< vsync event -> this thread running
+	uint32_t received;   //!< frames of the layer received
+	uint32_t superseded; //!< frames replaced by a newer one before a tick took them: never on the panels
+	uint32_t queued;     //!< ticks that showed `pend`, a frame a newer one had come after
+	//! when the frames came, in 2 ms steps after the last tick (MDP_PERIOD_NS / 2 ms = 7 buckets): a frame that comes
+	//! right after a tick waits a whole period, two in the same period lose the first
+	uint32_t phase[7];
 };
 
 #define DIRECT_COMMITS 4
@@ -237,7 +247,7 @@ struct mdp_direct
 	bool held[Q1D_MAX_IMAGES]; //!< the layer gave us this image (Q1D_FRAME) and it has not been released
 
 	int latest; //!< newest frame's image, the source of every re-projection; -1 none
-	struct
+	struct direct_frame
 	{
 		uint64_t frame;
 		int64_t time_ns;
@@ -246,6 +256,15 @@ struct mdp_direct
 	} latest_frame;
 	bool fresh;        //!< `latest` was not on the panels yet
 	bool need_refresh; //!< the panels came back on: show the latest frame again
+
+	//! A frame not on the panels yet when a newer one came (`latest` was still fresh): the next tick shows it, the one
+	//! after shows the newer one. vrcompositor needs ~13.2 ms of a 13.9 ms period for a frame: when its frames come
+	//! close to our tick, one can land just before it and the next just after the one after, two in a period and none
+	//! in the next. Showing only the newest skipped the first and showed the second twice: a jump each time, in bursts
+	//! (2026-11-09). A frame of delay instead, until vrcompositor misses a vsync and the queue empties without a
+	//! repeat. At most one frame waits (a third one in a period skips the oldest). -1 none.
+	int pend;
+	struct direct_frame pend_frame;
 
 	//! Commits that may still show an image: until their release fence signals
 	struct
@@ -294,6 +313,7 @@ struct mdp_direct
 
 	struct mdp_direct_stats stats;
 	int64_t prev_vsync; //!< the last vsync direct_tick saw (gap detection)
+	int64_t last_tick_ns; //!< when direct_tick last ran for a vsync with the panels on (arrival phase stats)
 	int64_t tick_offset_ns; //!< how long after its vsync the vsync thread meant to tick (the lead's sleep)
 	int64_t commit_ioctl_ns; //!< how long the last MSMFB_ATOMIC_COMMIT took
 	//! This tick's warp (for the late-commit log): mesh build, submit-to-fence wait, GPU execution
@@ -864,7 +884,7 @@ static void
 direct_release_unused(struct mdp_direct *D)
 {
 	for (uint32_t i = 0; i < D->count; i++) {
-		if (!D->held[i] || (int)i == D->latest) {
+		if (!D->held[i] || (int)i == D->latest || (int)i == D->pend) {
 			continue;
 		}
 		bool used = false;
@@ -916,6 +936,7 @@ direct_reset(struct mdp_target *t)
 	}
 	D->count = 0;
 	D->latest = -1;
+	D->pend = -1;
 	D->fresh = false;
 	D->o_valid = false;
 }
@@ -939,6 +960,9 @@ direct_thread_func(void *ptr)
 	struct mdp_target *t = ptr;
 	struct mdp_direct *D = &t->direct;
 	pthread_setname_np(pthread_self(), "Quest1 direct");
+	struct sched_param sp = {.sched_priority = MDP_DIRECT_RT_PRIO};
+	int se = pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
+	U_LOG_W("mdp: frame receiver thread: SCHED_FIFO %d %s", MDP_DIRECT_RT_PRIO, se ? strerror(se) : "ok");
 	while (D->running) {
 		struct pollfd p[2] = {{D->listen_fd, POLLIN, 0}, {D->client_fd, POLLIN, 0}};
 		if (poll(p, 2, 200) <= 0) {
@@ -992,6 +1016,20 @@ direct_thread_func(void *ptr)
 		} else if (m.type == Q1D_FRAME && m.index < D->count) {
 			pthread_mutex_lock(&D->lock);
 			D->held[m.index] = true;
+			D->stats.received++;
+			if (D->fresh && D->latest >= 0) {
+				// not on the panels yet: shown at the next tick, before this one (see pend)
+				if (D->pend >= 0) {
+					D->stats.superseded++; // three in one period: the oldest is skipped
+				}
+				D->pend = D->latest;
+				D->pend_frame = D->latest_frame;
+			}
+			if (D->last_tick_ns > 0) {
+				int64_t ph = os_monotonic_get_ns() - D->last_tick_ns;
+				int b = ph < 0 ? 0 : (int)(ph / (2 * (int64_t)U_TIME_1MS_IN_NS));
+				D->stats.phase[b < 7 ? b : 6]++;
+			}
 			D->latest = (int)m.index;
 			D->latest_frame.frame = m.frame;
 			D->latest_frame.time_ns = m.time_ns;
@@ -1012,6 +1050,7 @@ direct_init(struct mdp_target *t, void *nw)
 	D->client_fd = -1;
 	D->listen_fd = -1;
 	D->latest = -1;
+	D->pend = -1;
 	// priority inheritance: the real-time vsync thread must not wait behind a preempted normal thread
 	pthread_mutexattr_t ma;
 	pthread_mutexattr_init(&ma);
@@ -2247,6 +2286,7 @@ direct_tick(struct mdp_target *t, int64_t vsync)
 	}
 	if (vsync > 0) {
 		D->prev_vsync = on ? vsync : 0;
+		D->last_tick_ns = on ? now : 0;
 	}
 	if (D->ack_pending != 0 && (vsync > 0 || !on)) {
 		direct_displayed(D, D->ack_pending);
@@ -2260,12 +2300,24 @@ direct_tick(struct mdp_target *t, int64_t vsync)
 			direct_displayed(D, D->latest_frame.frame);
 			D->fresh = false;
 		}
+		D->pend = -1;
 		D->need_refresh = true;
 		D->commit_late = false;
 	} else if (vsync > 0 && D->latest >= 0 && D->commit_late) {
 		D->commit_late = false; // see commit_late: the last commit is latched at the coming vsync
 		D->stats.late_skips++;
 	} else if (vsync > 0 && D->latest >= 0) {
+		// the older of two frames not shown yet goes first (see pend); `latest` gets the newer back below
+		int newest = -1;
+		struct direct_frame newest_frame;
+		if (D->pend >= 0) {
+			newest = D->latest;
+			newest_frame = D->latest_frame;
+			D->latest = D->pend;
+			D->latest_frame = D->pend_frame;
+			D->pend = -1;
+			D->stats.queued++;
+		}
 		D->tick_mesh_ns = D->tick_wait_ns = D->commit_ioctl_ns = 0;
 		memset(D->tick_st, 0, sizeof(D->tick_st));
 		D->tick_gpu_ms = 0;
@@ -2472,6 +2524,11 @@ direct_tick(struct mdp_target *t, int64_t vsync)
 			}
 		}
 		D->commit_late = committed && D->commit_ioctl_ns > U_TIME_1MS_IN_NS && done > MDP_PERIOD_NS - U_TIME_1MS_IN_NS / 2;
+		if (newest >= 0) {
+			D->latest = newest;
+			D->latest_frame = newest_frame;
+			D->fresh = true;
+		}
 	}
 	direct_release_unused(D);
 	if (D->stats.since_ns == 0) {
@@ -2496,6 +2553,10 @@ direct_tick(struct mdp_target *t, int64_t vsync)
 		        s->no_set, s->late, s->late_skips, s->gaps, s->wake_ms_max, (double)WARP_MAX_DEG, s->wild, s->age_n ? s->age_ms_sum / s->age_n : 0.0, s->age_ms_min,
 		        s->age_ms_max, D->tick_offset_ns > 0 ? (double)(MDP_PERIOD_NS - D->tick_offset_ns) / 1e6 : 0.0,
 		        D->knobs.display_delay_ms);
+		U_LOG_W("mdp: direct: frames received %.1f/s, shown a period late (queued) %u, never shown %u; came after the tick at "
+		        "0-2 ms %u, 2-4 %u, 4-6 %u, 6-8 %u, 8-10 %u, 10-12 %u, 12+ %u",
+		        s->received / el, s->queued, s->superseded, s->phase[0], s->phase[1], s->phase[2], s->phase[3], s->phase[4],
+		        s->phase[5], s->phase[6]);
 		if (s->age_n > 0) {
 			// for driver_quest1's pose prediction, written by the files thread
 			mdp_files.age_ms = s->age_ms_sum / s->age_n;
@@ -2506,11 +2567,75 @@ direct_tick(struct mdp_target *t, int64_t vsync)
 	pthread_mutex_unlock(&D->lock);
 }
 
+//! The vsync thread's publication of the panels' real vsync (struct q1d_vsync, read by the layer of vrcompositor and by
+//! driver_quest1).
+struct vsync_pub
+{
+	struct q1d_vsync *page; //!< NULL until mapped
+	bool failed;            //!< mapping it failed (logged once)
+	uint32_t seq;
+	int64_t prev;   //!< the previous vsync
+	double period;  //!< ns, averaged over ~64 periods
+	uint64_t count; //!< vsyncs so far (q1d_vsync::count)
+};
+
+static void
+vsync_publish(struct vsync_pub *v, int64_t ts)
+{
+	if (v->page == NULL) {
+		if (v->failed) {
+			return;
+		}
+		// not unlinked when Monado stops: a layer that mapped it keeps reading the same page after a restart
+		int fd = open(Q1D_VSYNC_FILE, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+		void *p = MAP_FAILED;
+		if (fd >= 0) {
+			fchmod(fd, 0644); // vrcompositor runs as another user
+			if (ftruncate(fd, 4096) == 0) {
+				p = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+			}
+			close(fd);
+		}
+		if (p == MAP_FAILED) {
+			U_LOG_E("mdp: cannot map %s: %s; vrcompositor's vblanks will not follow the panels", Q1D_VSYNC_FILE,
+			        strerror(errno));
+			v->failed = true;
+			return;
+		}
+		v->page = p;
+		v->seq = __atomic_load_n(&v->page->seq, __ATOMIC_RELAXED) & ~1u;
+		v->count = __atomic_load_n(&v->page->count, __ATOMIC_RELAXED); // goes on from the last run's
+		// the last run's estimate when there is one: driver_quest1 reads it at once for SteamVR's display frequency
+		int64_t last = __atomic_load_n(&v->page->period_ns, __ATOMIC_RELAXED);
+		v->period = last > MDP_PERIOD_NS * 49 / 50 && last < MDP_PERIOD_NS * 51 / 50 ? (double)last : (double)MDP_PERIOD_NS;
+	}
+	if (v->prev > 0 && ts > v->prev) {
+		// one period, or a few when this thread missed some (a vsync event only keeps the last timestamp)
+		double d = (double)(ts - v->prev);
+		double k = round(d / v->period);
+		if (k >= 1.0 && k <= 4.0 && fabs(d / k - v->period) < v->period * 0.02) {
+			v->period += (d / k - v->period) / 64.0;
+		}
+		v->count += k >= 1.0 ? (uint64_t)k : 1;
+	} else if (v->prev == 0) {
+		v->count++;
+	}
+	v->prev = ts;
+	__atomic_store_n(&v->page->seq, v->seq + 1, __ATOMIC_RELAXED);
+	__atomic_thread_fence(__ATOMIC_RELEASE);
+	__atomic_store_n(&v->page->vsync_ns, ts, __ATOMIC_RELAXED);
+	__atomic_store_n(&v->page->period_ns, (int64_t)llround(v->period), __ATOMIC_RELAXED);
+	__atomic_store_n(&v->page->count, v->count, __ATOMIC_RELAXED);
+	v->seq += 2;
+	__atomic_store_n(&v->page->seq, v->seq, __ATOMIC_RELEASE);
+}
+
 static void *
 vsync_thread_func(void *ptr)
 {
 	struct mdp_target *t = ptr;
 	os_thread_helper_name(&t->vsync_thread, "Quest1 vsync");
+	struct vsync_pub pub = {0};
 
 	// Each vsync this thread warps and commits the next image within one 13.9 ms period. As a normal
 	// thread under SteamVR's load (load average 10+) it was sometimes scheduled too late, and the panels
@@ -2549,6 +2674,9 @@ vsync_thread_func(void *ptr)
 		}
 
 		direct_handle_fences(t, p + 2, nfences);
+		if (ts > 0) {
+			vsync_publish(&pub, ts);
+		}
 		os_thread_helper_lock(&t->vsync_thread);
 		if (ts > 0) {
 			t->last_vsync_ns = ts;

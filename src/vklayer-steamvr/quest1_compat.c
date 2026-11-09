@@ -80,6 +80,22 @@ static void logf_(const char *fmt, ...)
 //! Above Meta's tracking threads (FIFO 48 and 49) and every normal thread still.
 #define Q1_RT_MAX 50
 
+//! The calling thread made real-time (SCHED_RR prio) if it is not already. The layer's own threads on the frame's path
+//! (vrcompositor's submissions, their completion, the frame handed to Monado, its commits' fences) work well under
+//! 1 ms a frame each but ran as normal threads: under Steam's load (load average ~10) a frame done in time could reach
+//! Monado after its warp had started, and the panels showed the previous frame again (2026-11-09).
+static void q1_realtime(const char *who, int prio)
+{
+	int policy;
+	struct sched_param sp;
+	if (strcmp(program_invocation_short_name, "vrcompositor") != 0 || // not the dashboard's or other clients'
+	    (pthread_getschedparam(pthread_self(), &policy, &sp) == 0 && policy != SCHED_OTHER))
+		return;
+	sp.sched_priority = prio;
+	int e = pthread_setschedparam(pthread_self(), SCHED_RR, &sp);
+	LOG("%s: SCHED_RR %d: %s\n", who, prio, e ? strerror(e) : "ok");
+}
+
 //! The calling thread's real-time priority brought down to Q1_RT_MAX, once per thread. Called from the Vulkan entry
 //! points SteamVR's real-time threads use.
 static void q1_rt_cap(void)
@@ -687,6 +703,7 @@ static void *worker_main(void *arg)
 {
 	struct device *d = arg;
 	pthread_setname_np(pthread_self(), "q1compat submit");
+	q1_realtime("compat: submit thread", Q1_RT_MAX);
 	pthread_mutex_lock(&d->mutex);
 	for (;;) {
 		while (!d->head && !d->stop)
@@ -789,6 +806,7 @@ static void *completer_main(void *arg)
 {
 	struct device *d = arg;
 	pthread_setname_np(pthread_self(), "q1compat done");
+	q1_realtime("compat: completion thread", Q1_RT_MAX);
 	pthread_mutex_lock(&d->mutex);
 	for (;;) {
 		while (!d->done_head && !d->stop)

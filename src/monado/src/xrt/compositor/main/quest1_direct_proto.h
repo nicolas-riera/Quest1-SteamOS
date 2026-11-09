@@ -24,6 +24,21 @@ enum q1d_msg_type
 	Q1D_DISPLAYED = 4,
 };
 
+//! The panels' real vsync, published by Monado's vsync thread at each one in a shared page (Q1D_VSYNC_FILE, mapped
+//! read-only by the layer): the layer ticks vrcompositor's vblanks on it. The panels run at ~71.82 Hz, not 72: on a
+//! 72 Hz grid of its own vrcompositor's frames drifted against Monado's tick and crossed it every ~5.5 s, and around
+//! each crossing two frames came in one period and none in the next, a burst of jumps (2026-11-09).
+#define Q1D_VSYNC_FILE "/run/monado/quest1_vsync"
+
+struct q1d_vsync
+{
+	uint32_t seq;      //!< odd while Monado writes: read until two equal even values frame the copy
+	uint32_t reserved;
+	int64_t vsync_ns;  //!< the last vsync, CLOCK_MONOTONIC (the MDP's vsync_event timestamp)
+	int64_t period_ns; //!< the measured period
+	uint64_t count;    //!< vsyncs since Monado started (missed ones counted)
+};
+
 struct q1d_msg
 {
 	uint32_t type;

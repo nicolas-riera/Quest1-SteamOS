@@ -3,6 +3,38 @@
 Where the frame time goes and what was tried. Current numbers and the direct scanout path:
 docs/direct-scanout.md; Steam's UI: docs/steam-gpu.md.
 
+## 2026-11-09 (afternoon): image jumps in bursts: the panels run at 71.82 Hz, not 72
+
+The user, worn: no real trembling but image jumps, sometimes several in a row. Monado now counts, per 2 s, the frames
+it receives from the layer, those shown a period late, those never shown, and when they came after its tick (2 ms
+buckets): `frames received ...` lines next to the `direct:` ones.
+
+- **Threads on the frame's path real-time** (the night's leftover, now built and measured): the layer's submission,
+  completion, present and scanout fence threads (SCHED_RR 50, vrcompositor only), driver_quest1's display and frame
+  threads (SCHED_RR 50) and Monado's frame receiver "Quest1 direct" (SCHED_FIFO 53). Under the Steam load: fresh
+  frames 60.6 -> 68.4/s, vrcompositor 69.5 -> 71.5 fps, 1 late commit in 180 s.
+- **The cause of the bursts**: the panels' vsync events come every 13.924 ms (71.82 Hz, measured on
+  `/sys/class/graphics/fb0/vsync_event`), while the layer ticked vrcompositor's vblanks on a 72 Hz grid of its own and
+  the driver declared 72 Hz. vrcompositor's frames slid across Monado's tick (every ~5.5 s), and around each crossing
+  two came in one period and none in the next: one frame skipped, the other shown twice, several times in a row.
+  vrcompositor presented every 13.45 ms (frame trace), then waited 21 ms, over and over: it times its frames on
+  `GetTimeSinceLastVsync`, which came from the OpenXR frame loop's wake-ups.
+  Now Monado's vsync thread publishes the real vsync (time, period averaged over ~64 vsyncs, count) in a shared page,
+  `/run/monado/quest1_vsync` (`struct q1d_vsync`, quest1_direct_proto.h); the layer ticks the vblank fences on it, and
+  driver_quest1 answers `GetTimeSinceLastVsync` from it and sets `Prop_DisplayFrequency_Float` to the measured rate.
+  Both fall back to their own clock without it (no Monado, panels off). vrcompositor then presents every ~13.9 ms.
+- **Frames never skipped**: vrcompositor needs ~13.2 ms of the 13.9 ms period for a frame, so its frames still come at
+  a phase that wanders with its load, and two can land in one period of Monado's tick. Offsets of its vblank against
+  the vsync (-1 to -7 ms) gave no stable phase (the same offset: 269 then 1506 frames late in 30 s). Monado now keeps
+  one frame waiting (`pend`): when a frame comes before the previous one was shown, the next tick shows the older one
+  and the one after shows the newer. Each frame is shown once, at most a period late (the warp still re-projects it to
+  the display's head pose), and the queue empties when vrcompositor misses a vsync, without a repeat. Worn
+  (user's session, ~100 s): 0 frames never shown, 0 late commits.
+
+Left: the frames vrcompositor itself does not render (its fps below 71.8: ~69-71 worn) show as a repeat; activating
+passthrough stalls it ~0.3 s (16:44:02, 51 frames/s over 2 s, CTrackedCamera's "Late initialization"). More slack in
+its frame time is the lever (GPU-bound, see below).
+
 ## 2026-11-09 (night): the view trembled while the headset was loaded: frames shown twice
 
 The user: the view still trembles now and then while Steam works, "as if the previous frame were shown again". That
@@ -36,10 +68,7 @@ minute, up to 12 ms even idle). Fixed, in order:
 
 Left: vrcompositor runs ~70 fps under the load but only ~61 of its frames a second reach the warp fresh (68 idle):
 a frame that reaches Monado after the tick is shown a vsync later or replaced. The head's rotation stays smooth (every
-vsync is warped), moving content and position jump. Written, not yet built or tested: the layer's threads on the
-frame's path (vrcompositor's submissions and their completion, the frame handed to Monado, its fences) and
-driver_quest1's present/pose and frame threads SCHED_RR 50 (they ran as normal threads); Monado's frame receiver
-("Quest1 direct") is still a normal thread.
+vsync is warped), moving content and position jump. Followed up the next afternoon (section above).
 
 ## 2026-11-08 (night): Steam's VR UI ran the RAM out and froze the headset; its GPU queue, its readback memory
 
