@@ -1,0 +1,46 @@
+#!/usr/bin/python3
+# bwrap for flatpak (FLATPAK_BWRAP, set by holo-desktop.sh): drops --disable-userns and --assert-userns-disabled.
+# flatpak passes them to every app; bwrap implements them by writing /proc/sys/user/max_user_namespaces, which
+# kernel 4.4 does not have (Linux 4.9+), so every flatpak app failed with "bwrap: cannot open
+# /proc/sys/user/max_user_namespaces". Without them an app may create nested user namespaces, as with older
+# flatpak releases. flatpak hands most arguments over in a file (--args FD, NUL-terminated): those are rewritten
+# into a new memfd.
+import os
+import sys
+
+BWRAP = "/usr/bin/bwrap"
+DROP = {b"--disable-userns", b"--assert-userns-disabled"}
+
+
+def read_fd(fd):
+    data = b""
+    while True:
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            return data
+        data += chunk
+
+
+args = [os.fsencode(a) for a in sys.argv[1:]]
+out = []
+i = 0
+while i < len(args):
+    a = args[i]
+    if a == b"--args" and i + 1 < len(args):
+        fd = int(args[i + 1])
+        inner = read_fd(fd).split(b"\0")
+        os.close(fd)
+        if inner and inner[-1] == b"":
+            inner.pop()
+        new = os.memfd_create("bwrap-args", 0)
+        os.set_inheritable(new, True)
+        os.write(new, b"".join(x + b"\0" for x in inner if x not in DROP))
+        os.lseek(new, 0, os.SEEK_SET)
+        out += [b"--args", str(new).encode()]
+        i += 2
+        continue
+    if a not in DROP:
+        out.append(a)
+    i += 1
+
+os.execv(BWRAP, [b"bwrap"] + out)

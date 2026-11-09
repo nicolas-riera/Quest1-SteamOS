@@ -75,6 +75,26 @@ Everything above is the same, except gamescope:
   thread (`setpriv --no-new-privs` cancels its `cap_sys_nice` file capability). Before, Discover installing a flatpak
   with the system monitor open (load ~18) took vrcompositor down to 50-55 fps, an image jump at each missing frame;
   after, 70-71.8 fps at load 21. The desktop itself may lag instead.
+- Flatpak apps and kernel 4.4 (2026-11-09: Chromium installed by Steam's "Install Chromium" did not start, from
+  the desktop or from Steam's "+" menu):
+  - flatpak gives every app's bwrap `--disable-userns`, which writes `/proc/sys/user/max_user_namespaces` (Linux
+    4.9+): "bwrap: cannot open /proc/sys/user/max_user_namespaces". `device/quest1-bwrap` (FLATPAK_BWRAP, set for
+    system services, user units and shells by device/holo-desktop.sh) drops that option and its
+    `--assert-userns-disabled`, also from the arguments flatpak passes in a file (`--args FD`). Apps may then
+    create nested user namespaces, as with older flatpak releases. Steam needs a restart to get the variable.
+  - Chromium's own sandbox (zypak, `flatpak-spawn --sandbox`) runs a bwrap inside the app's user namespace, which
+    maps only the user: 4.4's devpts refused to create `ptmx` without a root in the namespace ("Can't mount devpts
+    on /newroot/dev/pts: Invalid argument"). kernel/devpts-ptmx-owner.patch gives `ptmx` to the mounter then, as
+    upstream does.
+- System Monitor (and anything else using libksysguard's process list) aborted at start: its GPU plugin sizes a
+  vector with `drmGetDevices2()`'s result, an error when `/dev/dri` is missing (no DRM here). device/holo-desktop.sh
+  creates an empty `/dev/dri` at boot (tmpfiles.d). Its sensors (CPU, memory...) were all missing: ksystemstats
+  read `/proc/cpuinfo` block by block up to an empty line and spun forever on the last one, Qualcomm's "Hardware"
+  line with no empty line after it; kernel/cpuinfo-blank-line.patch adds one.
+- Apps from Steam's "+" menu start on Steam's own X display (`:1`, Xvfb), which nobody sees: Steam launches them
+  as they are, and on the Frame gamescope shows each one as an overlay. That display is also what Remote Play
+  streams from the headset; on the Frame it shows the VR view. To do: each app in its own dashboard overlay, kept
+  out of the streamed screen.
 
 
 ## Notes moved from the to-do list (2026-11-08): Steam and desktop

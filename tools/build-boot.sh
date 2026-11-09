@@ -2,7 +2,8 @@
 # Build the native boot image (kernel + initramfs) from public sources only:
 #   - Meta's GPL Quest kernel (facebookincubator/oculus-linux-kernel) + kernel/quest1-kernel.patch
 #     + kernel/loop-no-discard-on-ext4.patch + kernel/cgroup-events-frozen.patch
-#     + kernel/bt-wcn3990.patch + kernel/kgsl-lazy.patch + kernel/lse_emul.c + kernel/lse-fast-undef.patch, config = recon/kernel.config + kernel/steamos.config;
+#     + kernel/bt-wcn3990.patch + kernel/kgsl-lazy.patch + kernel/lse_emul.c + kernel/lse-fast-undef.patch
+#     + kernel/devpts-ptmx-owner.patch + kernel/cpuinfo-blank-line.patch, config = recon/kernel.config + kernel/steamos.config;
 #   - Android's gcc 4.9 prebuilt toolchains (the ones Meta's tree builds with);
 #   - Debian's static busybox, initrd/ from this repo.
 # Nothing comes from a device dump: no Meta blob ends up in the image. Same result as
@@ -53,6 +54,10 @@ kernel() {
 	cp "$P/kernel/lse_emul.c" kernel/arch/arm64/kernel/lse_emul.c
 	# the LSE emulation's traps skip undef_lock and the hook list (lse_emul_fast)
 	git -C kernel apply "$P/kernel/lse-fast-undef.patch"
+	# devpts mounts in user namespaces that map no root (bubblewrap inside a flatpak sandbox: Chromium)
+	git -C kernel apply "$P/kernel/devpts-ptmx-owner.patch"
+	# /proc/cpuinfo ends with an empty line (KDE's ksystemstats spun forever without it)
+	git -C kernel apply "$P/kernel/cpuinfo-blank-line.patch"
 	# Kconfig sources Meta's unpublished internal/ drivers: empty stand-ins (ignored by git)
 	mkdir -p kernel/drivers/staging/oculus/internal
 	touch kernel/drivers/staging/oculus/internal/Kconfig kernel/drivers/staging/oculus/internal/Makefile

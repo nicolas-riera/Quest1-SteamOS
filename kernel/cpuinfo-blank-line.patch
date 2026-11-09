@@ -1,0 +1,16 @@
+diff --git a/arch/arm64/kernel/cpuinfo.c b/arch/arm64/kernel/cpuinfo.c
+index 4b2caefd..6b9e5bb6 100644
+--- a/arch/arm64/kernel/cpuinfo.c
++++ b/arch/arm64/kernel/cpuinfo.c
+@@ -167,6 +167,11 @@ static int c_show(struct seq_file *m, void *v)
+ 		seq_printf(m, "Hardware\t: %s\n", machine_name);
+ 	else
+ 		seq_printf(m, "Hardware\t: %s\n", arch_read_hardware_id());
++	/*
++	 * End the Hardware block with an empty line, like each processor block: KDE's ksystemstats reads blocks up
++	 * to an empty line and spun forever at the end of the file without one (no CPU or memory sensors).
++	 */
++	seq_puts(m, "\n");
+ 
+ 	return 0;
+ }

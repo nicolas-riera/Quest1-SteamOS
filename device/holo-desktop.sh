@@ -29,4 +29,21 @@ for u in flatpak-system-helper packagekit; do
 	install -d /etc/systemd/system/$u.service.d
 	printf '[Service]\nNice=10\nIOSchedulingClass=idle\n' > /etc/systemd/system/$u.service.d/quest1-background.conf
 done
+
+# Flatpak apps (Chromium from Steam's "Install Chromium", Discover installs): flatpak's bwrap options
+# --disable-userns/--assert-userns-disabled need /proc/sys/user/max_user_namespaces (Linux 4.9+), so every app
+# failed to start. quest1-bwrap drops them; FLATPAK_BWRAP points flatpak at it for system services (Steam, and the
+# desktop it starts), user units and shells.
+install -Dm755 "$D/quest1-bwrap" /usr/local/libexec/quest1-bwrap
+install -d /etc/systemd/system.conf.d /etc/environment.d /etc/profile.d
+printf '[Manager]\nDefaultEnvironment=FLATPAK_BWRAP=/usr/local/libexec/quest1-bwrap\n' \
+	> /etc/systemd/system.conf.d/quest1-flatpak-bwrap.conf
+echo FLATPAK_BWRAP=/usr/local/libexec/quest1-bwrap > /etc/environment.d/quest1-flatpak-bwrap.conf
+echo 'export FLATPAK_BWRAP=/usr/local/libexec/quest1-bwrap' > /etc/profile.d/quest1-flatpak-bwrap.sh
+
+# KDE apps listing processes (System Monitor) crash in libksysguard's GPU plugin when drmGetDevices2 fails, which it
+# does when /dev/dri is missing (no DRM here: fbdev + KGSL). An empty /dev/dri makes it return no device.
+echo 'd /dev/dri 0755 root root -' > /etc/tmpfiles.d/quest1-dev-dri.conf
+systemd-tmpfiles --create /etc/tmpfiles.d/quest1-dev-dri.conf 2>/dev/null || true
+
 systemctl daemon-reload 2>/dev/null || true

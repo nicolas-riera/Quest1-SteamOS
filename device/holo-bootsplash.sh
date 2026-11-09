@@ -6,7 +6,8 @@
 #             sh holo-bootsplash.sh install    (q1splash already built: tools/build-native.sh)
 #  - packages: GStreamer's VP9 (libvpx) and Matroska plugins
 #  - /usr/local/lib/q1splash/q1splash: built from src/q1splash/q1splash.c
-#  - /usr/local/sbin/q1splash-play, quest1-bootsplash.service (enabled), monado.service waits for it
+#  - /usr/local/sbin/q1splash-play, quest1-bootsplash.service (enabled), monado.service waits for the movie's
+#    end; its last frame stays lit until SteamVR shows its first one (Monado takes the panels over)
 #  - holo-panel-off.service (enabled): panels blanked at sysinit, so the bootloader's last frame does not
 #    stay lit (burn-in) until the splash or a compositor takes over
 # Before Steam has been installed (first boot) there is no movie and nothing is shown.
@@ -38,7 +39,7 @@ cat > /usr/local/sbin/q1splash-play <<'EOF'
 # Plays the Steam Frame's startup movie on the panels (q1splash), its sound on PipeWire when the user
 # session is up (else the video alone, still paced by GStreamer's clock).
 M=/home/steamos/.local/share/Steam/steamui/movies/steamframe_startup_450x450.webm
-[ -f "$M" ] || { echo "q1splash-play: no $M (Steam not installed yet)"; exit 0; }
+[ -f "$M" ] || { echo "q1splash-play: no $M (Steam not installed yet)"; systemd-notify --ready; exit 0; }
 P=/run/user/1000/pulse/native
 for i in $(seq 1 20); do [ -S $P ] && break; sleep 0.25; done
 if [ -S $P ]; then
@@ -61,10 +62,13 @@ After=android-gralloc.service holo-audio.service user@1000.service
 Wants=android-gralloc.service
 Before=monado.service
 
+# ready when the movie is over: q1splash then keeps its last frame on the panels until Monado takes them over
+# at SteamVR's first frame (/run/quest1-splash-hold, src/q1splash/q1splash.c)
 [Service]
-Type=oneshot
+Type=notify
+NotifyAccess=all
 ExecStart=/usr/local/sbin/q1splash-play
-TimeoutStartSec=20
+TimeoutStartSec=30
 
 [Install]
 WantedBy=multi-user.target

@@ -52,6 +52,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/ioctl.h>
 #include <time.h>
 #include <unistd.h>
@@ -127,6 +128,11 @@ android_dlsym(void *handle, const char *symbol);
 #define MDP_PANELS_OFF "/tmp/quest1-panels-off"
 //! Exists while the headset sleeps (quest1-standby): panels off as if the headset was removed.
 #define MDP_STANDBY "/run/quest1-standby"
+//! Exists while the boot animation (src/q1splash) keeps its last frame on the panels: we take them over when
+//! SteamVR's layer connects (its first frame replaces that one), or blank them as soon as the headset is not
+//! worn; our own frames (black, before any app) leave them alone. Whoever unlinks it, under its flock, owns the
+//! panels from then on.
+#define MDP_SPLASH_HOLD "/run/quest1-splash-hold"
 //! Time the compositor gets between waking up and the vsync that shows its frame.
 #define MDP_RENDER_BUDGET_NS (15 * U_TIME_1MS_IN_NS)
 #define PRIV_FLAGS_UBWC_ALIGNED 0x08000000
@@ -387,6 +393,7 @@ struct mdp_target
 	bool worn;      //!< Proximity sensor covered and not in standby. Protected by vsync_thread's mutex.
 	bool prox_worn; //!< Proximity sensor covered. Protected by vsync_thread's mutex.
 	bool standby;   //!< MDP_STANDBY exists. Protected by vsync_thread's mutex.
+	bool splash_done; //!< MDP_SPLASH_HOLD is gone or was taken. Protected by vsync_thread's mutex.
 
 	bool external;               //!< Another process scans out (external_scanout_active).
 	int64_t external_checked_ns; //!< When MDP_EXTERNAL_SCANOUT was last read.
@@ -777,8 +784,57 @@ boost_display_kthread(void)
  * Call with vsync_thread's mutex held.
  */
 static void
+set_panels_locked(struct mdp_target *t, bool on);
+
+/*!
+ * Take the panels over from the boot animation's held frame (MDP_SPLASH_HOLD), if it still holds them: they stay
+ * lit for our first frame, or are blanked here (@p blank: the headset is not worn).
+ * Call with vsync_thread's mutex held.
+ */
+static void
+take_splash_locked(struct mdp_target *t, bool blank)
+{
+	if (t->splash_done) {
+		return;
+	}
+	t->splash_done = true;
+	int fd = open(MDP_SPLASH_HOLD, O_RDWR | O_CLOEXEC);
+	if (fd < 0) {
+		return;
+	}
+	struct stat st;
+	// q1splash holds the lock only while it blanks the panels itself (its timeout)
+	if (flock(fd, LOCK_EX) == 0 && fstat(fd, &st) == 0 && st.st_nlink > 0) {
+		unlink(MDP_SPLASH_HOLD);
+		U_LOG_W("mdp: panels taken over from the boot animation%s", blank ? ", headset not worn: off" : "");
+		if (blank) {
+			t->unblanked = true; // lit by q1splash
+			set_panels_locked(t, false);
+		}
+	}
+	close(fd);
+}
+
+//! The boot animation still holds the panels (MDP_SPLASH_HOLD exists). Call with vsync_thread's mutex held.
+static bool
+splash_held_locked(struct mdp_target *t)
+{
+	if (t->splash_done) {
+		return false;
+	}
+	if (access(MDP_SPLASH_HOLD, F_OK) == 0) {
+		return true;
+	}
+	t->splash_done = true;
+	return false;
+}
+
+static void
 set_panels_locked(struct mdp_target *t, bool on)
 {
+	if (on && !t->unblanked) {
+		take_splash_locked(t, false);
+	}
 	if (on == t->unblanked) {
 		return;
 	}
@@ -864,6 +920,7 @@ update_worn_locked(struct mdp_target *t)
 	}
 	t->worn = t->prox_worn && !standby;
 	if (!t->worn) {
+		take_splash_locked(t, true);
 		set_panels_locked(t, false);
 	}
 }
@@ -3097,14 +3154,16 @@ target_present(struct comp_target *ct,
 	}
 
 	os_thread_helper_lock(&t->vsync_thread);
-	bool worn = t->worn;
+	// our own frames (black, at start, before any app) don't replace the boot animation's held frame: only
+	// SteamVR's (direct_tick, target_check_ready) take the panels over
+	bool worn = t->worn && !splash_held_locked(t);
 	if (worn) {
 		t->last_present_ns = t1;
 		set_panels_locked(t, true);
 	}
 	os_thread_helper_unlock(&t->vsync_thread);
 	if (!worn) {
-		return VK_SUCCESS; // panels off: nothing to scan out
+		return VK_SUCCESS; // panels off (or held by the boot animation): nothing to scan out
 	}
 
 	// One DMA pipe per panel; each pipe fetches its half of the buffer.
@@ -3242,6 +3301,7 @@ target_destroy(struct comp_target *ct)
 	if (t->fb_fd >= 0) {
 		unsigned int off = 0;
 		ioctl(t->fb_fd, MSMFB_OVERLAY_VSYNC_CTRL, &off);
+		take_splash_locked(t, false); // q1splash must not commit on the panels blanked here
 		t->unblanked = true; // force: also blank what an earlier process left on
 		set_panels_locked(t, false);
 	}

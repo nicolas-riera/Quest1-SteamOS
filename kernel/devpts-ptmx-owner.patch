@@ -1,0 +1,24 @@
+diff --git a/fs/devpts/inode.c b/fs/devpts/inode.c
+index c82edb04..876b1e93 100644
+--- a/fs/devpts/inode.c
++++ b/fs/devpts/inode.c
+@@ -251,10 +251,17 @@ static int mknod_ptmx(struct super_block *sb)
+ 	kuid_t root_uid;
+ 	kgid_t root_gid;
+ 
++	/*
++	 * ptmx belongs to the namespace's root, or to the mounter when the namespace maps no root (as upstream
++	 * since "devpts: Change the owner of /dev/pts/ptmx to the mounter of /dev/pts"): bubblewrap mounts devpts
++	 * in user namespaces that map only the user (flatpak-spawn --sandbox, Chromium's sandbox).
++	 */
+ 	root_uid = make_kuid(current_user_ns(), 0);
+ 	root_gid = make_kgid(current_user_ns(), 0);
+-	if (!uid_valid(root_uid) || !gid_valid(root_gid))
+-		return -EINVAL;
++	if (!uid_valid(root_uid))
++		root_uid = current_fsuid();
++	if (!gid_valid(root_gid))
++		root_gid = current_fsgid();
+ 
+ 	mutex_lock(&d_inode(root)->i_mutex);
+ 

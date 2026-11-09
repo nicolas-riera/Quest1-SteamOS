@@ -5,8 +5,11 @@
 // MSMFB_ATOMIC_COMMIT on the DMA pipes 64/128, one per panel. The framebuffer is seen rotated by
 // 180 degrees and its left half is the right eye; each half gets the image rotated, so it stays
 // upright. Two buffers: a buffer is written again only after the next commit,
-// which releases it. At the end of the stream the panels go black and are powered down, before
-// Monado takes them (monado.service starts after quest1-bootsplash.service).
+// which releases it. At the end of the stream the last frame (the Steam logo) stays on the panels until
+// SteamVR shows something: q1splash creates /run/quest1-splash-hold and tells systemd it is ready
+// (Type=notify; monado.service starts after quest1-bootsplash.service). Monado takes the panels over at its
+// first frame, or blanks them if the headset is not worn, by unlinking that file under its flock. If nobody
+// has after Q1SPLASH_HOLD_S seconds (60), or on SIGTERM, q1splash blanks and powers the panels down itself.
 // Build (in Holo; msm_mdp_ext.h from the kernel uapi, as for src/q1black):
 //   gcc -O2 -Wall -o q1splash q1splash.c -Iinc -I/opt/hybris/include -L/opt/hybris/lib
 //       -Wl,-rpath,/opt/hybris/lib -lhybris-common
@@ -16,11 +19,17 @@
 #include <fcntl.h>
 #include <linux/fb.h>
 #include <signal.h>
+#include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -56,6 +65,8 @@ typedef struct {
 // by 180 degrees): the image sits
 // at infinity, centered in both eyes.
 static const int lens_x[2] = {PANEL_W / 2 + 72, PANEL_W / 2 - 72}, lens_y = PANEL_H / 2 + 66;
+
+#define HOLD_FILE "/run/quest1-splash-hold"
 
 static volatile sig_atomic_t stop;
 static void on_signal(int s) { stop = 1; }
@@ -151,6 +162,47 @@ static int commit(int fb, const struct buffer *b)
 	return 0;
 }
 
+// sd_notify("READY=1") without libsystemd
+static void notify_ready(void)
+{
+	const char *path = getenv("NOTIFY_SOCKET");
+	struct sockaddr_un a = {.sun_family = AF_UNIX};
+	if (!path || (path[0] != '/' && path[0] != '@') || strlen(path) >= sizeof(a.sun_path))
+		return;
+	strcpy(a.sun_path, path);
+	if (a.sun_path[0] == '@')
+		a.sun_path[0] = 0;
+	int s = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+	if (s < 0)
+		return;
+	sendto(s, "READY=1", 7, 0, (struct sockaddr *)&a, offsetof(struct sockaddr_un, sun_path) + strlen(path));
+	close(s);
+}
+
+// The last frame stays lit for Monado (HOLD_FILE). True if Monado took the panels over; false if the hold
+// ended (timeout, SIGTERM) with the panels still ours: the caller blanks them, with the lock held.
+static bool hold_last_frame(int *lock_fd)
+{
+	*lock_fd = open(HOLD_FILE, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+	if (*lock_fd < 0) {
+		perror("q1splash: " HOLD_FILE);
+		return false;
+	}
+	notify_ready();
+	const char *e = getenv("Q1SPLASH_HOLD_S");
+	int left_ms = (e ? atoi(e) : 60) * 1000;
+	struct stat st;
+	while (!stop && left_ms > 0 && fstat(*lock_fd, &st) == 0 && st.st_nlink > 0) {
+		usleep(100000);
+		left_ms -= 100;
+	}
+	while (flock(*lock_fd, LOCK_EX) < 0 && errno == EINTR)
+		;
+	// still ours if it is still linked: the caller unlinks it once the panels are off, so Monado (waiting on
+	// the lock, or seeing the file) never commits while they power down
+	return fstat(*lock_fd, &st) == 0 && st.st_nlink == 0;
+}
+
 static size_t read_full(int fd, uint8_t *p, size_t n)
 {
 	size_t got = 0;
@@ -219,13 +271,26 @@ int main(int argc, char **argv)
 		frames++;
 		cur ^= 1;
 	}
-	// end black, then hand the panels over powered down (as src/q1black)
-	draw(&bufs[cur], NULL, 0, 0);
-	commit(fb, &bufs[cur]);
-	usleep(50000);
-	ioctl(fb, FBIOBLANK, FB_BLANK_POWERDOWN);
-	close(fb);
 	printf("q1splash: %d frames shown, %d failed commits\n", frames, fails);
+	int lock_fd = -1;
+	if (frames > 0 && !stop && hold_last_frame(&lock_fd)) {
+		// Monado's now: no commit or blank from here (our buffers stay referenced by the display until its
+		// first commit replaces them)
+		printf("q1splash: panels handed over with the last frame\n");
+	} else {
+		// end black, then hand the panels over powered down (as src/q1black)
+		draw(&bufs[cur], NULL, 0, 0);
+		commit(fb, &bufs[cur]);
+		usleep(50000);
+		ioctl(fb, FBIOBLANK, FB_BLANK_POWERDOWN);
+		if (frames > 0)
+			printf("q1splash: panels blanked (%s)\n", stop ? "stopped" : "nothing shown in time");
+	}
+	if (lock_fd >= 0) {
+		unlink(HOLD_FILE); // after the panels are off (already gone if Monado took them over)
+		close(lock_fd);
+	}
+	close(fb);
 	free(frame);
 	return frames > 0 ? 0 : 1;
 }
