@@ -470,8 +470,8 @@ static void set_thread_policy(pid_t caller, struct rd *r)
  * Without it libossdk reports "None connected" although the sensors HAL sees both controllers.
  * Transaction codes and the RemoteStatus layout are from libremoteservice.so (Bp proxies and
  * RemoteStatus::writeToParcel). The controller ids come from /run/q1track/controllers, one
- * "<16 hex id> <subtype 1 left | 2 right>" line per controller, written by fakelogd from the
- * sensors HAL log (ids are never baked into the repo). The idea of answering
+ * "<16 hex id> <subtype 1 left | 2 right> <1 connected | 0 not yet>" line per controller, written by fakelogd
+ * from the sensors HAL log (ids are never baked into the repo). The idea of answering
  * these calls and announcing controllers through the status callback comes from the Quest 2 port
  * (github.com/URFAVF3MBOY/quest2-steamos); this is an independent implementation. */
 #define CTL_FILE "/run/q1track/controllers"
@@ -480,6 +480,7 @@ static struct rctl {
 	char sid[20];
 	uint64_t id;
 	int type; /* 0 left, 1 right */
+	int connected; /* the sensors HAL has it connected (its revision is known) */
 	int announced;
 	int fd_given; /* trackingservice asked for its event fd (getDeviceEventFd): it has the controller */
 	int ticks;    /* seconds since the last onStatus */
@@ -511,20 +512,27 @@ static void remote_reload(void)
 		return;
 	while (fgets(line, sizeof(line), f)) {
 		char hex[32];
-		int sub;
-		if (sscanf(line, "%16s %d", hex, &sub) != 2 || strlen(hex) != 16 || (sub != 1 && sub != 2))
+		int sub, conn = 1; /* no third field (older fakelogd): connected */
+		if (sscanf(line, "%16s %d %d", hex, &sub, &conn) < 2 || strlen(hex) != 16 || (sub != 1 && sub != 2))
 			continue;
 		struct rctl *c = &rctl[sub - 1];
-		if (c->used && !strcmp(c->sid, hex))
+		if (c->used && !strcmp(c->sid, hex)) {
+			if (c->connected != conn)
+				logf_("OVRRemoteService: controller %s (%s) %s", hex, sub == 1 ? "left" : "right",
+				      conn ? "connected" : "not connected");
+			c->connected = conn;
 			continue;
+		}
 		memset(c, 0, sizeof(*c));
 		c->used = 1;
 		snprintf(c->sid, sizeof(c->sid), "%s", hex);
 		c->id = strtoull(hex, NULL, 16);
 		c->type = sub - 1;
+		c->connected = conn;
 		c->evfd[0] = c->evfd[1] = -1;
 		socketpair(AF_UNIX, SOCK_SEQPACKET, 0, c->evfd);
-		logf_("OVRRemoteService: controller %s (%s)", hex, sub == 1 ? "left" : "right");
+		logf_("OVRRemoteService: controller %s (%s)%s", hex, sub == 1 ? "left" : "right",
+		      conn ? "" : ", not connected yet");
 	}
 	fclose(f);
 }
@@ -534,11 +542,16 @@ static void remote_announce(void)
 	if (!remote_cb || power_state == 3)
 		return;
 	for (int i = 0; i < 2; i++) {
-		if (!rctl[i].used)
+		/* trackingservice only takes a controller the sensors HAL already reports connected, and only
+		 * on the first onStatus: when that one comes while the HAL has not connected it yet ("Failed to get
+		 * PairedControllerInfo"), it ignores every later one, and the controller never comes (2026-11-09,
+		 * twice: the right one woke up a second after the stack started). So a controller is announced
+		 * once the HAL has it connected (its revision logged, fakelogd), then every 3 s until
+		 * trackingservice asks for its event fd. A null status instead (to make the next one new)
+		 * aborts trackingservice: "Received nullptr status (unpaired controller) but RemoteTrackedDevice
+		 * is valid". */
+		if (!rctl[i].used || !rctl[i].connected)
 			continue;
-		/* trackingservice only takes a controller the sensors HAL already reports connected: when the
-		 * onStatus comes first (the HAL connects them a second later), it ignores it. Repeat it every
-		 * 3 s until trackingservice asks for the controller's event fd. */
 		if (rctl[i].announced && (rctl[i].fd_given || ++rctl[i].ticks < 3))
 			continue;
 		rctl[i].ticks = 0;
@@ -614,6 +627,9 @@ static void remote_txn(const struct binder_transaction_data *t, struct rd *r, st
 			bc_handle(BC_INCREFS, h);
 			bc_handle(BC_ACQUIRE, h);
 			remote_cb = h;
+			/* a new trackingservice (restarted): it has none of the controllers yet */
+			for (int i = 0; i < 2; i++)
+				rctl[i].announced = rctl[i].fd_given = rctl[i].ticks = 0;
 			logf_("OVRRemoteService: status callback registered, handle %u", h);
 		}
 		break;

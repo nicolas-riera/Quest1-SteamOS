@@ -8,8 +8,10 @@
 # /run/q1track/ctlbattery, "<first 8 hex of the device id> <percent>" per line, for q1trackd.
 #
 # And the paired controllers: the sensors HAL logs "Syncboss input <16 hex> hardware type N, subtype
-# 1|2" (an info line) for each; they go to /run/q1track/controllers, "<id> <1 left|2 right>" per line,
-# for ovrstub's OVRRemoteService stand-in, without which trackingservice reports no controller.
+# 1|2, revision <rev>" for each, the revision empty until the controller is connected; they go to
+# /run/q1track/controllers, "<id> <1 left|2 right> <1 connected|0 not yet>" per line, for ovrstub's
+# OVRRemoteService stand-in, without which trackingservice reports no controller. ovrstub announces a controller
+# once it is connected: trackingservice ignores every announcement after a first one it could not act on.
 #
 # The journal gets warnings and errors only, at most BURST lines per tag every 10 s (then a count of
 # what was dropped): Meta's tracking logs ~300 lines/s (CONSTELLATION, VioInit...), which cost
@@ -56,9 +58,14 @@ change_re = re.compile(r'Controller ([0-9a-f]{8})\w* battery level changed: \d+%
 dead_re = re.compile(r'\[[lr]con \(\s*\w+\) ([0-9a-f]{8})\w*\].*-> paired_dead_battery')
 levels = {}
 
+# The controllers' connection as the sensors HAL and trackingservice see it (a few lines per connection, info
+# level): always printed, to follow a controller that never reaches SteamVR (2026-11-09).
+ctl_re = re.compile(r'Syncboss input|stateChangeNotifierFunc|preparePairedControllerInfo|ControllerTrackingGlue|'
+                    r'handleDevice(Connected|Disconnected)')
+
 CTL = '/run/q1track/controllers'
-input_re = re.compile(r'Syncboss input ([0-9a-f]{16}) hardware type \d+, subtype ([12])')
-ctls = set()
+input_re = re.compile(r'Syncboss input ([0-9a-f]{16}) hardware type \d+, subtype ([12]), revision ?(\S*)')
+ctls = {}  # id -> (subtype, connected)
 
 
 def write_atomic(path, lines):
@@ -73,9 +80,12 @@ def write_atomic(path, lines):
 
 def controller(msg):
     m = input_re.search(msg)
-    if m and m.groups() not in ctls:
-        ctls.add(m.groups())
-        write_atomic(CTL, sorted('%s %s\n' % c for c in ctls))
+    if not m:
+        return
+    v = (m.group(2), 1 if m.group(3) else 0)
+    if ctls.get(m.group(1)) != v:
+        ctls[m.group(1)] = v
+        write_atomic(CTL, sorted('%s %s %d\n' % (k, sub, c) for k, (sub, c) in ctls.items()))
 
 
 def battery(msg):
@@ -100,6 +110,9 @@ while True:
         battery(msg)
     if 'Syncboss input' in msg:
         controller(msg)
+    if ctl_re.search(msg):
+        print('%s/%s: %s' % (prio[pr - 2] if 2 <= pr <= 7 else '?', tag, msg.rstrip()), flush=True)
+        continue
     if map_re.search(msg):
         line = '%s/%s: %s' % (prio[pr - 2] if 2 <= pr <= 7 else '?', tag, msg.rstrip())
         print(line, flush=True)

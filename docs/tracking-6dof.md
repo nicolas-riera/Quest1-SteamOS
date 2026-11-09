@@ -63,6 +63,16 @@ and nothing opens SyncBoss.
   corrects §1.2, which guessed 3. `BpVrPowerManagerClient::onStateChange` is oneway (flags 1).
   ovrstub sends 1 when a client registers. SIGUSR1/SIGHUP/SIGUSR2 rebroadcast
   RUNNING/STANDBY/SLEEP.
+* **Controllers through `OVRRemoteService` (2026-11-09):** trackingservice takes a controller on the
+  first `onStatus` "connected" it gets for it, and only if the sensors HAL already has it connected; when
+  that first one fails ("ControllerTrackingGlue: Failed to get PairedControllerInfo"), it ignores every
+  later one. A controller that woke up a second after the stack started never reached SteamVR (white LED,
+  twice, the right one). The HAL logs "Syncboss input <id> hardware type 2, subtype 1|2, revision <rev>",
+  the revision empty until the controller is connected: fakelogd writes that state in
+  `/run/q1track/controllers` (third column) and ovrstub announces a controller once it is connected.
+  A null status (to make the next one new) aborts trackingservice: "Received nullptr status (unpaired
+  controller) but RemoteTrackedDevice is valid". fakelogd prints the HAL's and trackingservice's
+  controller connection lines (`stateChangeNotifierFunc ... paired=2 connected=2`) to the journal.
 * The Android 10 interface token is `int32 strict-mode policy`, `int32 work-source uid (-1)`,
   then `String16` descriptor. servicemanager accepted it (addService works).
 * **Linker namespaces:** the global property area has no `ro.vndk.version`, so the bionic linker
