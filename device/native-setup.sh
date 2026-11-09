@@ -70,10 +70,12 @@ rm -f /etc/resolv.conf; printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > /etc
 # machine id (first-boot wizard has no console here)
 [ -s /etc/machine-id ] && [ "$(cat /etc/machine-id)" != uninitialized ] || systemd-machine-id-setup
 systemctl mask systemd-firstboot.service
-# nsresourced needs BPF LSM (absent on 4.4) and serves nothing here, but every group lookup asks it through
-# nss-systemd ("group: files [SUCCESS=merge] systemd"); after a while it stops answering and id, su, setpriv,
-# ls -l and anything calling getgrouplist hang forever
-systemctl mask systemd-nsresourced.socket systemd-nsresourced.service
+# Every group lookup also asks systemd's user databases through nss-systemd ("group: files [SUCCESS=merge]
+# systemd"). nsresourced and userdbd serve them with worker processes; on 4.4 both stop answering after a while (the
+# main process alone left, waiting: no worker started again), and id, su, setpriv, ls -l and anything calling
+# getgrouplist hang forever. Nothing here needs them (users are in /etc/passwd; nsresourced needs BPF LSM anyway):
+# masked, clients get "connection refused" at once and go on.
+systemctl mask systemd-nsresourced.socket systemd-nsresourced.service systemd-userdbd.socket systemd-userdbd.service
 # don't let NetworkManager (if any) fight networkd over usb0
 systemctl disable NetworkManager.service 2>/dev/null || true
 
