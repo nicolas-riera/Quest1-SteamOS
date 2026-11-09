@@ -11,8 +11,9 @@
 //   format that declares another colorspace does not match Steam's, which then takes BGRx.
 // - Frames, at most 60 a second, plus one a second when nothing changes:
 //   - while the headset's VR view is streamed (q1apps made /tmp/quest1-spectator): straight from Monado's double
-//     buffer /dev/shm/quest1-spectator, each new frame once it is complete (its header's seq). The X server and
-//     q1apps' cover are skipped, and nothing tears.
+//     buffer /dev/shm/quest1-spectator, each new frame once it is complete (its header's seq). Monado makes them
+//     NV12 on the GPU, so they are only copied (1.4 MB). The X server is skipped, and nothing tears. After 0.5 s
+//     without one, the X screen again: q1apps' cover there is dark blue.
 //   - otherwise XShmGetImage of the root window (the X server answers between two drawings: no tearing), when the
 //     screen changed (XDamage) or the pointer moved. Steam asks for the cursor "hidden" and draws it itself; in
 //     the other modes the X cursor is drawn in. Reading Xvfb's framebuffer file (-fbdir) directly saved its 3.7 ms
@@ -82,7 +83,7 @@ struct session {
 	XShmSegmentInfo shm;
 	uint8_t *sp_map; // Monado's spectator file, see spect_frames
 	size_t sp_size;
-	ino_t sp_ino;
+	ino_t sp_ino, sp_bad_ino;
 	uint32_t sp_seq;   // the last frame sent from it
 	uint32_t sp_seen;  // the last seq seen, at sp_changed
 	double sp_changed;
@@ -209,10 +210,10 @@ static void draw_cursor(struct session *s)
 	XFree(c);
 }
 
-// Monado's spectator file (comp_window_mdp.c, spect_thread): two B,G,R,X frames after a header that says which one
-// is complete; seq is bumped (release) once a frame is
+// Monado's spectator file (comp_window_mdp.c, spect_thread): two NV12 frames (BT.709 full range, made on the GPU)
+// after a header that says which one is complete; seq is bumped (release) once a frame is
 #define SPECT_FILE "/dev/shm/quest1-spectator"
-#define SPECT_MAGIC 0x31535051u
+#define SPECT_MAGIC 0x32535051u // "QPS2"
 #define SPECT_HEADER 4096
 struct spect_header {
 	uint32_t magic, width, height, stride, frame_bytes;
@@ -238,6 +239,8 @@ static const struct spect_header *spect_frames(struct session *s)
 	}
 	if (!s->sp_map || st.st_ino != s->sp_ino) {
 		spect_unmap(s);
+		if (st.st_ino == s->sp_bad_ino)
+			return NULL; // looked at already: not frames we can use
 		int fd = open(SPECT_FILE, O_RDONLY | O_CLOEXEC);
 		if (fd < 0)
 			return NULL;
@@ -247,8 +250,11 @@ static const struct spect_header *spect_frames(struct session *s)
 			return NULL;
 		const struct spect_header *h = m;
 		if (h->magic != SPECT_MAGIC || h->width != (uint32_t)s->width || h->height != (uint32_t)s->height ||
-		    h->stride < h->width * 4 || h->frame_bytes < h->stride * h->height ||
+		    h->stride != h->width || h->frame_bytes < h->width * h->height * 3 / 2 ||
 		    SPECT_HEADER + 2 * (uint64_t)h->frame_bytes > (uint64_t)st.st_size) {
+			fprintf(stderr, "q1screencast: %s holds no %dx%d NV12 frames: the X screen is streamed\n", SPECT_FILE,
+			        s->width, s->height);
+			s->sp_bad_ino = st.st_ino;
 			munmap(m, st.st_size);
 			return NULL;
 		}
@@ -261,6 +267,35 @@ static const struct spect_header *spect_frames(struct session *s)
 	return (const struct spect_header *)s->sp_map;
 }
 
+// a filled buffer to Steam; t0..t_get read the source (Monado's file, or the X screen), the rest converted
+static void frame_done(struct session *s, struct spa_buffer *buf, struct pw_buffer *b, double t0, double t_get)
+{
+	struct spa_meta_header *h = spa_buffer_find_meta_data(buf, SPA_META_Header, sizeof(*h));
+	if (h) {
+		struct timespec ts;
+		clock_gettime(CLOCK_MONOTONIC, &ts);
+		h->pts = SPA_TIMESPEC_TO_NSEC(&ts);
+		h->flags = 0;
+		h->seq = s->seq++;
+		h->dts_offset = 0;
+	}
+	pw_stream_queue_buffer(s->stream, b);
+	double t1 = now_s();
+	s->stat_get_ms += (t_get - t0) * 1000;
+	s->stat_ms += (t1 - t0) * 1000;
+	s->stat_frames++;
+	if (!s->stat_t0)
+		s->stat_t0 = t0;
+	if (t1 - s->stat_t0 >= 10) {
+		fprintf(stderr, "q1screencast: %.1f frames/s, %.2f ms each (%.2f reading the source)\n",
+		        s->stat_frames / (t1 - s->stat_t0), s->stat_ms / s->stat_frames, s->stat_get_ms / s->stat_frames);
+		s->stat_t0 = t1;
+		s->stat_ms = 0;
+		s->stat_get_ms = 0;
+		s->stat_frames = 0;
+	}
+}
+
 static void on_process(void *data)
 {
 	struct session *s = data;
@@ -270,14 +305,23 @@ static void on_process(void *data)
 	struct spa_buffer *buf = b->buffer;
 	struct spa_data *d = &buf->datas[0];
 	double t0 = now_s();
-	const uint8_t *src;
-	int sstride;
-	const struct spect_header *sp = d->data && s->sp_live ? spect_frames(s) : NULL;
+	const uint8_t *src = NULL;
+	int sstride = 0;
+	// Monado's frames are NV12 already: copied as they are
+	const struct spect_header *sp =
+	    d->data && s->sp_live && s->format == SPA_VIDEO_FORMAT_NV12 ? spect_frames(s) : NULL;
 	uint32_t seq = sp ? __atomic_load_n(&sp->seq, __ATOMIC_ACQUIRE) : 0;
 	if (seq) {
 		s->sp_seq = seq;
-		src = s->sp_map + SPECT_HEADER + (size_t)__atomic_load_n(&sp->index, __ATOMIC_RELAXED) * sp->frame_bytes;
-		sstride = (int)sp->stride;
+		const uint8_t *f =
+		    s->sp_map + SPECT_HEADER + (size_t)__atomic_load_n(&sp->index, __ATOMIC_RELAXED) * sp->frame_bytes;
+		uint32_t size = (uint32_t)s->width * (uint32_t)s->height * 3 / 2; // Y, then U,V, both s->width a row
+		memcpy(d->data, f, size);
+		d->chunk->offset = 0;
+		d->chunk->stride = s->width;
+		d->chunk->size = size;
+		frame_done(s, buf, b, t0, now_s());
+		return;
 	} else if (d->data && XShmGetImage(s->dpy, s->root, s->img, 0, 0, AllPlanes)) {
 		draw_cursor(s);
 		src = (const uint8_t *)s->img->data;
@@ -303,30 +347,7 @@ static void on_process(void *data)
 	d->chunk->offset = 0;
 	d->chunk->stride = (int32_t)stride;
 	d->chunk->size = size;
-	struct spa_meta_header *h = spa_buffer_find_meta_data(buf, SPA_META_Header, sizeof(*h));
-	if (h) {
-		struct timespec ts;
-		clock_gettime(CLOCK_MONOTONIC, &ts);
-		h->pts = SPA_TIMESPEC_TO_NSEC(&ts);
-		h->flags = 0;
-		h->seq = s->seq++;
-		h->dts_offset = 0;
-	}
-	pw_stream_queue_buffer(s->stream, b);
-	double t1 = now_s();
-	s->stat_get_ms += (t_get - t0) * 1000;
-	s->stat_ms += (t1 - t0) * 1000;
-	s->stat_frames++;
-	if (!s->stat_t0)
-		s->stat_t0 = t0;
-	if (t1 - s->stat_t0 >= 10) {
-		fprintf(stderr, "q1screencast: %.1f frames/s, %.2f ms each (%.2f reading the screen)\n",
-		        s->stat_frames / (t1 - s->stat_t0), s->stat_ms / s->stat_frames, s->stat_get_ms / s->stat_frames);
-		s->stat_t0 = t1;
-		s->stat_ms = 0;
-		s->stat_get_ms = 0;
-		s->stat_frames = 0;
-	}
+	frame_done(s, buf, b, t0, t_get);
 }
 
 // every event Xlib holds: a reply read from the socket (XQueryPointer, XShmGetImage) queues the events that came

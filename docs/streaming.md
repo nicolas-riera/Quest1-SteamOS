@@ -75,17 +75,18 @@ OpenGL. `src/q1screencast` is that backend: `org.freedesktop.impl.portal.ScreenC
 `/etc/xdg-desktop-portal/portals.conf` routes only ScreenCast to it, the rest stays on gtk; a `*` there woke the KDE
 backend, which never ran before). Each started session gets a PipeWire video source node; no dialog; Flatpak apps
 (non-empty app id) are refused. Frames:
-- While the VR view is streamed: straight from Monado's double buffer `/dev/shm/quest1-spectator`, each frame once
-  its header's `seq` says it is complete. The X server and q1apps' cover are not in the path, and nothing tears.
-  After 0.5 s without a new one (headset off, Monado renders nothing) it reads the X screen again, where q1apps'
-  cover has turned dark blue as the Frame's stream does.
+- While the VR view is streamed: Monado makes NV12 on the GPU and q1screencast copies it as it is (2 ms a frame)
+  from its double buffer `/dev/shm/quest1-spectator` ("QPS2" header), each frame once the header's `seq` says it is
+  complete. No X server in the path, nothing tears. After 0.5 s without a new one (headset off, Monado renders
+  nothing) it reads the X screen again, where q1apps' cover is dark blue for the whole session, as the Frame's
+  stream shows then. q1apps no longer paints the VR view on the cover (36 XShmPutImage of 3.7 MB a second saved).
 - Otherwise (Steam's own screen): XShmGetImage of the root, 3.7-7.5 ms a frame, when the screen changed (XDamage on
   the root) or the pointer moved. Xlib queues the events read along with a reply (XQueryPointer), so they are
   drained on every tick: waiting on the socket alone missed them and gave 1 frame a second. Steam asks cursor mode
   "hidden" and draws the X cursor itself (rpspectator hides it while spectating).
 - Tried and dropped: reading Xvfb's framebuffer file (`-fbdir /run/xvfb`, the XWD image Xvfb draws into) saved the
   3.7 ms but tore in the stream (user) whenever the screen was drawn during the read.
-- Converted to NV12 with NEON: 3.4 ms on a big core, 7.1 ms on a little one, at 1280x720; memory bound (a 1.4 MB
+- The X screen is converted to NV12 with NEON: 3.4 ms on a big core, 7.1 ms on a little one, at 1280x720; memory bound (a 1.4 MB
   memcpy alone takes 0.6 ms on a big core). Steam's NV12 format asks for **BT.709 full range** (`pw-cli
   enum-params <steam node> EnumFormat`: colorMatrix 3 = BT709, colorRange 1 = 0-255). BT.601 limited range looked
   washed out on the PC, and declaring BT.601 in our format made the NV12 formats not match, so Steam took BGRx
@@ -102,11 +103,16 @@ Result in a real stream: "Capture method set to Desktop PipeWire NV12 + V4L2 HEV
   `5 * U_TIME_1S_IN_NS` also overflowed an int there (the idle timeout was 0.7 s, the log every 1.4 s).
 - Encode 14-16 ms a frame in the stream (8 ms measured earlier with a quieter headset).
 
-Layers per frame now, VR view to encoder: GPU blit + copy to a host buffer (Monado), memcpy into
-`/dev/shm/quest1-spectator`, XShmPutImage onto q1apps' cover (the X server copies into its framebuffer),
-q1screencast's NV12 conversion into a PipeWire buffer, Steam's copy into the V4L2 buffer, venus. The fewer-layer
-path (user: "le plus matériel possible, avec le moins de couches possible") is NV12 made on the GPU by Monado and
-handed to the encoder without the X server and the CPU conversion; see docs/todo.md.
+Then (2026-11-10) the VR view's NV12 is made on the GPU: one compute pass in Monado (`quest1_spect_spv.h`: crop,
+bilinear scale and BT.709 full range in one go, 4x2 pixels an invocation) into a device buffer, a buffer copy into
+cached host memory (the blob offers no cached type for storage buffers: written straight, the thread's read took
+10.5 ms), then the thread's 1.4 MB memcpy into the file: **1.6 ms a frame** (was 28 ms). q1screencast copies it
+(2 ms, was 11 with the conversion). Measured without the PC (a q1screencast session over busctl and a PipeWire
+consumer, the spectator trigger made by hand): 35.5 frames a second, the most every second vsync gives; the user
+asks for 30 steady, no more, for the spectator (more is for the VR/2D streaming later).
+
+Layers per frame now, VR view to encoder: GPU pass + buffer copy (Monado), memcpy into `/dev/shm/quest1-spectator`,
+memcpy into a PipeWire buffer (q1screencast), Steam's copy into the V4L2 buffer, venus.
 
 Notes for the decoder (`/dev/video-dec0`, Steam Link to the headset): the same layer is the place for it (same
 buffer translation; vdectest.c lists the decoder's own rules), and `omxprobe.c` can run the vendor decoder the

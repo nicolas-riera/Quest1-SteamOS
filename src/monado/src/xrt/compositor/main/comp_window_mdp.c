@@ -35,6 +35,7 @@
 #include "main/comp_compositor.h"
 
 #include "quest1_direct_proto.h"
+#include "quest1_spect_spv.h"
 #include "quest1_warp_spv.h"
 
 #include <dirent.h>
@@ -209,14 +210,19 @@ struct direct_vk
 	VkQueryPool qp;
 };
 
-//! Remote Play spectator (see spect_tick): its copy objects and shared file
+//! Remote Play spectator (see spect_tick): its conversion objects and shared file
 struct direct_spect
 {
 	bool ready, failed;
-	VkFormat format;
-	VkImage image;
-	VkDeviceMemory image_mem;
-	VkBuffer buf;
+	VkSampler sampler;
+	VkDescriptorSetLayout dsl;
+	VkDescriptorPool dpool;
+	VkDescriptorSet set;
+	VkPipelineLayout playout;
+	VkPipeline pipeline; //!< quest1_spect_spv.h: crop, scale and NV12 in one compute pass
+	VkBuffer gbuf;       //!< the NV12 frame, written by the shader (device memory)
+	VkDeviceMemory gbuf_mem;
+	VkBuffer buf; //!< gbuf copied here for the CPU: cached memory is not allowed for storage buffers on this blob
 	VkDeviceMemory buf_mem;
 	uint8_t *map;
 	VkDevice device;                               //!< for the thread's invalidate
@@ -2341,11 +2347,15 @@ warp_snapshot(struct mdp_direct *D, int o)
  * Remote Play spectator (docs/streaming.md). Remote Play streams Steam's X display :1 from the headset; on the Steam
  * Frame that screen shows what the headset shows. While SPECT_TRIGGER exists (q1apps makes it during a Remote Play
  * session), the left eye's render, cropped to 16:10 around the view's axis and scaled to SPECT_W x SPECT_H, goes to
- * SPECT_FILE every second vsync (36 a second), for q1apps to put on :1 and for q1screencast, which streams it. Lens
- * mode only (the layer's buffers are the undistorted eye renders). The copy (a blit, then into a host buffer) is a
+ * SPECT_FILE every second vsync (36 a second), as NV12 (BT.709 full range) for q1screencast, which hands it to
+ * Steam's PipeWire capture as is. Lens mode only (the layer's buffers are the undistorted eye renders). One compute
+ * pass (quest1_spect_spv.h) samples the eye render (crop and bilinear scale, as a blit would) and writes NV12, which
+ * a buffer copy moves into cached host memory (the blob allows no cached memory for storage buffers): no
+ * intermediate image, no conversion on the CPU, 1.4 MB read back instead of 3.7. It is a
  * submission of its own after the warp's, never waited for on the vsync thread: a later tick sees its fence and hands
- * the buffer to the "Quest1 spectator" thread, which copies it into the file. The file holds two frames after a header that says which one is complete.
- * Nothing of this exists while nobody asks: the objects and the file go 5 s after the last request.
+ * the buffer to the "Quest1 spectator" thread, which copies it into the file. The file holds two frames after a
+ * header that says which one is complete. Nothing of this exists while nobody asks: the objects and the file go 5 s
+ * after the last request.
  */
 #define SPECT_FILE "/dev/shm/quest1-spectator"
 #define SPECT_W 1280
@@ -2353,15 +2363,24 @@ warp_snapshot(struct mdp_direct *D, int o)
 // every second vsync at 72 Hz (36 a second): checked once a vsync, 1/30 s took three of them (24 a second)
 #define SPECT_PERIOD_NS (U_TIME_1S_IN_NS / 45)
 #define SPECT_IDLE_NS (5 * (int64_t)U_TIME_1S_IN_NS)
-#define SPECT_MAGIC 0x31535051u // "QPS1"
+#define SPECT_MAGIC 0x32535051u // "QPS2" (NV12; "QPS1" was B,G,R,X)
 #define SPECT_HEADER 4096
+#define SPECT_FRAME_BYTES (SPECT_W * SPECT_H * 3 / 2)
 
-//! SPECT_FILE's header; frame i (B,G,R,X) at SPECT_HEADER + i * frame_bytes
+//! SPECT_FILE's header; frame i (NV12: Y rows of `stride` bytes, then the U,V rows) at SPECT_HEADER + i * frame_bytes
 struct spect_header
 {
 	uint32_t magic, width, height, stride, frame_bytes;
 	uint32_t index; //!< the complete frame
 	uint32_t seq;   //!< bumped (release) after each frame
+};
+
+//! quest1_spect_spv.h's push constants: the crop's origin and the size of an output pixel, in source texture
+//! coordinates; the output's size; red and blue swapped in what the source's view returns
+struct spect_push
+{
+	float origin[2], scale[2];
+	uint32_t w, h, swap_rb;
 };
 
 static void *
@@ -2421,9 +2440,14 @@ spect_free(struct mdp_target *t)
 	if (S->fence != VK_NULL_HANDLE) vk->vkDestroyFence(vk->device, S->fence, NULL);
 	if (S->cpool != VK_NULL_HANDLE) vk->vkDestroyCommandPool(vk->device, S->cpool, NULL);
 	if (S->buf != VK_NULL_HANDLE) vk->vkDestroyBuffer(vk->device, S->buf, NULL);
+	if (S->gbuf != VK_NULL_HANDLE) vk->vkDestroyBuffer(vk->device, S->gbuf, NULL);
+	if (S->gbuf_mem != VK_NULL_HANDLE) vk->vkFreeMemory(vk->device, S->gbuf_mem, NULL);
 	if (S->buf_mem != VK_NULL_HANDLE) vk->vkFreeMemory(vk->device, S->buf_mem, NULL);
-	if (S->image != VK_NULL_HANDLE) vk->vkDestroyImage(vk->device, S->image, NULL);
-	if (S->image_mem != VK_NULL_HANDLE) vk->vkFreeMemory(vk->device, S->image_mem, NULL);
+	if (S->pipeline != VK_NULL_HANDLE) vk->vkDestroyPipeline(vk->device, S->pipeline, NULL);
+	if (S->playout != VK_NULL_HANDLE) vk->vkDestroyPipelineLayout(vk->device, S->playout, NULL);
+	if (S->dpool != VK_NULL_HANDLE) vk->vkDestroyDescriptorPool(vk->device, S->dpool, NULL);
+	if (S->dsl != VK_NULL_HANDLE) vk->vkDestroyDescriptorSetLayout(vk->device, S->dsl, NULL);
+	if (S->sampler != VK_NULL_HANDLE) vk->vkDestroySampler(vk->device, S->sampler, NULL);
 	if (S->shm != NULL) {
 		munmap(S->shm, S->shm_size);
 		unlink(SPECT_FILE);
@@ -2432,9 +2456,15 @@ spect_free(struct mdp_target *t)
 		close(S->fd);
 	}
 	S->ready = false;
-	S->image = VK_NULL_HANDLE;
-	S->image_mem = S->buf_mem = VK_NULL_HANDLE;
-	S->buf = VK_NULL_HANDLE;
+	S->pipeline = VK_NULL_HANDLE;
+	S->playout = VK_NULL_HANDLE;
+	S->dpool = VK_NULL_HANDLE;
+	S->set = VK_NULL_HANDLE;
+	S->dsl = VK_NULL_HANDLE;
+	S->sampler = VK_NULL_HANDLE;
+	S->buf_mem = VK_NULL_HANDLE;
+	S->buf = S->gbuf = VK_NULL_HANDLE;
+	S->gbuf_mem = VK_NULL_HANDLE;
 	S->map = S->shm = NULL;
 	S->cpool = VK_NULL_HANDLE;
 	S->cmd = VK_NULL_HANDLE;
@@ -2458,45 +2488,83 @@ spect_init(struct mdp_target *t, const struct direct_buf *src)
 	}
 	S->failed = true;
 	S->fd = -1;
-	// B,G,R,X bytes for X11: the layer's UBWC buffers hold R,G,B,A (a blit converts), its linear ones B,G,R,A already
-	S->format = src->ubwc || !D->bgra ? VK_FORMAT_B8G8R8A8_UNORM : VK_FORMAT_R8G8B8A8_UNORM;
-	VkFormatProperties fs, fd;
-	vk->vkGetPhysicalDeviceFormatProperties(vk->physical_device, VK_FORMAT_R8G8B8A8_UNORM, &fs);
-	vk->vkGetPhysicalDeviceFormatProperties(vk->physical_device, S->format, &fd);
-	if (!(fs.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT) ||
-	    !(fs.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) ||
-	    !(fd.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_DST_BIT)) {
-		U_LOG_E("mdp: spectator: no blit between these formats");
-		return false;
-	}
-	VkImageCreateInfo ici = {
-	    .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-	    .imageType = VK_IMAGE_TYPE_2D,
-	    .format = S->format,
-	    .extent = {SPECT_W, SPECT_H, 1},
-	    .mipLevels = 1,
-	    .arrayLayers = 1,
-	    .samples = VK_SAMPLE_COUNT_1_BIT,
-	    .tiling = VK_IMAGE_TILING_OPTIMAL,
-	    .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-	    .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+	(void)src;
+	// the compute pass: the eye render (sampled, linear filter) in, the NV12 buffer out
+	VkSamplerCreateInfo sci = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+	                           .magFilter = VK_FILTER_LINEAR,
+	                           .minFilter = VK_FILTER_LINEAR,
+	                           .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+	                           .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+	                           .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+	                           .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE};
+	VkDescriptorSetLayoutBinding dslb[2] = {
+	    {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
+	    {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
 	};
-	VkBufferCreateInfo bci = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-	                          .size = (VkDeviceSize)SPECT_W * SPECT_H * 4,
-	                          .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-	                          .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
-	VkMemoryRequirements mr;
-	if (vk->vkCreateImage(vk->device, &ici, NULL, &S->image) != VK_SUCCESS) {
+	VkDescriptorSetLayoutCreateInfo dslci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+	                                         .bindingCount = 2,
+	                                         .pBindings = dslb};
+	VkDescriptorPoolSize dps[2] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1}};
+	VkDescriptorPoolCreateInfo dpci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+	                                   .maxSets = 1,
+	                                   .poolSizeCount = 2,
+	                                   .pPoolSizes = dps};
+	VkPushConstantRange pcr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(struct spect_push)};
+	if (vk->vkCreateSampler(vk->device, &sci, NULL, &S->sampler) != VK_SUCCESS ||
+	    vk->vkCreateDescriptorSetLayout(vk->device, &dslci, NULL, &S->dsl) != VK_SUCCESS ||
+	    vk->vkCreateDescriptorPool(vk->device, &dpci, NULL, &S->dpool) != VK_SUCCESS) {
 		goto fail;
 	}
-	vk->vkGetImageMemoryRequirements(vk->device, S->image, &mr);
+	VkDescriptorSetAllocateInfo dsai = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+	                                    .descriptorPool = S->dpool,
+	                                    .descriptorSetCount = 1,
+	                                    .pSetLayouts = &S->dsl};
+	VkPipelineLayoutCreateInfo plci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+	                                   .setLayoutCount = 1,
+	                                   .pSetLayouts = &S->dsl,
+	                                   .pushConstantRangeCount = 1,
+	                                   .pPushConstantRanges = &pcr};
+	VkShaderModuleCreateInfo smci = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+	                                 .codeSize = sizeof(q1_spect_nv12_comp_spv),
+	                                 .pCode = q1_spect_nv12_comp_spv};
+	VkShaderModule sm = VK_NULL_HANDLE;
+	if (vk->vkAllocateDescriptorSets(vk->device, &dsai, &S->set) != VK_SUCCESS ||
+	    vk->vkCreatePipelineLayout(vk->device, &plci, NULL, &S->playout) != VK_SUCCESS ||
+	    vk->vkCreateShaderModule(vk->device, &smci, NULL, &sm) != VK_SUCCESS) {
+		goto fail;
+	}
+	VkComputePipelineCreateInfo cppci = {
+	    .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+	    .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+	              .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+	              .module = sm,
+	              .pName = "main"},
+	    .layout = S->playout,
+	};
+	VkResult pr = vk->vkCreateComputePipelines(vk->device, VK_NULL_HANDLE, 1, &cppci, NULL, &S->pipeline);
+	vk->vkDestroyShaderModule(vk->device, sm, NULL);
+	if (pr != VK_SUCCESS) {
+		goto fail;
+	}
+	VkBufferCreateInfo bci = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+	                          .size = SPECT_FRAME_BYTES,
+	                          .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+	                          .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
+	VkMemoryRequirements mr;
+	if (vk->vkCreateBuffer(vk->device, &bci, NULL, &S->gbuf) != VK_SUCCESS) {
+		goto fail;
+	}
+	vk->vkGetBufferMemoryRequirements(vk->device, S->gbuf, &mr);
 	VkMemoryAllocateInfo mai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
 	                            .allocationSize = mr.size,
 	                            .memoryTypeIndex =
 	                                warp_memory_type(vk, mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)};
-	if (mai.memoryTypeIndex == UINT32_MAX || vk->vkAllocateMemory(vk->device, &mai, NULL, &S->image_mem) != VK_SUCCESS ||
-	    vk->vkBindImageMemory(vk->device, S->image, S->image_mem, 0) != VK_SUCCESS ||
-	    vk->vkCreateBuffer(vk->device, &bci, NULL, &S->buf) != VK_SUCCESS) {
+	if (mai.memoryTypeIndex == UINT32_MAX || vk->vkAllocateMemory(vk->device, &mai, NULL, &S->gbuf_mem) != VK_SUCCESS ||
+	    vk->vkBindBufferMemory(vk->device, S->gbuf, S->gbuf_mem, 0) != VK_SUCCESS) {
+		goto fail;
+	}
+	bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+	if (vk->vkCreateBuffer(vk->device, &bci, NULL, &S->buf) != VK_SUCCESS) {
 		goto fail;
 	}
 	vk->vkGetBufferMemoryRequirements(vk->device, S->buf, &mr);
@@ -2550,7 +2618,7 @@ spect_init(struct mdp_target *t, const struct direct_buf *src)
 	if (vk->vkAllocateCommandBuffers(vk->device, &cbai, &S->cmd) != VK_SUCCESS) {
 		goto fail;
 	}
-	uint32_t frame_bytes = SPECT_W * SPECT_H * 4;
+	uint32_t frame_bytes = SPECT_FRAME_BYTES;
 	S->shm_size = SPECT_HEADER + 2 * (size_t)frame_bytes;
 	S->fd = open(SPECT_FILE, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
 	if (S->fd < 0 || fchmod(S->fd, 0644) != 0 || ftruncate(S->fd, (off_t)S->shm_size) != 0) {
@@ -2562,7 +2630,7 @@ spect_init(struct mdp_target *t, const struct direct_buf *src)
 		goto fail;
 	}
 	struct spect_header *hd = (struct spect_header *)S->shm;
-	*hd = (struct spect_header){SPECT_MAGIC, SPECT_W, SPECT_H, SPECT_W * 4, frame_bytes, 0, 0};
+	*hd = (struct spect_header){SPECT_MAGIC, SPECT_W, SPECT_H, SPECT_W, frame_bytes, 0, 0};
 	if (!S->thread_running) {
 		pthread_mutex_init(&S->mtx, NULL);
 		pthread_cond_init(&S->cond, NULL);
@@ -2575,7 +2643,7 @@ spect_init(struct mdp_target *t, const struct direct_buf *src)
 	}
 	S->failed = false;
 	S->ready = true;
-	U_LOG_W("mdp: spectator: %ux%u copies of the left eye to %s (%s host memory)", SPECT_W, SPECT_H, SPECT_FILE,
+	U_LOG_W("mdp: spectator: %ux%u NV12 frames of the left eye to %s (%s host memory)", SPECT_W, SPECT_H, SPECT_FILE,
 	        S->noncoherent ? "cached" : "coherent");
 	return true;
 fail:
@@ -2618,7 +2686,7 @@ spect_tick(struct mdp_target *t)
 		return;
 	}
 	const struct direct_buf *src = &D->buf[D->latest][1]; // half 1: the left eye's view
-	if (src->image == VK_NULL_HANDLE || !src->transfer_src || !spect_init(t, src)) {
+	if (src->image == VK_NULL_HANDLE || src->view == VK_NULL_HANDLE || !spect_init(t, src)) {
 		return;
 	}
 	S->last_ns = now;
@@ -2639,67 +2707,57 @@ spect_tick(struct mdp_target *t)
 	VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
 	                               .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
 	VkCommandBuffer cmd = S->cmd;
+	// the source as the warp left it (SHADER_READ_ONLY_OPTIMAL, read by shaders): sampled the same way, no barrier.
+	// The set is free: the last pass using it has finished (!submitted).
+	VkDescriptorImageInfo dii = {S->sampler, src->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+	VkDescriptorBufferInfo dbi = {S->gbuf, 0, VK_WHOLE_SIZE};
+	VkWriteDescriptorSet wds[2] = {
+	    {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+	     .dstSet = S->set,
+	     .dstBinding = 0,
+	     .descriptorCount = 1,
+	     .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+	     .pImageInfo = &dii},
+	    {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+	     .dstSet = S->set,
+	     .dstBinding = 1,
+	     .descriptorCount = 1,
+	     .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+	     .pBufferInfo = &dbi},
+	};
+	vk->vkUpdateDescriptorSets(vk->device, 2, wds, 0, NULL);
+	// The view returns red and blue swapped for linear BGRA inputs unless it swizzles them back (warp_import_usage:
+	// only when the outputs are UBWC); UBWC inputs are RGBA (bgra 0).
+	struct spect_push pc = {
+	    .origin = {(float)cx / (float)D->in_w, (float)cy / (float)D->in_h},
+	    .scale = {(float)cw / (float)D->in_w / SPECT_W, (float)ch / (float)D->in_h / SPECT_H},
+	    .w = SPECT_W,
+	    .h = SPECT_H,
+	    .swap_rb = D->bgra && !D->out[0][0].ubwc,
+	};
 	vk->vkBeginCommandBuffer(cmd, &bi);
-	VkImageMemoryBarrier ib[2] = {
-	    {
-	        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-	        .srcAccessMask = VK_ACCESS_SHADER_READ_BIT,
-	        .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
-	        .oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, // as the warp left it
-	        .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-	        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-	        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-	        .image = src->image,
-	        .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
-	    },
-	    {
-	        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-	        .srcAccessMask = 0,
-	        .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
-	        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-	        .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-	        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-	        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-	        .image = S->image,
-	        .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
-	    },
-	};
-	vk->vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-	                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 2, ib);
-	VkImageBlit blit = {
-	    .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
-	    .srcOffsets = {{cx, cy, 0}, {cx + cw, cy + ch, 1}},
-	    .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
-	    .dstOffsets = {{0, 0, 0}, {SPECT_W, SPECT_H, 1}},
-	};
-	vk->vkCmdBlitImage(cmd, src->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, S->image,
-	                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
-	// the source back as the warp reads it; the copy ready to be read
-	ib[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-	ib[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-	ib[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-	ib[0].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-	ib[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-	ib[1].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-	ib[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-	ib[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-	vk->vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-	                         VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL,
-	                         2, ib);
-	VkBufferImageCopy copy = {
-	    .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
-	    .imageExtent = {SPECT_W, SPECT_H, 1},
-	};
-	vk->vkCmdCopyImageToBuffer(cmd, S->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, S->buf, 1, &copy);
+	vk->vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, S->pipeline);
+	vk->vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, S->playout, 0, 1, &S->set, 0, NULL);
+	vk->vkCmdPushConstants(cmd, S->playout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+	// 8x8 invocations of 4x2 pixels each
+	vk->vkCmdDispatch(cmd, (SPECT_W / 4 + 7) / 8, (SPECT_H / 2 + 7) / 8, 1);
+	// then to the cached host buffer, for the thread
 	VkBufferMemoryBarrier bb = {
 	    .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
-	    .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
-	    .dstAccessMask = VK_ACCESS_HOST_READ_BIT,
+	    .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+	    .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
 	    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
 	    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-	    .buffer = S->buf,
+	    .buffer = S->gbuf,
 	    .size = VK_WHOLE_SIZE,
 	};
+	vk->vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 1,
+	                         &bb, 0, NULL);
+	VkBufferCopy bc = {0, 0, SPECT_FRAME_BYTES};
+	vk->vkCmdCopyBuffer(cmd, S->gbuf, S->buf, 1, &bc);
+	bb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	bb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+	bb.buffer = S->buf;
 	vk->vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, NULL, 1, &bb, 0,
 	                         NULL);
 	vk->vkEndCommandBuffer(cmd);

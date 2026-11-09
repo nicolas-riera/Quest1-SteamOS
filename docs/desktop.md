@@ -125,26 +125,25 @@ dashboard like on the Frame.
 
 ### Remote Play spectator (the VR view in the stream)
 
-On the Frame, a Remote Play stream from the headset shows what the wearer sees. Here the streamed screen is `:1`, so
-during a session q1apps paints the VR view on its cover window:
+On the Frame, a Remote Play stream from the headset shows what the wearer sees. Here the streamed screen is `:1`;
+during a session the stream shows the VR view instead (Steam's PipeWire capture, fed by q1screencast,
+docs/streaming.md "The capture"):
 
 - Session detection: Steam's stream threads (`CGameStreamVide...`) exist only while a session runs; q1apps looks for
   them once a second. Nothing else runs outside a session (user's rule: active only when used, no cost in the
   headset).
 - While a session runs q1apps creates `/tmp/quest1-spectator`; Monado's warp (comp_window_mdp.c, `spect_tick`)
-  then blits the left eye's undistorted image (scene mode), cropped to 16:10 around the view axis, into a 1280x720
-  image every second vsync (36 a second; "30 a second" checked once a vsync gave 24), copies it to a host buffer
-  (cached memory, ~6 ms a copy; the write-combined type took ~28 ms) and a thread of its own writes it to
-  `/dev/shm/quest1-spectator` (two frames + a header with a sequence number). Monado frees all of it 5 s after the
-  file goes away. The copy time is logged every 10 s ("spectator: ... frames/s, copy ... ms each").
-- q1apps maps that file and hands it to the X server with MIT-SHM (`xcb_shm_attach_fd`): each new frame is one
-  `XShmPutImage` on the cover, no copy on our side. The stream itself does not go through X: Steam captures through
-  PipeWire and q1screencast reads that file directly (docs/streaming.md "The capture"); it goes back to the X screen
-  after 0.5 s without a new VR frame, so the dark blue cover shows.
+  then turns the left eye's undistorted image (scene mode), cropped to 16:10 around the view axis, into a 1280x720
+  NV12 frame on the GPU every second vsync (36 a second; "30 a second" checked once a vsync gave 24), and a thread of
+  its own writes it to `/dev/shm/quest1-spectator` (two frames + a header with a sequence number), 1.6 ms a frame.
+  Monado frees all of it 5 s after the file goes away. The copy time is logged every 10 s ("spectator: ...
+  frames/s, copy ... ms each").
+- q1screencast streams those frames. q1apps only turns its cover dark blue (#1b2838) for the session: q1screencast
+  shows the X screen again after 0.5 s without a VR frame (the headset taken off and asleep: Monado renders
+  nothing), as the Frame's stream turns dark blue. (Until 2026-11-10 q1apps painted every VR frame on the cover with
+  MIT-SHM and the stream captured X.)
 - The cover's cursor and the root's are an empty pixmap cursor: Remote Play draws the X cursor into the stream
   (XFixes' cursor image, hidden or not). The cover takes the pointer 1 s after the last laser input on an app.
-- No VR frame for 0.5 s (the headset taken off and asleep: Monado renders nothing) turns the cover dark blue
-  (#1b2838), as the Frame's stream does.
 - Xvfb runs at 1280x720, the Frame's gamescope size (it was 1280x800).
 - The PC only watches (user, 2026-11-09: its mouse moved and clicked the apps under the laser, its keyboard typed in
   them, and the apps' black cursor showed on the PC). `src/rpspectator` is preloaded into the Steam client
@@ -161,8 +160,10 @@ during a session q1apps paints the VR view on its cover window:
     to a second before q1apps makes the trigger, so here a session also counts from the moment Steam's
     `CGameStreamVide...` thread exists. Steam has no setting to stop the forwarding itself.
 
-  The "Microsoft X-Box 360 pad" (045e:028e) seen on the headset is xscreen's (the Touch controllers in flat mode)
-  and its Steam Input wrapper "Microsoft X-Box 360 pad 0" (28de:11ff) is made when Steam starts, not by the stream.
+  The "Microsoft X-Box 360 pad" (045e:028e) once seen on the headset was xscreen's (steam-screen.service, the
+  pre-Frame flat Steam screen: the Touch controllers as a gamepad), with its Steam Input wrapper "Microsoft X-Box 360
+  pad 0" (28de:11ff), made when Steam starts, not by the stream. Steam listed it as a connected "controller" (user,
+  2026-11-10); Frame mode now turns steam-screen off (device/holo-frame-mode.sh).
 - SteamVR's own headset view (`system.HeadsetView`, `IVRHeadsetView`) was tried first: vrcompositor renders it in
   two 256x256 passes, ignores `SetHeadsetViewSize` and the image is black here, and Steam's own VR capture
   (`CVRStreamThread`, GL) only runs on the Frame's hardware type and needs GL interop that llvmpipe lacks.

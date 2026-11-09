@@ -136,7 +136,7 @@ cd "$R/src/q1desktop"
 g++ -std=c++17 -O2 -Wall -o $D/usr/local/bin/q1desktop q1desktop.cpp $OVR -ldl -lX11 -lXdamage -lXtst
 # apps started by Steam ("+" menu): each in its own overlay, Steam's X display covered (device/holo-desktop.sh)
 g++ -std=c++17 -O2 -Wall -o $D/usr/local/bin/q1apps q1apps.cpp $OVR -ldl -lX11 -lX11-xcb -lxcb -lXext -lXdamage \
-	-lXfixes -lXcomposite -lXtst -lxcb-shm
+	-lXfixes -lXcomposite -lXtst
 # System Monitor's GPU sensors (kgsl): replaces ksystemstats' DRM-only GPU plugin (device/holo-desktop.sh)
 cmake -S "$R/src/ksysgpu" -B $W/ksysgpu -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local >/dev/null
 cmake --build $W/ksysgpu -j$J >/dev/null
