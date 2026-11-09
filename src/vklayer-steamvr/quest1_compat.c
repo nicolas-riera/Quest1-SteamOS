@@ -2354,13 +2354,19 @@ static void log_failed_pipeline(const VkGraphicsPipelineCreateInfo *c)
 // take here. The Steam Frame's driver accepts that; the Adreno 540 blob refuses the pipeline (-13) and vrcompositor then
 // binds a null pipeline and crashes. So, when a pipeline is refused, its modules are rewritten for the layout: every
 // image or sampler variable the layout lacks for that stage is removed, and what sampled or read it gives 0
-// (OpConstantNull). Returns a malloc'ed module or NULL (nothing to do, or a use this does not handle).
+// (OpConstantNull). Same for buffers: its headset view's vertex shader (2026-11-09, asked for by Remote Play's
+// spectator) loads a uniform of a buffer (binding 0) its layout has not got, into a variable it never reads; the
+// access chains into such a buffer are removed and their loads give 0. Returns a malloc'ed module or NULL (nothing to
+// do, or a use this does not handle).
 static uint32_t *null_missing_descriptors(const uint32_t *w, uint32_t words, uint64_t layout, uint32_t stage,
                                           uint32_t *out_words, unsigned *nnull)
 {
 	enum { NAME = 5, ENTRY = 15, DECORATE = 71, VARIABLE = 59, LOAD = 61, SAMPLED_IMAGE = 86, IMAGE = 100, COPY = 83 };
 	enum { CONST_NULL = 46, FUNCTION = 54, FUNCTION_CALL = 57, DEC_BINDING = 33, DEC_SET = 34, UNIFORM_CONSTANT = 0 };
-	enum { MISSING = 1, DERIVED = 2, NULLED = 3 };
+	enum { ACCESS_CHAIN = 65, IN_BOUNDS_ACCESS_CHAIN = 66, UNIFORM = 2, STORAGE_BUFFER = 12 };
+	// MISSING: an image or sampler variable, DERIVED: loaded or combined from one, NULLED: read through one (now 0),
+	// MISSING_BUF: a buffer variable, CHAIN: a pointer into one
+	enum { MISSING = 1, DERIVED = 2, NULLED = 3, MISSING_BUF = 4, CHAIN = 5 };
 	uint32_t bound = w[3];
 	if (bound == 0 || bound > (1u << 20))
 		return NULL;
@@ -2386,12 +2392,32 @@ static uint32_t *null_missing_descriptors(const uint32_t *w, uint32_t words, uin
 			(in[2] == DEC_SET ? set : bind)[in[1]] = in[3];
 		} else if (op == VARIABLE && wc >= 4 && in[2] < bound && set[in[2]] != UINT32_MAX &&
 		           bind[in[2]] != UINT32_MAX && !layout_has(layout, set[in[2]], bind[in[2]], stage)) {
-			if (in[3] != UNIFORM_CONSTANT) { // a missing buffer: not handled
+			if (in[3] == UNIFORM_CONSTANT)
+				mark[in[2]] = MISSING;
+			else if (in[3] == UNIFORM || in[3] == STORAGE_BUFFER)
+				mark[in[2]] = MISSING_BUF;
+			else { // push constants, ...: not handled
 				ok = false;
 				break;
 			}
-			mark[in[2]] = MISSING;
 			nmissing++;
+		} else if (nmissing && (op == ACCESS_CHAIN || op == IN_BOUNDS_ACCESS_CHAIN) && wc >= 4 && in[2] < bound &&
+		           in[3] < bound && (mark[in[3]] == MISSING_BUF || mark[in[3]] == CHAIN)) {
+			mark[in[2]] = CHAIN;
+		} else if (nmissing && op == LOAD && wc >= 4 && in[2] < bound && in[3] < bound &&
+		           (mark[in[3]] == MISSING_BUF || mark[in[3]] == CHAIN)) {
+			mark[in[2]] = NULLED;
+			uint32_t t = 0;
+			while (t < ntypes && types[t] != in[1])
+				t++;
+			if (t == ntypes) {
+				if (ntypes == 16) {
+					ok = false;
+					break;
+				}
+				types[ntypes++] = in[1];
+			}
+			(*nnull)++;
 		} else if (nmissing && (op == LOAD || op == IMAGE) && wc >= 4 && in[2] < bound && in[3] < bound && mark[in[3]]) {
 			mark[in[2]] = DERIVED;
 		} else if (nmissing && op == SAMPLED_IMAGE && wc >= 5 && in[2] < bound && in[3] < bound && in[4] < bound &&
@@ -2415,6 +2441,10 @@ static uint32_t *null_missing_descriptors(const uint32_t *w, uint32_t words, uin
 			for (uint32_t k = 4; k < wc; k++)
 				if (in[k] < bound && mark[in[k]] && mark[in[k]] != NULLED)
 					ok = false; // an image passed to a function: not handled
+		} else if (nmissing && op != NAME && op != DECORATE && op != ENTRY) {
+			for (uint32_t k = 1; k < wc; k++) // a buffer pointer used otherwise (store, copy, array length): not handled
+				if (in[k] < bound && (mark[in[k]] == MISSING_BUF || mark[in[k]] == CHAIN))
+					ok = false;
 		}
 	}
 	if (ok && nmissing) {
@@ -2432,10 +2462,12 @@ static uint32_t *null_missing_descriptors(const uint32_t *w, uint32_t words, uin
 			uint32_t op = w[i] & 0xffff, wc = w[i] >> 16;
 			const uint32_t *in = &w[i];
 			i += wc;
-			if ((op == NAME || op == DECORATE) && wc >= 2 && in[1] < bound && mark[in[1]] == MISSING)
+			if ((op == NAME || op == DECORATE) && wc >= 2 && in[1] < bound &&
+			    (mark[in[1]] == MISSING || mark[in[1]] == MISSING_BUF))
 				continue;
-			if ((op == VARIABLE || op == LOAD || op == IMAGE || op == SAMPLED_IMAGE) && wc >= 3 && in[2] < bound &&
-			    (mark[in[2]] == MISSING || mark[in[2]] == DERIVED))
+			if ((op == VARIABLE || op == LOAD || op == IMAGE || op == SAMPLED_IMAGE || op == ACCESS_CHAIN ||
+			     op == IN_BOUNDS_ACCESS_CHAIN) && wc >= 3 && in[2] < bound &&
+			    (mark[in[2]] == MISSING || mark[in[2]] == DERIVED || mark[in[2]] == MISSING_BUF || mark[in[2]] == CHAIN))
 				continue;
 			if (op == FUNCTION && !nulls_out) {
 				for (uint32_t t = 0; t < ntypes; t++) {
@@ -2454,12 +2486,14 @@ static uint32_t *null_missing_descriptors(const uint32_t *w, uint32_t words, uin
 				memcpy(&o[n], in, s * sizeof(uint32_t));
 				n += s;
 				for (uint32_t k = s; k < wc; k++)
-					if (in[k] >= bound || mark[in[k]] != MISSING)
+					if (in[k] >= bound || (mark[in[k]] != MISSING && mark[in[k]] != MISSING_BUF))
 						o[n++] = in[k];
 				o[start] = ((n - start) << 16) | ENTRY;
 				continue;
 			}
-			if (op != VARIABLE && wc >= 3 && in[2] < bound && mark[in[2]] == NULLED) {
+			// the instruction that gave the nulled value (in[2] is its result; an OpStore of it has it there too)
+			bool producer = op == LOAD || (op >= 87 && op <= 99) || (op >= 103 && op <= 107) || (op >= 305 && op <= 315);
+			if (producer && wc >= 3 && in[2] < bound && mark[in[2]] == NULLED) {
 				uint32_t t = 0;
 				while (types[t] != in[1])
 					t++;
@@ -2481,6 +2515,24 @@ static uint32_t *null_missing_descriptors(const uint32_t *w, uint32_t words, uin
 	free(bind);
 	free(mark);
 	return o;
+}
+
+//! A pipeline still refused after retry_pipeline: its modules for spirv-dis, /tmp/quest1-failed-pipeline-<stage>.spv
+static void dump_failed_modules(const VkGraphicsPipelineCreateInfo *c)
+{
+	for (uint32_t s = 0; s < c->stageCount; s++) {
+		uint32_t words = 0;
+		uint32_t *code = mod_code_get(c->pStages[s].module, &words);
+		char path[64];
+		snprintf(path, sizeof(path), "/tmp/quest1-failed-pipeline-%x.spv", c->pStages[s].stage);
+		FILE *f = code ? fopen(path, "wb") : NULL;
+		if (f) {
+			fwrite(code, 4, words, f);
+			fclose(f);
+			LOG("  module of stage 0x%x written to %s\n", c->pStages[s].stage, path);
+		}
+		free(code);
+	}
 }
 
 //! Retry of a refused graphics pipeline with its modules rewritten for its layout (null_missing_descriptors).
@@ -2518,8 +2570,8 @@ static VkResult retry_pipeline(VkDevice device, VkPipelineCache cache, const VkG
 		VkGraphicsPipelineCreateInfo c2 = *c;
 		c2.pStages = st;
 		r = d->CreateGraphicsPipelines(device, cache, 1, &c2, alloc, out);
-		LOG("graphics pipeline retried with %u descriptor reads the layout lacks turned into 0 (%u stages): %d\n",
-		    nulled, changed, r);
+		LOG("graphics pipeline retried with %u descriptor reads the layout lacks turned into 0 (%u stages): %d, "
+		    "pipeline %p\n", nulled, changed, r, r == VK_SUCCESS ? (void *)*out : NULL);
 	}
 	for (uint32_t s = 0; s < c->stageCount; s++)
 		if (tmp[s])
@@ -2559,9 +2611,12 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateGraphicsPipelines(VkDevice device, V
 		bool all = true;
 		for (uint32_t i = 0; i < n; i++)
 			if (!out[i]) {
+				LOG("graphics pipeline %u of %u refused: %d\n", i, n, r);
 				log_failed_pipeline(&ci[i]);
-				if (retry_pipeline(device, cache, &ci[i], alloc, &out[i]) != VK_SUCCESS)
+				if (retry_pipeline(device, cache, &ci[i], alloc, &out[i]) != VK_SUCCESS) {
+					dump_failed_modules(&ci[i]);
 					all = false;
+				}
 			}
 		if (all)
 			r = VK_SUCCESS;
