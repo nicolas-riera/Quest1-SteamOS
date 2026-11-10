@@ -1,6 +1,7 @@
 // quest1_v4l2: the mainline V4L2 memory-to-memory encoder API, as Steam's Remote Play uses it, on the Quest 1's
 // venus encoder (downstream msm_vidc of kernel 4.4, /dev/video33). LD_PRELOAD'ed into the Steam client; inert in
-// any process that never opens the encoder (one compare per 'V' ioctl, mmap and close).
+// any process that never opens the encoder (one compare per 'V' ioctl, mmap and close). The decoder
+// (/dev/video32, for FFmpeg's v4l2m2m decoders) is quest1_vdec.c, in the same library behind the same hooks.
 //
 // Steam (steamui.so, CGameStreamVideoStageV4L2) opens /dev/video-enc0 (a udev symlink to the encoder) and does
 // what a mainline stateful encoder takes:
@@ -55,6 +56,8 @@
 #include <sys/sysmacros.h>
 #include <time.h>
 #include <unistd.h>
+
+#include "quest1_v4l2.h"
 
 #define EXPORT __attribute__((visibility("default")))
 
@@ -695,8 +698,13 @@ EXPORT int ioctl(int fd, unsigned long req, ...)
 	if (_IOC_TYPE(req) != 'V')
 		return sys_ioctl(fd, req, arg);
 	struct enc *e = find(fd);
-	if (!e && !(e = adopt(fd)))
-		return sys_ioctl(fd, req, arg);
+	if (!e) {
+		struct q1dec *d = q1dec_find(fd);
+		if (d || (!(e = adopt(fd)) && (d = q1dec_adopt(fd))))
+			return q1dec_ioctl(d, req, arg);
+		if (!e)
+			return sys_ioctl(fd, req, arg);
+	}
 	switch (req) {
 	case VIDIOC_S_FMT:
 		return s_fmt(e, arg);
@@ -737,6 +745,9 @@ EXPORT void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off
 	struct enc *e = fd >= 0 ? find(fd) : NULL;
 	if (e)
 		return map_buf(e, addr, len, prot, flags, off);
+	struct q1dec *d = fd >= 0 ? q1dec_find(fd) : NULL;
+	if (d)
+		return q1dec_mmap(d, addr, len, prot, flags, off);
 	return sys_mmap(addr, len, prot, flags, fd, off);
 }
 
@@ -746,8 +757,11 @@ EXPORT void *mmap64(void *addr, size_t len, int prot, int flags, int fd, off_t o
 EXPORT int close(int fd)
 {
 	struct enc *e = fd >= 0 ? find(fd) : NULL;
+	struct q1dec *d = fd >= 0 && !e ? q1dec_find(fd) : NULL;
 	int r = (int)syscall(SYS_close, fd);
 	if (e)
 		forget(e); // after the driver let go of the buffers
+	if (d)
+		q1dec_forget(d);
 	return r;
 }

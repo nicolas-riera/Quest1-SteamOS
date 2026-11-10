@@ -3,8 +3,6 @@
 Only what is left to do, roughly by priority. Done work leaves this list: it is described in the other docs
 (`docs/*.md`) and in the commit log.
 
-## Before the next push (user, 2026-11-08)
-
 - Performance: confirm worn, controllers moving, dashboard and Steam in use. On the table since 2026-11-08 (vrcompositor's CPU
   and GPU overlap, docs/performance.md): 72 fps with the dashboard (with or without passthrough), 68-70 while it is
   used. GPU-bound now (~12.4 of 13.9 ms a frame). Levers left, all visible, so the user decides: achromatic distortion
@@ -152,12 +150,16 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 ## Streaming (after everything above, user 2026-11-08)
 
 - Hardware video decoding for the whole system (user, 2026-11-09: "décodage vidéo matériel system wide, dont
-  Chromium"). VLC now decodes in software (vlc-plugin-ffmpeg was missing, 2026-11-10). Plan: the venus decoder in
-  quest1_v4l2 (below), then apps that speak V4L2 M2M: ffmpeg's `h264_v4l2m2m`/`hevc_v4l2m2m` (VLC 3's avcodec
-  module takes `--avcodec-codec`, mpv `--hwdec=v4l2m2m-copy`), GStreamer's v4l2 decoders; Chromium on desktop Linux
-  decodes with VA-API only (Arch's build has no V4L2 decoder).
+  Chromium"). The venus decoder now answers FFmpeg's `*_v4l2m2m` decoders (`q1-hwdec`, docs/streaming.md "The
+  decoder"), bit-exact. Left: who uses it by default. VLC's launcher with `--avcodec-codec=h264_v4l2m2m` (H.264
+  only, and a stream venus refuses then does not play: ask the user); GStreamer's v4l2 decoders (they fall back by
+  themselves, but set CAPTURE up after SOURCE_CHANGE: the library must start the firmware session itself first);
+  Chromium decodes with VA-API only (Arch's build has no V4L2 decoder): a VA-API driver on top, or another build.
+  The user's target (2026-11-10): the stream at 72 fps next to the dashboard and overlays, so everything on the
+  hardware path and no CPU copy of the frames.
 
-- Steam Link from a PC: the decoder in quest1_v4l2 (`/dev/video-dec0`, docs/streaming.md); the stream app's GL can't
+- Steam Link from a PC: `/dev/video-dec0` on the decoder of quest1_v4l2 plus dma-buf export, tested with a real PC
+  stream (docs/streaming.md, plan step 2); the decoded frames to the compositor with no copy; the stream app's GL can't
   share images with the compositor (libhybris GL lacks GL_EXT_memory_object_fd / semaphore_fd); the theater mode
   crash (user's lead: the floor reflections); then VR (vrlink).
 - Reference for making Steam Link accept a Quest 1 (device identity, etc.):

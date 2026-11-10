@@ -17,9 +17,11 @@ Status 2026-11-06: feasibility survey with read-only probes. Nothing here was ma
 - [H] No `/dev/video-dec0` (the Frame's `steam-video-codec-setup.service` makes it and `/dev/video-enc0` from `vrdevice_path`; it does not exist here).
   `/dev/video-enc0` is a udev link to `video33` since 2026-11-09 (section 0); before, Steam logged
   `CGameStreamVideoStageV4L2::BInitEncoder: Failed to open device: /dev/video-enc0` and encoded with x264.
-- [H] ffmpeg has `h264/hevc/vp9_v4l2m2m` wrappers, but `ffmpeg -c:v hevc_v4l2m2m` fails here (`Could not find a valid device`, EBUSY). It probes every
-  `/dev/video*`, including the msm camera nodes (querycap on them logs harmless kernel WARNINGs `Bad caps for driver`, v4l2-ioctl.c:1039).
-  GStreamer has no `v4l2*dec` elements (only src/sink/convert).
+- [H] ffmpeg's `h264_v4l2m2m` / `hevc_v4l2m2m` decoders work on venus through `libquest1_v4l2.so` since 2026-11-10
+  (`q1-hwdec ffmpeg -c:v h264_v4l2m2m ...`, section 0, "The decoder"). Without the library they fail (`Could not find a valid
+  device`): msm_vidc is not the mainline API. libavcodec probes every `/dev/video*`, including the msm camera nodes (QUERYCAP on
+  them logs harmless kernel WARNINGs `Bad caps for driver`, v4l2-ioctl.c:1039). GStreamer has no `v4l2*dec` elements (only
+  src/sink/convert).
 - [H] Software decode is fine for flat streams: 1280x720 HEVC and H.264 each decode at about 100 fps (ffmpeg libavcodec, `-f null`).
   1080p60 H.264 should be OK; 4K or 120 fps is not.
 - [H] Network: wlan0 5 GHz VHT 80 MHz NSS2, -43 dBm, link rate up to 866 Mbit/s (tx). Bandwidth is not the limit.
@@ -114,9 +116,44 @@ asks for 30 steady, no more, for the spectator (more is for the VR/2D streaming 
 Layers per frame now, VR view to encoder: GPU pass + buffer copy (Monado), memcpy into `/dev/shm/quest1-spectator`,
 memcpy into a PipeWire buffer (q1screencast), Steam's copy into the V4L2 buffer, venus.
 
-Notes for the decoder (`/dev/video-dec0`, Steam Link to the headset): the same layer is the place for it (same
-buffer translation; vdectest.c lists the decoder's own rules), and `omxprobe.c` can run the vendor decoder the
-same way to compare firmware logs.
+### The decoder: FFmpeg's v4l2m2m decoders on venus (2026-11-10)
+
+`src/v4l2shim/quest1_vdec.c`, in the same `libquest1_v4l2.so` behind the same hooks (ioctl, mmap, close), is the
+mainline stateful decoder API on `/dev/video32` as libavcodec's `*_v4l2m2m` decoders use it; its header lists what
+libavcodec does and what msm_vidc wants instead. `q1-hwdec <program> ...` preloads the library (Steam already has
+it). In short:
+- MMAP buffers are ION buffers given to the driver as USERPTR, **cached** ones (the driver cleans and invalidates
+  the caches itself; frames read from uncached ION memory were what made vdectest's linear runs slow).
+- The firmware's "insufficient" event at the first sequence header (it then waits) is the driver's whole
+  reconfiguration, done inside the library with the client's buffers: flush, flush-done, every buffer back,
+  STREAMOFF, REQBUFS 0, S_FMT, REQBUFS, QBUF, STREAMON. The client only sees a SOURCE_CHANGE that changes nothing.
+  Another size than the one announced is a real SOURCE_CHANGE (flushed here, the client's STREAMOFF/REQBUFS/STREAMON
+  do the rest).
+- The frame is venus's own layout with no copy: G_FMT says height = scanlines (so the client puts the UV plane at
+  stride * scanlines, where venus writes it) and G_SELECTION says the picture (1920x1080 in 1920x1088).
+- Packet buffers: the driver wants 12 MB each whatever the stream (and libavcodec asks for 16): limited with the
+  driver's BUFFER_SIZE_LIMIT control to half a raw frame (1.5 MB at 1080p). 20 frame buffers of 3 MB at 1080p.
+- DECODER_CMD STOP is an empty packet with the EOS flag; the frame buffer with the EOS flag is the LAST one.
+
+Measured (ffmpeg 8, `-c:v h264_v4l2m2m` against `-c:v h264`, the md5 of every frame as NV12): **bit-exact** for
+1920x1080 H.264 (no B-frames), 1920x1080 HEVC, 1280x720 H.264 with B-frames and 854x480 H.264 (stride 896, picture
+854 in 864). 300 frames of 1080p: H.264 0.9 s of CPU against 3.75 s in software, HEVC 0.8 s against 5.9 s; flat
+out about 150 frames a second (2.07 s with the start), with SteamVR and the dashboard running. Stopped early,
+killed (`kill -9`: the driver logs "Failed to move from state" and recovers), two decodes at once: all fine, and
+the next decode is bit-exact. VLC 3 (its own libavcodec 58) decodes with `q1-hwdec vlc
+--avcodec-codec=h264_v4l2m2m` (that option names one decoder: HEVC stays in software with it).
+
+Limits: a size change in the middle of a stream hangs **ffmpeg itself** (libavcodec waits for every frame it gave
+out before it frees the capture buffers, and ffmpeg's filter thread keeps one; the library has flushed and sent
+SOURCE_CHANGE by then). A client that waits for SOURCE_CHANGE before it sets CAPTURE up (the mainline order) gets
+nothing: the driver starts the firmware session only when both queues stream. 8-bit only (NV12). No dma-buf
+export yet (Steam's stream client takes its CAPTURE buffers as dma-buf fds, section 1).
+
+Nothing picks these decoders by itself: libavcodec's default for H.264 is its software decoder, and it has no
+fallback from one decoder to another, so making the hardware one the default for every program would break
+10-bit and other streams venus refuses. Chromium (Arch build) decodes with VA-API only.
+
+`omxprobe.c` can run the vendor decoder the same way as it did the encoder, to compare firmware logs.
 
 ## 1. 2D streaming (Steam Remote Play / Steam Link)
 
@@ -134,8 +171,10 @@ Here today (from `/root/stream-crash-20261101`, `-20261102` and the live `stream
 Plan (hardware decode only: software decode is not an option, user decision 2026-11-07):
 1. ~~Standalone V4L2 test on venus~~ **done 2026-11-07** (`src/vdectest`, `run-tests.sh`): bit-exact, 9-11 ms per 1080p60 frame (above).
 2. **`/dev/video-dec0` for Steam** (1-3 days): the Frame's own node name (`steam-video-codec-setup.service` makes it), then see how
-   `CV4L2Accel` copes with msm_vidc (UBWC capture formats, buffer counts, events, DISPLAY_DELAY controls). If the gaps are small, a
-   V4L2 shim (LD_PRELOAD on streaming_client) translates; else patch the kernel driver toward the mainline stateful decoder API.
+   `CV4L2Accel` copes. The translation exists since 2026-11-10 for libavcodec (section 0, "The decoder"); Steam's client
+   also wants its CAPTURE buffers as dma-buf fds (EXPBUF of the ION buffers, to see with strace on a real stream) and may
+   set CAPTURE up in another order. The node is not made yet: it changes what the stream client does, so it comes with
+   a PC stream to test it.
    [H] 2026-11-07, from `steamrtarm64/streaming_client` (2.17.10, not stripped, strings and imports only): `CV4L2Accel`
    (`/data/src/streaming/client/v4l2accel.cpp`) opens `/dev/video-dec%d`, **mmaps its OUTPUT buffers** ("Couldn't memory map
    output buffer"), takes CAPTURE buffers as **dma-buf fds** ("capture planes has invalid m_fd"), expects mainline behaviour

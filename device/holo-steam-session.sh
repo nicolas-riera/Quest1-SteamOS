@@ -11,7 +11,8 @@
 # environment goes back to Mesa llvmpipe.
 # Remote Play encodes on the headset's venus encoder: /dev/video-enc0 (the Frame's node name) and
 # libquest1_v4l2.so preloaded into the client, which turns Steam's mainline V4L2 calls into what the
-# downstream msm_vidc driver takes (src/v4l2shim, docs/streaming.md).
+# downstream msm_vidc driver takes (src/v4l2shim, docs/streaming.md). The same library has the decoder
+# (q1-hwdec <program> preloads it).
 # Usage (on the headset): [VKSRC=<src/vklayer-steamvr copy>] [V4L2SRC=<src/v4l2shim copy>] [RPSRC=<src/rpspectator copy>]
 #   [SCSRC=<src/q1screencast copy>] holo-steam-session.sh install
 #   VKSRC: build and install the Vulkan shim + dlopen redirect into /usr/local/lib/quest1-vk-steam
@@ -119,8 +120,16 @@ fi
 
 if [ -n "$V4L2SRC" ]; then
 	gcc -std=gnu11 -O2 -Wall -fPIC -shared -fvisibility=hidden -o /usr/local/lib/libquest1_v4l2.so \
-		"$V4L2SRC/quest1_v4l2.c" -lpthread
+		"$V4L2SRC/quest1_v4l2.c" "$V4L2SRC/quest1_vdec.c" -lpthread
 fi
+# Hardware video decoding for a program that uses FFmpeg's V4L2 decoders (h264_v4l2m2m, hevc_v4l2m2m): the same
+# library turns their calls into what the venus decoder takes (src/v4l2shim/quest1_vdec.c). For example
+#   q1-hwdec ffmpeg -c:v h264_v4l2m2m -i film.mp4 ...    q1-hwdec vlc --avcodec-codec=h264_v4l2m2m film.mp4
+cat > /usr/local/bin/q1-hwdec <<'EOF'
+#!/bin/sh
+exec env LD_PRELOAD=/usr/local/lib/libquest1_v4l2.so${LD_PRELOAD:+:$LD_PRELOAD} "$@"
+EOF
+chmod 755 /usr/local/bin/q1-hwdec
 if [ -n "$RPSRC" ]; then
 	gcc -std=gnu11 -O2 -Wall -fPIC -shared -fvisibility=hidden -o /usr/local/lib/libquest1_rpspectator.so \
 		"$RPSRC/quest1_rpspectator.c" -ldl

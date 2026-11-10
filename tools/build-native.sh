@@ -86,8 +86,10 @@ cc -fPIC -shared -fvisibility=hidden -Wl,-soname,libvulkan.so.1 -Wl,-z,nodelete 
 	-ldl -lpthread -lxcb -lxcb-shm
 cp $D/usr/local/lib/quest1-vk-steam/libvulkan.so.1 $D/usr/local/lib/quest1-vk/libvulkan.so.1
 cc -fPIC -shared -o $D/usr/local/lib/quest1-vk-steam/libquest1_vkredirect.so vklayer-steamvr/quest1_vkredirect.c -ldl
-# Remote Play hardware encoding: Steam's V4L2 encoder calls on msm_vidc (preloaded by steam-q1)
-cc -fPIC -shared -fvisibility=hidden -Wextra -o $D/usr/local/lib/libquest1_v4l2.so v4l2shim/quest1_v4l2.c -lpthread
+# Hardware video on msm_vidc behind the mainline V4L2 API: Steam's Remote Play encoder (preloaded by steam-q1) and
+# the decoder for FFmpeg's v4l2m2m decoders (q1-hwdec)
+cc -fPIC -shared -fvisibility=hidden -Wextra -o $D/usr/local/lib/libquest1_v4l2.so v4l2shim/quest1_v4l2.c \
+	v4l2shim/quest1_vdec.c -lpthread
 # Remote Play spectator: the PC's input, cursor and gamepads kept out of the headset (preloaded by steam-q1)
 cc -fPIC -shared -fvisibility=hidden -Wextra -o $D/usr/local/lib/libquest1_rpspectator.so rpspectator/quest1_rpspectator.c -ldl
 # Remote Play's capture: the ScreenCast portal backend for Steam's X screen (device/holo-steam-session.sh installs
