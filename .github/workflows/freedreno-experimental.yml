@@ -24,7 +24,7 @@ jobs:
             libxdamage-dev libxfixes-dev libxcb-glx0-dev libxcb-dri2-0-dev \
             libxcb-dri3-dev libxcb-present-dev libxcb-randr0-dev libxcb-sync-dev \
             libxcb-shm0-dev libxcb-xfixes0-dev \
-            libxshmfence-dev libxxf86vm-dev libelf-dev libzstd-dev zlib1g-dev
+            libxshmfence-dev libxxf86vm-dev libxrandr-dev libelf-dev libzstd-dev zlib1g-dev
       - name: Fetch pinned Mesa source
         run: |
           git init "$RUNNER_TEMP/mesa"
@@ -33,4 +33,11 @@ jobs:
           git -C "$RUNNER_TEMP/mesa" checkout --detach FETCH_HEAD
       - name: Build and stage native Freedreno
         run: sh tools/build-freedreno-experimental.sh "$RUNNER_TEMP/mesa" "$RUNNER_TEMP/mesa-build" "$RUNNER_TEMP/mesa-stage"
+      - name: Package experimental build
+        run: tar -C "$RUNNER_TEMP/mesa-stage" -czf "$RUNNER_TEMP/freedreno-aarch64-experimental.tar.gz" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: freedreno-aarch64-experimental
+          path: ${{ runner.temp }}/freedreno-aarch64-experimental.tar.gz
+          retention-days: 7
 
