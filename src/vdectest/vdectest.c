@@ -2,7 +2,10 @@
 // through V4L2, write the decoded NV12 frames (cropped) and report speed and latency.
 //
 //   vdectest [-d /dev/video32] [-c h264|hevc] -s WxH [-f nv12|ubwc] [-m primary|split] [-O display|decode] [-R]
-//            [-r fps] [-n frames] [-o out.nv12] stream.264
+//            [-g] [-r fps] [-n frames] [-o out.nv12] stream.264
+// -g: the frames go into gralloc buffers (AHardwareBuffers, through libhybris) instead of plain ION ones, as
+// Android's decoder does: the buffers the GPU can sample with no copy. Run it then with
+// LD_LIBRARY_PATH=/opt/hybris/lib LD_PRELOAD=/opt/hybris/lib/libbionictls.so.
 //
 // What the downstream driver wants (drivers/media/platform/msm/vidc, read 2026-11-07), unlike the mainline
 // stateful decoder API:
@@ -24,6 +27,7 @@
 // 127 fps (H.264) / 104 fps (HEVC) flat out; paced at 60 fps, 9.2 / 10.8 ms from QBUF to the decoded frame.
 // Only ioctls on the decoder node and ION allocations: nothing is written anywhere but the -o file.
 #define _GNU_SOURCE
+#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/videodev2.h>
@@ -138,6 +142,81 @@ static int ion_buf(size_t len, struct buf *b)
 	return 0;
 }
 
+// --- gralloc buffers (-g): AHardwareBuffer from Android's libnativewindow, loaded through libhybris
+struct ahb_desc {
+	uint32_t width, height, layers, format;
+	uint64_t usage;
+	uint32_t stride, rfu0;
+	uint64_t rfu1;
+};
+struct native_handle {
+	int version, num_fds, num_ints;
+	int data[];
+};
+#define AHB_FORMAT_Y8Cb8Cr8_420 0x23 // gralloc picks the layout: NV12 "venus" with the video encoder usage
+#define AHB_USAGE_CPU_READ_OFTEN 3ull
+#define AHB_USAGE_GPU_SAMPLED_IMAGE (1ull << 8)
+#define AHB_USAGE_VIDEO_ENCODE (1ull << 16)
+static int use_gralloc;
+static int (*ahb_allocate)(const struct ahb_desc *, void **);
+static void (*ahb_describe)(const void *, struct ahb_desc *);
+static void (*ahb_release)(void *);
+static const struct native_handle *(*ahb_handle)(const void *);
+static void *cahb[32];
+
+static int gralloc_init(void)
+{
+	void *hc = dlopen("libhybris-common.so.1", RTLD_NOW | RTLD_GLOBAL);
+	if (!hc)
+		hc = dlopen("/opt/hybris/lib/libhybris-common.so.1", RTLD_NOW | RTLD_GLOBAL);
+	void *(*adlopen)(const char *, int) = hc ? (void *(*)(const char *, int))dlsym(hc, "android_dlopen") : NULL;
+	void *(*adlsym)(void *, const char *) = hc ? (void *(*)(void *, const char *))dlsym(hc, "android_dlsym") : NULL;
+	void *nw = adlopen && adlsym ? adlopen("libnativewindow.so", RTLD_NOW) : NULL;
+	if (!nw) {
+		fprintf(stderr, "vdectest: no libhybris libnativewindow (%s)\n", hc ? "android_dlopen failed" : dlerror());
+		return -1;
+	}
+	*(void **)&ahb_allocate = adlsym(nw, "AHardwareBuffer_allocate");
+	*(void **)&ahb_describe = adlsym(nw, "AHardwareBuffer_describe");
+	*(void **)&ahb_release = adlsym(nw, "AHardwareBuffer_release");
+	*(void **)&ahb_handle = adlsym(nw, "AHardwareBuffer_getNativeHandle");
+	return ahb_allocate && ahb_describe && ahb_release && ahb_handle ? 0 : -1;
+}
+
+// a gralloc buffer for a w x h frame; its ION fd is the first of the native handle
+static int gralloc_buf(uint32_t w, uint32_t h, uint32_t i, size_t need, struct buf *b)
+{
+	struct ahb_desc d = {.width = w, .height = h, .layers = 1, .format = AHB_FORMAT_Y8Cb8Cr8_420,
+	                     .usage = AHB_USAGE_CPU_READ_OFTEN | AHB_USAGE_GPU_SAMPLED_IMAGE | AHB_USAGE_VIDEO_ENCODE};
+	int e = ahb_allocate(&d, &cahb[i]);
+	if (e || !cahb[i]) {
+		fprintf(stderr, "vdectest: AHardwareBuffer_allocate %ux%u: %d\n", w, h, e);
+		return -1;
+	}
+	const struct native_handle *nh = ahb_handle(cahb[i]);
+	off_t len = lseek(nh->data[0], 0, SEEK_END);
+	if (i == 0) {
+		ahb_describe(cahb[i], &d);
+		fprintf(stderr, "vdectest: gralloc buffer: %ux%u, stride %u, dma-buf of %lld bytes (the decoder wants %zu); handle",
+		        d.width, d.height, d.stride, (long long)len, need);
+		for (int k = 0; k < nh->num_fds + nh->num_ints && k < 24; k++)
+			fprintf(stderr, " %d", nh->data[k]);
+		fprintf(stderr, "\n");
+	}
+	if (len < (off_t)need) {
+		fprintf(stderr, "vdectest: gralloc buffer too small or of unknown size\n");
+		return -1;
+	}
+	b->fd = nh->data[0];
+	b->len = (size_t)len;
+	b->map = mmap(NULL, b->len, PROT_READ | PROT_WRITE, MAP_SHARED, b->fd, 0);
+	if (b->map == MAP_FAILED) {
+		fprintf(stderr, "vdectest: gralloc mmap: %s\n", strerror(errno));
+		return -1;
+	}
+	return 0;
+}
+
 static void ion_free(struct buf *b)
 {
 	if (b->map && b->map != MAP_FAILED)
@@ -237,7 +316,8 @@ static int cap_setup(uint32_t count)
 	for (uint32_t i = 0; i < ncbuf; i++) {
 		struct v4l2_plane pl[2] = {{0}};
 		for (uint32_t k = 0; k < cap_planes && k < 2; k++) {
-			if (ion_buf(f.fmt.pix_mp.plane_fmt[k].sizeimage, &cbuf[i][k]) < 0)
+			if (use_gralloc && k == 0 ? gralloc_buf(width, height, i, f.fmt.pix_mp.plane_fmt[k].sizeimage, &cbuf[i][k]) < 0
+			                          : ion_buf(f.fmt.pix_mp.plane_fmt[k].sizeimage, &cbuf[i][k]) < 0)
 				return -1;
 			pl[k].m.userptr = (unsigned long)cbuf[i][k].map;
 			pl[k].length = f.fmt.pix_mp.plane_fmt[k].sizeimage;
@@ -259,9 +339,16 @@ static void cap_teardown(void)
 	xioctl(VIDIOC_STREAMOFF, &t, "STREAMOFF capture");
 	struct v4l2_requestbuffers rb = {.count = 0, .type = t, .memory = V4L2_MEMORY_USERPTR};
 	xioctl(VIDIOC_REQBUFS, &rb, NULL);
-	for (uint32_t i = 0; i < ncbuf; i++)
+	for (uint32_t i = 0; i < ncbuf; i++) {
+		if (use_gralloc && cahb[i]) { // the fd is the buffer's own
+			munmap(cbuf[i][0].map, cbuf[i][0].len);
+			ahb_release(cahb[i]);
+			cahb[i] = NULL;
+			cbuf[i][0] = (struct buf){.fd = -1};
+		}
 		for (int k = 0; k < 2; k++)
 			ion_free(&cbuf[i][k]);
+	}
 	ncbuf = 0;
 }
 
@@ -281,7 +368,7 @@ static uint32_t min_capture_buffers(void)
 static void usage(void)
 {
 	fprintf(stderr, "usage: vdectest [-d dev] [-c h264|hevc] -s WxH [-f nv12|ubwc] [-m primary|split] "
-	                "[-O display|decode] [-R] [-r fps] [-n frames] [-o out.nv12] stream\n");
+	                "[-O display|decode] [-R] [-g] [-r fps] [-n frames] [-o out.nv12] stream\n");
 	exit(2);
 }
 
@@ -291,7 +378,7 @@ int main(int argc, char **argv)
 	int hevc = 0, ubwc = 0, decode_order = 0, realtime = 0, maxframes = 0, opt;
 	double fps = 0; // 0: feed as fast as the decoder takes it; else one access unit every 1/fps (a live stream)
 	uint32_t w = 0, h = 0;
-	while ((opt = getopt(argc, argv, "d:c:s:f:m:O:Rr:n:o:")) != -1) {
+	while ((opt = getopt(argc, argv, "d:c:s:f:m:O:Rgr:n:o:")) != -1) {
 		switch (opt) {
 		case 'd': devpath = optarg; break;
 		case 'c': hevc = !strcmp(optarg, "hevc"); break;
@@ -300,6 +387,7 @@ int main(int argc, char **argv)
 		case 'm': mode = optarg; break;
 		case 'O': decode_order = !strcmp(optarg, "decode"); break;
 		case 'R': realtime = 1; break;
+		case 'g': use_gralloc = 1; break;
 		case 'r': fps = atof(optarg); break;
 		case 'n': maxframes = atoi(optarg); break;
 		case 'o': outpath = optarg; break;
@@ -308,6 +396,8 @@ int main(int argc, char **argv)
 	}
 	if (optind != argc - 1 || !w || !h)
 		usage();
+	if (use_gralloc && gralloc_init() < 0)
+		return 1;
 	if (ubwc && outpath)
 		fprintf(stderr, "vdectest: UBWC frames are written as they are (tiled, compressed): no comparison possible\n");
 

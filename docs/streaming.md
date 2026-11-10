@@ -162,6 +162,27 @@ the same VLC plays in software (VLC ignores the name then), but a 10-bit stream 
 
 `omxprobe.c` can run the vendor decoder the same way as it did the encoder, to compare firmware logs.
 
+### Decoded frames to the GPU with no copy: proven (2026-11-10)
+
+The two halves of the path a video frame takes from venus to the compositor, each checked on the headset:
+- **venus decodes straight into gralloc buffers** (`vdectest -g`): AHardwareBuffers from Android's libnativewindow
+  through libhybris, format `Y8Cb8Cr8_420` (0x23) with the usages GPU_SAMPLED_IMAGE + VIDEO_ENCODE, which Qualcomm's
+  gralloc lays out as NV12 "venus" (handle format 0x102, stride = width aligned to 128, scanlines = height aligned
+  to 32, 3153920 bytes at 1920x1088: exactly the size and layout msm_vidc asks for on CAPTURE). Their ION fd (the
+  native handle's first) goes to the driver as the USERPTR buffer, as Android's decoder does. 120 frames of
+  1080p H.264: bit-exact against ffmpeg.
+- **the Adreno blob samples such a buffer** (`vkahbtest`): imported with
+  VK_ANDROID_external_memory_android_hardware_buffer as an external-format image (external format 0x1fa, no Vulkan
+  format) with a sampler YCbCr conversion, read by a compute shader. Four flat colours written by the CPU come out
+  exact over the whole 1920x1088 picture. The driver suggests BT.601 narrow range for the conversion whatever is in
+  the buffer: the client sets the model and range of the stream (BT.709 for HD). Linear filtering is offered. The
+  image is taken over with a barrier from VK_QUEUE_FAMILY_FOREIGN_EXT so its content is kept.
+
+So a stream client of ours (or a layer under Valve's) can show decoded frames with no CPU copy and no colour
+conversion on the CPU: decode into AHBs, import each once, sample it in the pass that draws the overlay or the
+layer. What is left is the consumer: Valve's `streaming_client` wants dma-buf import with modifiers in Vulkan
+(the layer would have to turn that into AHB imports), or our own client on the same pieces.
+
 ## 1. 2D streaming (Steam Remote Play / Steam Link)
 
 How the Frame does it: Steam client -> `streaming_client` (arm64) with V4L2 decode (`CV4L2Accel`, `/dev/video-dec%d`), output through DRM/EGL/Vulkan, an FFmpeg software
