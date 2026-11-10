@@ -153,6 +153,13 @@ Nothing picks these decoders by itself: libavcodec's default for H.264 is its so
 fallback from one decoder to another, so making the hardware one the default for every program would break
 10-bit and other streams venus refuses. Chromium (Arch build) decodes with VA-API only.
 
+VLC is the exception (user, 2026-11-10: hardware with a software fallback): its launcher is `q1-vlc`
+(`/usr/local/share/applications/vlc.desktop`), which looks at the file VLC is opened with (ffprobe) and adds
+`--avcodec-codec=h264_v4l2m2m` or `hevc_v4l2m2m` and the library when the video is 8-bit progressive H.264 or
+HEVC up to 4096x2304, and starts plain VLC otherwise. Checked: 8-bit H.264 (a `file://` URL with spaces) and HEVC
+on venus, 10-bit H.264 and VP9 in software. The choice is made once, at the start: another codec opened later in
+the same VLC plays in software (VLC ignores the name then), but a 10-bit stream of the same codec would not play.
+
 `omxprobe.c` can run the vendor decoder the same way as it did the encoder, to compare firmware logs.
 
 ## 1. 2D streaming (Steam Remote Play / Steam Link)

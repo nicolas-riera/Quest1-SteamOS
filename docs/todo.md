@@ -151,8 +151,8 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 
 - Hardware video decoding for the whole system (user, 2026-11-09: "décodage vidéo matériel system wide, dont
   Chromium"). The venus decoder now answers FFmpeg's `*_v4l2m2m` decoders (`q1-hwdec`, docs/streaming.md "The
-  decoder"), bit-exact. Left: who uses it by default. VLC's launcher with `--avcodec-codec=h264_v4l2m2m` (H.264
-  only, and a stream venus refuses then does not play: ask the user); GStreamer's v4l2 decoders (they fall back by
+  decoder"), bit-exact, and VLC's launcher picks it for the files venus decodes. Left: the other programs.
+  GStreamer's v4l2 decoders (they fall back by
   themselves, but set CAPTURE up after SOURCE_CHANGE: the library must start the firmware session itself first);
   Chromium decodes with VA-API only (Arch's build has no V4L2 decoder): a VA-API driver on top, or another build.
   The user's target (2026-11-10): the stream at 72 fps next to the dashboard and overlays, so everything on the

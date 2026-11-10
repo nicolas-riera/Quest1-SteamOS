@@ -130,6 +130,37 @@ cat > /usr/local/bin/q1-hwdec <<'EOF'
 exec env LD_PRELOAD=/usr/local/lib/libquest1_v4l2.so${LD_PRELOAD:+:$LD_PRELOAD} "$@"
 EOF
 chmod 755 /usr/local/bin/q1-hwdec
+# VLC's launcher: the hardware decoder when the file it is opened with is one venus decodes (8-bit progressive
+# H.264 or HEVC), plain VLC otherwise. VLC's --avcodec-codec names one decoder and libavcodec does not fall back
+# from one decoder to another, so the choice is made here, before VLC starts. A stream of another codec played later
+# in the same VLC is decoded in software (VLC ignores the name then).
+cat > /usr/local/bin/q1-vlc <<'EOF'
+#!/bin/bash
+hw=
+if [ -w /dev/video32 ] && [ -f /usr/local/lib/libquest1_v4l2.so ]; then
+	for a in "$@"; do
+		case $a in -*) continue ;; esac
+		f=${a#file://}
+		[ "$f" != "$a" ] && printf -v f '%b' "${f//%/\\x}" # a file URL: percent-decoded
+		[ -f "$f" ] || continue
+		IFS=, read -r codec w h pix field < <(ffprobe -v error -select_streams v:0 \
+			-show_entries stream=codec_name,width,height,pix_fmt,field_order -of csv=p=0 "$f" 2>/dev/null)
+		case $pix in yuv420p | yuvj420p) ;; *) break ;; esac
+		case $field in progressive | unknown | "") ;; *) break ;; esac
+		[ "${w:-0}" -le 4096 ] && [ "${h:-0}" -le 2304 ] || break
+		case $codec in h264 | hevc) hw=${codec}_v4l2m2m ;; esac
+		break
+	done
+fi
+[ -n "$hw" ] && exec /usr/local/bin/q1-hwdec /usr/bin/vlc --avcodec-codec=$hw "$@"
+exec /usr/bin/vlc "$@"
+EOF
+chmod 755 /usr/local/bin/q1-vlc
+if [ -f /usr/share/applications/vlc.desktop ]; then
+	mkdir -p /usr/local/share/applications
+	sed 's|^Exec=/usr/bin/vlc|Exec=/usr/local/bin/q1-vlc|' /usr/share/applications/vlc.desktop \
+		> /usr/local/share/applications/vlc.desktop
+fi
 if [ -n "$RPSRC" ]; then
 	gcc -std=gnu11 -O2 -Wall -fPIC -shared -fvisibility=hidden -o /usr/local/lib/libquest1_rpspectator.so \
 		"$RPSRC/quest1_rpspectator.c" -ldl
