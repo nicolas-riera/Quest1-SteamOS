@@ -23,6 +23,7 @@ jobs:
             libdrm-dev libexpat1-dev libx11-dev libx11-xcb-dev libxext-dev \
             libxdamage-dev libxfixes-dev libxcb-glx0-dev libxcb-dri2-0-dev \
             libxcb-dri3-dev libxcb-present-dev libxcb-randr0-dev libxcb-sync-dev \
+            libxcb-shm0-dev libxcb-xfixes0-dev \
             libxshmfence-dev libxxf86vm-dev libelf-dev libzstd-dev zlib1g-dev
       - name: Fetch pinned Mesa source
         run: |
@@ -32,3 +33,4 @@ jobs:
           git -C "$RUNNER_TEMP/mesa" checkout --detach FETCH_HEAD
       - name: Build and stage native Freedreno
         run: sh tools/build-freedreno-experimental.sh "$RUNNER_TEMP/mesa" "$RUNNER_TEMP/mesa-build" "$RUNNER_TEMP/mesa-stage"
+
