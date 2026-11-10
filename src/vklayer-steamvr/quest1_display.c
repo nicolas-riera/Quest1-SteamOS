@@ -1082,6 +1082,9 @@ static void qd_record_present_id(struct qd_swapchain *sc, uint64_t frame, uint64
 	sc->present_ids[frame % 64].id = id;
 }
 
+//! Frame period of vrcompositor while the headset is not worn: 8 refresh periods, as Monado's MDP_IDLE_PERIOD_NS.
+#define QD_IDLE_PERIOD_NS (8ull * 1000000000ull / 72)
+
 static VKAPI_ATTR VkResult VKAPI_CALL qd_QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *pi)
 {
 	qd_trace("present");
@@ -1103,6 +1106,16 @@ static VKAPI_ATTR VkResult VKAPI_CALL qd_QueuePresentKHR(VkQueue queue, const Vk
 			r = ((PFN_vkQueuePresentKHR)d->gdpa(d->handle, "vkQueuePresentKHR"))(queue, &one);
 		} else {
 			uint32_t idx = pi->pImageIndices[s];
+			// The headset is not worn (Monado made /tmp/quest1-panels-off: the panels are off, no frame is shown):
+			// vrcompositor is held here to about 9 frames a second, the rate Monado gives OpenXR apps then, instead
+			// of rendering 72 a second for nobody (half a core and the GPU's work, measured 2026-11-10).
+			static uint64_t idle_last; // one presenting thread
+			if (access("/tmp/quest1-panels-off", F_OK) == 0) {
+				uint64_t n = now_ns();
+				if (n - idle_last < QD_IDLE_PERIOD_NS)
+					usleep((useconds_t)((QD_IDLE_PERIOD_NS - (n - idle_last)) / 1000));
+				idle_last = now_ns();
+			}
 			uint64_t t_entry = now_ns(), t_gpu;
 			// wait for rendering, hand the image over in TRANSFER_SRC, then tell the driver
 			VkPipelineStageFlags stages[16];

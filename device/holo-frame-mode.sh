@@ -230,18 +230,21 @@ mkdir -p /usr/local/lib/holo
 cat > /usr/local/lib/holo/vrdashboard-run <<'EOW'
 #!/bin/sh
 /usr/local/bin/steamvr-q1 vrdashboard &
-seen=
+alive() { [ -n "$1" ] && [ "$(cat /proc/$1/comm 2>/dev/null)" = "$2" ]; }
+seen=; d=; w=
 while :; do
 	sleep 5
-	d=$(pgrep -u steamos -x vrdashboard | head -1)
+	# the two are looked up again only once the one found before is gone: a pgrep is 50 ms of CPU (600 tasks)
+	alive "$d" vrdashboard || d=$(pgrep -u steamos -x vrdashboard | head -1)
+	[ -n "$d" ] && { alive "$w" vrwebhelper || w=$(pgrep -u steamos -x vrwebhelper | head -1); }
 	if [ -z "$d" ]; then
 		seen=
-	elif pgrep -u steamos -x vrwebhelper >/dev/null; then
+	elif [ -n "$w" ]; then
 		seen=$d
 	elif [ "$seen" = "$d" ]; then
 		echo "vrdashboard-run: the dashboard's vrwebhelper is gone: ending vrdashboard $d (vrserver starts a new one)"
 		kill $d; sleep 3; kill -9 $d 2>/dev/null
-		seen=
+		seen=; d=
 		(sleep 30; LD_LIBRARY_PATH=/opt/steamvr/bin/linuxarm64 timeout 20 /usr/local/bin/vrdash show) &
 	fi
 done

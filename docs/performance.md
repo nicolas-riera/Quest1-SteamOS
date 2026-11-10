@@ -3,6 +3,26 @@
 Where the frame time goes and what was tried. Current numbers and the direct scanout path:
 docs/direct-scanout.md; Steam's UI: docs/steam-gpu.md.
 
+## 2026-11-10: headset not worn: vrcompositor at 9 frames a second instead of 72
+
+With the headset on the table (panels off) vrcompositor went on rendering 72 frames a second that Monado never
+showed ("frames received 72.0/s ... never shown"): 32-47 % of a core for its render thread, the GPU's work on top,
+vrserver at 19-24 %, for nobody. The compat layer now holds vrcompositor's present (`qd_QueuePresentKHR`) so
+that presents are 8 refresh periods apart while Monado's `/tmp/quest1-panels-off` exists (not worn, or standby):
+the rate Monado already gave OpenXR apps then (`MDP_IDLE_PERIOD_NS`).
+
+Measured without wearing it (`QUEST1_IGNORE_PROX=1`, worn or not with `/run/quest1-standby`): not worn 9.0 fps,
+vrcompositor out of the five busiest processes, vrserver 13 %, the GPU at 257 MHz and 0 % busy; worn again 71.8 fps
+at 13.6 ms a frame as before, one late commit at the moment the panels come on, none after; three round trips, no
+crash. Meta's tracking stays the big idle cost (trackingservice 70-110 % of a core worn or not: docs/todo.md,
+"tracking stays off until the headset is worn").
+
+Also: the dashboard watcher (`vrdashboard-run`) ran two `pgrep` every 5 s (50 ms of CPU each with 600 tasks); it
+now looks the two processes up again only when the one it found is gone.
+
+Looked at and dropped: the idea that Steam and the 2D apps crawl on the little cores. New and bursty tasks do go
+to the big cores (a Python burst test ran on CPUs 4-7 every time), and steamwebhelper is already pinned to 2-6.
+
 ## 2026-11-09 (afternoon): image jumps in bursts: the panels run at 71.82 Hz, not 72
 
 The user, worn: no real trembling but image jumps, sometimes several in a row. Monado now counts, per 2 s, the frames
