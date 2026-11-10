@@ -166,6 +166,10 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 
 ## Hardware
 
+- Fan and heat (user, 2026-11-10): the fan runs but its speed does not seem to change, and the headset gets really
+  hot after hours of use. Check what drives the fan here (Android's thermal engine and its fan control are not
+  running on the native system?), read the temperatures under load (CPU, GPU, battery, skin), and make the fan
+  follow them as Android does; check whether the kernel's thermal mitigation throttles the CPU/GPU meanwhile.
 - Bluetooth: keyboard/mouse, audio (A2DP), Steam's and Plasma's Bluetooth settings, what Plasma's toggle does
   to the chip's power, a faster patch download (~11 s), the UART's power cost (in-band sleep).
 - Power LED colour controlled by the user (low priority).
