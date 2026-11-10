@@ -116,6 +116,19 @@ asks for 30 steady, no more, for the spectator (more is for the VR/2D streaming 
 Layers per frame now, VR view to encoder: GPU pass + buffer copy (Monado), memcpy into `/dev/shm/quest1-spectator`,
 memcpy into a PipeWire buffer (q1screencast), Steam's copy into the V4L2 buffer, venus.
 
+### The encoder's frame rate: 60 at most (2026-11-10)
+
+Steam feeds the encoder far more frames than the picture has: the PC asks for its monitor's rate (165 Hz) and
+Steam's limiter only steps the target down, by whole divisors, when a stage is slow (126 fps on average in one
+session, 55 <-> 82 fps back and forth in another). Each frame costs two 1.4 MB copies and an encode.
+`quest1_v4l2` now gives the bitstreams out no closer than 1/60 s (`ENC_MIN_PERIOD_NS`): the encode stage then takes
+that long and Steam feeds it at that rate, with no delay added when the frames come slower. Measured live in a
+720p HEVC session with the PC (the delay set from a file, 20 s each): Steam's process 56 % of a core with no cap
+(about 100-110 frames a second, from venus's interrupt count), 44 % at 60, 35 % at about 55 (every bitstream held
+14 ms), 32 % at about 40 (held 20 ms). Steam logs "Slow framerate ... (encode)" once a second and does nothing else:
+"V4L2: Hardware encoding is too slow, disabling" did not come in 6 minutes of it. The user found the picture on the
+PC as good at 60. The encode is so not the main cost of the stream: the capture and Steam's composition are the rest.
+
 ### The decoder: FFmpeg's v4l2m2m decoders on venus (2026-11-10)
 
 `src/v4l2shim/quest1_vdec.c`, in the same `libquest1_v4l2.so` behind the same hooks (ioctl, mmap, close), is the

@@ -123,7 +123,29 @@ struct enc {
 	bool out_on_pending; // STREAMON OUTPUT waits for the first raw frame
 	uint64_t frames, keyframes, bytes;
 	uint32_t refused[8];
+	uint64_t t_ret; // when the last bitstream was given to Steam
 };
+
+// Steam asks for the PC's monitor rate (165 Hz) and feeds the encoder 100 frames a second and more, of a picture that
+// has 36 to 72. Its limiter only watches how long a stage takes, so the bitstreams are given out no closer than
+// this: the encoder's stage then takes that long and Steam feeds it at that rate (2026-11-10: 56 % of a core for
+// Steam's process down to 44 %, the PC's picture as smooth; Steam logs "Slow framerate ... (encode)", no more).
+#define ENC_MIN_PERIOD_NS (1000000000ull / 60)
+
+static uint64_t now_ns(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+static void pace(struct enc *e)
+{
+	uint64_t n = now_ns();
+	if (n - e->t_ret < ENC_MIN_PERIOD_NS)
+		usleep((useconds_t)((ENC_MIN_PERIOD_NS - (n - e->t_ret)) / 1000));
+	e->t_ret = now_ns();
+}
 
 static struct enc *encs[MAXDEV];
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
@@ -656,6 +678,7 @@ static int dqbuf(struct enc *e, struct v4l2_buffer *b)
 		}
 		e->frames++;
 		e->bytes += n;
+		pace(e);
 	} else {
 		n = 0;
 	}

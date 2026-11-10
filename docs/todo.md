@@ -158,14 +158,6 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   The user's target (2026-11-10): the stream at 72 fps next to the dashboard and overlays, so everything on the
   hardware path and no CPU copy of the frames.
 
-- Remote Play spectator (headset to PC): Steam feeds the encoder far more frames than the VR view has. The PC asks
-  for its monitor's rate (165 Hz) and Steam's limiter steps the target down by whole divisors only when a stage is
-  slow: 126 fps on average in the session of 2026-11-10 16:31, and 55 <-> 82 fps back and forth on 2026-11-10 00:54
-  (encode "slow" at 13-23 ms because of that; the view itself has 36 frames a second). That is the CPU the stream
-  costs (two 1.4 MB copies and an encode per frame). To try with a real session from the PC (it cannot be started
-  from the headset): hold each bitstream in quest1_v4l2 about 14 ms so the limiter settles at 30-41 fps; watch for
-  "V4L2: Hardware encoding is too slow, disabling" (seen once after seconds of 18-31 ms encodes at 41 fps), which
-  would be worse (x264). Or the client's "limit framerate" on the PC.
 - Steam Link from a PC: `/dev/video-dec0` on the decoder of quest1_v4l2 plus dma-buf export, tested with a real PC
   stream (docs/streaming.md, plan step 2); the decoded frames to the compositor with no copy; the stream app's GL can't
   share images with the compositor (libhybris GL lacks GL_EXT_memory_object_fd / semaphore_fd); the theater mode
