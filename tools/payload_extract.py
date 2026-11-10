@@ -55,6 +55,7 @@ def open_payload(path):
 
 def main():
     src, outdir, want = sys.argv[1], sys.argv[2], set(sys.argv[3:])
+    found = set()
     f, base = open_payload(src)
     f.seek(base)
     magic, ver, msize = struct.unpack(">4sQQ", f.read(20))
@@ -72,6 +73,7 @@ def main():
         h = newinfo.get(2, [b""])[0]
         if want and name not in want:
             print("skip %-14s %10d" % (name, size)); continue
+        found.add(name)
         ops = [pb(o) for o in part.get(8, [])]
         with open(os.path.join(outdir, name + ".img"), "wb") as o:
             o.truncate(size)
@@ -90,8 +92,20 @@ def main():
                         o.seek(e[1][0] * bs); o.write(b"\0" * (e[2][0] * bs))
                 else:
                     sys.exit("%s: unsupported op %d (delta OTA?)" % (name, t))
-        hh = hashlib.sha256(open(os.path.join(outdir, name + ".img"), "rb").read()).digest()
-        print("%-14s %10d %s" % (name, size, "OK" if hh == h else "HASH MISMATCH"))
+        # The system partition can be several GiB. Hash it incrementally and fail
+        # closed: prepare.py calls this function directly and must not stage a
+        # corrupt image after merely printing a warning.
+        digest = hashlib.sha256()
+        with open(os.path.join(outdir, name + ".img"), "rb") as image:
+            for chunk in iter(lambda: image.read(1024 * 1024), b""):
+                digest.update(chunk)
+        if not h or digest.digest() != h:
+            sys.exit("%s: HASH MISMATCH" % name)
+        print("%-14s %10d OK" % (name, size))
+
+    missing = want - found
+    if missing:
+        sys.exit("partitions not found: %s" % ", ".join(sorted(missing)))
 
 
 if __name__ == "__main__":
