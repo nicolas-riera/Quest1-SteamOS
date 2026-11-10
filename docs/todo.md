@@ -17,9 +17,6 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   Meta's engine refuses our client (not pursued).
 - Re-projection: confirm worn that nothing trembles with the head still and nothing stretches as it turns (every
   frame warped, each row at its own scan-out time, 2026-11-08, docs/direct-scanout.md).
-- "View in theater mode" (dashboard) crashes vrcompositor (2026-11-08 13:00:37, minidump in /tmp/dumps): right after
-  the compat layer logged a failed graphics pipeline (2 stages, R8G8B8A8_SRGB colour attachment, vertex stride 20,
-  1 sample). SteamVR restarts by itself.
 - Brightness: confirm in the headset that both eyes match at low brightness (display-engine dimming, panels'
   calibration, 2026-11-08).
 - Audio: confirm by ear that the crackle and the click at each Steam start are gone (the output now never closes,
@@ -158,10 +155,14 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   The user's target (2026-11-10): the stream at 72 fps next to the dashboard and overlays, so everything on the
   hardware path and no CPU copy of the frames.
 
-- Steam Link from a PC: `/dev/video-dec0` on the decoder of quest1_v4l2 plus dma-buf export, tested with a real PC
-  stream (docs/streaming.md, plan step 2); the decoded frames to the compositor with no copy; the stream app's GL can't
-  share images with the compositor (libhybris GL lacks GL_EXT_memory_object_fd / semaphore_fd); the theater mode
-  crash (user's lead: the floor reflections); then VR (vrlink).
+- Steam Link from a PC (docs/streaming.md, section 1, 2026-11-10): the client starts on the GPU (ANGLE), sound and
+  theater mode work, the picture is black: no video codec is offered. Next: (1) a `libdrm.so.2` for the client only
+  that shows one display (the client wants a DRM device before it tries the V4L2 decoder); (2) `/dev/video-dec0`
+  (not created by the scripts yet) and what CV4L2Accel asks of the decoder (dma-buf CAPTURE buffers); (3) the
+  frames into ANGLE with no copy (dma-buf import turned into AHardwareBuffer imports in the compat layer);
+  (4) the stream's sound stutters; the Vulkan/OpenGL semaphore is refused (glFinish fallback); (5) the user's
+  list: 72 fps, microphone, gamepads, the PC's overlays, the headset's dashboard and not the PC's SteamVR one;
+  then VR (vrlink).
 - Reference for making Steam Link accept a Quest 1 (device identity, etc.):
   github.com/MisterAnderson91/quest1-steamlink-patcher (it patches Valve's Steam Link VR APK; we use it as a guide
   only, for SteamOS's native streaming, user 2026-11-09).

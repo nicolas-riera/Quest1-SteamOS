@@ -89,7 +89,10 @@ cc -fPIC -shared -o $D/usr/local/lib/quest1-vk-steam/libquest1_vkredirect.so vkl
 # Hardware video on msm_vidc behind the mainline V4L2 API: Steam's Remote Play encoder (preloaded by steam-q1) and
 # the decoder for FFmpeg's v4l2m2m decoders (q1-hwdec)
 cc -fPIC -shared -fvisibility=hidden -Wextra -o $D/usr/local/lib/libquest1_v4l2.so v4l2shim/quest1_v4l2.c \
-	v4l2shim/quest1_vdec.c -lpthread
+	v4l2shim/quest1_vdec.c v4l2shim/quest1_streamclient.c -lpthread
+# Steam's stream client on ANGLE: its libEGL.so.1 and libGL.so.1 (device/holo-steam-session.sh links them into
+# /usr/local/lib/quest1-streamclient)
+cc -fPIC -shared -fvisibility=hidden -Wextra -o $D/usr/local/lib/libquest1_angle_egl.so v4l2shim/quest1_angle_egl.c -ldl
 # Remote Play spectator: the PC's input, cursor and gamepads kept out of the headset (preloaded by steam-q1)
 cc -fPIC -shared -fvisibility=hidden -Wextra -o $D/usr/local/lib/libquest1_rpspectator.so rpspectator/quest1_rpspectator.c -ldl
 # Remote Play's capture: the ScreenCast portal backend for Steam's X screen (device/holo-steam-session.sh installs

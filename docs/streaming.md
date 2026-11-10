@@ -225,6 +225,50 @@ Here today (from `/root/stream-crash-20261101`, `-20261102` and the live `stream
 - Blockers, in order: (a) sharing the image with the compositor (GL memory objects missing; Vulkan has opaque fd external memory but no dma-buf or modifiers);
   (b) the V4L2 decoder node and msm_vidc quirks; (c) the crash in the SteamVR tree.
 
+### 2026-11-10: the client starts, on the GPU; sound and theater mode work; the picture is still black
+
+Tested with a real stream from the PC (a 2D game, 1920x1080). How to look at it: the client writes its own log to
+`/tmp/streaming_client.log` (the run before in `.log.last`), the PC's Steam logs what the client tells it in
+`logs/streaming_log.txt` ("CLIENT:" lines), and the client can be started by hand with Steam's environment and its
+command line (`/proc/<pid>/cmdline`, which holds the account's id: never in the repo) under gdb or strace: it goes
+as far as its renderer and the shared texture without a session.
+
+- **Why it closed at once**: SDL's OpenVR video driver makes a desktop OpenGL context through the system's EGL
+  (libEGL.so.1 is linked into libSDL3: SDL's library hints do not apply), so Mesa's llvmpipe; vrclient then shares
+  the overlay's texture with vrcompositor through `GL_EXT_memory_object_fd` and stops on an ASSERT
+  (`sharedresource_linux.cpp:208`, SIGTRAP) when the functions are not there. The `MESA_EXTENSION_OVERRIDE` of
+  steam.service hides them on purpose (the webhelper then copies through the CPU), and llvmpipe could not import the
+  Adreno's memory anyway.
+- **Fix** (`src/v4l2shim/quest1_streamclient.c`, `quest1_angle_egl.c`): Steam ships ANGLE next to the client (OpenGL
+  ES on Vulkan), and on the Adreno's Vulkan it has `GL_EXT_memory_object_fd` and `GL_EXT_semaphore_fd`. The client
+  starts itself again once with `/usr/local/lib/quest1-streamclient` first in its library path; the `libEGL.so.1`
+  and `libGL.so.1` there hand everything to ANGLE, turn the desktop context into an OpenGL ES 3.1 one and add the
+  three desktop-only things SDL's driver and vrclient use (`glCheckNamedFramebufferStatus`, an unsized depth
+  renderbuffer, the extension functions asked through `glXGetProcAddress`). vrclient is loaded so that it sees its
+  own libGL/libEGL first, so a preloaded library does not reach it: hence the library path. Result: "Created
+  opengles2 renderer on openvr", "Created remote GL texture ... 1920 x 1080", "Created remote Vulkan image": the
+  overlay's picture is shared with the compositor on the GPU, with no copy.
+- The semaphore between Vulkan and OpenGL is refused ("Failed to get cross-process semaphore FD -1000072003",
+  VK_ERROR_INVALID_EXTERNAL_HANDLE): vrclient falls back to `glFinish()`. To look at.
+- Mesa's Zink (OpenGL on Vulkan) was tried first: it reaches the blob and fails to make its screen with no message
+  (the driver has Vulkan 1.1.128, no `VK_KHR_imageless_framebuffer`, no `logicOp`). Not pursued.
+- **Why the picture is black**: "WARNING: No supported video codec, will not stream video" in the client's log, and
+  "Allowed Codecs:" empty on the PC (which then encodes x264 for nobody). This arm64 client has no software
+  decoder. From its disassembly (read only): a codec is supported when (1) its DRM object has a device: libdrm's
+  `drmGetDevices2` gives a device with a primary node, `open` works, `drmModeGetResources` gives at least one CRTC
+  and the client finds a connector and mode on it (0x389900, 0x389690); `/dev/dri` is empty here (the Android
+  kernel's display is not DRM); and (2) a V4L2 device among `/dev/video-dec%d` then `/dev/video%d` answers
+  `VIDIOC_QUERYCAP` with `V4L2_CAP_VIDEO_M2M_MPLANE | V4L2_CAP_STREAMING` and lists H264 or HEVC in `VIDIOC_ENUM_FMT`
+  on the OUTPUT queue (0x420350). The client never got to (2): no video device was opened.
+- The sound of the stream stutters (user): not looked at yet; the client could not raise its threads' priority
+  ("setpriority() failed").
+- Remote Play's encoder side is not touched by any of this.
+
+Next, in order: a `libdrm.so.2` for the client only (same directory) that shows one display, so that the decoder
+is tried; then what `CV4L2Accel` asks of `/dev/video-dec0` (dma-buf CAPTURE buffers); then the frames: ANGLE's
+`EGL_EXT_image_dma_buf_import` needs `VK_EXT_external_memory_dma_buf` and modifiers, which the compat layer can turn
+into AHardwareBuffer imports (proven in section 0).
+
 Plan (hardware decode only: software decode is not an option, user decision 2026-11-07):
 1. ~~Standalone V4L2 test on venus~~ **done 2026-11-07** (`src/vdectest`, `run-tests.sh`): bit-exact, 9-11 ms per 1080p60 frame (above).
 2. **`/dev/video-dec0` for Steam** (1-3 days): the Frame's own node name (`steam-video-codec-setup.service` makes it), then see how

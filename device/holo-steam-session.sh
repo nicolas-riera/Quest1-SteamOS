@@ -120,7 +120,16 @@ fi
 
 if [ -n "$V4L2SRC" ]; then
 	gcc -std=gnu11 -O2 -Wall -fPIC -shared -fvisibility=hidden -o /usr/local/lib/libquest1_v4l2.so \
-		"$V4L2SRC/quest1_v4l2.c" "$V4L2SRC/quest1_vdec.c" -lpthread
+		"$V4L2SRC/quest1_v4l2.c" "$V4L2SRC/quest1_vdec.c" "$V4L2SRC/quest1_streamclient.c" -lpthread
+	gcc -std=gnu11 -O2 -Wall -fPIC -shared -fvisibility=hidden -o /usr/local/lib/libquest1_angle_egl.so \
+		"$V4L2SRC/quest1_angle_egl.c" -ldl
+fi
+# Steam's stream client (Steam Link) draws with ANGLE, on the GPU: these are its libEGL.so.1 and libGL.so.1, in a
+# directory only that process has in its library path (src/v4l2shim/quest1_streamclient.c)
+if [ -f /usr/local/lib/libquest1_angle_egl.so ]; then
+	mkdir -p /usr/local/lib/quest1-streamclient
+	ln -sfn ../libquest1_angle_egl.so /usr/local/lib/quest1-streamclient/libEGL.so.1
+	ln -sfn ../libquest1_angle_egl.so /usr/local/lib/quest1-streamclient/libGL.so.1
 fi
 # Hardware video decoding for a program that uses FFmpeg's V4L2 decoders (h264_v4l2m2m, hevc_v4l2m2m): the same
 # library turns their calls into what the venus decoder takes (src/v4l2shim/quest1_vdec.c). For example
