@@ -178,6 +178,22 @@ The two halves of the path a video frame takes from venus to the compositor, eac
   the buffer: the client sets the model and range of the stream (BT.709 for HD). Linear filtering is offered. The
   image is taken over with a barrier from VK_QUEUE_FAMILY_FOREIGN_EXT so its content is kept.
 
+**At 72 frames a second next to the compositor** (2026-11-10, panels on with `QUEST1_IGNORE_PROX=1`, SteamVR with
+the dashboard at 71.8 fps, `vdectest -g -R -r 72`: a live stream paced at 72 fps into gralloc buffers, 15-40 Mbit/s
+test pattern, no B-frames):
+
+| stream | decoded | latency QBUF to frame | vrcompositor meanwhile | Monado late |
+|---|---|---|---|---|
+| H.264 1920x1080 | 720/720, 72.0 fps | 11.5 ms | 71.9 fps, 13.5 ms a frame | 0 |
+| HEVC 1920x1080 | 720/720, 72.0 fps | 8.6 ms | 71.7 fps | 0 |
+| H.264 2880x1600 (both panels) | 360/360, 72.0 fps | 16.9 ms | 71.8 fps | 0 |
+| HEVC 2880x1600 (both panels) | 360/360, 72.0 fps | 14.2 ms | 71.6 fps | 0 |
+
+The test program took 13-15 % of a core (it copies each packet into the decoder's buffer; the frames are not
+touched). So venus holds the VR stream at the panels' size and rate (user's requirement, 2026-11-10) while the
+compositor keeps its rate; at that size the decode takes about one refresh period (13.9 ms), HEVC a little less.
+Not measured yet: real game content at PC VR bitrates (50-100 Mbit/s), and the GPU pass that draws the frames.
+
 So a stream client of ours (or a layer under Valve's) can show decoded frames with no CPU copy and no colour
 conversion on the CPU: decode into AHBs, import each once, sample it in the pass that draws the overlay or the
 layer. What is left is the consumer: Valve's `streaming_client` wants dma-buf import with modifiers in Vulkan
