@@ -617,12 +617,15 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateSamplerYcbcrConversionKHR(VkDevice d
 }
 
 //! A view of one of our NV12 images: on the external format, as a whole (color aspect).
+//! Any other view goes on to direct scanout's own vkCreateImageView when it is on (quest1_scanout.c: the twin views
+//! of the two panel halves, which vrcompositor renders into; this intercept is found first, and without them every
+//! frame on the panels was black, 2026-11-11).
 static VKAPI_ATTR VkResult VKAPI_CALL CreateImageView(VkDevice device, const VkImageViewCreateInfo *ci,
                                                      const VkAllocationCallbacks *alloc, VkImageView *out)
 {
 	PFN_vkCreateImageView next = device_of(device)->CreateImageView;
 	if (qnv_find(ci->image) < 0)
-		return next(device, ci, alloc, out);
+		return qs_enabled() ? qs_CreateImageView(device, ci, alloc, out) : next(device, ci, alloc, out);
 	VkImageViewCreateInfo c = *ci;
 	c.format = VK_FORMAT_UNDEFINED;
 	c.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
