@@ -224,6 +224,25 @@ SUBSYSTEM=="video4linux", KERNEL=="video32", SYMLINK+="video-dec0"
 EOF
 ln -sfn video33 /dev/video-enc0
 ln -sfn video32 /dev/video-dec0
+# At boot udev's v4l_id opens the nodes before holo-android-blobs has made the venus firmware reachable: the open
+# waits for it, udev kills the worker after 3 min and the rule above is never applied (no video-dec0, video32 root
+# only: no stream decoded, 2026-11-11). Once the firmware is there, the nodes go through udev again.
+cat > /etc/systemd/system/quest1-video-nodes.service <<'EOF'
+[Unit]
+Description=Video decoder and encoder nodes under their Frame names (udev again, once the firmware is reachable)
+After=holo-android-blobs.service systemd-udev-trigger.service
+Wants=holo-android-blobs.service
+Before=steam.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# (these two only: v4l_id on the camera nodes takes minutes too)
+ExecStart=/usr/bin/udevadm trigger --action=add --settle /sys/class/video4linux/video32 /sys/class/video4linux/video33
+
+[Install]
+WantedBy=multi-user.target
+EOF
 # The Frame's vrdevice_path prints the node of one of its devices; Steam Link VR (vrlink) finds its decoder with
 # `vrdevice_path video_decode` (popen) and gives up without one. Only the video nodes here: the other names it
 # knows on the Frame (model, imu_sync_clk, ...) fail, as they did when the tool did not exist.
@@ -358,4 +377,4 @@ mkdir -p /etc/x11vnc
 [ -f /etc/x11vnc/passwd ] || /usr/local/bin/x11vnc -storepasswd quest1 /etc/x11vnc/passwd
 chmod 600 /etc/x11vnc/passwd
 systemctl daemon-reload
-systemctl enable xvfb.service steam.service x11vnc.service steam-screen.service
+systemctl enable xvfb.service steam.service x11vnc.service steam-screen.service quest1-video-nodes.service
