@@ -120,7 +120,7 @@ fi
 
 if [ -n "$V4L2SRC" ]; then
 	gcc -std=gnu11 -O2 -Wall -fPIC -shared -fvisibility=hidden -o /usr/local/lib/libquest1_v4l2.so \
-		"$V4L2SRC/quest1_v4l2.c" "$V4L2SRC/quest1_vdec.c" "$V4L2SRC/quest1_streamclient.c" -lpthread
+		"$V4L2SRC/quest1_v4l2.c" "$V4L2SRC/quest1_vdec.c" "$V4L2SRC/quest1_streamclient.c" "$V4L2SRC/quest1_vrlink.c" -lpthread
 	gcc -std=gnu11 -O2 -Wall -fPIC -shared -fvisibility=hidden -o /usr/local/lib/libquest1_angle_egl.so \
 		"$V4L2SRC/quest1_angle_egl.c" -ldl
 	gcc -std=gnu11 -O2 -Wall -fPIC -shared -fvisibility=hidden -o /usr/local/lib/libquest1_streamdrm.so \
@@ -224,6 +224,18 @@ SUBSYSTEM=="video4linux", KERNEL=="video32", SYMLINK+="video-dec0"
 EOF
 ln -sfn video33 /dev/video-enc0
 ln -sfn video32 /dev/video-dec0
+# The Frame's vrdevice_path prints the node of one of its devices; Steam Link VR (vrlink) finds its decoder with
+# `vrdevice_path video_decode` (popen) and gives up without one. Only the video nodes here: the other names it
+# knows on the Frame (model, imu_sync_clk, ...) fail, as they did when the tool did not exist.
+cat > /usr/local/bin/vrdevice_path <<'EOF'
+#!/bin/sh
+case $1 in
+video_decode) printf /dev/video-dec0 ;;
+video_encode) printf /dev/video-enc0 ;;
+*) exit 1 ;;
+esac
+EOF
+chmod 755 /usr/local/bin/vrdevice_path
 
 # the GPU (kgsl) and ion for the render group (steamos); binder nodes are opened too (gralloc)
 cat > /etc/udev/rules.d/70-quest1-gpu.rules <<'EOF'

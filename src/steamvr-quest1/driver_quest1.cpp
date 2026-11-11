@@ -1565,6 +1565,10 @@ public:
 			float hz = RealVsync(&v, &p, &n, false) ? (float)(1e9 / (double)p) : xr.displayHz;
 			Log("quest1: display frequency %.3f Hz\n", hz);
 			VRProperties()->SetFloatProperty(c, Prop_DisplayFrequency_Float, hz);
+			// the one rate the panels run at: Steam Link VR (vrlink) sends this list to the PC, which activates
+			// no headset until it has a rate in it ("No available client display frequencies")
+			VRProperties()->SetProperty(c, Prop_DisplayAvailableFrameRates_Float_Array, &hz, sizeof(hz),
+			                            k_unFloatPropertyTag);
 		}
 		VRProperties()->SetFloatProperty(c, Prop_UserIpdMeters_Float, xr.ipd);
 		VRProperties()->SetFloatProperty(c, Prop_UserHeadToEyeDepthMeters_Float, 0.0f);

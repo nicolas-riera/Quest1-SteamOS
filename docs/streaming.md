@@ -375,9 +375,33 @@ Here today: [H] Steam starts vrlink and it connects to vrserver (`vrlink.client`
 init, most likely because of (a) no `/dev/video-dec0` (SVLCodecV4L2 CaptureSetup/S_FMT error strings are in the binary) and (b) the Vulkan dma-buf and modifier requirement
 (`SVLRendererVulkan`). Its stdout and stderr are not in the saved logs; getting them is step 0.
 
+### 2026-11-11: vrlink connects to the PC
+
+vrlink writes its own log, `~/.local/share/Steam/logs/vrlink.txt` (the PC's side is `Steam/logs/driver_vrlink.txt`). In order, what stopped it:
+1. `SVLCodecV4L2::InitializeDevice: Failed to get video device path [38]`: it finds its decoder with `popen("vrdevice_path video_decode")`, a
+   Frame tool. `device/holo-steam-session.sh` installs a `/usr/local/bin/vrdevice_path` that knows `video_decode` and `video_encode` and
+   fails for the rest (`model`, `imu_sync_clk`, ... as before, when it did not exist).
+2. `vkCreateDevice failed with error -7`: its device needs `VK_EXT_external_memory_dma_buf` and `VK_EXT_image_drm_format_modifier`. The
+   layer has them for vrlink only (`src/vklayer-steamvr/quest1_modifier.c`): the linear modifier, the dma-buf imported as a gralloc BLOB
+   buffer (`quest1_dmabuf.c`), and plane layouts that must be the blob's own linear ones. `test_modifier` (same directory): a one-plane
+   image on a venus-like ION buffer reads back exact. **NV12 does not fit**: venus rows are 128-byte aligned and its UV plane follows
+   the rows rounded up to 32, the blob's linear NV12 has neither; the blob samples venus NV12 only as a gralloc buffer with an Android
+   external format (`src/vdectest/vkahbtest.c`: Vulkan format 0, external format 0x1fa). So vrlink's NV12 images and YCbCr conversions
+   have to become external-format ones (next step).
+3. With both, `Init complete`: vrlink links to the PC (UDP over the PC's hotspot), sends the chaperone, gets a session id; then the PC
+   sends nothing and vrlink quits after 15 s ("Timed out getting information from the server"; it then crashes on its way out).
+   The PC got a Valve Index: vrlink ships default bindings for Knuckles and Frame controllers only, so SteamVR gives the Touch
+   controllers the Knuckles ones and shows vrlink a simulated Index (model "Index", LHR-FFFFFFF0, Knuckles). Found by attaching gdb to
+   vrlink and logging its `GetStringTrackedDeviceProperty` calls (it sends props 1000-1005, 1035-1037, 7000 of devices 0-2).
+   `src/v4l2shim/quest1_vrlink.c` (in libquest1_v4l2.so, which Steam preloads, active in vrlink only) answers those with the Quest 1
+   identity of the patched Android app (quest1-steamlink-patcher): "Oculus Quest" VRLINKHMDQUEST1 with VRLINKQ1 Touch controllers on
+   SteamVR's `{oculus}` profiles. The PC then took them, but still activated no headset: "No available client display frequencies".
+   vrlink reads them from `Prop_DisplayAvailableFrameRates_Float_Array` (2080), which driver_quest1 now sets (the panels' rate).
+4. Still open: controller input. vrlink forwards buttons only from controllers whose type it reads as `frame_controller` ("Unsupported
+   Prop_ControllerType_String"), through the Frame's input paths (`/user/hand/right/input/thumbstick/x`, ...).
+
 Plan:
-0. **Capture vrlink's own output** (0.5 day): run `run_vrlink.sh -c <PC ip>` by hand with output to a file while a PC session waits. It connects to the running SteamVR as a
-   scene app and may take over the headset scene, so ask the user first.
+0. ~~Capture vrlink's own output~~ done (above).
 1. **`/dev/video-dec0` symlink and a decode test** (1 day) to see how far V4L2 init goes on msm_vidc.
 2. **Vulkan dma-buf import shim** (1-2 weeks, [L]): map ION/dma-buf fds to AHBs (Monado's `comp_window_mdp.c` already handles gralloc AHBs), advertise
    `EXT_external_memory_dma_buf` and `EXT_image_drm_format_modifier` (linear only). It is the same blocker as the flat stream's compositor sharing, so do it once for both.

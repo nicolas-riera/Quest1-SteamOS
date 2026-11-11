@@ -125,6 +125,7 @@ static uint64_t now_ns(void)
 }
 
 static bool fx_enabled(void); // quest1_facet.c
+static bool qdb_front(void);  // quest1_dmabuf.c
 
 // --- advertised extensions ------------------------------------------------------------------------
 
@@ -165,6 +166,14 @@ static void init_fake(void)
 			snprintf(fake_names[fake_count], VK_MAX_EXTENSION_NAME_SIZE, "%s", VK_EXT_HOST_QUERY_RESET_EXTENSION_NAME);
 			fake_spec[fake_count++] = VK_EXT_HOST_QUERY_RESET_SPEC_VERSION;
 		}
+		if (qdb_front()) { // Steam Link VR's dma-buf frames (quest1_dmabuf.c)
+			snprintf(fake_names[fake_count], VK_MAX_EXTENSION_NAME_SIZE, "%s",
+			         VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME);
+			fake_spec[fake_count++] = VK_EXT_EXTERNAL_MEMORY_DMA_BUF_SPEC_VERSION;
+			snprintf(fake_names[fake_count], VK_MAX_EXTENSION_NAME_SIZE, "%s",
+			         VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME);
+			fake_spec[fake_count++] = VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_SPEC_VERSION;
+		}
 		return;
 	}
 	char buf[1024];
@@ -199,6 +208,8 @@ struct instance
 	PFN_vkGetPhysicalDeviceProperties2 GetPhysicalDeviceProperties2;
 	PFN_vkGetPhysicalDeviceProperties GetPhysicalDeviceProperties;
 	PFN_vkGetPhysicalDeviceExternalSemaphoreProperties GetPhysicalDeviceExternalSemaphoreProperties;
+	PFN_vkGetPhysicalDeviceFormatProperties2 GetPhysicalDeviceFormatProperties2;
+	PFN_vkGetPhysicalDeviceImageFormatProperties2 GetPhysicalDeviceImageFormatProperties2;
 };
 
 struct submit_job;
@@ -994,7 +1005,12 @@ static bool is_unknown_struct(VkStructureType t)
 	case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES:
 	case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES:
 	case 1000201000: // PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_NV
-	case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR: return true;
+	case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR:
+	case VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT:
+	case VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_2_EXT:
+	case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT:
+	case VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_LIST_CREATE_INFO_EXT:
+	case VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT: return true;
 	default: return false;
 	}
 }
@@ -1110,6 +1126,7 @@ static PFN_vkVoidFunction debug_utils_stub(const char *name)
 #include "quest1_display.c"
 #include "quest1_facet.c"
 #include "quest1_dmabuf.c"
+#include "quest1_modifier.c"
 
 
 // --- fences ----------------------------------------------------------------------------------------------
@@ -1913,9 +1930,15 @@ static VKAPI_ATTR VkResult VKAPI_CALL AllocateMemory(VkDevice device, const VkMe
 	if (ai->allocationSize >= LAZY_MIN_SIZE && called_from_vrclient())
 		lazy_hint(ai->allocationSize);
 	int keep = qdb_keep(ai);
-	VkResult r = d->AllocateMemory(device, ai, alloc, out);
-	if (r == VK_ERROR_INVALID_EXTERNAL_HANDLE && keep >= 0)
-		r = qdb_import(d, device, ai, keep, alloc, out); // a dma-buf the blob does not know (quest1_dmabuf.c)
+	// a dma-buf the blob does not know (quest1_dmabuf.c): an OPAQUE_FD one is tried there first, a DMA_BUF one never
+	const VkImportMemoryFdInfoKHR *imp = find_struct(ai->pNext, VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR);
+	bool dmabuf = keep >= 0 && imp->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+	VkResult r = dmabuf ? VK_ERROR_INVALID_EXTERNAL_HANDLE : d->AllocateMemory(device, ai, alloc, out);
+	if (r == VK_ERROR_INVALID_EXTERNAL_HANDLE && keep >= 0) {
+		r = qdb_import(d, device, ai, keep, alloc, out);
+		if (r == VK_SUCCESS && dmabuf)
+			close(imp->fd); // a successful import owns the fd (the blob closed the OPAQUE_FD one itself)
+	}
 	if (keep >= 0)
 		close(keep);
 	if (r != VK_SUCCESS && fail_logs < 40) {
@@ -2984,6 +3007,9 @@ static PFN_vkVoidFunction device_intercept(const char *name)
 	I("vkBindImageMemory", BindImageMemory)
 	I("vkBindImageMemory2", BindImageMemory2)
 	I("vkBindImageMemory2KHR", BindImageMemory2)
+	I("vkGetImageSubresourceLayout", GetImageSubresourceLayout)
+	I("vkGetMemoryFdPropertiesKHR", GetMemoryFdProperties)
+	I("vkGetImageDrmFormatModifierPropertiesEXT", GetImageDrmFormatModifierProperties)
 	I("vkMapMemory", MapMemory)
 	I("vkUnmapMemory", UnmapMemory)
 	I("vkFreeMemory", FreeMemory)
@@ -3052,6 +3078,16 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateInstance(const VkInstanceCreateInfo 
 	if (!in->GetPhysicalDeviceExternalSemaphoreProperties)
 		in->GetPhysicalDeviceExternalSemaphoreProperties = (PFN_vkGetPhysicalDeviceExternalSemaphoreProperties)gipa(
 		    *out, "vkGetPhysicalDeviceExternalSemaphorePropertiesKHR");
+	in->GetPhysicalDeviceFormatProperties2 =
+	    (PFN_vkGetPhysicalDeviceFormatProperties2)gipa(*out, "vkGetPhysicalDeviceFormatProperties2");
+	if (!in->GetPhysicalDeviceFormatProperties2)
+		in->GetPhysicalDeviceFormatProperties2 =
+		    (PFN_vkGetPhysicalDeviceFormatProperties2)gipa(*out, "vkGetPhysicalDeviceFormatProperties2KHR");
+	in->GetPhysicalDeviceImageFormatProperties2 =
+	    (PFN_vkGetPhysicalDeviceImageFormatProperties2)gipa(*out, "vkGetPhysicalDeviceImageFormatProperties2");
+	if (!in->GetPhysicalDeviceImageFormatProperties2)
+		in->GetPhysicalDeviceImageFormatProperties2 =
+		    (PFN_vkGetPhysicalDeviceImageFormatProperties2)gipa(*out, "vkGetPhysicalDeviceImageFormatProperties2KHR");
 
 	pthread_mutex_lock(&g_lock);
 	for (int i = 0; i < MAX_OBJS; i++)
@@ -3113,6 +3149,10 @@ static PFN_vkVoidFunction instance_intercept(const char *name)
 	I("vkGetPhysicalDeviceProperties2KHR", GetPhysicalDeviceProperties2)
 	I("vkGetPhysicalDeviceExternalSemaphoreProperties", GetPhysicalDeviceExternalSemaphoreProperties)
 	I("vkGetPhysicalDeviceExternalSemaphorePropertiesKHR", GetPhysicalDeviceExternalSemaphoreProperties)
+	I("vkGetPhysicalDeviceFormatProperties2", GetPhysicalDeviceFormatProperties2)
+	I("vkGetPhysicalDeviceFormatProperties2KHR", GetPhysicalDeviceFormatProperties2)
+	I("vkGetPhysicalDeviceImageFormatProperties2", GetPhysicalDeviceImageFormatProperties2)
+	I("vkGetPhysicalDeviceImageFormatProperties2KHR", GetPhysicalDeviceImageFormatProperties2)
 #undef I
 	return NULL;
 }

@@ -189,19 +189,28 @@ static VkDeviceSize qdb_take_offset(VkImage image)
 	return off;
 }
 
+// quest1_modifier.c
+static VkResult qdb_create_modifier_image(struct device *d, VkDevice device, const VkImageCreateInfo *ci,
+                                          const VkAllocationCallbacks *alloc, VkImage *out);
+static void qdb_mod_forget(VkImage image);
+
 //! vkCreateImage: a linear image for OPAQUE_FD memory (a plane of a dma-buf, see above) is created plain, and
 //! the offset it comes with is kept for its binding.
 static VkResult qdb_create_image(struct device *d, VkDevice device, const VkImageCreateInfo *ci,
                                  const VkAllocationCallbacks *alloc, VkImage *out)
 {
+	if (ci->tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT)
+		return qdb_create_modifier_image(d, device, ci, alloc, out);
 	const VkExternalMemoryImageCreateInfo *e = find_struct(ci->pNext, VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO);
 	const qdb_plane_offset *plane = find_struct(ci->pNext, QDB_STRUCTURE_TYPE_PLANE_OFFSET);
 	bool plain = ci->tiling == VK_IMAGE_TILING_LINEAR && e &&
 	             (e->handleTypes & (VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT | VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT));
 	if (!plain && !plane) {
 		VkResult r = d->CreateImage(device, ci, alloc, out);
-		if (r == VK_SUCCESS)
+		if (r == VK_SUCCESS) {
 			qdb_take_offset(*out); // the handle of an image destroyed before it was bound, if one was
+			qdb_mod_forget(*out);  // or of a destroyed image that had a modifier
+		}
 		return r;
 	}
 	// those two out of the chain for the call (as WITH_UNLINKED does), then back
@@ -225,6 +234,8 @@ static VkResult qdb_create_image(struct device *d, VkDevice device, const VkImag
 		cut[i]->pNext = before[i]->pNext;
 		before[i]->pNext = cut[i];
 	}
+	if (r == VK_SUCCESS)
+		qdb_mod_forget(*out);
 	if (r != VK_SUCCESS || !plane)
 		return r;
 	qdb_take_offset(*out);
