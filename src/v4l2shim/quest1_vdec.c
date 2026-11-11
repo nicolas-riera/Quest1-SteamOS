@@ -116,10 +116,16 @@ struct q1dec {
 	uint32_t count[2];       // the client's buffers (the driver has one more OUTPUT buffer: the EOS carrier)
 	struct ionbuf b[2][MAXBUF + 1], x[MAXBUF];
 	bool indrv[2][MAXBUF + 1];
+	bool cap_dmabuf;     // the client brings the frame buffers itself, as dma-buf fds (Steam's stream client)
+	int cap_cfd[MAXBUF]; // its fd of each, -1 before it queued one
 	bool on[2];      // the driver's queues stream
 	bool reconfig;   // CAPTURE was flushed for a new size: it waits for the client's STREAMOFF
 	bool eos_sent, last_seen, dead;
 	bool sub_src;
+	pthread_t ev_thread; // takes the driver's events as they come
+	bool ev_started, closing;
+	uint64_t first_packet_ns; // when the stream's first packet was queued
+	bool quiet_change;        // an event of the driver that changed nothing for the client was taken
 	uint32_t pending_src, ev_seq;
 	struct v4l2_event late; // a sequence event that came while a flush was awaited
 	bool has_late;
@@ -277,6 +283,7 @@ void q1dec_forget(struct q1dec *e)
 		if (decs[i] == e)
 			__atomic_store_n(&decs[i], NULL, __ATOMIC_RELEASE);
 	pthread_mutex_unlock(&lock);
+	q1dec_closing(e);
 	if (e->frames)
 		logf_("closed: %llu frames", (unsigned long long)e->frames);
 	free_bufs(e, OUT);
@@ -339,6 +346,8 @@ static void fill_cap_fmt(struct q1dec *e, struct v4l2_format *f)
 	p->plane_fmt[0].sizeimage = e->cap_size;
 }
 
+static void *ev_loop(void *arg);
+
 static void set_up(struct q1dec *e)
 {
 	static const uint32_t evs[] = {EV_FLUSH_DONE, EV_SETTINGS_SUFFICIENT, EV_SETTINGS_INSUFFICIENT,
@@ -356,6 +365,59 @@ static void set_up(struct q1dec *e)
 		logf_("/dev/ion: %s (the decoder's buffers cannot be made)", strerror(errno));
 	if (!e->cw)
 		set_dims(e, 1920, 1088);
+	e->ev_started = pthread_create(&e->ev_thread, NULL, ev_loop, e) == 0;
+}
+
+static bool pump(struct q1dec *e);
+
+static uint64_t now_ns(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+// The driver's events are taken here as they come, whatever the client is doing: the first packet of a stream
+// always brings the firmware's "insufficient", and nothing is decoded until CAPTURE has been set up again
+// (reconfigure()). A client that only looks at its frames would wait for nothing.
+static void *ev_loop(void *arg)
+{
+	struct q1dec *e = arg;
+	while (!e->closing) {
+		struct pollfd pf = {.fd = e->fd, .events = POLLPRI};
+		int n = q1_sys_poll(&pf, 1, 100);
+		if (e->closing || (pf.revents & POLLNVAL))
+			break;
+		if (n > 0 && (pf.revents & POLLPRI)) {
+			pthread_mutex_lock(&e->mu);
+			pump(e);
+			pthread_mutex_unlock(&e->mu);
+		} else if (n > 0) {
+			usleep(5000); // the driver says POLLERR while a queue has no buffer: not an event
+		}
+	}
+	return NULL;
+}
+
+// poll() of the client on the decoder alone. Steam's stream client gives the first frame 30 ms and starts the
+// decoder all over when it has not come; the firmware's reconfiguration at the first packet takes longer than
+// that. So the wait for the first frame goes on, up to a second after the first packet.
+int q1dec_poll(struct q1dec *e, struct pollfd *fd, int timeout_ms)
+{
+	int r = q1_sys_poll(fd, 1, timeout_ms);
+	while (r == 0 && timeout_ms >= 0 && (fd->events & POLLIN) && !e->frames && !e->dead && !e->closing &&
+	       e->first_packet_ns && now_ns() - e->first_packet_ns < 1000000000ull)
+		r = q1_sys_poll(fd, 1, 10);
+	return r;
+}
+
+void q1dec_closing(struct q1dec *e)
+{
+	e->closing = true;
+	if (e->ev_started) {
+		pthread_join(e->ev_thread, NULL);
+		e->ev_started = false;
+	}
 }
 
 static bool codec_listed(struct q1dec *e, uint32_t pix)
@@ -538,7 +600,7 @@ static int drain_capture(struct q1dec *e, bool keep)
 		clock_gettime(CLOCK_MONOTONIC, &t);
 		int left = 2000 - (int)((t.tv_sec - t0.tv_sec) * 1000 + (t.tv_nsec - t0.tv_nsec) / 1000000);
 		struct pollfd pf = {.fd = e->fd, .events = POLLPRI};
-		if (left <= 0 || poll(&pf, 1, left) <= 0) {
+		if (left <= 0 || q1_sys_poll(&pf, 1, left) <= 0) {
 			logf_("no flush-done event after 2 s");
 			return -1;
 		}
@@ -634,11 +696,15 @@ static void seq_changed(struct q1dec *e, const struct v4l2_event *ev)
 			e->reconfig = true;
 		}
 		set_dims(e, w, h);
-	} else if (insufficient && e->on[CAP]) {
-		if (reconfigure(e) < 0) {
+	} else {
+		if (insufficient && e->on[CAP] && reconfigure(e) < 0) {
 			dead(e, "reconfiguration failed");
 			return;
 		}
+		// Nothing changed for the client, so no source change: Steam's stream client sets CAPTURE up again at any
+		// of them, which this driver does not survive.
+		e->quiet_change = true;
+		return;
 	}
 	e->pending_src++;
 }
@@ -652,8 +718,12 @@ static bool pump(struct q1dec *e)
 		if (e->has_late) {
 			ev = e->late;
 			e->has_late = false;
-		} else if (e->dead || sys_ioctl(e->fd, VIDIOC_DQEVENT, &ev) < 0) {
-			break;
+		} else {
+			// never a wait here, whatever the client opened the device with: the lock is held
+			struct pollfd pf = {.fd = e->fd, .events = POLLPRI};
+			if (e->dead || e->closing || q1_sys_poll(&pf, 1, 0) <= 0 || !(pf.revents & POLLPRI) ||
+			    sys_ioctl(e->fd, VIDIOC_DQEVENT, &ev) < 0)
+				break;
 		}
 		any = true;
 		if (ev.type == EV_SETTINGS_INSUFFICIENT || ev.type == EV_BITDEPTH_INSUFFICIENT ||
@@ -671,15 +741,32 @@ static bool pump(struct q1dec *e)
 
 static int dqevent(struct q1dec *e, struct v4l2_event *ev)
 {
-	pthread_mutex_lock(&e->mu);
-	bool any = pump(e);
-	if (!e->sub_src)
-		e->pending_src = 0;
-	else if (any && !e->pending_src)
-		e->pending_src = 1; // the driver's event woke the client: it gets one that changes nothing
-	if (!e->pending_src) {
+	// a client that opened the device without O_NONBLOCK waits here for an event (Steam's stream client has a
+	// thread that does only that): waited for outside the lock
+	bool wait = !(fcntl(e->fd, F_GETFL) & O_NONBLOCK);
+	for (;;) {
+		pthread_mutex_lock(&e->mu);
+		pump(e);
+		if (!e->sub_src)
+			e->pending_src = 0;
+		else if (!wait && !e->pending_src && e->quiet_change)
+			e->pending_src = 1; // a client that polls (libavcodec) was woken by the driver's event and must find
+			                    // one to take: one that says nothing changed, which it checks
+		e->quiet_change = false;
+		if (e->pending_src)
+			break;
+		bool is_dead = e->dead;
 		pthread_mutex_unlock(&e->mu);
-		return fail(ENOENT);
+		if (!wait || is_dead)
+			return fail(is_dead ? EIO : ENOENT);
+		struct pollfd pf = {.fd = e->fd, .events = POLLPRI};
+		int n = q1_sys_poll(&pf, 1, 200);
+		if (n < 0 && errno != EINTR)
+			return -1;
+		if (pf.revents & POLLNVAL)
+			return fail(EBADF);
+		if (n > 0 && !(pf.revents & POLLPRI))
+			usleep(20000); // the driver says POLLERR while a queue has no buffer: not an event
 	}
 	memset(ev, 0, sizeof(*ev));
 	ev->type = V4L2_EVENT_SOURCE_CHANGE;
@@ -709,7 +796,8 @@ static int stream(struct q1dec *e, unsigned long req, int q);
 static int reqbufs(struct q1dec *e, struct v4l2_requestbuffers *rb)
 {
 	int q = qof(rb->type);
-	if (q < 0 || rb->memory != V4L2_MEMORY_MMAP)
+	bool dmabuf = q == CAP && rb->memory == V4L2_MEMORY_DMABUF;
+	if (q < 0 || (rb->memory != V4L2_MEMORY_MMAP && !dmabuf))
 		return sys_ioctl(e->fd, VIDIOC_REQBUFS, rb);
 	set_up(e);
 	if (e->on[q])
@@ -743,8 +831,18 @@ static int reqbufs(struct q1dec *e, struct v4l2_requestbuffers *rb)
 	}
 	free_bufs(e, q);
 	uint32_t n = d.count > MAXBUF + (q == OUT) ? MAXBUF + (q == OUT) : d.count;
+	// The client has that many and no more: Steam's stream client keeps 16 in a table of 16, does not read the
+	// count back and writes past the table when given more (its STEAMLINK_V4L2_BUFFER_COUNT too). The driver
+	// registers 18 before it has seen the stream and decodes with the 16 it is given (8 are enough for 1080p).
+	if (dmabuf && n > rb->count)
+		n = rb->count;
+	if (q == CAP) {
+		e->cap_dmabuf = dmabuf;
+		for (uint32_t i = 0; i < MAXBUF; i++)
+			e->cap_cfd[i] = -1;
+	}
 	for (uint32_t i = 0; i < n; i++)
-		if (ion_alloc(e, q == CAP ? e->cap_size : e->in_size, &e->b[q][i]) < 0 ||
+		if ((!dmabuf && ion_alloc(e, q == CAP ? e->cap_size : e->in_size, &e->b[q][i]) < 0) ||
 		    (q == CAP && e->cap_planes > 1 && ion_alloc(e, e->extra_size, &e->x[i]) < 0)) {
 			logf_("ION buffer of %u bytes: %s", q == CAP ? e->cap_size : e->in_size, strerror(errno));
 			free_bufs(e, q);
@@ -756,8 +854,8 @@ static int reqbufs(struct q1dec *e, struct v4l2_requestbuffers *rb)
 	rb->count = e->count[q];
 	char s[5];
 	if (q == CAP)
-		logf_("frames: NV12 %ux%u in %ux%u, stride %u, %u lines, %u buffers of %u kB", e->crop_w, e->crop_h, e->cw,
-		      e->ch, e->stride, e->scan, e->count[q], e->cap_size / 1024);
+		logf_("frames: NV12 %ux%u in %ux%u, stride %u, %u lines, %u buffers of %u kB%s", e->crop_w, e->crop_h, e->cw,
+		      e->ch, e->stride, e->scan, e->count[q], e->cap_size / 1024, dmabuf ? " (dma-bufs of the client)" : "");
 	else
 		logf_("bitstream: %s, %u buffers of %u kB", fourcc(e->out_fmt.fmt.pix_mp.pixelformat, s), e->count[q],
 		      e->in_size / 1024);
@@ -767,7 +865,37 @@ static int reqbufs(struct q1dec *e, struct v4l2_requestbuffers *rb)
 static bool mine(struct q1dec *e, struct v4l2_buffer *b, int *q)
 {
 	*q = qof(b->type);
-	return *q >= 0 && b->memory == V4L2_MEMORY_MMAP && b->index < e->count[*q] && b->length >= 1 && b->m.planes;
+	return *q >= 0 && (b->memory == V4L2_MEMORY_MMAP || (*q == CAP && e->cap_dmabuf && b->memory == V4L2_MEMORY_DMABUF)) &&
+	       b->index < e->count[*q] && b->length >= 1 && b->m.planes;
+}
+
+// the dma-buf the client brings for a frame buffer: an ION buffer (the only kind the driver takes), mapped here once
+static int adopt_dmabuf(struct q1dec *e, uint32_t i, int fd)
+{
+	struct ionbuf *b = &e->b[CAP][i];
+	if (e->cap_cfd[i] == fd && b->size)
+		return 0;
+	off_t len = lseek(fd, 0, SEEK_END);
+	if (len < (off_t)e->cap_size) {
+		logf_("frame buffer %u of the client is %lld bytes, the decoder needs %u", i, (long long)len, e->cap_size);
+		return fail(EINVAL);
+	}
+	int own = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+	if (own < 0)
+		return -1;
+	void *map = (void *)syscall(SYS_mmap, NULL, (size_t)len, PROT_READ | PROT_WRITE, MAP_SHARED, own, 0);
+	if (map == MAP_FAILED) {
+		int err = errno;
+		syscall(SYS_close, own);
+		logf_("frame buffer %u of the client cannot be mapped: %s", i, strerror(err));
+		return fail(err);
+	}
+	ion_free(b);
+	b->fd = own;
+	b->map = map;
+	b->size = (size_t)len;
+	e->cap_cfd[i] = fd;
+	return 0;
 }
 
 static int querybuf(struct q1dec *e, struct v4l2_buffer *b)
@@ -806,8 +934,13 @@ static int qbuf(struct q1dec *e, struct v4l2_buffer *b)
 	int r = 0;
 	if (e->dead)
 		r = fail(EIO);
-	else if (q == OUT)
+	else if (q == OUT) {
+		if (!e->first_packet_ns)
+			e->first_packet_ns = now_ns();
 		r = drv_qbuf(e, OUT, b->index, b, 0);
+	}
+	else if (e->cap_dmabuf && adopt_dmabuf(e, b->index, b->m.planes[0].m.fd) < 0)
+		r = -1;
 	else if (!e->reconfig) // else the client is about to make new buffers
 		r = drv_qbuf(e, CAP, b->index, NULL, 0);
 	int err = errno;
@@ -836,13 +969,17 @@ static void to_client(struct q1dec *e, int q, struct v4l2_buffer *b, const struc
 	memset(sp, 0, sizeof(*sp));
 	sp->bytesused = used;
 	sp->length = (uint32_t)e->b[q][d->index].size;
-	sp->m.mem_offset = COOKIE(q, d->index);
+	if (q == CAP && e->cap_dmabuf)
+		sp->m.fd = e->cap_cfd[d->index];
+	else
+		sp->m.mem_offset = COOKIE(q, d->index);
 }
 
 static int dqbuf(struct q1dec *e, struct v4l2_buffer *b)
 {
 	int q = qof(b->type);
-	if (q < 0 || b->memory != V4L2_MEMORY_MMAP || b->length < 1 || !b->m.planes)
+	if (q < 0 || (b->memory != V4L2_MEMORY_MMAP && !(q == CAP && e->cap_dmabuf && b->memory == V4L2_MEMORY_DMABUF)) ||
+	    b->length < 1 || !b->m.planes)
 		return sys_ioctl(e->fd, VIDIOC_DQBUF, b);
 	pthread_mutex_lock(&e->mu);
 	if (!e->sub_src)

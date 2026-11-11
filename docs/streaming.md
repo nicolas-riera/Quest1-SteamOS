@@ -264,10 +264,48 @@ as far as its renderer and the shared texture without a session.
   ("setpriority() failed").
 - Remote Play's encoder side is not touched by any of this.
 
-Next, in order: a `libdrm.so.2` for the client only (same directory) that shows one display, so that the decoder
-is tried; then what `CV4L2Accel` asks of `/dev/video-dec0` (dma-buf CAPTURE buffers); then the frames: ANGLE's
-`EGL_EXT_image_dma_buf_import` needs `VK_EXT_external_memory_dma_buf` and modifiers, which the compat layer can turn
-into AHardwareBuffer imports (proven in section 0).
+### 2026-11-11: the picture shows, decoded by venus
+
+The user saw the PC's game in the headset (theater mode, sound): "ça fonctionne". Performance is "ok" while nothing
+else runs on the headset and drops as soon as something else does. What it took, in the order the problems came:
+
+- **A DRM display in name only** (`src/v4l2shim/quest1_streamdrm.c`, the client's `libdrm.so.2` in
+  `/usr/local/lib/quest1-streamclient`): one connected panel, one CRTC, a 1920x1080@72 mode, on `/dev/null`;
+  everything that would draw on it fails. Dumb buffers are real: `DRM_IOCTL_MODE_CREATE_DUMB` allocates from ION's
+  system heap and `PRIME_HANDLE_TO_FD` gives its fd, because the client makes the decoder's frame buffers there.
+  `drmGetVersion` answers NULL (ANGLE asks). The client then lists H.264 to the PC and opens the decoder.
+- **`/dev/video-dec0`** (udev rule in `device/holo-steam-session.sh`): without it the client asks every
+  `/dev/video<n>` and each camera node logs a kernel warning.
+- **CAPTURE buffers as the client's dma-bufs** (`quest1_vdec.c`): REQBUFS with `V4L2_MEMORY_DMABUF` on CAPTURE, the
+  client's fds (ION) mapped and queued to the driver as they come. The client keeps a fixed table of 16 frame
+  buffers: a larger count from the driver (18) runs past it (SIGSEGV in `BSubmitFrame`), so the client's count is
+  kept, which venus decodes fine with.
+- **The first frame**: the client waits 30 ms for it after the first packet and otherwise starts the decoder's
+  queues all over, which msm_vidc does not survive ("Core is in bad state"). The firmware always asks for its
+  reconfiguration at the first packet, and the shim only did it when the client called it. Now a thread of the
+  shim takes the driver's events as they come (reconfiguration with the same size is done there and the client is
+  told nothing: it sets CAPTURE up again at any source change), and `poll()` on the decoder waits up to a second
+  after the first packet for the first frame.
+- **Reading a frame**: with no `EGL_EXT_image_dma_buf_import` the client uploads each frame from the CPU, through a
+  read-only **private** mapping of a `dup()` of its dma-buf, which ION refuses (EINVAL; the client then gives up on
+  hardware decoding and, having no software decoder, disconnects). The shim's `mmap` retries such a refused mapping
+  as a shared one (the same thing when nothing writes). `DMA_BUF_IOCTL_SYNC`, which this kernel lacks, is answered
+  with success (the driver gave the frame back ready for the CPU), so the client does not log each frame.
+- **The window was transparent**: ANGLE on the Adreno driver loses every draw, with no GL error, while its
+  `supportsExtendedDynamicState` feature is on (the dynamic vertex-binding stride draws nothing; already known from
+  `test_angle_x11.c`). Only clears worked: black before the video, then nothing. The client is started with
+  `ANGLE_FEATURE_OVERRIDES_DISABLED=supportsExtendedDynamicState` (`quest1_streamclient.c`). Found with a small SDL3
+  test on the client's own SDL and ANGLE: a rectangle, an RGBA texture and an NV12 texture all came out empty before,
+  right after.
+- The compat layer's linear tiling for CPU-written camera images (the input-attachment usage mark) now applies in
+  vrcompositor only: ANGLE asks that usage for its own textures.
+- vrclient asks `eglGetProcAddress("pglFramebufferRenderbuffer")` (its pointer's name): answered with
+  `glFramebufferRenderbuffer`. `QUEST1_ANGLE_EGL_TRACE` also traces vrclient's copy into the shared texture (a pixel
+  before and after `glBlitFramebuffer`).
+
+Still open: the frames go through the CPU (upload of 3 MB NV12 per frame); when the PC's game window is minimised
+the stream's size changes (1920x1080 to 270x1080) and the decoder does not survive it (the client restarts its queues
+by itself after the driver's event); the sound stutters; the Vulkan/OpenGL semaphore is refused (glFinish).
 
 Plan (hardware decode only: software decode is not an option, user decision 2026-11-07):
 1. ~~Standalone V4L2 test on venus~~ **done 2026-11-07** (`src/vdectest`, `run-tests.sh`): bit-exact, 9-11 ms per 1080p60 frame (above).

@@ -39,6 +39,9 @@ __attribute__((constructor)) static void quest1_streamclient_init(int argc, char
 	setenv("QUEST1_ANGLE_EGL", lib, 1);
 	setenv("ANGLE_DEFAULT_PLATFORM", "vulkan", 1);
 	setenv("SDL_RENDER_DRIVER", "opengles2", 1); // SDL's renderer on that context
+	// the Adreno driver's dynamic vertex-binding stride draws nothing: without this every draw of the client is
+	// lost with no error (a clear still works), and the stream's window is transparent
+	setenv("ANGLE_FEATURE_OVERRIDES_DISABLED", "supportsExtendedDynamicState", 1);
 	const char *old = getenv("LD_LIBRARY_PATH");
 	char *path;
 	if (asprintf(&path, GLDIR "%s%s", old ? ":" : "", old ? old : "") < 0)

@@ -123,13 +123,19 @@ if [ -n "$V4L2SRC" ]; then
 		"$V4L2SRC/quest1_v4l2.c" "$V4L2SRC/quest1_vdec.c" "$V4L2SRC/quest1_streamclient.c" -lpthread
 	gcc -std=gnu11 -O2 -Wall -fPIC -shared -fvisibility=hidden -o /usr/local/lib/libquest1_angle_egl.so \
 		"$V4L2SRC/quest1_angle_egl.c" -ldl
+	gcc -std=gnu11 -O2 -Wall -fPIC -shared -fvisibility=hidden -o /usr/local/lib/libquest1_streamdrm.so \
+		"$V4L2SRC/quest1_streamdrm.c"
 fi
 # Steam's stream client (Steam Link) draws with ANGLE, on the GPU: these are its libEGL.so.1 and libGL.so.1, in a
-# directory only that process has in its library path (src/v4l2shim/quest1_streamclient.c)
+# directory only that process has in its library path (src/v4l2shim/quest1_streamclient.c). Its libdrm.so.2 there
+# is a display that exists in name only (src/v4l2shim/quest1_streamdrm.c): the client offers a video codec to the
+# PC only when it finds a DRM display next to the V4L2 decoder, and makes the decoder's frame buffers on it.
 if [ -f /usr/local/lib/libquest1_angle_egl.so ]; then
 	mkdir -p /usr/local/lib/quest1-streamclient
 	ln -sfn ../libquest1_angle_egl.so /usr/local/lib/quest1-streamclient/libEGL.so.1
 	ln -sfn ../libquest1_angle_egl.so /usr/local/lib/quest1-streamclient/libGL.so.1
+	[ -f /usr/local/lib/libquest1_streamdrm.so ] &&
+		ln -sfn ../libquest1_streamdrm.so /usr/local/lib/quest1-streamclient/libdrm.so.2
 fi
 # Hardware video decoding for a program that uses FFmpeg's V4L2 decoders (h264_v4l2m2m, hevc_v4l2m2m): the same
 # library turns their calls into what the venus decoder takes (src/v4l2shim/quest1_vdec.c). For example
@@ -209,12 +215,15 @@ BusName=org.freedesktop.impl.portal.desktop.quest1
 Environment=DISPLAY=:1
 ExecStart=/usr/local/bin/q1screencast
 EOF
-# the venus encoder under the Frame's name (msm_vidc's nodes are video32 = decoder, video33 = encoder; their
-# sysfs name is empty); the video group (steamos) already has it
+# the venus encoder and decoder under the Frame's names (msm_vidc's nodes are video32 = decoder, video33 =
+# encoder; their sysfs name is empty); the video group (steamos) already has them. The stream client looks for
+# /dev/video-dec<n> first, then asks every /dev/video<n> what it is (a kernel warning for each camera node).
 cat > /etc/udev/rules.d/70-quest1-video.rules <<'EOF'
 SUBSYSTEM=="video4linux", KERNEL=="video33", SYMLINK+="video-enc0"
+SUBSYSTEM=="video4linux", KERNEL=="video32", SYMLINK+="video-dec0"
 EOF
 ln -sfn video33 /dev/video-enc0
+ln -sfn video32 /dev/video-dec0
 
 # the GPU (kgsl) and ion for the render group (steamos); binder nodes are opened too (gralloc)
 cat > /etc/udev/rules.d/70-quest1-gpu.rules <<'EOF'

@@ -654,7 +654,7 @@ static int dqbuf(struct enc *e, struct v4l2_buffer *b)
 			return -1;
 		}
 		struct pollfd pf = {.fd = e->fd, .events = POLLIN};
-		poll(&pf, 1, 1000); // a frame follows at once; DQBUF itself waits or says EAGAIN
+		q1_sys_poll(&pf, 1, 1000); // a frame follows at once; DQBUF itself waits or says EAGAIN
 	}
 	if (d.index >= e->count[q]) {
 		errno = EINVAL;
@@ -718,8 +718,14 @@ EXPORT int ioctl(int fd, unsigned long req, ...)
 	va_start(ap, req);
 	void *arg = va_arg(ap, void *);
 	va_end(ap);
-	if (_IOC_TYPE(req) != 'V')
-		return sys_ioctl(fd, req, arg);
+	if (_IOC_TYPE(req) != 'V') {
+		int r = sys_ioctl(fd, req, arg);
+		// DMA_BUF_IOCTL_SYNC, which this kernel's dma-bufs do not have: the decoder's driver has already made the
+		// frame ready for the CPU when it gave the buffer back, and Steam's stream client logs each refusal
+		if (r < 0 && errno == ENOTTY && req == _IOW('b', 0, uint64_t))
+			return 0;
+		return r;
+	}
 	struct enc *e = find(fd);
 	if (!e) {
 		struct q1dec *d = q1dec_find(fd);
@@ -771,16 +777,36 @@ EXPORT void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off
 	struct q1dec *d = fd >= 0 ? q1dec_find(fd) : NULL;
 	if (d)
 		return q1dec_mmap(d, addr, len, prot, flags, off);
-	return sys_mmap(addr, len, prot, flags, fd, off);
+	void *m = sys_mmap(addr, len, prot, flags, fd, off);
+	// Steam's stream client reads a decoded frame through a private mapping of its dma-buf (a dup() of the fd it
+	// queued), which ION refuses with EINVAL; read-only, a shared mapping is the same thing
+	if (m == MAP_FAILED && errno == EINVAL && fd >= 0 && len && (flags & MAP_PRIVATE) && !(prot & PROT_WRITE))
+		m = sys_mmap(addr, len, prot, (flags & ~MAP_PRIVATE) | MAP_SHARED, fd, off);
+	return m;
 }
 
 EXPORT void *mmap64(void *addr, size_t len, int prot, int flags, int fd, off_t off)
 	__attribute__((alias("mmap")));
 
+int q1_sys_poll(struct pollfd *fds, unsigned long n, int timeout_ms)
+{
+	struct timespec ts = {.tv_sec = timeout_ms / 1000, .tv_nsec = (long)(timeout_ms % 1000) * 1000000};
+	return (int)syscall(SYS_ppoll, fds, n, timeout_ms < 0 ? NULL : &ts, NULL, 0);
+}
+
+// poll() on the decoder alone: the wait for a stream's first frame (q1dec_poll)
+EXPORT int poll(struct pollfd *fds, nfds_t n, int timeout)
+{
+	struct q1dec *d = n == 1 && fds && fds[0].fd >= 0 ? q1dec_find(fds[0].fd) : NULL;
+	return d ? q1dec_poll(d, fds, timeout) : q1_sys_poll(fds, n, timeout);
+}
+
 EXPORT int close(int fd)
 {
 	struct enc *e = fd >= 0 ? find(fd) : NULL;
 	struct q1dec *d = fd >= 0 && !e ? q1dec_find(fd) : NULL;
+	if (d)
+		q1dec_closing(d); // its thread must be off the fd before the number can be another file's
 	int r = (int)syscall(SYS_close, fd);
 	if (e)
 		forget(e); // after the driver let go of the buffers

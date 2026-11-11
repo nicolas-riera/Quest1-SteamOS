@@ -216,9 +216,57 @@ static void q1_glRenderbufferStorage(unsigned int target, unsigned int fmt, int 
 	p(target, fmt == GL_DEPTH_COMPONENT ? GL_DEPTH_COMPONENT24 : fmt, w, h);
 }
 
+// the trace of vrclient's copy into the texture it shares with vrcompositor (its functions are ANGLE's own, got by
+// name: this one is put in between when tracing), with the state of both framebuffers and the error it left
+static void q1_trace_glBlitFramebuffer(int sx0, int sy0, int sx1, int sy1, int dx0, int dy0, int dx1, int dy1,
+                                       unsigned int mask, unsigned int filter)
+{
+	static void (*blit)(int, int, int, int, int, int, int, int, unsigned int, unsigned int);
+	static unsigned int (*check)(unsigned int);
+	static unsigned int (*error)(void);
+	static int logged;
+	if (!blit) {
+		*(void **)&blit = gl("glBlitFramebuffer");
+		*(void **)&check = gl("glCheckFramebufferStatus");
+		*(void **)&error = gl("glGetError");
+	}
+	static void (*get)(unsigned int, int *);
+	static void (*bind)(unsigned int, unsigned int);
+	static void (*readpx)(int, int, int, int, unsigned int, unsigned int, void *);
+	if (!get) {
+		*(void **)&get = gl("glGetIntegerv");
+		*(void **)&bind = gl("glBindFramebuffer");
+		*(void **)&readpx = gl("glReadPixels");
+	}
+	unsigned int before = error(), rd = check(GL_READ_FRAMEBUFFER), dr = check(0x8CA9);
+	unsigned char src[4] = {0}, dst[4] = {0};
+	int rfb = 0, dfb = 0;
+	get(GL_READ_FRAMEBUFFER_BINDING, &rfb);
+	get(GL_DRAW_FRAMEBUFFER_BINDING, &dfb);
+	readpx((sx0 + sx1) / 2, (sy0 + sy1) / 2, 1, 1, 0x1908, 0x1401, src);
+	blit(sx0, sy0, sx1, sy1, dx0, dy0, dx1, dy1, mask, filter);
+	unsigned int after = error();
+	bind(GL_READ_FRAMEBUFFER, (unsigned int)dfb);
+	readpx((dx0 + dx1) / 2, (dy0 + dy1) / 2, 1, 1, 0x1908, 0x1401, dst);
+	bind(GL_READ_FRAMEBUFFER, (unsigned int)rfb);
+	if (logged < 40 || logged % 60 == 0)
+		fprintf(stderr, "quest1_angle_egl: middle pixel: source %u,%u,%u,%u, shared texture after the copy %u,%u,%u,%u (%#x)\n",
+		        src[0], src[1], src[2], src[3], dst[0], dst[1], dst[2], dst[3], error());
+	if (logged++ < 8 || after)
+		fprintf(stderr,
+		        "quest1_angle_egl: glBlitFramebuffer(%d,%d,%d,%d -> %d,%d,%d,%d, %#x, %#x): read fb %#x, draw fb %#x, "
+		        "error before %#x, after %#x\n",
+		        sx0, sy0, sx1, sy1, dx0, dy0, dx1, dy1, mask, filter, rd, dr, before, after);
+}
+
 EXPORT void *eglGetProcAddress(const char *name)
 {
+	// vrclient asks for "pglFramebufferRenderbuffer" (its own name for the pointer): the function meant
+	if (!strcmp(name, "pglFramebufferRenderbuffer"))
+		name++;
 	void *p = !strcmp(name, "glRenderbufferStorage") ? (void *)q1_glRenderbufferStorage : gl(name);
+	if (p && trace > 0 && !strcmp(name, "glBlitFramebuffer"))
+		p = (void *)q1_trace_glBlitFramebuffer;
 	if (!p && !strcmp(name, "glCheckNamedFramebufferStatus"))
 		p = (void *)q1_glCheckNamedFramebufferStatus;
 	if (!p || trace > 0)

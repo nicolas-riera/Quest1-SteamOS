@@ -82,8 +82,6 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   ("Ring Buffer Wrapped!") so all of it ends up pinned for a few 8 MB frames in flight. Drop the pages far behind the
   write position (kernel/kgsl-lazy.patch: unmap them and point the GPU back at the scratch page): ~200 MB.
 - Steam's VR UI: check the right controller's Oculus button logo in the headset (user).
-- Starting a stream from the PC (Steam Link / Remote Play to the headset) crashes Steam and SteamVR (not implemented,
-  user 2026-11-09): fail cleanly until streaming exists.
 - Remote Play from the headset: smoother, "not perfect yet" (user, 2026-11-10; docs/streaming.md "The capture").
   Confirm in the headset: the VR view at 36 a second (Monado copies every second vsync, deployed at the next Monado
   restart), the dark blue screen with the headset off, no tearing, the colours. Then, fewer layers and more hardware
@@ -155,14 +153,13 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   The user's target (2026-11-10): the stream at 72 fps next to the dashboard and overlays, so everything on the
   hardware path and no CPU copy of the frames.
 
-- Steam Link from a PC (docs/streaming.md, section 1, 2026-11-10): the client starts on the GPU (ANGLE), sound and
-  theater mode work, the picture is black: no video codec is offered. Next: (1) a `libdrm.so.2` for the client only
-  that shows one display (the client wants a DRM device before it tries the V4L2 decoder); (2) `/dev/video-dec0`
-  (not created by the scripts yet) and what CV4L2Accel asks of the decoder (dma-buf CAPTURE buffers); (3) the
-  frames into ANGLE with no copy (dma-buf import turned into AHardwareBuffer imports in the compat layer);
-  (4) the stream's sound stutters; the Vulkan/OpenGL semaphore is refused (glFinish fallback); (5) the user's
-  list: 72 fps, microphone, gamepads, the PC's overlays, the headset's dashboard and not the PC's SteamVR one;
-  then VR (vrlink).
+- Steam Link from a PC (docs/streaming.md, section 1): the picture shows, decoded by venus (user, 2026-11-11).
+  Next: (1) performance: "ok" alone, falls apart as soon as anything else runs on the headset (user); the frames
+  go through the CPU: into ANGLE with no copy (dma-buf import turned into AHardwareBuffer imports in the compat
+  layer); (2) a change of the stream's size (the PC's game window minimised: 1920x1080 to 270x1080) kills the
+  decoder and closes the stream; (3) the stream's sound stutters; the Vulkan/OpenGL semaphore is refused (glFinish
+  fallback); (4) the user's list: 72 fps, microphone, gamepads, the PC's overlays, the headset's dashboard and not
+  the PC's SteamVR one; then VR (vrlink).
 - Reference for making Steam Link accept a Quest 1 (device identity, etc.):
   github.com/MisterAnderson91/quest1-steamlink-patcher (it patches Valve's Steam Link VR APK; we use it as a guide
   only, for SteamOS's native streaming, user 2026-11-09).

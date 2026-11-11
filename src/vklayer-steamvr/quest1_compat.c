@@ -1436,8 +1436,16 @@ static uint32_t *rewrite_layer_builtins(const uint32_t *w, uint32_t words, uint3
 // Camera frames for vrcompositor's roomview (src/camtap/ptprovider): the provider allocates RGBA8 shared images and writes
 // their memory with the CPU. With optimal tiling the Adreno blob compresses such images (UBWC), so raw bytes decode to
 // blocks of noise. The provider marks them with an otherwise unused usage bit (input attachment); here they lose the
-// mark and get linear tiling (no compression), and their row pitch is logged.
+// mark and get linear tiling (no compression), and their row pitch is logged. In vrcompositor only, where those
+// images are made: ANGLE (Steam's stream client) asks that usage for every texture of its own.
 #define Q1_CPU_IMAGE_USAGE VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT
+
+static bool cpu_image(const VkImageCreateInfo *ci)
+{
+	return (ci->usage & Q1_CPU_IMAGE_USAGE) && ci->format == VK_FORMAT_R8G8B8A8_UNORM &&
+	       ci->tiling == VK_IMAGE_TILING_OPTIMAL && ci->mipLevels == 1 && ci->arrayLayers == 1 &&
+	       ci->imageType == VK_IMAGE_TYPE_2D && !strcmp(program_invocation_short_name, "vrcompositor");
+}
 
 // Failed image creations and allocations are logged (the first 40): vrcompositor only says "CreateTexture - Unable to
 // allocate memory".
@@ -1913,8 +1921,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateImage(VkDevice device, const VkImage
                                                   const VkAllocationCallbacks *alloc, VkImage *out)
 {
 	struct device *d = device_of(device);
-	if (!(ci->usage & Q1_CPU_IMAGE_USAGE) || ci->format != VK_FORMAT_R8G8B8A8_UNORM || ci->tiling != VK_IMAGE_TILING_OPTIMAL ||
-	    ci->mipLevels != 1 || ci->arrayLayers != 1 || ci->imageType != VK_IMAGE_TYPE_2D) {
+	if (!cpu_image(ci)) {
 		// vrcompositor sizes the "Playspace area SDF" texture from the boundary: 0x0 until one is drawn (room
 		// setup). The Adreno driver accepts the image but reports 0 bytes of memory, whose allocation fails, so
 		// vrcompositor's CreateTexture failed on every frame (room setup at ~3 fps). Made 1x1 instead.
@@ -1965,9 +1972,6 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateImage(VkDevice device, const VkImage
 		}
 		return r;
 	}
-	if (!(ci->usage & Q1_CPU_IMAGE_USAGE) || ci->format != VK_FORMAT_R8G8B8A8_UNORM || ci->tiling != VK_IMAGE_TILING_OPTIMAL ||
-	    ci->mipLevels != 1 || ci->arrayLayers != 1 || ci->imageType != VK_IMAGE_TYPE_2D)
-		return d->CreateImage(device, ci, alloc, out);
 	VkImageCreateInfo lin = *ci;
 	lin.usage &= ~Q1_CPU_IMAGE_USAGE;
 	lin.tiling = VK_IMAGE_TILING_LINEAR;
