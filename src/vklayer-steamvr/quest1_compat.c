@@ -2933,6 +2933,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice pd, const Vk
 			break;
 		}
 	pthread_mutex_unlock(&g_lock);
+	qnv_prewarm(); // vrlink's frame buffers, seconds before the PC streams (quest1_modifier.c)
 	return VK_SUCCESS;
 }
 

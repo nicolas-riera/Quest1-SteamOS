@@ -5,6 +5,7 @@
 //
 //   LD_PRELOAD=libquest1_v4l2.so test_vdec_epoll stream.265 [fps] [first] [stop|stopMS|flush]
 // "flush": at SOURCE_CHANGE, OUTPUT off and on again before CAPTURE is set up (vrlink's flush then).
+// "again": "stop", then a new decoder in the same process (vrlink after a reset of its own).
 // "stop": at SOURCE_CHANGE, OUTPUT off and the decoder closed with no CAPTURE set up (vrlink resetting its decoder
 // then, 2026-11-11: the firmware stopped answering); "stopMS": the same MS ms after the first packet, in whatever
 // state. Fails when that takes 500 ms or more; check the kernel log, then run once more without it.
@@ -94,10 +95,10 @@ static size_t split(const uint8_t *p, size_t n, size_t *start, size_t max)
 	return cnt;
 }
 
-int main(int argc, char **argv)
+static int run(int argc, char **argv)
 {
 	if (argc < 2) {
-		fprintf(stderr, "usage: test_vdec_epoll stream.265 [fps] [first] [stop|stopMS|flush|-]\n");
+		fprintf(stderr, "usage: test_vdec_epoll stream.265 [fps] [first] [stop|stopMS|flush|again|-]\n");
 		return 2;
 	}
 	double fps = argc > 2 ? atof(argv[2]) : 72;
@@ -310,4 +311,17 @@ out:
 	       rb.count);
 	close(fd);
 	return frames && held_max < rb.count && !early0 ? 0 : 1;
+}
+
+int main(int argc, char **argv)
+{
+	if (argc > 4 && !strcmp(argv[4], "again")) { // stopped at SOURCE_CHANGE, then a new decoder in the same process
+		char *a[] = {argv[0], argv[1], argv[2], argv[3], "stop"};
+		if (run(5, a))
+			return 1;
+		printf("again, in the same process:\n");
+		a[4] = "-";
+		return run(5, a);
+	}
+	return run(argc, argv);
 }

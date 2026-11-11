@@ -778,8 +778,12 @@ static VkResult qnv_conversion(VkDevice device, const VkSamplerYcbcrConversionCr
 	struct device *d = device_of(device);
 	VkFormatFeatureFlags feat = 0;
 	uint64_t xfmt = 0;
-	if (!qdb_front() || ci->format != VK_FORMAT_G8_B8R8_2PLANE_420_UNORM || !(xfmt = qnv_external_format(d, device, &feat)))
+	if (!qdb_front() || ci->format != VK_FORMAT_G8_B8R8_2PLANE_420_UNORM || !(xfmt = qnv_external_format(d, device, &feat))) {
+		static atomic_int logs;
+		if (qdb_front() && atomic_fetch_add(&logs, 1) < 4)
+			LOG("dma-buf: YCbCr conversion of format %d left as it is\n", ci->format);
 		return next(device, ci, alloc, out);
+	}
 	VkExternalFormatANDROID xf = {VK_STRUCTURE_TYPE_EXTERNAL_FORMAT_ANDROID, NULL, xfmt};
 	VkSamplerYcbcrConversionCreateInfo c = *ci;
 	c.pNext = &xf;
@@ -826,10 +830,15 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateImageView(VkDevice device, const VkI
 	c.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 	c.components = (VkComponentMapping){0};
 	VkResult r = next(device, &c, alloc, out);
-	if (qdb_logs++ < 16 || r != VK_SUCCESS)
-		LOG("dma-buf: view of an NV12 image (format %d, aspects 0x%x, %s conversion): %d\n", ci->format,
-		    ci->subresourceRange.aspectMask,
+	static atomic_int logs;
+	if (atomic_fetch_add(&logs, 1) < 8 || r != VK_SUCCESS) {
+		char chain[64] = "";
+		for (const VkBaseInStructure *s = ci->pNext; s && strlen(chain) < sizeof(chain) - 12; s = s->pNext)
+			snprintf(chain + strlen(chain), sizeof(chain) - strlen(chain), " %d", s->sType);
+		LOG("dma-buf: view of an NV12 image (format %d, aspects 0x%x, chain:%s, %s conversion): %d\n", ci->format,
+		    ci->subresourceRange.aspectMask, chain,
 		    find_struct(ci->pNext, VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_INFO) ? "with a" : "no", r);
+	}
 	return r;
 }
 
