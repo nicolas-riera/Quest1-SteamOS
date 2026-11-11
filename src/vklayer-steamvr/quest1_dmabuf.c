@@ -37,6 +37,8 @@ enum { QDB_MAGIC = 0, QDB_WIDTH = 2, QDB_UWIDTH = 4, QDB_FORMAT = 6, QDB_SIZE = 
 static struct
 {
 	pthread_once_t once;
+	int (*allocate)(const qdb_desc *, AHardwareBuffer **);
+	void (*describe)(const AHardwareBuffer *, qdb_desc *);
 	int (*from_handle)(const qdb_desc *, const qdb_handle *, int, AHardwareBuffer **);
 	void (*release)(AHardwareBuffer *);
 	const qdb_handle *(*native_handle)(const AHardwareBuffer *);
@@ -57,10 +59,12 @@ static void qdb_load(void)
 	if (nw) {
 		*(void **)&allocate = adlsym(nw, "AHardwareBuffer_allocate");
 		*(void **)&qdb.from_handle = adlsym(nw, "AHardwareBuffer_createFromHandle");
+		*(void **)&qdb.describe = adlsym(nw, "AHardwareBuffer_describe");
 		*(void **)&qdb.release = adlsym(nw, "AHardwareBuffer_release");
 		*(void **)&qdb.native_handle = adlsym(nw, "AHardwareBuffer_getNativeHandle");
 	}
 	qdb_desc d = {QDB_MODEL_SIZE, 1, 1, QDB_FORMAT_BLOB, QDB_USAGE, 0, 0, 0};
+	qdb.allocate = allocate;
 	if (!allocate || !qdb.from_handle || !qdb.release || !qdb.native_handle || allocate(&d, &qdb.model) != 0) {
 		LOG("dma-buf import: no gralloc BLOB buffers\n");
 		qdb.model = NULL;

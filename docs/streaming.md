@@ -386,8 +386,12 @@ vrlink writes its own log, `~/.local/share/Steam/logs/vrlink.txt` (the PC's side
    buffer (`quest1_dmabuf.c`), and plane layouts that must be the blob's own linear ones. `test_modifier` (same directory): a one-plane
    image on a venus-like ION buffer reads back exact. **NV12 does not fit**: venus rows are 128-byte aligned and its UV plane follows
    the rows rounded up to 32, the blob's linear NV12 has neither; the blob samples venus NV12 only as a gralloc buffer with an Android
-   external format (`src/vdectest/vkahbtest.c`: Vulkan format 0, external format 0x1fa). So vrlink's NV12 images and YCbCr conversions
-   have to become external-format ones (next step).
+   external format (`src/vdectest/vkahbtest.c`: Vulkan format 0, external format 0x1fa). So for vrlink an NV12 image with the linear
+   modifier is created with that external format, its dma-buf imported (dedicated) as a gralloc NV12 buffer (a handle of our own of
+   the same frame with the fd replaced), and its YCbCr conversions and views take the external format. gralloc only takes a dma-buf
+   whose size is exactly the one it gives the frame (venus's `VENUS_BUFFER_SIZE` with the video usage: the planes, 4096 and 8 rows of
+   metadata room), which the decoder's buffers are. `test_modifier`: NV12 at 1920x1080, 2880x1600 and 1832x1920 sampled through an NV12
+   conversion give BT.709's colours.
 3. With both, `Init complete`: vrlink links to the PC (UDP over the PC's hotspot), sends the chaperone, gets a session id; then the PC
    sends nothing and vrlink quits after 15 s ("Timed out getting information from the server"; it then crashes on its way out).
    The PC got a Valve Index: vrlink ships default bindings for Knuckles and Frame controllers only, so SteamVR gives the Touch

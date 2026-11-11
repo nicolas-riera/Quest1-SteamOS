@@ -249,6 +249,11 @@ struct device
 	PFN_vkBindBufferMemory2 BindBufferMemory2;
 	PFN_vkBindImageMemory BindImageMemory;
 	PFN_vkBindImageMemory2 BindImageMemory2;
+	// venus NV12 as an external format (quest1_modifier.c)
+	PFN_vkGetImageMemoryRequirements GetImageMemoryRequirements;
+	PFN_vkGetImageMemoryRequirements2 GetImageMemoryRequirements2, GetImageMemoryRequirements2KHR;
+	PFN_vkCreateImageView CreateImageView;
+	PFN_vkCreateSamplerYcbcrConversion CreateSamplerYcbcrConversion, CreateSamplerYcbcrConversionKHR;
 	PFN_vkMapMemory MapMemory;
 	PFN_vkUnmapMemory UnmapMemory;
 	PFN_vkFreeMemory FreeMemory;
@@ -1935,7 +1940,9 @@ static VKAPI_ATTR VkResult VKAPI_CALL AllocateMemory(VkDevice device, const VkMe
 	bool dmabuf = keep >= 0 && imp->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
 	VkResult r = dmabuf ? VK_ERROR_INVALID_EXTERNAL_HANDLE : d->AllocateMemory(device, ai, alloc, out);
 	if (r == VK_ERROR_INVALID_EXTERNAL_HANDLE && keep >= 0) {
-		r = qdb_import(d, device, ai, keep, alloc, out);
+		// an NV12 frame as a gralloc NV12 buffer, anything else as plain memory
+		if (!dmabuf || !qnv_import(d, device, ai, keep, alloc, out, &r))
+			r = qdb_import(d, device, ai, keep, alloc, out);
 		if (r == VK_SUCCESS && dmabuf)
 			close(imp->fd); // a successful import owns the fd (the blob closed the OPAQUE_FD one itself)
 	}
@@ -2886,6 +2893,14 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice pd, const Vk
 	GET(BindImageMemory2);
 	if (!d->BindImageMemory2)
 		d->BindImageMemory2 = (PFN_vkBindImageMemory2)gdpa(*out, "vkBindImageMemory2KHR");
+	GET(GetImageMemoryRequirements);
+	GET(GetImageMemoryRequirements2);
+	d->GetImageMemoryRequirements2KHR =
+	    (PFN_vkGetImageMemoryRequirements2)gdpa(*out, "vkGetImageMemoryRequirements2KHR");
+	GET(CreateImageView);
+	GET(CreateSamplerYcbcrConversion);
+	d->CreateSamplerYcbcrConversionKHR =
+	    (PFN_vkCreateSamplerYcbcrConversion)gdpa(*out, "vkCreateSamplerYcbcrConversionKHR");
 	GET(MapMemory);
 	GET(UnmapMemory);
 	GET(FreeMemory);
@@ -3010,6 +3025,12 @@ static PFN_vkVoidFunction device_intercept(const char *name)
 	I("vkGetImageSubresourceLayout", GetImageSubresourceLayout)
 	I("vkGetMemoryFdPropertiesKHR", GetMemoryFdProperties)
 	I("vkGetImageDrmFormatModifierPropertiesEXT", GetImageDrmFormatModifierProperties)
+	I("vkGetImageMemoryRequirements", GetImageMemoryRequirements)
+	I("vkGetImageMemoryRequirements2", GetImageMemoryRequirements2)
+	I("vkGetImageMemoryRequirements2KHR", GetImageMemoryRequirements2KHR)
+	I("vkCreateImageView", CreateImageView)
+	I("vkCreateSamplerYcbcrConversion", CreateSamplerYcbcrConversion)
+	I("vkCreateSamplerYcbcrConversionKHR", CreateSamplerYcbcrConversionKHR)
 	I("vkMapMemory", MapMemory)
 	I("vkUnmapMemory", UnmapMemory)
 	I("vkFreeMemory", FreeMemory)
