@@ -98,6 +98,7 @@
 #define QCOM_BUF_FLAG_DATA_CORRUPT 0x00400000
 #define QCOM_BUF_FLAG_EOS 0x02000000
 #define DEC_QCOM_CMD_FLUSH 4
+#define QCOM_CMD_FLUSH_OUTPUT (1 << 0)
 #define QCOM_CMD_FLUSH_CAPTURE (1 << 1)
 
 // --- legacy ION (kernel 4.4 staging: a handle, then a dma-buf fd)
@@ -162,6 +163,7 @@ struct q1dec {
 	uint32_t fifo_used[MAXBUF], fifo_n;
 	uint64_t frames;
 	bool boot, booted; // CAPTURE is set up here until the stream's size is known (the client waits for it)
+	bool await_cap;    // since then the firmware waits for the client's CAPTURE (its "port reconfiguration")
 	bool low_latency;  // frames in decode order, realtime priority (the client's DISPLAY_DELAY 0)
 	int evfd;          // in the client's epoll set: readable while a SOURCE_CHANGE or a skipped packet waits; -1 if none
 	bool ev_ready;     // it is readable
@@ -418,6 +420,7 @@ static void set_up(struct q1dec *e)
 static bool pump(struct q1dec *e);
 static void boot_check(struct q1dec *e);
 static void boot_recycle(struct q1dec *e);
+static void leave_reconfig(struct q1dec *e);
 
 static uint64_t now_ns(void)
 {
@@ -469,6 +472,9 @@ int q1dec_poll(struct q1dec *e, struct pollfd *fd, int timeout_ms)
 
 void q1dec_closing(struct q1dec *e)
 {
+	pthread_mutex_lock(&e->mu);
+	leave_reconfig(e); // (the driver's close stops the session as STREAMOFF does)
+	pthread_mutex_unlock(&e->mu);
 	e->closing = true;
 	if (e->ev_started) {
 		pthread_join(e->ev_thread, NULL);
@@ -682,11 +688,10 @@ static void dead(struct q1dec *e, const char *why)
 	e->dead = true;
 }
 
-// Flush CAPTURE and take every buffer back (the firmware must hold none at STREAMOFF). Frames that were decoded
-// before the flush are kept for the client when asked.
-static int drain_capture(struct q1dec *e, bool keep)
+// The firmware's flush of the given queues, and its flush-done event awaited (2 s at most)
+static int flush(struct q1dec *e, uint32_t queues)
 {
-	struct v4l2_decoder_cmd dc = {.cmd = DEC_QCOM_CMD_FLUSH, .flags = QCOM_CMD_FLUSH_CAPTURE};
+	struct v4l2_decoder_cmd dc = {.cmd = DEC_QCOM_CMD_FLUSH, .flags = queues};
 	if (sys_ioctl(e->fd, VIDIOC_DECODER_CMD, &dc) < 0) {
 		logf_("flush: %s", strerror(errno));
 		return -1;
@@ -714,6 +719,15 @@ static int drain_capture(struct q1dec *e, bool keep)
 			}
 		}
 	}
+	return 0;
+}
+
+// Flush CAPTURE and take every buffer back (the firmware must hold none at STREAMOFF). Frames that were decoded
+// before the flush are kept for the client when asked.
+static int drain_capture(struct q1dec *e, bool keep)
+{
+	if (flush(e, QCOM_CMD_FLUSH_CAPTURE) < 0)
+		return -1;
 	struct v4l2_buffer d;
 	struct v4l2_plane p[2];
 	while (drv_dqbuf(e, CAP, &d, p) == 0) {
@@ -865,8 +879,24 @@ static void boot_end(struct q1dec *e, uint32_t w, uint32_t h, bool tell)
 	if (!tell)
 		return;
 	set_dims(e, w, h);
+	e->await_cap = true;
 	src_pending(e);
 	logf_("the stream is %ux%u: CAPTURE is the client's now", w, h);
+}
+
+// The client stops before it set CAPTURE up (vrlink resets its decoder when no frame came for 800 ms, which can be
+// right then). The driver's STOP at the last STREAMOFF (or at close) is never answered by a firmware that waits
+// for its port reconfiguration: 2 s, an abort, 2 s more, then a system error that takes the video core down
+// (2026-11-11). A flush of both queues first takes it out of that wait.
+static void leave_reconfig(struct q1dec *e)
+{
+	if (!e->await_cap)
+		return;
+	e->await_cap = false;
+	if (e->dead || !e->on[OUT])
+		return;
+	if (flush(e, QCOM_CMD_FLUSH_OUTPUT | QCOM_CMD_FLUSH_CAPTURE) < 0)
+		logf_("stopped while the firmware waited for CAPTURE: flush failed");
 }
 
 // Our CAPTURE's buffers that the firmware gave back (empty, one for each picture it dropped before the stream's
@@ -1031,6 +1061,8 @@ static int reqbufs(struct q1dec *e, struct v4l2_requestbuffers *rb)
 	set_up(e);
 	if (q == CAP && e->boot) // the client sets CAPTURE up before the stream's size came after all
 		boot_end(e, 0, 0, false);
+	if (q == CAP && rb->count)
+		e->await_cap = false;
 	if (e->on[q])
 		stream(e, VIDIOC_STREAMOFF, q);
 	struct v4l2_requestbuffers d = *rb;
@@ -1297,6 +1329,8 @@ static int dqbuf(struct q1dec *e, struct v4l2_buffer *b)
 static int stream(struct q1dec *e, unsigned long req, int q)
 {
 	int t = q == OUT ? V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE : V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+	if (req == VIDIOC_STREAMOFF && q == OUT)
+		leave_reconfig(e);
 	if (req == VIDIOC_STREAMOFF && q == CAP && e->on[CAP]) {
 		pump(e);
 		// the firmware must hold no capture buffer at STREAMOFF while the stream runs

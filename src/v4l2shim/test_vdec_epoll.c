@@ -3,7 +3,10 @@
 // epoll wait for SOURCE_CHANGE, and only then CAPTURE, with dma-bufs of the client's own (ION here; vrlink's are
 // Vulkan memory it exports). Paced like a live stream; reports the frames, when the first came, and the latency.
 //
-//   LD_PRELOAD=libquest1_v4l2.so test_vdec_epoll stream.265 [fps] [first]
+//   LD_PRELOAD=libquest1_v4l2.so test_vdec_epoll stream.265 [fps] [first] [stop]
+// "stop": at SOURCE_CHANGE, OUTPUT off and the decoder closed with no CAPTURE set up (vrlink resetting its decoder
+// then, 2026-11-11: the firmware stopped answering); "stopMS": the same MS ms after the first packet, in whatever
+// state. Fails when that takes 500 ms or more; check the kernel log, then run once more without it.
 // HEVC Annex-B with no B-frames (ffmpeg -f lavfi -i testsrc2=size=1024x4096:rate=72 -t 3 -c:v hevc_nvenc -bf 0
 // -tune ull -g 30 -f hevc). "first" starts at that access unit: inside a GOP, the stream vrlink feeds after it
 // reset its decoder (P-frames until the I-frame it asked for). vrlink gives up as soon as all 16 packet buffers are
@@ -48,6 +51,19 @@ static double now_ms(void)
 	return t.tv_sec * 1e3 + t.tv_nsec / 1e6;
 }
 
+// vrlink resetting its decoder: OUTPUT off and the decoder closed, whatever state it is in
+static int stop_now(const char *when)
+{
+	double s0 = now_ms();
+	int ot = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+	ioctl(fd, VIDIOC_STREAMOFF, &ot);
+	struct v4l2_requestbuffers z = {.count = 0, .type = ot, .memory = V4L2_MEMORY_MMAP};
+	ioctl(fd, VIDIOC_REQBUFS, &z);
+	close(fd);
+	printf("stopped %s and closed in %.1f ms\n", when, now_ms() - s0);
+	return now_ms() - s0 < 500 ? 0 : 1;
+}
+
 static int x(unsigned long req, void *arg, const char *what)
 {
 	int r = ioctl(fd, req, arg);
@@ -80,11 +96,13 @@ static size_t split(const uint8_t *p, size_t n, size_t *start, size_t max)
 int main(int argc, char **argv)
 {
 	if (argc < 2) {
-		fprintf(stderr, "usage: test_vdec_epoll stream.265 [fps] [first]\n");
+		fprintf(stderr, "usage: test_vdec_epoll stream.265 [fps] [first] [stop|stopMS]\n");
 		return 2;
 	}
 	double fps = argc > 2 ? atof(argv[2]) : 72;
 	size_t skip = argc > 3 ? (size_t)atol(argv[3]) : 0;
+	int stop = argc > 4 && !strncmp(argv[4], "stop", 4);
+	double stop_ms = stop && argv[4][4] ? atof(argv[4] + 4) : -1; // after the first packet; else at SOURCE_CHANGE
 	int sf = open(argv[1], O_RDONLY);
 	struct stat st;
 	if (sf < 0 || fstat(sf, &st) < 0)
@@ -149,6 +167,8 @@ int main(int argc, char **argv)
 	unsigned held = 0, held_max = 0;
 	double end = naus * 1000.0 / fps + 1000;
 	while (frames < naus && now_ms() - t0 < end) {
+		if (stop_ms >= 0 && now_ms() - t0 >= stop_ms)
+			return stop_now(argv[4]);
 		held = 0;
 		for (unsigned i = 0; i < rb.count; i++)
 			held += !infree[i];
@@ -196,6 +216,8 @@ int main(int argc, char **argv)
 					return 1;
 				printf("SOURCE_CHANGE after %.1f ms: %ux%u, stride %u, %u bytes\n", now_ms() - t0, g.fmt.pix_mp.width,
 				       g.fmt.pix_mp.height, g.fmt.pix_mp.plane_fmt[0].bytesperline, g.fmt.pix_mp.plane_fmt[0].sizeimage);
+				if (stop && stop_ms < 0) // CAPTURE never set up
+					return stop_now("at SOURCE_CHANGE");
 				int ct = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
 				x(VIDIOC_STREAMOFF, &ct, "STREAMOFF CAPTURE");
 				struct v4l2_requestbuffers cr = {.count = 0, .type = ct, .memory = V4L2_MEMORY_DMABUF};
