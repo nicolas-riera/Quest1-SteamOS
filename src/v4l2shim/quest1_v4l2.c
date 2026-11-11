@@ -813,10 +813,28 @@ EXPORT int epoll_ctl(int epfd, int op, int fd, struct epoll_event *ev)
 	return r;
 }
 
+// When every event of a wake-up was one of the decoder's that says nothing to the client, the wait goes on: 0 is a
+// timeout, and vrlink's decoder thread takes 0 from a wait with no timeout as a failure and stops (2026-11-11).
 EXPORT int epoll_pwait(int epfd, struct epoll_event *ev, int max, int timeout, const sigset_t *ss)
 {
-	int n = (int)syscall(SYS_epoll_pwait, epfd, ev, max, timeout, ss, _NSIG / 8);
-	return q1dec_epoll_events(epfd, ev, n);
+	struct timespec t0, t;
+	if (timeout > 0)
+		clock_gettime(CLOCK_MONOTONIC, &t0);
+	for (int left = timeout;;) {
+		int n = (int)syscall(SYS_epoll_pwait, epfd, ev, max, left, ss, _NSIG / 8);
+		if (n <= 0)
+			return n;
+		n = q1dec_epoll_events(epfd, ev, n);
+		if (n > 0 || timeout == 0)
+			return n;
+		if (timeout > 0) {
+			clock_gettime(CLOCK_MONOTONIC, &t);
+			left = timeout - (int)((t.tv_sec - t0.tv_sec) * 1000 + (t.tv_nsec - t0.tv_nsec) / 1000000);
+			if (left <= 0)
+				return 0;
+		}
+		usleep(1000); // (what it hid may be level-triggered and still there)
+	}
 }
 
 EXPORT int epoll_wait(int epfd, struct epoll_event *ev, int max, int timeout)

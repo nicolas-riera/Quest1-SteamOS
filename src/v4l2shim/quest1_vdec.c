@@ -417,6 +417,7 @@ static void set_up(struct q1dec *e)
 
 static bool pump(struct q1dec *e);
 static void boot_check(struct q1dec *e);
+static void boot_recycle(struct q1dec *e);
 
 static uint64_t now_ns(void)
 {
@@ -432,13 +433,15 @@ static void *ev_loop(void *arg)
 {
 	struct q1dec *e = arg;
 	while (!e->closing) {
-		struct pollfd pf = {.fd = e->fd, .events = POLLPRI};
+		struct pollfd pf = {.fd = e->fd, .events = POLLPRI | (__atomic_load_n(&e->boot, __ATOMIC_RELAXED) ? POLLIN : 0)};
 		int n = q1_sys_poll(&pf, 1, 100);
 		if (e->closing || (pf.revents & POLLNVAL))
 			break;
-		if (n > 0 && (pf.revents & POLLPRI)) {
+		if (n > 0 && (pf.revents & (POLLPRI | POLLIN))) {
 			pthread_mutex_lock(&e->mu);
 			pump(e);
+			if (e->boot)
+				boot_recycle(e);
 			pthread_mutex_unlock(&e->mu);
 		} else if (n > 0) {
 			usleep(5000); // the driver says POLLERR while a queue has no buffer: not an event
@@ -864,6 +867,23 @@ static void boot_end(struct q1dec *e, uint32_t w, uint32_t h, bool tell)
 	set_dims(e, w, h);
 	src_pending(e);
 	logf_("the stream is %ux%u: CAPTURE is the client's now", w, h);
+}
+
+// Our CAPTURE's buffers that the firmware gave back (empty, one for each picture it dropped before the stream's
+// start) go straight back to it: left done in the driver, they keep the decoder readable (POLLIN) for the client,
+// whose epoll_wait would wake for nothing until the stream's size is known.
+static void boot_recycle(struct q1dec *e)
+{
+	struct v4l2_buffer d;
+	struct v4l2_plane p[2];
+	struct pollfd pf = {.fd = e->fd, .events = POLLIN}; // (the client may have opened the device blocking)
+	while (e->boot && e->on[CAP] && q1_sys_poll(&pf, 1, 0) > 0 && (pf.revents & POLLIN) && drv_dqbuf(e, CAP, &d, p) == 0) {
+		if (d.index >= MAXBUF)
+			continue;
+		e->indrv[CAP][d.index] = false;
+		if (drv_qbuf(e, CAP, d.index, NULL, 0) < 0)
+			break;
+	}
 }
 
 static void boot_check(struct q1dec *e)

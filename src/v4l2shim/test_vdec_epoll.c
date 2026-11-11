@@ -144,7 +144,7 @@ int main(int argc, char **argv)
 		return 1;
 
 	double t0 = now_ms(), first = -1, lat = 0, latmax = 0, sent[4096];
-	size_t next = 0, frames = 0, live = 0, events = 0, wakes = 0;
+	size_t next = 0, frames = 0, live = 0, events = 0, wakes = 0, early0 = 0;
 	int capfd[NCAP], ncap = 0;
 	unsigned held = 0, held_max = 0;
 	double end = naus * 1000.0 / fps + 1000;
@@ -175,7 +175,10 @@ int main(int argc, char **argv)
 			sent[next++] = now_ms();
 		}
 		struct epoll_event got[4];
+		double w0 = now_ms();
 		int n = epoll_wait(ep, got, 4, 2);
+		if (n == 0 && now_ms() - w0 < 1.5)
+			early0++; // a timeout before the time: vrlink, which waits with none, takes it as a failure
 		for (int k = 0; k < n; k++) {
 			wakes++;
 			if (got[k].data.u64 != DATA) {
@@ -257,8 +260,9 @@ int main(int argc, char **argv)
 	}
 out:
 	printf("%zu of %zu frames in %.0f ms; first after %.1f ms; then %zu frames %.1f ms from packet to frame (max %.1f);"
-	       " %zu events, %zu wakes; at most %u of %u packet buffers in the driver\n",
-	       frames, naus, now_ms() - t0, first, live, live ? lat / live : 0, latmax, events, wakes, held_max, rb.count);
+	       " %zu events, %zu wakes, %zu early empty ones; at most %u of %u packet buffers in the driver\n",
+	       frames, naus, now_ms() - t0, first, live, live ? lat / live : 0, latmax, events, wakes, early0, held_max,
+	       rb.count);
 	close(fd);
-	return frames && held_max < rb.count ? 0 : 1;
+	return frames && held_max < rb.count && !early0 ? 0 : 1;
 }
