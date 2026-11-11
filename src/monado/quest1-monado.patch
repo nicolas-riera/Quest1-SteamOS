@@ -249,10 +249,10 @@ index eb41c3c..5214613 100644
  
 diff --git a/src/xrt/compositor/main/comp_window_mdp.c b/src/xrt/compositor/main/comp_window_mdp.c
 new file mode 100644
-index 0000000..e044c97
+index 0000000..897cff3
 --- /dev/null
 +++ b/src/xrt/compositor/main/comp_window_mdp.c
-@@ -0,0 +1,3928 @@
+@@ -0,0 +1,3945 @@
 +// Copyright 2026, Quest1-SteamOS contributors
 +// SPDX-License-Identifier: BSL-1.0
 +/*!
@@ -385,10 +385,12 @@ index 0000000..e044c97
 +//! Exists while the headset sleeps (quest1-standby): panels off as if the headset was removed.
 +#define MDP_STANDBY "/run/quest1-standby"
 +//! Exists while the boot animation (src/q1splash) keeps its last frame on the panels: we take them over when
-+//! SteamVR's layer connects (its first frame replaces that one), or blank them as soon as the headset is not
-+//! worn; our own frames (black, before any app) leave them alone. Whoever unlinks it, under its flock, owns the
-+//! panels from then on.
++//! SteamVR's layer connects (its first frame replaces that one); our own frames (black, before any app) leave
++//! them alone. Whoever unlinks it, under its flock, owns the panels from then on.
 +#define MDP_SPLASH_HOLD "/run/quest1-splash-hold"
++//! Exists while the boot animation holds the panels and the headset is not worn: q1splash powers them down, and
++//! up again with its last frame once it is gone.
++#define MDP_SPLASH_OFF "/run/quest1-splash-off"
 +//! Time the compositor gets between waking up and the vsync that shows its frame.
 +#define MDP_RENDER_BUDGET_NS (15 * U_TIME_1MS_IN_NS)
 +#define PRIV_FLAGS_UBWC_ALIGNED 0x08000000
@@ -1102,6 +1104,7 @@ index 0000000..e044c97
 +	// q1splash holds the lock only while it blanks the panels itself (its timeout)
 +	if (flock(fd, LOCK_EX) == 0 && fstat(fd, &st) == 0 && st.st_nlink > 0) {
 +		unlink(MDP_SPLASH_HOLD);
++		unlink(MDP_SPLASH_OFF);
 +		U_LOG_W("mdp: panels taken over from the boot animation%s", blank ? ", headset not worn: off" : "");
 +		if (blank) {
 +			t->unblanked = true; // lit by q1splash
@@ -1215,6 +1218,20 @@ index 0000000..e044c97
 +		t->standby = standby;
 +	}
 +	t->worn = t->prox_worn && !standby;
++	// While the boot animation holds the panels (SteamVR has not shown anything yet), q1splash powers them down
++	// and up itself, so the Steam logo comes back when the headset is put on again: taken over here, they would
++	// light up black until SteamVR's first frame (2026-11-11).
++	if (splash_held_locked(t)) {
++		if (!t->worn) {
++			int fd = open(MDP_SPLASH_OFF, O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
++			if (fd >= 0) {
++				close(fd);
++			}
++		} else {
++			unlink(MDP_SPLASH_OFF);
++		}
++		return;
++	}
 +	if (!t->worn) {
 +		take_splash_locked(t, true);
 +		set_panels_locked(t, false);

@@ -45,8 +45,10 @@ lists what is left to do).
   picks it from its hardware type (5001 = Frame, read from /proc/device-tree: the Frame's DT says
   qcom,sm8650-deckard), not from -steamframe. The boot animation (q1splash) plays the Frame's, and its last
   frame (the Steam logo) stays on the panels until SteamVR's first one (`/run/quest1-splash-hold`: Monado takes
-  the panels over when vrcompositor's layer connects, or blanks them if the headset is not worn; q1splash blanks
-  them itself after 60 s). Monado's own frames at its start (black) used to replace it.
+  the panels over when vrcompositor's layer connects; q1splash blanks them itself after 60 s). Monado's own frames
+  at its start (black) used to replace it. While the headset is not worn before that, Monado asks q1splash to turn
+  the panels off (`/run/quest1-splash-off`) and q1splash lights them again with the logo when it is put back on.
+  Monado used to take the panels over then, and they came back black until SteamVR's first frame (2026-11-11).
 - Restart from Steam: retest. If it works, drop the sshd `pam_systemd` workaround in
   `device/holo-perf.sh`.
 

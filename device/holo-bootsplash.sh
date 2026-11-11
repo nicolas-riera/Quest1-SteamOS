@@ -7,7 +7,8 @@
 #  - packages: GStreamer's VP9 (libvpx) and Matroska plugins
 #  - /usr/local/lib/q1splash/q1splash: built from src/q1splash/q1splash.c
 #  - /usr/local/sbin/q1splash-play, quest1-bootsplash.service (enabled), monado.service waits for the movie's
-#    end; its last frame stays lit until SteamVR shows its first one (Monado takes the panels over)
+#    end; its last frame stays lit until SteamVR shows its first one (Monado takes the panels over). Meanwhile
+#    the panels go off while the headset is not worn and come back with the logo (/run/quest1-splash-off)
 #  - holo-panel-off.service (enabled): panels blanked at sysinit, so the bootloader's last frame does not
 #    stay lit (burn-in) until the splash or a compositor takes over
 # Before Steam has been installed (first boot) there is no movie and nothing is shown.
