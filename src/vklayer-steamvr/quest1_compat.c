@@ -1938,7 +1938,10 @@ static VKAPI_ATTR VkResult VKAPI_CALL AllocateMemory(VkDevice device, const VkMe
 	int keep = qdb_keep(ai);
 	// a dma-buf the blob does not know (quest1_dmabuf.c): an OPAQUE_FD one is tried there first, a DMA_BUF one never
 	const VkImportMemoryFdInfoKHR *imp = find_struct(ai->pNext, VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR);
-	bool dmabuf = keep >= 0 && imp->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+	// (an NV12 frame's OPAQUE_FD is the dma-buf vrcompositor exported again: GetMemoryFd)
+	const VkMemoryDedicatedAllocateInfo *ded = find_struct(ai->pNext, VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO);
+	bool dmabuf = keep >= 0 && (imp->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT ||
+	                            (ded && qnv_find(ded->image) >= 0));
 	VkResult r;
 	if (keep < 0 && qnv_export(d, device, ai, alloc, out, &r)) // an NV12 frame to export (quest1_modifier.c)
 		return r;

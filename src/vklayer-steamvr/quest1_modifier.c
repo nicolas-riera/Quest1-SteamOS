@@ -392,6 +392,48 @@ static AHardwareBuffer *qnv_model(unsigned w, unsigned h, uint64_t usage, qdb_de
 	return b;
 }
 
+// The dma-buf of each NV12 import, for vkGetMemoryFdKHR: vrcompositor exports what it imported again ("prepare image
+// for export", as a cross-process shared resource), which the blob cannot do for memory of a gralloc buffer; without
+// it every frame vrlink submits is an invalid texture (2026-11-11).
+static struct
+{
+	VkDeviceMemory mem;
+	int fd;
+} qnv_imp[64];
+static atomic_int qnv_nimp;
+
+static void qnv_imported(VkDeviceMemory m, int fd)
+{
+	int own = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+	unsigned k = 0;
+	pthread_mutex_lock(&qdb_lock);
+	while (k < sizeof(qnv_imp) / sizeof(qnv_imp[0]) && qnv_imp[k].mem)
+		k++;
+	if (own >= 0 && k < sizeof(qnv_imp) / sizeof(qnv_imp[0])) {
+		qnv_imp[k].mem = m;
+		qnv_imp[k].fd = own;
+		atomic_fetch_add(&qnv_nimp, 1);
+		own = -1;
+	}
+	pthread_mutex_unlock(&qdb_lock);
+	if (own >= 0)
+		close(own);
+}
+
+//! A new fd of the dma-buf an NV12 import was made of, -1 if m is none.
+static int qnv_import_fd(VkDeviceMemory m)
+{
+	int fd = -1;
+	if (!m || !atomic_load(&qnv_nimp))
+		return -1;
+	pthread_mutex_lock(&qdb_lock);
+	for (unsigned k = 0; k < sizeof(qnv_imp) / sizeof(qnv_imp[0]) && fd < 0; k++)
+		if (qnv_imp[k].mem == m)
+			fd = fcntl(qnv_imp[k].fd, F_DUPFD_CLOEXEC, 0);
+	pthread_mutex_unlock(&qdb_lock);
+	return fd;
+}
+
 //! vkAllocateMemory of a dma-buf for an NV12 image of ours (dedicated to it): true if it was one (*r is the result).
 static bool qnv_import(struct device *d, VkDevice device, const VkMemoryAllocateInfo *ai, int fd,
                        const VkAllocationCallbacks *alloc, VkDeviceMemory *out, VkResult *r)
@@ -447,6 +489,8 @@ static bool qnv_import(struct device *d, VkDevice device, const VkMemoryAllocate
 		VkMemoryAllocateInfo mi = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &imp, props.allocationSize,
 		                           (uint32_t)__builtin_ctz(props.memoryTypeBits)};
 		*r = d->AllocateMemory(device, &mi, alloc, out);
+		if (*r == VK_SUCCESS)
+			qnv_imported(*out, fd);
 	} else if (*r == VK_SUCCESS) {
 		*r = VK_ERROR_INVALID_EXTERNAL_HANDLE;
 	}
@@ -619,6 +663,21 @@ static AHardwareBuffer *qnv_exported(VkDeviceMemory m)
 //! After vkFreeMemory: our gralloc buffer of exported memory goes too.
 static void qnv_free_memory(VkDeviceMemory m)
 {
+	if (m && atomic_load(&qnv_nimp)) {
+		int fd = -1;
+		pthread_mutex_lock(&qdb_lock);
+		for (unsigned k = 0; k < sizeof(qnv_imp) / sizeof(qnv_imp[0]) && fd < 0; k++)
+			if (qnv_imp[k].mem == m) {
+				fd = qnv_imp[k].fd;
+				qnv_imp[k].mem = VK_NULL_HANDLE;
+				atomic_fetch_sub(&qnv_nimp, 1);
+			}
+		pthread_mutex_unlock(&qdb_lock);
+		if (fd >= 0) {
+			close(fd);
+			return;
+		}
+	}
 	if (!m || !atomic_load(&qnv_nexp))
 		return;
 	AHardwareBuffer *b = NULL;
@@ -640,6 +699,17 @@ static void qnv_free_memory(VkDeviceMemory m)
 static VKAPI_ATTR VkResult VKAPI_CALL GetMemoryFd(VkDevice device, const VkMemoryGetFdInfoKHR *gi, int *fd)
 {
 	struct device *d = device_of(device);
+	if (gi->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT ||
+	    gi->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT) {
+		// an NV12 import: its dma-buf again, as either kind (an OPAQUE_FD one comes back to qnv_import)
+		*fd = qnv_import_fd(gi->memory);
+		if (*fd >= 0) {
+			static atomic_int logs;
+			if (atomic_fetch_add(&logs, 1) < 2)
+				LOG("dma-buf: NV12 import exported again (handle type 0x%x)\n", gi->handleType);
+			return VK_SUCCESS;
+		}
+	}
 	if (gi->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT) {
 		AHardwareBuffer *b = qnv_exported(gi->memory);
 		const qdb_handle *h = b ? qdb.native_handle(b) : NULL;
