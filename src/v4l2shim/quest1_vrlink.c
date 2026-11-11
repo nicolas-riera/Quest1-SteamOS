@@ -12,14 +12,25 @@
 // controller_config.json Quest 1 Touch names): an "Oculus Quest" with Quest 1 Touch controllers, which the PC
 // drives with SteamVR's own Oculus profiles and render models. Nothing of Valve's is changed: the properties are
 // answered in vrlink's process, through its IVRSystem.
+//
+// The headset's model starts with "Deckard" (the Steam Frame's code name): the PC's driver_vrlink takes a model
+// starting with "steam frame" or "deckard" (any case) for a Steam Frame, and only then is the PC's SteamVR in the
+// Frame's dashboard mode (SteamVRClientUnified: no dashboard of its own, its panels go to the headset's dashboard;
+// "ThirdPartyClient" otherwise) and uses the Frame's stream profile (2026-11-11). The model is the only thing it
+// looks at for that, and it is also the name the PC shows.
 #define _GNU_SOURCE
+#include <dirent.h>
 #include <dlfcn.h>
 #include <errno.h> // program_invocation_short_name
 #include <pthread.h>
+#include <sched.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 
 #define EXPORT __attribute__((visibility("default")))
 
@@ -36,7 +47,7 @@ static const struct
 	const char *v[3]; // HMD, left, right
 } idents[] = {
     {1000 /* TrackingSystemName */, {"oculus", "oculus", "oculus"}},
-    {1001 /* ModelNumber */, {"Oculus Quest", "Oculus Quest (Left Controller)", "Oculus Quest (Right Controller)"}},
+    {1001 /* ModelNumber */, {"Deckard (Oculus Quest)", "Oculus Quest (Left Controller)", "Oculus Quest (Right Controller)"}},
     {1002 /* SerialNumber */, {"VRLINKHMDQUEST1", "VRLINKQ1_Controller_Left", "VRLINKQ1_Controller_Right"}},
     {1003 /* RenderModelName */, {"generic_hmd", "oculus_quest_controller_left", "oculus_quest_controller_right"}},
     {1005 /* ManufacturerName */, {"Oculus", "Oculus", "Oculus"}},
@@ -144,8 +155,103 @@ static void patch(void *sys)
 	vtable[SLOT_STRING] = (void *)string_prop;
 	vtable[SLOT_ARRAY] = (void *)array_prop;
 	*obj = vtable;
-	fprintf(stderr, "quest1_v4l2: vrlink: identity of an Oculus Quest with Quest 1 Touch controllers (SteamVR shows %s)\n",
-	        model);
+	fprintf(stderr, "quest1_v4l2: vrlink: identity of a \"Deckard (Oculus Quest)\" with Quest 1 Touch controllers "
+	        "(SteamVR shows %s)\n", model);
+}
+
+// vrlink makes its network and decoding threads SCHED_FIFO 80 (as on the Frame). Steam's processes may only go up to
+// RLIMIT_RTPRIO (steam.service: 40), so that failed and they stayed normal threads: they ran late while the headset
+// was busy, the PC read that as a bad link ("Bad link event", ~10-70 ms) and held its encoder back, half the frames
+// (2026-11-11). Here vrlink's requests are lowered to RT_MAX, below Meta's tracking and Monado (48 and up).
+#define RT_MAX 40
+
+static bool is_vrlink(void)
+{
+	static int v = -1;
+	if (v < 0)
+		v = !strcmp(program_invocation_short_name, "vrlink");
+	return v;
+}
+
+EXPORT int pthread_setschedparam(pthread_t t, int policy, const struct sched_param *sp)
+{
+	static int (*real)(pthread_t, int, const struct sched_param *);
+	if (!real)
+		*(void **)&real = dlsym(RTLD_NEXT, "pthread_setschedparam");
+	struct sched_param p;
+	if (is_vrlink() && (policy == SCHED_FIFO || policy == SCHED_RR) && sp->sched_priority > RT_MAX) {
+		p = *sp;
+		p.sched_priority = RT_MAX;
+		sp = &p;
+	}
+	return real(t, policy, sp);
+}
+
+EXPORT int sched_setscheduler(pid_t pid, int policy, const struct sched_param *sp)
+{
+	static int (*real)(pid_t, int, const struct sched_param *);
+	if (!real)
+		*(void **)&real = dlsym(RTLD_NEXT, "sched_setscheduler");
+	struct sched_param p;
+	int base = policy & ~SCHED_RESET_ON_FORK;
+	if (sp && is_vrlink() && (base == SCHED_FIFO || base == SCHED_RR) && sp->sched_priority > RT_MAX) {
+		p = *sp;
+		p.sched_priority = RT_MAX;
+		sp = &p;
+	}
+	return real(pid, policy, sp);
+}
+
+// Three of vrlink's threads ask for no priority: its main thread (it takes each decoded frame and submits it to
+// vrcompositor), EventsThread (the link's messages) and data-loop.0 (its PipeWire sound). With the headset busy
+// (Meta's tracking, SteamVR, Monado: load ~10) they waited for a CPU longer than they ran (169, 274 and 173 ms a
+// second, 2026-11-11). They are made realtime here too, below vrlink's own (RT_MAX), as they come up.
+static const struct
+{
+	const char *name;
+	int prio;
+} rt_threads[] = {{"vrlinkrunthread", RT_MAX - 2}, {"EventsThread", RT_MAX - 2}, {"data-loop.0", RT_MAX - 4}};
+
+static void *rt_watch(void *arg)
+{
+	(void)arg;
+	for (;;) {
+		DIR *d = opendir("/proc/self/task");
+		struct dirent *de;
+		while (d && (de = readdir(d))) {
+			pid_t tid = (pid_t)atoi(de->d_name);
+			char path[64], comm[32] = "";
+			snprintf(path, sizeof(path), "/proc/self/task/%d/comm", tid);
+			FILE *f = tid > 0 ? fopen(path, "r") : NULL;
+			if (!f)
+				continue;
+			if (fgets(comm, sizeof(comm), f))
+				comm[strcspn(comm, "\n")] = 0;
+			fclose(f);
+			for (size_t i = 0; i < sizeof(rt_threads) / sizeof(rt_threads[0]); i++) {
+				if (strcmp(comm, rt_threads[i].name) || sched_getscheduler(tid) != SCHED_OTHER)
+					continue;
+				struct sched_param p = {.sched_priority = rt_threads[i].prio};
+				if (syscall(SYS_sched_setscheduler, tid, SCHED_FIFO, &p) == 0)
+					fprintf(stderr, "quest1_v4l2: vrlink: %s realtime (SCHED_FIFO %d)\n", comm, p.sched_priority);
+				else
+					fprintf(stderr, "quest1_v4l2: vrlink: %s realtime: %s\n", comm, strerror(errno));
+			}
+		}
+		if (d)
+			closedir(d);
+		sleep(1);
+	}
+	return NULL;
+}
+
+__attribute__((constructor)) static void rt_watch_start(void)
+{
+	pthread_t t;
+	if (is_vrlink() && pthread_create(&t, NULL, rt_watch, NULL) == 0) {
+		pthread_setname_np(t, "q1rtwatch");
+		pthread_detach(t);
+	}
 }
 
 EXPORT void *VR_GetGenericInterface(const char *version, int *err)

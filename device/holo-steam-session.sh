@@ -310,7 +310,9 @@ ExecStart=/usr/local/bin/steam-q1 -gamepadui -steamos3 -steamdeck -steamframe -p
 # At 0 Steam's "Realtime AudioW" stayed a normal thread that waited longer for a CPU than it ran (0.99 s against
 # 0.29 s six minutes after boot, up to 24 ms at once): its sounds crackled while the headset was busy (2026-11-08).
 # Below Meta's tracking, SteamVR and Monado (48 and up); games started by Steam inherit it, as rtkit would allow.
-LimitRTPRIO=10
+# 40: Steam Link VR's client (vrlink) runs its network and decoding threads realtime (libquest1_v4l2 lowers its 80
+# to 40); as normal threads they ran late and the PC held its encoder back (2026-11-11, src/v4l2shim/quest1_vrlink.c).
+LimitRTPRIO=40
 # Steam exits with status 0 on its own (e.g. when SteamVR restarts); like a console session it must come back
 Restart=always
 RestartSec=5

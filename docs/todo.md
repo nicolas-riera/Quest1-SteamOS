@@ -168,6 +168,16 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   fallback); (4) VR streaming (vrlink), once the 2D stream runs well (user, 2026-11-11: before the rest of the
   list); (5) the user's list: 72 fps, microphone, gamepads, the PC's overlays, the headset's dashboard and not the
   PC's SteamVR one.
+- Steam Link VR (docs/streaming.md, section 2): the stream shows in the headset, 8 or 10 bits. The user
+  (2026-11-11): it trembles in the headset only (not in the PC's VR view), is not fluid, and looks heavily
+  compressed and smoothed (the floor and the dashboard). The decode is exact, so the compression is the PC's
+  encode; the user was checking Steam Link with a Quest 3 on the same PC. Leads on the headset: vrlink holds each
+  decoded frame ~22 ms before it queries it, ~90 % of the frames are "Mispredicted" on the PC (driver_quest1's
+  `Prop_SecondsFromVsyncToPhotons` 0.022 may be wrong for direct scanout), how vrlink's frames are re-projected.
+  Also: the PC's overlays show only when the PC's SteamVR started after vrlink; stopping a session from the headset
+  (`StopStreamingSession`) does nothing and vrlink hangs on its way out.
+- Wi-Fi power saving comes back on at each boot (`iw dev wlan0 set power_save off` by hand for the stream): keep it
+  off for good, if the stream needs it.
 - Reference for making Steam Link accept a Quest 1 (device identity, etc.):
   github.com/MisterAnderson91/quest1-steamlink-patcher (it patches Valve's Steam Link VR APK; we use it as a guide
   only, for SteamOS's native streaming, user 2026-11-09).

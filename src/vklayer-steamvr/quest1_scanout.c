@@ -87,6 +87,19 @@ static uint32_t qs_scene_w, qs_scene_h; // 0: off
 static bool qs_scene_on;                // asked for (qs_scene_w may still be 0: size unknown)
 static int qs_first_eye = 1;            // the half vrcompositor renders first (its first distortion pass: x = 1440)
 
+// Steam Link VR (vrlink): vrcompositor draws its frames in the distortion pass only (quest1_modifier.c copies them as
+// RGBA for it), which scene mode drops: the panels showed only what the eye passes drew (the headset's own dashboard,
+// over black, 2026-11-11). So while a frame of vrlink came in the last second, the eyes render into vrcompositor's own
+// images and its distortion pass runs into the eye's buffer: its distortion is an identity here (driver_quest1), so
+// stretched from the panel's size to the buffer's (viewports, scissors) it gives what an eye render would have been.
+static _Atomic uint64_t qs_stream_ns;
+
+static bool qs_streaming(void)
+{
+	uint64_t t = atomic_load(&qs_stream_ns);
+	return t && now_ns() - t < 1000000000ull;
+}
+
 static void qs_scene_size_path(char *out, size_t n)
 {
 	const char *home = getenv("HOME");
@@ -378,9 +391,10 @@ static VkResult qs_plain_image(struct qd_swapchain *sc, const VkImageCreateInfo 
 
 struct qs_twin
 {
-	uint64_t handle;  //!< app's image view / framebuffer
-	uint64_t twin[2]; //!< ours on half_image[0] / half_image[1]
-	uint64_t img[2];  //!< half_image[0] / [1]
+	uint64_t handle;    //!< app's image view / framebuffer
+	uint64_t twin[2];   //!< ours on half_image[0] / half_image[1]
+	uint64_t img[2];    //!< half_image[0] / [1]
+	uint64_t stream[2]; //!< framebuffers: the whole buffer of scene mode (qs_streaming)
 };
 static struct qs_twin qs_views[64], qs_fbs[64];
 static unsigned qs_nviews, qs_nfbs;
@@ -511,7 +525,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL qs_CreateFramebuffer(VkDevice device, cons
 	pthread_mutex_lock(&qs_twin_lock);
 	const struct qs_twin *v = qs_twin_find(qs_views, qs_nviews, (uint64_t)ci->pAttachments[0]);
 	if (v && qs_nfbs < sizeof(qs_fbs) / sizeof(qs_fbs[0])) {
-		struct qs_twin t = {(uint64_t)*out, {0, 0}, {v->img[0], v->img[1]}};
+		struct qs_twin t = {(uint64_t)*out, {0, 0}, {v->img[0], v->img[1]}, {0, 0}};
 		for (int h = 0; h < 2; h++) {
 			VkFramebufferCreateInfo c = *ci;
 			VkImageView a = (VkImageView)v->twin[h];
@@ -520,13 +534,23 @@ static VKAPI_ATTR VkResult VKAPI_CALL qs_CreateFramebuffer(VkDevice device, cons
 			VkFramebuffer fb = VK_NULL_HANDLE;
 			if (next(device, &c, alloc, &fb) == VK_SUCCESS)
 				t.twin[h] = (uint64_t)fb;
+			if (qs_scene_w) { // (the buffers are the scene's size)
+				c.width = qs_scene_w;
+				c.height = qs_scene_h;
+				fb = VK_NULL_HANDLE;
+				if (next(device, &c, alloc, &fb) == VK_SUCCESS)
+					t.stream[h] = (uint64_t)fb;
+			}
 		}
 		if (t.twin[0] && t.twin[1])
 			qs_fbs[qs_nfbs++] = t;
 		else
-			for (int h = 0; h < 2; h++)
+			for (int h = 0; h < 2; h++) {
 				if (t.twin[h])
 					destroy(device, (VkFramebuffer)t.twin[h], alloc);
+				if (t.stream[h])
+					destroy(device, (VkFramebuffer)t.stream[h], alloc);
+			}
 	}
 	pthread_mutex_unlock(&qs_twin_lock);
 	return r;
@@ -554,8 +578,11 @@ static VKAPI_ATTR void VKAPI_CALL qs_DestroyFramebuffer(VkDevice device, VkFrame
 	pthread_mutex_lock(&qs_twin_lock);
 	for (unsigned i = 0; i < qs_nfbs; i++)
 		if (qs_fbs[i].handle == (uint64_t)fb) {
-			for (int h = 0; h < 2; h++)
+			for (int h = 0; h < 2; h++) {
 				next(device, (VkFramebuffer)qs_fbs[i].twin[h], alloc);
+				if (qs_fbs[i].stream[h])
+					next(device, (VkFramebuffer)qs_fbs[i].stream[h], alloc);
+			}
 			qs_fbs[i] = qs_fbs[--qs_nfbs];
 			break;
 		}
@@ -584,6 +611,38 @@ static void qs_set_shifted(VkCommandBuffer cb, bool on)
 	for (unsigned i = 0; i < 8; i++)
 		if (on ? !qs_shifted[i] : qs_shifted[i] == cb) {
 			qs_shifted[i] = on ? cb : VK_NULL_HANDLE;
+			break;
+		}
+	pthread_mutex_unlock(&qs_shift_lock);
+}
+
+// command buffers recording a distortion pass stretched over a scene-sized buffer (qs_streaming): their viewports
+// and scissors move left by `off` and scale from the panel's size to the buffer's until the end of the pass
+static struct
+{
+	VkCommandBuffer cb;
+	int off;
+} qs_scaled[8];
+
+//! The x offset the viewports of `cb` move by, -1 if it is not stretched.
+static int qs_scaled_off(VkCommandBuffer cb)
+{
+	int r = -1;
+	pthread_mutex_lock(&qs_shift_lock);
+	for (unsigned i = 0; i < 8; i++)
+		if (qs_scaled[i].cb == cb)
+			r = qs_scaled[i].off;
+	pthread_mutex_unlock(&qs_shift_lock);
+	return r;
+}
+
+static void qs_set_scaled(VkCommandBuffer cb, int off)
+{
+	pthread_mutex_lock(&qs_shift_lock);
+	for (unsigned i = 0; i < 8; i++)
+		if (off >= 0 ? !qs_scaled[i].cb : qs_scaled[i].cb == cb) {
+			qs_scaled[i].cb = off >= 0 ? cb : VK_NULL_HANDLE;
+			qs_scaled[i].off = off;
 			break;
 		}
 	pthread_mutex_unlock(&qs_shift_lock);
@@ -1221,6 +1280,7 @@ static VKAPI_ATTR void VKAPI_CALL qs_CmdBeginRenderPass(VkCommandBuffer cb, cons
 	const struct qs_twin *t = eye_pass ? qs_twin_find(qs_fbs, qs_nfbs, (uint64_t)bi->framebuffer) : NULL;
 	int h = a.offset.x == QS_PANEL_W;
 	VkFramebuffer twin = t ? (VkFramebuffer)t->twin[h] : VK_NULL_HANDLE;
+	VkFramebuffer stream_fb = t ? (VkFramebuffer)t->stream[h] : VK_NULL_HANDLE;
 	VkImage half_img = t ? (VkImage)t->img[h] : VK_NULL_HANDLE;
 	pthread_mutex_unlock(&qs_twin_lock);
 	VkRenderPassBeginInfo sb;
@@ -1236,7 +1296,7 @@ static VKAPI_ATTR void VKAPI_CALL qs_CmdBeginRenderPass(VkCommandBuffer cb, cons
 		typeof(qs_cbst[0]) *e = scene_fb ? qs_cbst_get(cb, true) : NULL;
 		bool start = e && !e->in_run;
 		pthread_mutex_unlock(&qs_cbst_lock);
-		if (start && e->runs == 0)
+		if (start && e->runs == 0 && !qs_streaming()) // (streaming: into vrcompositor's images, for its distortion pass)
 			idx = qs_reserve(&sc);
 		pthread_mutex_lock(&qs_cbst_lock);
 		if (start) {
@@ -1291,6 +1351,25 @@ static VKAPI_ATTR void VKAPI_CALL qs_CmdBeginRenderPass(VkCommandBuffer cb, cons
 			pthread_mutex_unlock(&qs_cbst_lock);
 			return; // dropped: Monado's warp does the lens from the eye's render
 		}
+		if (half_img && stream_fb && qs_streaming()) { // vrlink's frame: the pass runs, stretched over the buffer
+			rm_flush(cb);
+			pthread_mutex_lock(&qs_cbst_lock);
+			e = qs_cbst_get(cb, false);
+			if (e)
+				e->scene = 0;
+			pthread_mutex_unlock(&qs_cbst_lock);
+			VkRenderPassBeginInfo s = *bi;
+			s.framebuffer = stream_fb;
+			s.renderArea = (VkRect2D){{0, 0}, {qs_scene_w, qs_scene_h}};
+			rm_begin(cb, &s, contents, true); // (never merged)
+			next(cb, &s, contents);
+			qs_set_scaled(cb, h ? QS_PANEL_W : 0);
+			static int logged;
+			if (!logged++)
+				LOG("direct scanout: scene mode: Steam Link VR's frames, the distortion pass runs over the %ux%u buffers\n",
+				    qs_scene_w, qs_scene_h);
+			return;
+		}
 		if (half_img) { // (also notes the render size when it differs: qs_scene_copy)
 			(void)run;
 			rm_flush(cb);
@@ -1344,6 +1423,20 @@ static VKAPI_ATTR void VKAPI_CALL qs_CmdSetViewport(VkCommandBuffer cb, uint32_t
 		next(cb, first, n, s);
 		return;
 	}
+	int off = n <= 4 && qs_scene_w ? qs_scaled_off(cb) : -1;
+	if (off >= 0) {
+		const float sx = (float)qs_scene_w / QS_PANEL_W, sy = (float)qs_scene_h / QS_PANEL_H;
+		VkViewport s[4];
+		for (uint32_t i = 0; i < n; i++) {
+			s[i] = v[i];
+			s[i].x = (v[i].x - off) * sx;
+			s[i].y = v[i].y * sy;
+			s[i].width = v[i].width * sx;
+			s[i].height = v[i].height * sy;
+		}
+		next(cb, first, n, s);
+		return;
+	}
 	next(cb, first, n, v);
 }
 
@@ -1359,6 +1452,21 @@ static VKAPI_ATTR void VKAPI_CALL qs_CmdSetScissor(VkCommandBuffer cb, uint32_t 
 		for (uint32_t i = 0; i < n; i++) {
 			s[i] = r[i];
 			s[i].offset.x = s[i].offset.x >= QS_PANEL_W ? s[i].offset.x - QS_PANEL_W : 0;
+		}
+		next(cb, first, n, s);
+		return;
+	}
+	int off = n <= 4 && qs_scene_w ? qs_scaled_off(cb) : -1;
+	if (off >= 0) {
+		VkRect2D s[4];
+		for (uint32_t i = 0; i < n; i++) {
+			int x0 = r[i].offset.x - off, x1 = x0 + (int)r[i].extent.width;
+			int y0 = r[i].offset.y, y1 = y0 + (int)r[i].extent.height;
+			x0 = x0 < 0 ? 0 : (int)((int64_t)x0 * qs_scene_w / QS_PANEL_W);
+			y0 = y0 < 0 ? 0 : (int)((int64_t)y0 * qs_scene_h / QS_PANEL_H);
+			x1 = x1 <= 0 ? 0 : (int)(((int64_t)x1 * qs_scene_w + QS_PANEL_W - 1) / QS_PANEL_W);
+			y1 = y1 <= 0 ? 0 : (int)(((int64_t)y1 * qs_scene_h + QS_PANEL_H - 1) / QS_PANEL_H);
+			s[i] = (VkRect2D){{x0, y0}, {(uint32_t)(x1 > x0 ? x1 - x0 : 0), (uint32_t)(y1 > y0 ? y1 - y0 : 0)}};
 		}
 		next(cb, first, n, s);
 		return;
@@ -1436,6 +1544,7 @@ static VKAPI_ATTR void VKAPI_CALL qs_CmdEndRenderPass(VkCommandBuffer cb)
 	}
 	next(cb);
 	qs_set_shifted(cb, false);
+	qs_set_scaled(cb, -1);
 	qs_ts_end_pass(cb);
 }
 

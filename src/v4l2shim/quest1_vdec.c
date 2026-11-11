@@ -48,15 +48,18 @@
 //    back undecoded to such a client (the firmware drops them anyway).
 //  - A client that waits with epoll: the driver's events are taken here, so the client's epoll set gets an
 //    eventfd of ours, readable while a SOURCE_CHANGE (EPOLLPRI on the decoder for the client) or a packet buffer
-//    given back here (EPOLLOUT) waits; the driver's own EPOLLPRI on the decoder is hidden from it
-//    (q1dec_epoll_ctl/q1dec_epoll_events).
+//    given back here (EPOLLOUT) waits; the driver's own EPOLLPRI on the decoder is hidden from it, and its EPOLLIN
+//    passes only with a frame for the client, taken from the driver first: vrlink stops decoding for good at a DQBUF
+//    that finds nothing (q1dec_epoll_ctl/q1dec_epoll_events/frame_ready).
 //  - A client size larger than venus decodes (more than 4096 on a side: vrlink says 1536x6144 for a 1024x4096
 //    atlas) is a bound, not the stream's: a session that size fails at the STREAMON after the first
 //    reconfiguration (EINVAL, 2026-11-11), so the driver gets the default size; the firmware reads the stream's.
 //  - DEC_DISPLAY_DELAY_ENABLE with a delay of 0 (each frame out as soon as it is decoded: vrlink asks for it) is
 //    the firmware's decode order, with realtime priority and a 90 fps operating rate: 1024x4096 HEVC at 72 fps
 //    then takes 9.5 ms from packet to frame (51 fps flat out without them, 2026-11-11, vdectest).
-// Not handled: USERPTR clients, 10-bit streams (NV12 only).
+//  - A 10-bit stream (the driver's "insufficient" says so) is decoded in split mode: 10-bit references, 8-bit NV12
+//    frames, so the client sees NV12 as for any other stream (apply_cap_fmt).
+// Not handled: USERPTR clients.
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
@@ -88,6 +91,10 @@
 #define CID_BUFFER_SIZE_LIMIT VIDC_CID(64)  // the largest packet, in bytes
 #define CID_PRIORITY VIDC_CID(83)           // 0 realtime, 1 not
 #define CID_OPERATING_RATE VIDC_CID(84)     // frames per second, Q16
+#define CID_PERF_LEVEL VIDC_CID(26)         // 0 nominal, 2 turbo (the core's top clock for this session)
+#define CID_OUTPUT_MODE VIDC_CID(38)        // 0 primary (the frames are the references), 1 secondary (split mode)
+#define CID_DPB_FORMAT VIDC_CID(73)         // the reference pictures in split mode: 1 UBWC, 2 TP10 UBWC
+#define BIT_DEPTH_10 1                      // MSM_VIDC_BIT_DEPTH_10, in a sequence event
 #define EV_VIDC(n) (V4L2_EVENT_PRIVATE_START + 0x1000 + (n))
 #define EV_FLUSH_DONE EV_VIDC(1)
 #define EV_SETTINGS_SUFFICIENT EV_VIDC(2)
@@ -174,6 +181,8 @@ struct q1dec {
 	uint64_t seq_ns;   // when the stream's first sequence came (for a client that waits with epoll)
 	bool stall_logged;
 	bool low_latency;  // frames in decode order, realtime priority (the client's DISPLAY_DELAY 0)
+	bool ten_bit;      // the stream is 10-bit: split mode, 8-bit NV12 frames of 10-bit references (split: set)
+	bool split;
 	int evfd;          // in the client's epoll set: readable while a SOURCE_CHANGE or a skipped packet waits; -1 if none
 	bool ev_ready;     // it is readable
 	int epfd;          // that epoll set, -1 if none
@@ -417,6 +426,22 @@ static void set_dims(struct q1dec *e, uint32_t w, uint32_t h)
 // CAPTURE's format in the driver: only with no buffers on that queue
 static int apply_cap_fmt(struct q1dec *e)
 {
+	if (e->ten_bit && !e->split) {
+		// A 10-bit stream (HEVC Main10: Steam Link VR's default for a Frame): venus keeps its reference pictures in
+		// its 10-bit format (TP10 UBWC, buffers the driver makes) and writes each frame as an 8-bit NV12 copy into
+		// CAPTURE, as Qualcomm's own decoder does for a client that reads frames. Set at a reconfiguration, when
+		// CAPTURE has no buffers. The driver makes as many references (9.3 MB each at 1024x4096) as CAPTURE had
+		// frame buffers before.
+		struct v4l2_ext_control x[2] = {{.id = CID_OUTPUT_MODE, .value = 1}, {.id = CID_DPB_FORMAT, .value = 2}};
+		struct v4l2_ext_controls xs = {.ctrl_class = V4L2_CTRL_CLASS_MPEG, .count = 2, .controls = x};
+		if (sys_ioctl(e->fd, VIDIOC_S_EXT_CTRLS, &xs) < 0) {
+			int err = errno;
+			logf_("10-bit stream, split mode: %s", strerror(err));
+			return fail(err);
+		}
+		e->split = true;
+		logf_("10-bit stream: references in TP10 UBWC, frames in 8-bit NV12");
+	}
 	struct v4l2_format f = {.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE};
 	f.fmt.pix_mp.width = e->cw;
 	f.fmt.pix_mp.height = e->ch;
@@ -567,7 +592,7 @@ static void set_low_latency(struct q1dec *e)
 	static const struct {
 		uint32_t id;
 		int32_t v;
-	} c[] = {{CID_OUTPUT_ORDER, 1}, {CID_PRIORITY, 0}, {CID_OPERATING_RATE, LOW_LATENCY_FPS << 16}};
+	} c[] = {{CID_OUTPUT_ORDER, 1}, {CID_PRIORITY, 0}, {CID_OPERATING_RATE, LOW_LATENCY_FPS << 16}, {CID_PERF_LEVEL, 2}};
 	for (size_t i = 0; i < sizeof(c) / sizeof(c[0]); i++) {
 		struct v4l2_control k = {.id = c[i].id, .value = c[i].v};
 		if (sys_ioctl(e->fd, VIDIOC_S_CTRL, &k) < 0)
@@ -1105,8 +1130,13 @@ static void seq_changed(struct q1dec *e, const struct v4l2_event *ev)
 	const uint32_t *d = (const uint32_t *)ev->u.data;
 	uint32_t h = d[0], w = d[1];
 	bool insufficient = ev->type != EV_SETTINGS_SUFFICIENT;
-	if (d[3] > 0) // HAL_COLOR_FORMAT 8-bit is 0
-		logf_("%u-bit stream: only 8-bit NV12 comes out of this", d[3] == 1 ? 10 : d[3]);
+	if (d[3] == BIT_DEPTH_10 && !e->ten_bit) {
+		e->ten_bit = true; // (the next CAPTURE set-up changes the mode: apply_cap_fmt)
+		e->cap_dirty = true;
+		logf_("the stream is 10-bit");
+	} else if (d[3] > BIT_DEPTH_10) {
+		logf_("bit depth %u: not handled", d[3]);
+	}
 	if (e->boot) {
 		w = w ? w : e->cw;
 		h = h ? h : e->ch;
@@ -1520,7 +1550,8 @@ static int dqbuf(struct q1dec *e, struct v4l2_buffer *b)
 			e->fifo_n--;
 			memmove(&e->fifo[0], &e->fifo[1], e->fifo_n * sizeof(e->fifo[0]));
 			memmove(&e->fifo_used[0], &e->fifo_used[1], e->fifo_n * sizeof(e->fifo_used[0]));
-			e->frames++;
+			if (!e->frames++ && e->epfd >= 0)
+				logf_("first frame, %.0f ms after the first packet", (now_ns() - e->first_packet_ns) / 1e6);
 			pthread_mutex_unlock(&e->mu);
 			return 0;
 		}
@@ -1795,6 +1826,34 @@ void q1dec_epoll_ctl(struct q1dec *e, int epfd, int op, const struct epoll_event
 	pthread_mutex_unlock(&e->mu);
 }
 
+// Whether a frame waits for the client, taken from the driver into fifo if need be (lock held). The driver says
+// POLLIN for buffers this library takes back itself (a reconfiguration's flush) and for empty ones (pictures the
+// firmware dropped), and vrlink takes a DQBUF that finds nothing after an EPOLLIN as fatal: its decoder thread stops
+// and it resets the decoder every 800 ms from then on (2026-11-11, a 10-bit stream's reconfiguration).
+static bool frame_ready(struct q1dec *e)
+{
+	struct pollfd pf = {.fd = e->fd, .events = POLLIN};
+	while (!e->fifo_n && !e->last_seen && !e->boot && !e->reconfig && e->on[CAP] && !e->dead &&
+	       q1_sys_poll(&pf, 1, 0) > 0 && (pf.revents & POLLIN)) {
+		struct v4l2_buffer d;
+		struct v4l2_plane p[2];
+		if (drv_dqbuf(e, CAP, &d, p) < 0 || d.index >= MAXBUF)
+			break;
+		e->indrv[CAP][d.index] = false;
+		bool eos = d.flags & QCOM_BUF_FLAG_EOS;
+		if (!p[0].bytesused && !eos) {
+			if (drv_qbuf(e, CAP, d.index, NULL, 0) < 0)
+				break;
+			continue;
+		}
+		e->last_seen = eos;
+		e->fifo[0] = d;
+		e->fifo_used[0] = p[0].bytesused;
+		e->fifo_n = 1;
+	}
+	return e->fifo_n || e->last_seen;
+}
+
 // what the client's epoll_wait on epfd gives it: our eventfd's readiness is EPOLLPRI (a SOURCE_CHANGE) and/or
 // EPOLLOUT (a packet buffer back) on the decoder, the driver's own EPOLLPRI is not (its events are taken here);
 // returns the new count
@@ -1830,8 +1889,12 @@ int q1dec_epoll_events(int epfd, struct epoll_event *ev, int n)
 			for (int k = 0; k < nm; k++)
 				if (x.data.u64 == mine[k]->epdata) {
 					x.events &= ~(uint32_t)EPOLLPRI;
-					if (__atomic_load_n(&mine[k]->boot, __ATOMIC_RELAXED)) // frames of our CAPTURE, not the client's
-						x.events &= ~(uint32_t)(EPOLLIN | EPOLLRDNORM);
+					if (x.events & (EPOLLIN | EPOLLRDNORM)) { // only for a frame there is (and not of our CAPTURE)
+						pthread_mutex_lock(&mine[k]->mu);
+						if (!frame_ready(mine[k]))
+							x.events &= ~(uint32_t)(EPOLLIN | EPOLLRDNORM);
+						pthread_mutex_unlock(&mine[k]->mu);
+					}
 					dec = true;
 				}
 			if (!x.events)

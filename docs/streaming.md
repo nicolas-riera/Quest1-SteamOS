@@ -457,17 +457,64 @@ vrlink writes its own log, `~/.local/share/Steam/logs/vrlink.txt` (the PC's side
      sets 16 MiB: none dropped since.
    - Starting a session from the headset without the user (for tests): Steam's `SharedJSContext` (CEF remote debugging on
      127.0.0.1:8080) runs `SteamClient.Apps.StreamGame(250820, "<PC client id>", -1)`, the dashboard button's call (the id is in
-     `logs/remote_connections.txt`); `SteamClient.RemotePlay.StopStreamingSession()` stops it. The panels must be on.
+     `logs/remote_connections.txt`). The panels must be on. `SteamClient.RemotePlay.StopStreamingSession` now wants an
+     argument and, given the PC's id, does nothing (2026-11-11): vrlink has to be killed (by PID; its main thread is
+     `vrlinkrunthread`), and Steam then starts no new session until it is restarted with SteamVR.
    Still open: vrlink hangs on its way out (a thread waits in vrclient for a reply of vrcompositor, the main thread joins it),
-   and while it lives Steam starts no new session: it has to be killed. The headset's identity on the PC (Quest 1 as Virtual
-   Desktop shows it) and the PC's overlays.
+   and while it lives Steam starts no new session: it has to be killed.
+9. **The stream in the headset** (2026-11-11 evening). That "picture" was the headset's own dashboard; the stream itself
+   needed:
+   - vrcompositor draws vrlink's frames in its distortion pass only, through a plain view of the NV12 image and a separate
+     sampler; the blob samples NV12 only through a YCbCr conversion with an immutable sampler, so nothing came out. The
+     layer (`quest1_modifier.c`, shaders `nv12_copy.vert/.frag`, `build_nv12_shaders.sh`) gives each NV12 image an RGBA8
+     copy, filled with BT.709 RGB right after vrcompositor's barrier on the NV12 image, and vrcompositor's views are of the
+     copy (raw YCbCr shows magenta: vrcompositor shows what it samples as it is).
+   - Direct scanout's scene mode drops the distortion pass, so the panels showed only the eye passes (the headset's
+     dashboard over black). While vrlink frames come, the eyes render into vrcompositor's own images and its distortion
+     pass (an identity here) runs into the eye's buffer, stretched from the panel's size (`quest1_scanout.c`).
+   - Identity: the model starts with "Deckard" ("Deckard (Oculus Quest)", `quest1_vrlink.c`). The PC's driver_vrlink
+     takes a model starting with "steam frame" or "deckard" for a Steam Frame (headset type 5), and only then is the PC's
+     SteamVR in the Frame's dashboard mode (`SteamVRClientUnified`: no dashboard of its own, its panels go to the headset's
+     dashboard) and uses the Frame's stream profile. The PC's overlays show in the headset's dashboard only when the PC's
+     SteamVR started after vrlink: restarting vrlink alone leaves them out.
+   - Realtime threads: vrlink asks SCHED_FIFO 80 for its network and decoding threads; Steam may only go to 40
+     (`LimitRTPRIO=40` in steam.service, `device/holo-steam-session.sh`), so they stayed normal threads, ran late with the
+     headset busy, and the PC read that as a bad link ("Bad link event", holdoff) and held its encoder back. The shim lowers
+     the requests to 40, and makes vrlink's main thread (it submits each frame to vrcompositor), `EventsThread` and its
+     PipeWire `data-loop.0` realtime as they come up (they waited 169, 274 and 173 ms a second for a CPU).
+   - The decoder runs at the core's top clock (`VIDC_CID(26)` = 2, turbo).
+   - **10 bits**: for a Frame the PC encodes HEVC Main10 by default ("Using 10bit mode: 1" in driver_vrlink.txt). The
+     driver's first "insufficient" says so (bit depth 10, and colour space); the decoder layer then puts the session in
+     split mode at that reconfiguration (CAPTURE without buffers): `STREAM_OUTPUT_MODE` secondary and `DPB_COLOR_FORMAT`
+     TP10 UBWC, set together with S_EXT_CTRLS, as Qualcomm's own decoder does for a client that reads frames. Venus keeps
+     its references in TP10 UBWC (buffers the driver makes, 9.3 MB each at 1024x4096, as many as CAPTURE had frame
+     buffers) and writes each frame as 8-bit NV12 into CAPTURE: the client sees NV12 as for any stream. An NVENC Main10
+     1024x4096 clip through FFmpeg: 144 of 144 frames, PSNR 55 dB (Y) and 54 dB (U) against FFmpeg's own 10-to-8-bit
+     conversion of its software decode, one rounding step at most. In 8 bits split mode is slower (12.7 ms against 11.0 ms
+     from packet to frame at ~140 KB a frame), so it is used for 10-bit streams only. The PC's `"10bit": false` is not
+     needed any more.
+   - That reconfiguration made vrlink stop decoding for good: the driver says EPOLLIN for frame buffers the layer takes
+     back itself (the flush) and for empty ones, vrlink woke, its DQBUF found nothing (EAGAIN), its `MediaThread` ended
+     ("Failed to dequeue capture buffer ... Resource temporarily unavailable" in vrlink.txt) and it reset the decoder every
+     800 ms while the firmware held 9 decoded frames. For an epoll client EPOLLIN now passes only when a frame is there:
+     the layer takes it from the driver first (`frame_ready`), so the client's DQBUF always finds it. This was also the
+     8-bit stream's "insufficient that wanted CAPTURE set up again" above.
+   - Measured worn, 8 bits (2026-11-11): venus takes 8 ms from packet to frame for small frames and 11 ms at ~140 KB;
+     vrlink's epoll wake to its DQBUF ~2 ms; then ~22 ms until vrlink tells the PC it queried the frame and ~31 ms more
+     until it is shown: ~80 ms from the PC's encode to the panel, and the PC marks ~90 % of the frames "Mispredicted"
+     (predicted and actual display a few ms apart) and ~80 % "DecodeSlow". With the headset not worn vrcompositor runs at
+     9 fps, the PC reads that as a bad link every ~110 ms and sends ~1 Mbit/s: measure worn, or with the panels forced on.
+   - The decode is exact: 400 packets of a real session (captured at the decoder's input) decode with no error in FFmpeg,
+     and venus's frame of packet 300 is bit-exact against FFmpeg's (luma MSE 0). The compression blocks the user sees
+     are in what the PC encodes: ~75 Mbit/s of video for four 1024x1024 views at 72 fps (P-frames of 120-130 KB when
+     the head moves, 4-10 KB still; the I-frame 73 KB), the rest of the ~108 Mbit/s on the wire is vrlink's FEC.
 
 Plan:
 0. ~~Capture vrlink's own output~~ done (above).
 1. ~~`/dev/video-dec0` and a decode test~~ done (`vrdevice_path`, items 5 and 6).
 2. ~~Vulkan dma-buf import shim~~ done (items 2 and 6).
-3. ~~The picture in the headset~~ done (item 8). Next: the user's check in the headset (latency, head tracking), vrlink's
-   exit hang, controller input, identity, overlays.
+3. ~~The picture in the headset~~ done (items 8-9), in 8 and 10 bits. Next (docs/todo.md): the stream trembles in the
+   headset only, is not fluid and looks heavily compressed (user, 2026-11-11); vrlink's exit hang, controller input.
 4. Alternative: ALVR or WiVRn (PC-side driver + headset client with V4L2 or software HEVC decode). 1-2 weeks, avoids Valve's stack but loses Steam integration.
 Not worth pursuing: patching vrlink (internal interfaces `IVRMailbox`, `IVRBlockQueue`).
 
