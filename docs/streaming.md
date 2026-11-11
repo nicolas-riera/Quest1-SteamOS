@@ -423,6 +423,18 @@ vrlink writes its own log, `~/.local/share/Steam/logs/vrlink.txt` (the PC's side
    extensions with modifiers for NV12 only (its clients see no other dma-buf format and keep sharing their textures as before:
    vrclient logs "Supports dmabuf formats + modifiers? - No!"). `test_modifier` covers it: exported, written as venus writes, imported
    again with that modifier and sampled, exact at all four sizes.
+7. First real session with items 5-6 (2026-11-11): SOURCE_CHANGE came, vrlink set CAPTURE up and vrcompositor imported its
+   frames, but 20 ms later vrlink stopped: "Could not find a free OUTPUT buffer", 12 of its 16 packet buffers queued, then
+   "ExperiencedAnUnrecoverableError" (the PC side: "Connection inactive" 5 s after it started sending, 211 of 229 frames
+   "NotReceived"). vrlink takes all its packet buffers being held by the decoder at once as fatal, and venus holds every packet
+   until its session runs and from the first sequence header until CAPTURE is set up again. vrlink had reset its decoder at the
+   first packet (its "no forward progress for 800 ms" counts from its start), then sent the P-frames that came before the
+   I-frame it asked for, while the 50 ms wait and our CAPTURE set-up ran. `test_vdec_epoll` (new third argument: the first
+   access unit, to start inside a GOP) showed it: 11 to 16 packets held, sometimes none decoded. Now the decoder layer sets its
+   CAPTURE up as soon as an epoll client waits (before any packet), and gives such a client the packets before the stream's
+   start (parameter sets / IDR) back at once, through its eventfd (EPOLLOUT); the driver's EPOLLIN for our own CAPTURE is
+   hidden from the client. Result: at most 2-3 packets held, SOURCE_CHANGE 17 ms and the first frame 50 ms after the first
+   packet, 11 ms from packet to frame, about two epoll wake-ups per frame. FFmpeg's H.264/HEVC decode stays bit-exact.
 
 Plan:
 0. ~~Capture vrlink's own output~~ done (above).

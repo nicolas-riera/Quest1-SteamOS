@@ -3,9 +3,11 @@
 // epoll wait for SOURCE_CHANGE, and only then CAPTURE, with dma-bufs of the client's own (ION here; vrlink's are
 // Vulkan memory it exports). Paced like a live stream; reports the frames, when the first came, and the latency.
 //
-//   LD_PRELOAD=libquest1_v4l2.so test_vdec_epoll stream.265 [fps]
-// HEVC Annex-B with no B-frames (ffmpeg -f lavfi -i testsrc2=size=1024x4096:rate=72 -t 1 -c:v hevc_nvenc -bf 0
-// -tune ull -f hevc). Only ioctls on the decoder and ION allocations.
+//   LD_PRELOAD=libquest1_v4l2.so test_vdec_epoll stream.265 [fps] [first]
+// HEVC Annex-B with no B-frames (ffmpeg -f lavfi -i testsrc2=size=1024x4096:rate=72 -t 3 -c:v hevc_nvenc -bf 0
+// -tune ull -g 30 -f hevc). "first" starts at that access unit: inside a GOP, the stream vrlink feeds after it
+// reset its decoder (P-frames until the I-frame it asked for). vrlink gives up as soon as all 16 packet buffers are
+// queued at once, so the most the driver held is reported. Only ioctls on the decoder and ION allocations.
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
@@ -78,10 +80,11 @@ static size_t split(const uint8_t *p, size_t n, size_t *start, size_t max)
 int main(int argc, char **argv)
 {
 	if (argc < 2) {
-		fprintf(stderr, "usage: test_vdec_epoll stream.265 [fps]\n");
+		fprintf(stderr, "usage: test_vdec_epoll stream.265 [fps] [first]\n");
 		return 2;
 	}
 	double fps = argc > 2 ? atof(argv[2]) : 72;
+	size_t skip = argc > 3 ? (size_t)atol(argv[3]) : 0;
 	int sf = open(argv[1], O_RDONLY);
 	struct stat st;
 	if (sf < 0 || fstat(sf, &st) < 0)
@@ -90,6 +93,10 @@ int main(int argc, char **argv)
 	static size_t au[4096];
 	size_t naus = split(s, st.st_size, au, 4095);
 	au[naus] = st.st_size;
+	if (skip >= naus)
+		return 1;
+	memmove(au, au + skip, (naus + 1 - skip) * sizeof(au[0]));
+	naus -= skip;
 
 	fd = open("/dev/video32", O_RDWR | O_NONBLOCK | O_CLOEXEC);
 	int ion = open("/dev/ion", O_RDONLY | O_CLOEXEC);
@@ -139,13 +146,22 @@ int main(int argc, char **argv)
 	double t0 = now_ms(), first = -1, lat = 0, latmax = 0, sent[4096];
 	size_t next = 0, frames = 0, live = 0, events = 0, wakes = 0;
 	int capfd[NCAP], ncap = 0;
-	while (frames < naus && now_ms() - t0 < 10000) {
+	unsigned held = 0, held_max = 0;
+	double end = naus * 1000.0 / fps + 1000;
+	while (frames < naus && now_ms() - t0 < end) {
+		held = 0;
+		for (unsigned i = 0; i < rb.count; i++)
+			held += !infree[i];
+		if (held > held_max)
+			held_max = held;
 		while (next < naus && now_ms() >= t0 + next * 1000.0 / fps) {
 			unsigned i = 0;
 			while (i < rb.count && !infree[i])
 				i++;
-			if (i == rb.count)
-				break;
+			if (i == rb.count) {
+				printf("all %u packet buffers queued at %.1f ms (vrlink gives up here)\n", rb.count, now_ms() - t0);
+				goto out;
+			}
 			uint32_t len = (uint32_t)(au[next + 1] - au[next]);
 			if (len > inlen[i])
 				return 1;
@@ -239,9 +255,10 @@ int main(int argc, char **argv)
 			}
 		}
 	}
+out:
 	printf("%zu of %zu frames in %.0f ms; first after %.1f ms; then %zu frames %.1f ms from packet to frame (max %.1f);"
-	       " %zu events, %zu wakes\n",
-	       frames, naus, now_ms() - t0, first, live, live ? lat / live : 0, latmax, events, wakes);
+	       " %zu events, %zu wakes; at most %u of %u packet buffers in the driver\n",
+	       frames, naus, now_ms() - t0, first, live, live ? lat / live : 0, latmax, events, wakes, held_max, rb.count);
 	close(fd);
-	return frames == naus ? 0 : 1;
+	return frames && held_max < rb.count ? 0 : 1;
 }

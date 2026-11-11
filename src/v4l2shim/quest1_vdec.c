@@ -35,14 +35,21 @@
 //  - Private buffer flags are cleared (one is the same bit as V4L2_BUF_FLAG_LAST).
 //  - A client that sets CAPTURE up only at the first SOURCE_CHANGE (Steam Link VR's vrlink: OUTPUT, STREAMON
 //    OUTPUT, packets, then an epoll wait for the event) would wait forever: the driver starts the firmware session
-//    only once both queues stream. When packets have waited 50 ms with no CAPTURE, CAPTURE is set up here with
-//    buffers of our own, of the OUTPUT size (CAPTURE smaller than OUTPUT: the firmware calls the stream
-//    unsupported and dies, Err_Fatal video_decoder_utils.c:3206); the firmware's "insufficient" at the first
-//    sequence header tells the stream's size, those buffers go back, and the client gets its SOURCE_CHANGE
-//    (boot_capture/boot_end).
+//    only once both queues stream. So CAPTURE is set up here with buffers of our own, of the OUTPUT size
+//    (CAPTURE smaller than OUTPUT: the firmware calls the stream unsupported and dies, Err_Fatal
+//    video_decoder_utils.c:3206): at once for a client that waits with epoll, after 50 ms of packets with no
+//    CAPTURE for one that polls. The firmware's "insufficient" at the first sequence header tells the stream's
+//    size, those buffers go back, and the client gets its SOURCE_CHANGE (boot_capture/boot_end).
+//  - vrlink takes all its 16 packet buffers being held by the decoder at once as fatal ("Could not find a free
+//    OUTPUT buffer", then it stops). The firmware holds every packet from the first sequence header until CAPTURE
+//    is set up again, and every packet before it until the session runs: with 50 ms of wait, packets that came
+//    before the I-frame vrlink asks for after a reset of its own, and the client's CAPTURE set-up, that was more
+//    than 16 (2026-11-11). Hence CAPTURE at once, and packets before the stream's start (stream_start) given
+//    back undecoded to such a client (the firmware drops them anyway).
 //  - A client that waits with epoll: the driver's events are taken here, so the client's epoll set gets an
-//    eventfd of ours, readable while a SOURCE_CHANGE waits (EPOLLPRI on the decoder for the client); the
-//    driver's own EPOLLPRI on the decoder is hidden from it (q1dec_epoll_ctl/q1dec_epoll_events).
+//    eventfd of ours, readable while a SOURCE_CHANGE (EPOLLPRI on the decoder for the client) or a packet buffer
+//    given back here (EPOLLOUT) waits; the driver's own EPOLLPRI on the decoder is hidden from it
+//    (q1dec_epoll_ctl/q1dec_epoll_events).
 //  - A client size larger than venus decodes (more than 4096 on a side: vrlink says 1536x6144 for a 1024x4096
 //    atlas) is a bound, not the stream's: a session that size fails at the STREAMON after the first
 //    reconfiguration (EINVAL, 2026-11-11), so the driver gets the default size; the firmware reads the stream's.
@@ -156,12 +163,17 @@ struct q1dec {
 	uint64_t frames;
 	bool boot, booted; // CAPTURE is set up here until the stream's size is known (the client waits for it)
 	bool low_latency;  // frames in decode order, realtime priority (the client's DISPLAY_DELAY 0)
-	int evfd;          // in the client's epoll set: readable while a SOURCE_CHANGE waits; -1 if none
+	int evfd;          // in the client's epoll set: readable while a SOURCE_CHANGE or a skipped packet waits; -1 if none
+	bool ev_ready;     // it is readable
 	int epfd;          // that epoll set, -1 if none
 	uint64_t epdata;   // the client's data for the decoder in it
+	bool start_seen;   // a packet decoding can start at was queued (skipped_*: the ones before it, given back)
+	uint32_t skipped[MAXBUF + 1], skipped_n, skipped_all;
+	struct timeval skipped_ts[MAXBUF + 1];
 };
 
 #define BOOT_AFTER_NS 50000000ull
+#define SKIP_MAX 144 // packets given back while no stream start came: 2 s at 72 fps, then they all go to the driver
 #define LOW_LATENCY_FPS 90
 #define PACKET_MAX (4u << 20)
 #define VENUS_MAX_SIDE 4096u
@@ -431,7 +443,7 @@ static void *ev_loop(void *arg)
 		} else if (n > 0) {
 			usleep(5000); // the driver says POLLERR while a queue has no buffer: not an event
 		}
-		if (!e->booted && e->first_packet_ns) {
+		if (!e->booted && (e->first_packet_ns || e->epfd >= 0)) {
 			pthread_mutex_lock(&e->mu);
 			boot_check(e);
 			pthread_mutex_unlock(&e->mu);
@@ -760,20 +772,51 @@ static int reconfigure(struct q1dec *e)
 	return 0;
 }
 
-// a SOURCE_CHANGE for the client; our eventfd in its epoll set says so
+// our eventfd in the client's epoll set is readable while a SOURCE_CHANGE or a skipped packet waits for it
+static void ev_sync(struct q1dec *e)
+{
+	bool want = e->pending_src || e->skipped_n;
+	if (e->evfd < 0 || want == e->ev_ready)
+		return;
+	uint64_t v = 1;
+	if (want ? write(e->evfd, &v, sizeof(v)) == sizeof(v) : (read(e->evfd, &v, sizeof(v)) == sizeof(v) || errno == EAGAIN))
+		e->ev_ready = want;
+	else
+		logf_("eventfd: %s", strerror(errno));
+}
+
+// a SOURCE_CHANGE for the client
 static void src_pending(struct q1dec *e)
 {
 	e->pending_src++;
-	uint64_t one = 1;
-	if (e->evfd >= 0 && write(e->evfd, &one, sizeof(one)) < 0)
-		logf_("eventfd: %s", strerror(errno));
+	ev_sync(e);
 }
 
 static void src_taken(struct q1dec *e)
 {
-	uint64_t v;
-	if (!e->pending_src && e->evfd >= 0 && read(e->evfd, &v, sizeof(v)) < 0 && errno != EAGAIN)
-		logf_("eventfd: %s", strerror(errno));
+	ev_sync(e);
+}
+
+// Whether decoding can start at a packet: parameter sets or an IDR/CRA/BLA picture before its first other picture
+// (H.264, HEVC; other codecs and packets with no start code: yes). The firmware drops the pictures before such a
+// packet anyway, but holds their buffers meanwhile.
+static bool stream_start(uint32_t codec, const uint8_t *p, size_t n)
+{
+	bool hevc = codec == V4L2_PIX_FMT_HEVC, nal = false;
+	if (!hevc && codec != V4L2_PIX_FMT_H264)
+		return true;
+	for (size_t i = 0; i + 3 < n; i++) {
+		if (p[i] || p[i + 1] || p[i + 2] != 1)
+			continue;
+		nal = true;
+		unsigned t = hevc ? (p[i + 3] >> 1) & 0x3f : p[i + 3] & 0x1f;
+		if (hevc ? (t >= 16 && t <= 21) || (t >= 32 && t <= 34) : t == 5 || t == 7 || t == 8)
+			return true;
+		if (hevc ? t < 32 : t >= 1 && t <= 4) // another picture
+			return false;
+		i += 3;
+	}
+	return !nal;
 }
 
 // CAPTURE of our own for a client that waits for the stream's size before it sets CAPTURE up: the firmware session
@@ -810,12 +853,12 @@ static void boot_end(struct q1dec *e, uint32_t w, uint32_t h, bool tell)
 {
 	int t = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
 	struct v4l2_requestbuffers rb = {.count = 0, .type = t, .memory = V4L2_MEMORY_USERPTR};
-	e->boot = false;
 	if ((e->on[CAP] && drain_capture(e, false) < 0) || sys_ioctl(e->fd, VIDIOC_STREAMOFF, &t) < 0 ||
 	    sys_ioctl(e->fd, VIDIOC_REQBUFS, &rb) < 0)
 		dead(e, "our CAPTURE could not be taken down");
 	e->on[CAP] = false;
 	free_bufs(e, CAP);
+	e->boot = false; // (only now: its frames done in the driver are not the client's, q1dec_epoll_events)
 	if (!tell)
 		return;
 	set_dims(e, w, h);
@@ -825,8 +868,11 @@ static void boot_end(struct q1dec *e, uint32_t w, uint32_t h, bool tell)
 
 static void boot_check(struct q1dec *e)
 {
-	if (e->booted || e->dead || e->closing || !e->sub_src || !e->on[OUT] || e->on[CAP] || e->count[CAP] ||
-	    now_ns() - e->first_packet_ns < BOOT_AFTER_NS)
+	if (e->booted || e->dead || e->closing || !e->sub_src || !e->on[OUT] || e->on[CAP] || e->count[CAP])
+		return;
+	// a client that waits with epoll gets it at once (vrlink, which takes every packet buffer being held as fatal);
+	// one that polls may still set CAPTURE up itself after its first packets
+	if (e->epfd < 0 && (!e->first_packet_ns || now_ns() - e->first_packet_ns < BOOT_AFTER_NS))
 		return;
 	e->booted = true;
 	if (boot_capture(e) < 0) {
@@ -1102,7 +1148,25 @@ static int qbuf(struct q1dec *e, struct v4l2_buffer *b)
 	else if (q == OUT) {
 		if (!e->first_packet_ns)
 			e->first_packet_ns = now_ns();
-		r = drv_qbuf(e, OUT, b->index, b, 0);
+		const struct v4l2_plane *pl = &b->m.planes[0];
+		const struct ionbuf *ib = &e->b[OUT][b->index];
+		size_t end = pl->bytesused < ib->size ? pl->bytesused : ib->size, off = pl->data_offset < end ? pl->data_offset : 0;
+		// Before the stream's start, a client that waits with epoll gets its packets back at once (our eventfd: its
+		// EPOLLOUT); vrlink sends pictures that need others until the I-frame it asks for after a reset of its own.
+		if (!e->start_seen && (e->epfd < 0 || e->skipped_all >= SKIP_MAX || e->skipped_n > MAXBUF ||
+		                       stream_start(e->out_fmt.fmt.pix_mp.pixelformat, ib->map + off, end - off))) {
+			e->start_seen = true;
+			if (e->skipped_all)
+				logf_("%u packets before the stream's start given back undecoded", e->skipped_all);
+		}
+		if (e->start_seen) {
+			r = drv_qbuf(e, OUT, b->index, b, 0);
+		} else {
+			e->skipped[e->skipped_n] = b->index;
+			e->skipped_ts[e->skipped_n++] = b->timestamp;
+			e->skipped_all++;
+			ev_sync(e);
+		}
 	}
 	else if (e->cap_dmabuf && adopt_dmabuf(e, b->index, b->m.planes[0].m.fd) < 0)
 		r = -1;
@@ -1152,6 +1216,15 @@ static int dqbuf(struct q1dec *e, struct v4l2_buffer *b)
 	int err = 0;
 	if (e->dead) {
 		err = EIO;
+	} else if (q == OUT && e->skipped_n) {
+		struct v4l2_buffer d = {.index = e->skipped[0], .timestamp = e->skipped_ts[0]};
+		to_client(e, q, b, &d, 0);
+		e->skipped_n--;
+		memmove(&e->skipped[0], &e->skipped[1], e->skipped_n * sizeof(e->skipped[0]));
+		memmove(&e->skipped_ts[0], &e->skipped_ts[1], e->skipped_n * sizeof(e->skipped_ts[0]));
+		ev_sync(e);
+		pthread_mutex_unlock(&e->mu);
+		return 0;
 	} else if (q == CAP) {
 		if (e->fifo_n) {
 			to_client(e, q, b, &e->fifo[0], e->fifo_used[0]);
@@ -1228,6 +1301,8 @@ static int stream(struct q1dec *e, unsigned long req, int q)
 			e->last_seen = false;
 		} else {
 			e->eos_sent = false;
+			e->skipped_n = 0; // the client's again, like the driver's
+			ev_sync(e);
 		}
 	}
 	return r;
@@ -1355,6 +1430,8 @@ void q1dec_epoll_ctl(struct q1dec *e, int epfd, int op, const struct epoll_event
 			if (syscall(SYS_epoll_ctl, epfd, EPOLL_CTL_ADD, e->evfd, &x) == 0) {
 				e->epfd = epfd;
 				atomic_fetch_add(&ep_users, 1);
+				ev_sync(e);
+				boot_check(e);
 			} else {
 				logf_("eventfd into the client's epoll set: %s", strerror(errno));
 			}
@@ -1363,8 +1440,9 @@ void q1dec_epoll_ctl(struct q1dec *e, int epfd, int op, const struct epoll_event
 	pthread_mutex_unlock(&e->mu);
 }
 
-// what the client's epoll_wait on epfd gives it: our eventfd's readiness is EPOLLPRI on the decoder, the driver's
-// own EPOLLPRI is not (its events are taken here); returns the new count
+// what the client's epoll_wait on epfd gives it: our eventfd's readiness is EPOLLPRI (a SOURCE_CHANGE) and/or
+// EPOLLOUT (a packet buffer back) on the decoder, the driver's own EPOLLPRI is not (its events are taken here);
+// returns the new count
 int q1dec_epoll_events(int epfd, struct epoll_event *ev, int n)
 {
 	if (n <= 0 || !atomic_load(&ep_users))
@@ -1387,13 +1465,18 @@ int q1dec_epoll_events(int epfd, struct epoll_event *ev, int n)
 			struct q1dec *e = slot < MAXDEV ? __atomic_load_n(&decs[slot], __ATOMIC_ACQUIRE) : NULL;
 			if (!e || e->epfd != epfd)
 				continue;
-			x.events = EPOLLPRI;
+			x.events = (__atomic_load_n(&e->pending_src, __ATOMIC_RELAXED) ? EPOLLPRI : 0) |
+			           (__atomic_load_n(&e->skipped_n, __ATOMIC_RELAXED) ? EPOLLOUT : 0);
+			if (!x.events)
+				continue;
 			x.data.u64 = e->epdata;
 			dec = true;
 		} else {
 			for (int k = 0; k < nm; k++)
 				if (x.data.u64 == mine[k]->epdata) {
 					x.events &= ~(uint32_t)EPOLLPRI;
+					if (__atomic_load_n(&mine[k]->boot, __ATOMIC_RELAXED)) // frames of our CAPTURE, not the client's
+						x.events &= ~(uint32_t)(EPOLLIN | EPOLLRDNORM);
 					dec = true;
 				}
 			if (!x.events)
