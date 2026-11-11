@@ -1,0 +1,80 @@
+--- a/drivers/platform/oculus/vs1-board.c
++++ b/drivers/platform/oculus/vs1-board.c
+@@ -374,31 +374,71 @@
+ 	.set_cur_state = fan_set_cur_state,
+ };
+ 
++/*
++ * Quest1-SteamOS: the fan follows the temperature. This driver had two speeds with the screen on: cooling level 1
++ * (120 of 255) and, once a zone reached its trip (85.0 C for the tsens zones), level 2 (full), so the fan stayed
++ * slow up to 85 C and then jumped to full; with the screen off it stopped, however hot (the panels go off when the
++ * headset is taken off, with SteamVR and the tracking still at work); and this poll sets the speed every second, so
++ * nothing else can. Now the speed rises from level 1 to full over FAN_CURVE_SPAN below each zone's trip, led by the
++ * zone closest to its trip, and comes down by FAN_CURVE_STEP per second at most, never below level 1, screen on or
++ * off. A tripped zone keeps full speed until it is back below its trip by its hysteresis.
++ */
++#define FAN_CURVE_STEP 8
++
++static int fan_curve_span(unsigned int trip)
++{
++	/* the tsens zones are in 0.1 C (trip 850: from 60 C), the battery in mC (trip 48000: from 40 C) */
++	return trip < 2000 ? 250 : 8000;
++}
++
+ static void fan_poll_tz(struct work_struct *work)
+ {
+ 	struct fan_ctx *ctx = container_of(work,
+ 		struct fan_ctx, fan_critical_poll.work);
+ 	int fan_state = FAN_STATE_DEFAULT;
++	int frac = -1; /* how far along the curve, 0..256; -1: every zone below it */
++	int lo, hi, want;
+ 	int cur_temp;
+ 	int i = 0;
+ 
+ 	/* Find all of the thermal zones that will trip the fan */
+ 	for (i = 0; i < ctx->num_thermal_zones; i++) {
++		int trip = (int)ctx->tz_trips[i], span = fan_curve_span(ctx->tz_trips[i]);
++
+ 		if (!ctx->tz_devices[i].ops->get_temp)
+ 			continue;
+ 
+ 		ctx->tz_devices[i].ops->get_temp(&ctx->tz_devices[i], &cur_temp);
+ 
+-		if (cur_temp >= ctx->tz_trips[i]) {
++		if (cur_temp >= trip)
+ 			ctx->tripped_zones[i] = true;
+-			/* Set fan state */
+-			fan_state = FAN_STATE_TRIP;
+-		} else if (ctx->tripped_zones[i] &&
+-			cur_temp <= (ctx->tz_trips[i] - ctx->tz_hysteresis[i]))
++		else if (ctx->tripped_zones[i] &&
++			cur_temp <= trip - (int)ctx->tz_hysteresis[i])
+ 			ctx->tripped_zones[i] = false;
++		if (ctx->tripped_zones[i])
++			fan_state = FAN_STATE_TRIP;
++		if (cur_temp >= trip - span) {
++			int f = (cur_temp - (trip - span)) * 256 / span;
++
++			if (f > frac)
++				frac = f > 256 ? 256 : f;
++		}
+ 	}
+ 
+-	fan_set_cur_state(ctx->cdev, fan_state);
++	lo = ctx->fan_cooling_levels[FAN_STATE_DEFAULT];
++	hi = ctx->fan_cooling_levels[ctx->fan_max_state];
++	mutex_lock(&ctx->lock);
++	if (fan_state == FAN_STATE_TRIP) {
++		want = hi;
++	} else {
++		want = lo + (hi - lo) * (frac < 0 ? 0 : frac) / 256;
++		if (want < (int)ctx->pwm_value - FAN_CURVE_STEP)
++			want = (int)ctx->pwm_value - FAN_CURVE_STEP;
++	}
++	if (want != ctx->pwm_value && fan_set_pwm_locked(ctx, want))
++		dev_err(ctx->dev, "%s: cannot set pwm %d", __func__, want);
++	ctx->fan_state = fan_state;
++	mutex_unlock(&ctx->lock);
+ 
+ 	/* Reschedule */
+ 	schedule_delayed_work(&ctx->fan_critical_poll,

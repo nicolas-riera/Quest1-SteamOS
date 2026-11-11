@@ -3,6 +3,33 @@
 Where the frame time goes and what was tried. Current numbers and the direct scanout path:
 docs/direct-scanout.md; Steam's UI: docs/steam-gpu.md.
 
+## 2026-11-11: heat: CPUs at top clock, the telemetry HAL in a loop, a fan with two speeds
+
+The headset got very hot and the fan jumped to full now and then (user). Measured with Steam Link VR streaming:
+the tsens zones at 74-85 C (0.1 C units, e.g. 848), load average 13-15, and three causes:
+
+- **CPU governor.** The kernel starts with `performance` (CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE) and Android's
+  init sets `interactive`; nothing did here, so all 8 cores ran at 1.9 / 2.3 GHz all the time.
+  `quest1-cpufreq.service` (device/holo-perf.sh) sets `interactive` with the values of Qualcomm's msm8998 init
+  script (hispeed 1248 / 1574 MHz at 90 % load, target loads up to 95 %).
+- **Telemetry HAL.** `vendor.oculus.hardware.telemetry@1.0-service` forwards events to Android's Java
+  TelemetryService (ovrstub's stand-in here). Once one could not go ("could not send
+  'oculus_mobile_remote_device_battery' to the telemetry service", "Failed to flush all events!") it retried with no
+  pause: one thread at 100 %, ~50000 log lines/s, and fakelogd at ~90 % of a core reading and dropping them.
+  Stopping the HAL is not a fix: a minute later the tracking froze in the headset (user) while something waited for
+  IDeviceTelemetry in a loop ("Waited one second for ...IDeviceTelemetry/default"). Open (docs/todo.md).
+- **Fan.** Meta's driver (drivers/platform/oculus/vs1-board.c) polls the zones every second and sets cooling level 1
+  (120 of 255) with the screen on, level 2 (255) once a zone reaches its trip (85.0 C for the tsens zones), and its
+  1 C hysteresis was not even used (the state followed the current temperature only). With the screen off it stopped
+  the fan however hot (panels off when the headset is taken off, SteamVR and the tracking still at work). pwm1 written
+  from userspace is overwritten by the next poll. kernel/fan-curve.patch: from level 1 at 25 C below the trip (60 C)
+  up to full at the trip, led by the zone closest to its trip, down by 8 per second at most, never below level 1,
+  screen on or off (user: the fan must not stop with the panels); a tripped zone keeps full speed until it is back
+  below its trip by its hysteresis.
+
+With the governor and the HAL stopped (stream stopped too), the zones went from 74-85 C to 54-56 C within a few
+minutes.
+
 ## 2026-11-10: headset not worn: vrcompositor at 9 frames a second instead of 72
 
 With the headset on the table (panels off) vrcompositor went on rendering 72 frames a second that Monado never

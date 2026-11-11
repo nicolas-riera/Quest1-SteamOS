@@ -145,6 +145,9 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 
 - SteamOS and SteamVR updates must keep working without undoing our changes.
 - Slim the install: drop what this headset never uses (other controllers' render models, etc.).
+- The telemetry HAL's loop (docs/performance.md, 2026-11-11 heat): once an event cannot go to ovrstub's
+  TelemetryService it retries with no pause (a core at 100 %, ~50000 log lines/s, fakelogd at 90 %). Stopping the HAL
+  froze the tracking: make the stand-in accept the events, or find what it fails on.
 
 ## Streaming (after everything above, user 2026-11-08)
 
@@ -171,10 +174,9 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 
 ## Hardware
 
-- Fan and heat (user, 2026-11-10): the fan runs but its speed does not seem to change, and the headset gets really
-  hot after hours of use. Check what drives the fan here (Android's thermal engine and its fan control are not
-  running on the native system?), read the temperatures under load (CPU, GPU, battery, skin), and make the fan
-  follow them as Android does; check whether the kernel's thermal mitigation throttles the CPU/GPU meanwhile.
+- Heat after hours of use: the fan now follows the temperature (kernel/fan-curve.patch) and the CPUs scale their
+  clock (docs/performance.md, 2026-11-11). Left: read the zones after a long session (stream, games) and check
+  whether the kernel's thermal mitigation throttles the CPU/GPU meanwhile.
 - Bluetooth: keyboard/mouse, audio (A2DP), Steam's and Plasma's Bluetooth settings, what Plasma's toggle does
   to the chip's power, a faster patch download (~11 s), the UART's power cost (in-band sleep).
 - Power LED colour controlled by the user (low priority).

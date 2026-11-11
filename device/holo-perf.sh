@@ -101,6 +101,42 @@ ExecStart=/usr/local/sbin/quest1-io
 WantedBy=sysinit.target
 EOF
 
+# CPU frequencies: the kernel starts with the performance governor (CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE) and
+# Android's init switches to interactive; nothing did here, so all 8 cores ran at their top clock all the time
+# (1.9 and 2.3 GHz): the SoC sat at 75-85 C and the fan jumped to full (2026-11-11). Interactive with the values of
+# Qualcomm's msm8998 init script: each cluster at its "hispeed" clock as soon as it is 90 % busy, higher when the load
+# stays.
+cat > /usr/local/sbin/quest1-cpufreq <<'EOF'
+#!/bin/sh
+tune() { # cpu hispeed_freq target_loads
+	P=/sys/devices/system/cpu/$1/cpufreq
+	[ -d $P ] || return 0
+	echo interactive > $P/scaling_governor || return 0
+	I=$P/interactive
+	echo 1 > $I/use_sched_load; echo 1 > $I/use_migration_notif; echo 1 > $I/ignore_hispeed_on_notif
+	echo 19000 > $I/above_hispeed_delay; echo 90 > $I/go_hispeed_load; echo 20000 > $I/timer_rate
+	echo 1 > $I/io_is_busy; echo 19000 > $I/min_sample_time; echo 79000 > $I/max_freq_hysteresis
+	echo $2 > $I/hispeed_freq; echo "$3" > $I/target_loads
+}
+tune cpu0 1248000 "80 1747200:95"
+tune cpu4 1574400 "80 1958400:90 2112000:95"
+exit 0
+EOF
+chmod 755 /usr/local/sbin/quest1-cpufreq
+cat > /etc/systemd/system/quest1-cpufreq.service <<'EOF'
+[Unit]
+Description=Quest 1 CPU frequency governor (Android's interactive values)
+DefaultDependencies=no
+After=systemd-modules-load.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/quest1-cpufreq
+
+[Install]
+WantedBy=sysinit.target
+EOF
+
 # Reclaim the Steam client's memory before SteamVR's, Monado's, the passthrough's and the tracking's (cgroup v2
 # memory.low). On this 4.4 kernel a cgroup is only protected while all its ancestors are below their own memory.low
 # too (mem_cgroup_low()), so system.slice gets one larger than the RAM: until 2026-11-08 it had none and these
@@ -142,8 +178,8 @@ WantedBy=sysinit.target
 EOF
 
 systemctl daemon-reload
-systemctl enable quest1-zram.service q1-hangwatch.service quest1-io.service
-systemctl start quest1-zram.service q1-hangwatch.service quest1-io.service
+systemctl enable quest1-zram.service q1-hangwatch.service quest1-io.service quest1-cpufreq.service
+systemctl start quest1-zram.service q1-hangwatch.service quest1-io.service quest1-cpufreq.service
 sysctl -q --system || true
 echo "holo-perf: zram swap on, sshd protected (restart sshd to apply: systemctl restart sshd)"
 
