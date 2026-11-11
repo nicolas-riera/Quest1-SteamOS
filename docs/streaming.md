@@ -368,7 +368,8 @@ Plan (hardware decode only: software decode is not an option, user decision 2026
 
 How the Frame does it: the Steam client starts `/opt/steamvr/tools/vrlink/bin/linuxarm64/run_vrlink.sh -I <steamid> -G <app> -A <app> -C <id> -c <ip> ...` (the `-c` list is every
 address of the PC, virtual adapters included). vrlink is a normal OpenVR scene app on the headset's own SteamVR: it connects over UDP (FEC, encrypted),
-receives HEVC through `SVLCodecV4L2`, imports the decoded buffers into Vulkan (dma-buf + modifiers) and submits them as layers. The PC runs `driver_vrlink`.
+receives HEVC through `SVLCodecV4L2` into frame buffers it makes in Vulkan and exports (dma-buf + modifier), and hands those to vrcompositor
+(`IVRIPCResourceManagerClient::ImportDmabuf`), which shows them. The PC runs `driver_vrlink`.
 
 Here today: [H] Steam starts vrlink and it connects to vrserver (`vrlink.client`, legacy bindings loaded, `quest1_hmd`), but **it exits after about 15 s** each time
 (19:15:45 to 19:16:00 and 19:16:17 to 19:16:32 on 2026-11-01; no WaitGetPoses, no layers), and the PC's SteamVR keeps waiting. The timer suggests it never finishes decoder and renderer
@@ -389,9 +390,9 @@ vrlink writes its own log, `~/.local/share/Steam/logs/vrlink.txt` (the PC's side
    external format (`src/vdectest/vkahbtest.c`: Vulkan format 0, external format 0x1fa). So for vrlink an NV12 image with the linear
    modifier is created with that external format, its dma-buf imported (dedicated) as a gralloc NV12 buffer (a handle of our own of
    the same frame with the fd replaced), and its YCbCr conversions and views take the external format. gralloc only takes a dma-buf
-   whose size is exactly the one it gives the frame (venus's `VENUS_BUFFER_SIZE` with the video usage: the planes, 4096 and 8 rows of
-   metadata room), which the decoder's buffers are. `test_modifier`: NV12 at 1920x1080, 2880x1600 and 1832x1920 sampled through an NV12
-   conversion give BT.709's colours.
+   whose size is exactly the one it gives the frame (venus's `VENUS_BUFFER_SIZE` with the video usage: the planes, 4096, and 16 kB or 8
+   rows of metadata room), which the decoder's buffers are. `test_modifier`: NV12 at 1920x1080, 2880x1600, 1832x1920 and 1024x4096
+   sampled through an NV12 conversion give BT.709's colours.
 3. With both, `Init complete`: vrlink links to the PC (UDP over the PC's hotspot), sends the chaperone, gets a session id; then the PC
    sends nothing and vrlink quits after 15 s ("Timed out getting information from the server"; it then crashes on its way out).
    The PC got a Valve Index: vrlink ships default bindings for Knuckles and Frame controllers only, so SteamVR gives the Touch
@@ -403,13 +404,32 @@ vrlink writes its own log, `~/.local/share/Steam/logs/vrlink.txt` (the PC's side
    vrlink reads them from `Prop_DisplayAvailableFrameRates_Float_Array` (2080), which driver_quest1 now sets (the panels' rate).
 4. Still open: controller input. vrlink forwards buttons only from controllers whose type it reads as `frame_controller` ("Unsupported
    Prop_ControllerType_String"), through the Frame's input paths (`/user/hand/right/input/thumbstick/x`, ...).
+5. With the frequencies the PC started SteamVR as a Quest 1 (its controllers as Quest 1 Touch) and sent HEVC: an atlas of four
+   1024x1024 views, 1024x4096 at 72 Hz. The headset stayed on its loading screen: vrlink sets OUTPUT up (saying 1536x6144, a bound),
+   streams it and queues packets, and only sets CAPTURE up at the first SOURCE_CHANGE, which it waits for with epoll; the driver starts
+   the firmware session only once both queues stream, so nothing came and vrlink reset the decoder every 800 ms. Found with strace on
+   vrlink and the driver's debugfs (CAPTURE count 0, no packet sent to the firmware). The decoder layer (`src/v4l2shim/quest1_vdec.c`)
+   now sets CAPTURE up itself when packets have waited 50 ms with none (buffers of the OUTPUT size: smaller ones make the firmware call
+   the stream unsupported and die), takes the firmware's size at its first "insufficient", gives those buffers back and raises the
+   client's SOURCE_CHANGE through an eventfd it adds to the client's epoll set. A size beyond 4096 on a side goes to the driver as
+   1920x1088 (a 1536x6144 session fails at the STREAMON after the reconfiguration), packet buffers are 4 MB at most (vrlink asks for 16
+   of 7 MB), and vrlink's DISPLAY_DELAY 0 becomes the firmware's decode order with realtime priority and a 90 fps operating rate: venus
+   decodes 1024x4096 HEVC at 51 fps flat out without them, 94 with them, 9.5 ms from packet to frame when paced at 72 (`vdectest`).
+   `src/v4l2shim/test_vdec_epoll.c` plays vrlink's part on an NVENC stream of that size: SOURCE_CHANGE after 163 ms, every frame decoded.
+6. vrlink's frame buffers: 16 NV12 images with the QCOM_COMPRESSED modifier (UBWC, what the Frame's decoder gives; read in its code),
+   dedicated memory exported as dma-bufs (`vkGetMemoryFdKHR`), queued on the decoder (V4L2 DMABUF) and handed to vrcompositor. Our
+   decoder writes linear venus NV12, so in the layer both NV12 modifiers are that: the exported memory is a gralloc NV12 buffer of ours
+   (ION, venus's layout, which the decoder takes), imported again on the external format in vrcompositor, which now gets the two
+   extensions with modifiers for NV12 only (its clients see no other dma-buf format and keep sharing their textures as before:
+   vrclient logs "Supports dmabuf formats + modifiers? - No!"). `test_modifier` covers it: exported, written as venus writes, imported
+   again with that modifier and sampled, exact at all four sizes.
 
 Plan:
 0. ~~Capture vrlink's own output~~ done (above).
-1. **`/dev/video-dec0` symlink and a decode test** (1 day) to see how far V4L2 init goes on msm_vidc.
-2. **Vulkan dma-buf import shim** (1-2 weeks, [L]): map ION/dma-buf fds to AHBs (Monado's `comp_window_mdp.c` already handles gralloc AHBs), advertise
-   `EXT_external_memory_dma_buf` and `EXT_image_drm_format_modifier` (linear only). It is the same blocker as the flat stream's compositor sharing, so do it once for both.
-3. Alternative: ALVR or WiVRn (PC-side driver + headset client with V4L2 or software HEVC decode). 1-2 weeks, avoids Valve's stack but loses Steam integration.
+1. ~~`/dev/video-dec0` and a decode test~~ done (`vrdevice_path`, items 5 and 6).
+2. ~~Vulkan dma-buf import shim~~ done (items 2 and 6).
+3. Next: the picture in the headset (vrcompositor's import of vrlink's frames, the layers vrlink submits), then controller input.
+4. Alternative: ALVR or WiVRn (PC-side driver + headset client with V4L2 or software HEVC decode). 1-2 weeks, avoids Valve's stack but loses Steam integration.
 Not worth pursuing: patching vrlink (internal interfaces `IVRMailbox`, `IVRBlockQueue`).
 
 ## 3. PC overlays (desktop and windows in the headset)

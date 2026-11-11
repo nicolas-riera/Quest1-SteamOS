@@ -1879,6 +1879,7 @@ static VKAPI_ATTR void VKAPI_CALL FreeMemory(VkDevice device, VkDeviceMemory m, 
 {
 	u32_map(m, NULL, 0);
 	device_of(device)->FreeMemory(device, m, alloc);
+	qnv_free_memory(m); // exported NV12 memory: our gralloc buffer
 }
 
 /*
@@ -1938,7 +1939,10 @@ static VKAPI_ATTR VkResult VKAPI_CALL AllocateMemory(VkDevice device, const VkMe
 	// a dma-buf the blob does not know (quest1_dmabuf.c): an OPAQUE_FD one is tried there first, a DMA_BUF one never
 	const VkImportMemoryFdInfoKHR *imp = find_struct(ai->pNext, VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR);
 	bool dmabuf = keep >= 0 && imp->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
-	VkResult r = dmabuf ? VK_ERROR_INVALID_EXTERNAL_HANDLE : d->AllocateMemory(device, ai, alloc, out);
+	VkResult r;
+	if (keep < 0 && qnv_export(d, device, ai, alloc, out, &r)) // an NV12 frame to export (quest1_modifier.c)
+		return r;
+	r = dmabuf ? VK_ERROR_INVALID_EXTERNAL_HANDLE : d->AllocateMemory(device, ai, alloc, out);
 	if (r == VK_ERROR_INVALID_EXTERNAL_HANDLE && keep >= 0) {
 		// an NV12 frame as a gralloc NV12 buffer, anything else as plain memory
 		if (!dmabuf || !qnv_import(d, device, ai, keep, alloc, out, &r))
@@ -3024,6 +3028,7 @@ static PFN_vkVoidFunction device_intercept(const char *name)
 	I("vkBindImageMemory2KHR", BindImageMemory2)
 	I("vkGetImageSubresourceLayout", GetImageSubresourceLayout)
 	I("vkGetMemoryFdPropertiesKHR", GetMemoryFdProperties)
+	I("vkGetMemoryFdKHR", GetMemoryFd)
 	I("vkGetImageDrmFormatModifierPropertiesEXT", GetImageDrmFormatModifierProperties)
 	I("vkGetImageMemoryRequirements", GetImageMemoryRequirements)
 	I("vkGetImageMemoryRequirements2", GetImageMemoryRequirements2)

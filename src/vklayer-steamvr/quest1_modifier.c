@@ -7,11 +7,22 @@
 // linear image has (DRM_FORMAT_MOD_LINEAR, 0): such an image is created linear, its memory is the dma-buf as a
 // gralloc buffer (qdb_import), and it is bound at its first plane's offset (as the planes of quest1_dmabuf.c). The
 // plane layouts the caller gives must be the blob's own linear ones (checked; the image is refused otherwise).
-// Advertised to vrlink only, so nothing else changes its choices; QUEST1_VK_DMABUF=1 for another program.
+// Advertised to vrlink and vrcompositor only (below), so nothing else changes its choices; QUEST1_VK_DMABUF=1 makes
+// another program vrlink.
+//
+// vrlink makes its decoder's frame buffers itself (2026-11-11): NV12 images with an explicit modifier, which is
+// QCOM_COMPRESSED (UBWC, the Steam Frame decoder's), dedicated memory exported as a dma-buf (vkGetMemoryFdKHR), the
+// fd queued on the decoder (V4L2 DMABUF) and handed to vrcompositor (IVRIPCResourceManagerClient::ImportDmabuf),
+// which imports it to show the frame. Our decoder writes linear venus NV12 (libquest1_v4l2.so), so both modifiers
+// of NV12 are that here: the memory is a gralloc NV12 buffer of ours (venus's layout, an ION buffer the decoder
+// takes), the image its external format (below). vrcompositor gets the two extensions too, with modifiers for NV12
+// only: the compositor offers its clients no other dma-buf format, so nothing else moves to dma-bufs.
 
 #define QDB_MOD_LINEAR 0ull
+#define QDB_MOD_QCOM_COMPRESSED 0x0500000000000001ull // fourcc_mod_code(QCOM, 1)
 
-static bool qdb_front(void)
+//! vrlink: the linear modifier for every format, imports of any dma-buf.
+static bool qdb_vrlink(void)
 {
 	static int on = -1;
 	if (on < 0) {
@@ -19,6 +30,21 @@ static bool qdb_front(void)
 		on = !strcmp(program_invocation_short_name, "vrlink") || (e && atoi(e) == 1);
 	}
 	return on;
+}
+
+//! vrlink or vrcompositor: the dma-buf and modifier extensions.
+static bool qdb_front(void)
+{
+	static int on = -1;
+	if (on < 0)
+		on = qdb_vrlink() || !strcmp(program_invocation_short_name, "vrcompositor");
+	return on;
+}
+
+//! A modifier an NV12 image can have here (both are linear venus NV12).
+static bool qdb_nv12_mod(uint64_t m)
+{
+	return m == QDB_MOD_LINEAR || m == QDB_MOD_QCOM_COMPRESSED;
 }
 
 static uint32_t qdb_plane_count(VkFormat f)
@@ -53,25 +79,28 @@ static VKAPI_ATTR void VKAPI_CALL GetPhysicalDeviceFormatProperties2(VkPhysicalD
 	if (!qdb_front())
 		return;
 	VkFormatFeatureFlags lin = p->formatProperties.linearTilingFeatures;
+	bool nv12 = format == VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
+	if (!nv12 && !qdb_vrlink())
+		lin = 0;
+	static const uint64_t mods[] = {QDB_MOD_LINEAR, QDB_MOD_QCOM_COMPRESSED};
+	uint32_t n = !lin ? 0 : nv12 ? 2 : 1;
 	for (VkBaseOutStructure *s = p->pNext; s; s = s->pNext) {
 		if (s->sType == VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT) {
 			VkDrmFormatModifierPropertiesListEXT *l = (void *)s;
-			if (l->pDrmFormatModifierProperties && l->drmFormatModifierCount && lin)
-				l->pDrmFormatModifierProperties[0] =
-				    (VkDrmFormatModifierPropertiesEXT){QDB_MOD_LINEAR, qdb_plane_count(format), lin};
-			l->drmFormatModifierCount = lin ? 1 : 0;
+			for (uint32_t i = 0; l->pDrmFormatModifierProperties && i < n && i < l->drmFormatModifierCount; i++)
+				l->pDrmFormatModifierProperties[i] = (VkDrmFormatModifierPropertiesEXT){mods[i], qdb_plane_count(format), lin};
+			l->drmFormatModifierCount = l->pDrmFormatModifierProperties && l->drmFormatModifierCount < n ? l->drmFormatModifierCount : n;
 		} else if (s->sType == VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_2_EXT) {
 			VkDrmFormatModifierPropertiesList2EXT *l = (void *)s;
-			if (l->pDrmFormatModifierProperties && l->drmFormatModifierCount && lin)
-				l->pDrmFormatModifierProperties[0] =
-				    (VkDrmFormatModifierProperties2EXT){QDB_MOD_LINEAR, qdb_plane_count(format), lin};
-			l->drmFormatModifierCount = lin ? 1 : 0;
+			for (uint32_t i = 0; l->pDrmFormatModifierProperties && i < n && i < l->drmFormatModifierCount; i++)
+				l->pDrmFormatModifierProperties[i] =
+				    (VkDrmFormatModifierProperties2EXT){mods[i], qdb_plane_count(format), lin};
+			l->drmFormatModifierCount = l->pDrmFormatModifierProperties && l->drmFormatModifierCount < n ? l->drmFormatModifierCount : n;
 		} else {
 			continue;
 		}
-		if (qdb_logs++ < 16)
-			LOG("dma-buf: format %d: modifier LINEAR, %u plane(s), features 0x%x\n", format, qdb_plane_count(format),
-			    lin);
+		if (n && qdb_logs++ < 16)
+			LOG("dma-buf: format %d: %u modifier(s), %u plane(s), features 0x%x\n", format, n, qdb_plane_count(format), lin);
 	}
 }
 
@@ -91,24 +120,30 @@ static VKAPI_ATTR VkResult VKAPI_CALL GetPhysicalDeviceImageFormatProperties2(Vk
 	}
 	const VkPhysicalDeviceImageDrmFormatModifierInfoEXT *mi =
 	    find_struct(info->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT);
-	if (!qdb_front() || (mod && (!mi || mi->drmFormatModifier != QDB_MOD_LINEAR)) ||
+	bool nv12 = info->format == VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
+	if (!qdb_front() || (!nv12 && !qdb_vrlink()) ||
+	    (mod && (!mi || (mi->drmFormatModifier != QDB_MOD_LINEAR && !(nv12 && qdb_nv12_mod(mi->drmFormatModifier))))) ||
 	    (dmabuf && info->tiling == VK_IMAGE_TILING_OPTIMAL)) {
 		r = VK_ERROR_FORMAT_NOT_SUPPORTED;
 	} else {
-		// a plain linear image: the blob's limits for it; the dma-buf import is ours
+		// a plain linear image: the blob's limits for it; the dma-buf import (and NV12's export) is ours
 		VkPhysicalDeviceImageFormatInfo2 plain = *info;
 		plain.pNext = NULL;
 		plain.tiling = VK_IMAGE_TILING_LINEAR;
 		WITH_UNLINKED(out, r = in->GetPhysicalDeviceImageFormatProperties2(pd, &plain, out));
 		VkExternalImageFormatProperties *ep =
 		    (VkExternalImageFormatProperties *)find_struct(out->pNext, VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES);
+		VkExternalMemoryFeatureFlags feat = VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT;
+		if (nv12) // a gralloc buffer of ours, dedicated to the image
+			feat |= VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT | VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT;
+		VkExternalMemoryHandleTypeFlags t = dmabuf ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT : 0;
 		if (r == VK_SUCCESS && ep)
-			ep->externalMemoryProperties = (VkExternalMemoryProperties){
-			    VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT, 0, dmabuf ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT : 0};
+			ep->externalMemoryProperties = (VkExternalMemoryProperties){feat, nv12 ? t : 0, t};
 	}
 	if (qdb_logs++ < 16)
-		LOG("dma-buf: image format %d %s, usage 0x%x flags 0x%x%s: %d\n", info->format,
-		    mod ? "with a modifier" : "linear", info->usage, info->flags, dmabuf ? ", dma-buf" : "", r);
+		LOG("dma-buf: image format %d %s 0x%llx, usage 0x%x flags 0x%x%s: %d\n", info->format,
+		    mod ? "with modifier" : "linear", mod && mi ? (unsigned long long)mi->drmFormatModifier : 0ull, info->usage,
+		    info->flags, dmabuf ? ", dma-buf" : "", r);
 	return r;
 }
 
@@ -195,6 +230,7 @@ static struct
 	VkImage image;
 	uint32_t w, h;
 	VkDeviceSize pitch, uv; //!< the caller's plane layouts
+	uint64_t mod;           //!< the caller's modifier
 } qnv[32];
 static atomic_int qnv_n;
 
@@ -296,6 +332,7 @@ static VkResult qnv_create_image(struct device *d, VkDevice device, const VkImag
 		qnv[i].h = ci->extent.height;
 		qnv[i].pitch = ex->pPlaneLayouts[0].rowPitch;
 		qnv[i].uv = ex->pPlaneLayouts[1].offset;
+		qnv[i].mod = ex->drmFormatModifier;
 		atomic_fetch_add(&qnv_n, 1);
 	}
 	pthread_mutex_unlock(&qdb_lock);
@@ -305,9 +342,9 @@ static VkResult qnv_create_image(struct device *d, VkDevice device, const VkImag
 		return VK_ERROR_OUT_OF_HOST_MEMORY;
 	}
 	if (qdb_logs++ < 16)
-		LOG("dma-buf: NV12 image %ux%u (usage 0x%x flags 0x%x, pitch %llu, UV at %llu): external format\n",
-		    ci->extent.width, ci->extent.height, ci->usage, ci->flags, (unsigned long long)ex->pPlaneLayouts[0].rowPitch,
-		    (unsigned long long)ex->pPlaneLayouts[1].offset);
+		LOG("dma-buf: NV12 image %ux%u (modifier 0x%llx, usage 0x%x flags 0x%x, pitch %llu, UV at %llu): external format\n",
+		    ci->extent.width, ci->extent.height, (unsigned long long)ex->drmFormatModifier, ci->usage, ci->flags,
+		    (unsigned long long)ex->pPlaneLayouts[0].rowPitch, (unsigned long long)ex->pPlaneLayouts[1].offset);
 	return VK_SUCCESS;
 }
 
@@ -380,6 +417,116 @@ static bool qnv_import(struct device *d, VkDevice device, const VkMemoryAllocate
 	return true;
 }
 
+// --- NV12 memory made here and exported as a dma-buf (vrlink's frame buffers)
+
+static struct
+{
+	VkDeviceMemory mem;
+	AHardwareBuffer *b; //!< ours: its fd is the dma-buf
+} qnv_exp[64];
+static atomic_int qnv_nexp;
+
+//! vkAllocateMemory of exportable (dma-buf) memory for an NV12 image of ours: true if it was one (*r is the result).
+static bool qnv_export(struct device *d, VkDevice device, const VkMemoryAllocateInfo *ai,
+                       const VkAllocationCallbacks *alloc, VkDeviceMemory *out, VkResult *r)
+{
+	const VkExportMemoryAllocateInfo *ex = find_struct(ai->pNext, VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO);
+	const VkMemoryDedicatedAllocateInfo *ded = find_struct(ai->pNext, VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO);
+	int i = ex && (ex->handleTypes & VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT) && ded ? qnv_find(ded->image) : -1;
+	if (i < 0)
+		return false;
+	pthread_once(&qdb.once, qdb_load);
+	PFN_vkGetAndroidHardwareBufferPropertiesANDROID props_of =
+	    (PFN_vkGetAndroidHardwareBufferPropertiesANDROID)d->gdpa(device, "vkGetAndroidHardwareBufferPropertiesANDROID");
+	qdb_desc md = {qnv[i].w, qnv[i].h, 1, QNV_AHB_FORMAT, QNV_AHB_USAGE, 0, 0, 0};
+	AHardwareBuffer *b = NULL;
+	if (!props_of || !qdb.allocate || qdb.allocate(&md, &b) != 0) {
+		LOG("dma-buf: NV12 %ux%u: no gralloc buffer\n", qnv[i].w, qnv[i].h);
+		*r = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+		return true;
+	}
+	VkAndroidHardwareBufferPropertiesANDROID props = {VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID};
+	*r = props_of(device, b, &props);
+	if (*r == VK_SUCCESS && props.memoryTypeBits) {
+		VkMemoryDedicatedAllocateInfo dd = {VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO, NULL, ded->image};
+		VkImportAndroidHardwareBufferInfoANDROID imp = {VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID, &dd, b};
+		VkMemoryAllocateInfo mi = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &imp, props.allocationSize,
+		                           (uint32_t)__builtin_ctz(props.memoryTypeBits)};
+		*r = d->AllocateMemory(device, &mi, alloc, out);
+	} else if (*r == VK_SUCCESS) {
+		*r = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+	}
+	unsigned k = 0;
+	if (*r == VK_SUCCESS) {
+		pthread_mutex_lock(&qdb_lock);
+		while (k < sizeof(qnv_exp) / sizeof(qnv_exp[0]) && qnv_exp[k].mem)
+			k++;
+		if (k < sizeof(qnv_exp) / sizeof(qnv_exp[0])) {
+			qnv_exp[k].mem = *out;
+			qnv_exp[k].b = b;
+			atomic_fetch_add(&qnv_nexp, 1);
+		}
+		pthread_mutex_unlock(&qdb_lock);
+		if (k == sizeof(qnv_exp) / sizeof(qnv_exp[0])) {
+			d->FreeMemory(device, *out, alloc);
+			*out = VK_NULL_HANDLE;
+			*r = VK_ERROR_TOO_MANY_OBJECTS;
+		}
+	}
+	if (*r != VK_SUCCESS)
+		qdb.release(b);
+	if (qdb_logs++ < 16 || *r != VK_SUCCESS)
+		LOG("dma-buf: NV12 %ux%u exportable, a gralloc buffer of %llu bytes: %d\n", qnv[i].w, qnv[i].h,
+		    (unsigned long long)props.allocationSize, *r);
+	return true;
+}
+
+static AHardwareBuffer *qnv_exported(VkDeviceMemory m)
+{
+	AHardwareBuffer *b = NULL;
+	if (!m || !atomic_load(&qnv_nexp))
+		return NULL;
+	pthread_mutex_lock(&qdb_lock);
+	for (unsigned k = 0; k < sizeof(qnv_exp) / sizeof(qnv_exp[0]) && !b; k++)
+		if (qnv_exp[k].mem == m)
+			b = qnv_exp[k].b;
+	pthread_mutex_unlock(&qdb_lock);
+	return b;
+}
+
+//! After vkFreeMemory: our gralloc buffer of exported memory goes too.
+static void qnv_free_memory(VkDeviceMemory m)
+{
+	if (!m || !atomic_load(&qnv_nexp))
+		return;
+	AHardwareBuffer *b = NULL;
+	pthread_mutex_lock(&qdb_lock);
+	for (unsigned k = 0; k < sizeof(qnv_exp) / sizeof(qnv_exp[0]) && !b; k++)
+		if (qnv_exp[k].mem == m) {
+			b = qnv_exp[k].b;
+			qnv_exp[k].mem = VK_NULL_HANDLE;
+			atomic_fetch_sub(&qnv_nexp, 1);
+		}
+	pthread_mutex_unlock(&qdb_lock);
+	if (b)
+		qdb.release(b);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL GetMemoryFd(VkDevice device, const VkMemoryGetFdInfoKHR *gi, int *fd)
+{
+	struct device *d = device_of(device);
+	if (gi->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT) {
+		AHardwareBuffer *b = qnv_exported(gi->memory);
+		const qdb_handle *h = b ? qdb.native_handle(b) : NULL;
+		*fd = h && h->numFds >= 1 ? fcntl(h->data[0], F_DUPFD_CLOEXEC, 0) : -1;
+		if (*fd < 0)
+			LOG("dma-buf: no fd for memory %p (not exportable here)\n", (void *)gi->memory);
+		return *fd >= 0 ? VK_SUCCESS : VK_ERROR_TOO_MANY_OBJECTS;
+	}
+	PFN_vkGetMemoryFdKHR next = (PFN_vkGetMemoryFdKHR)d->gdpa(device, "vkGetMemoryFdKHR");
+	return next ? next(device, gi, fd) : VK_ERROR_EXTENSION_NOT_PRESENT;
+}
+
 static VKAPI_ATTR void VKAPI_CALL GetImageMemoryRequirements(VkDevice device, VkImage image, VkMemoryRequirements *req)
 {
 	struct device *d = device_of(device);
@@ -388,8 +535,13 @@ static VKAPI_ATTR void VKAPI_CALL GetImageMemoryRequirements(VkDevice device, Vk
 		d->GetImageMemoryRequirements(device, image, req);
 		return;
 	}
-	// an external-format image has no requirements of its own before its gralloc buffer is bound: the frame's
-	req->size = (qnv[i].uv + qnv[i].pitch * ((qnv[i].h + 1) / 2) + 4095) & ~(VkDeviceSize)4095;
+	// an external-format image has no requirements of its own before its gralloc buffer is bound: venus's frame
+	// (VENUS_BUFFER_SIZE: planes of rows rounded up to 128 bytes, 32 and 16 lines, 4096 bytes, and the decoder's
+	// metadata: 16 kB or 8 rows),
+	// whatever layouts the caller gave (vrlink's are for UBWC)
+	VkDeviceSize stride = (qnv[i].w + 127) & ~127u, y = stride * ((qnv[i].h + 31) & ~31u),
+	             uv = stride * ((((qnv[i].h + 1) / 2) + 15) & ~15u), extra = 8 * stride > 16384 ? 8 * stride : 16384;
+	req->size = (y + uv + 4096 + extra + 4095) & ~(VkDeviceSize)4095;
 	req->alignment = 4096;
 	req->memoryTypeBits = (uint32_t)((1ull << d->memprops.memoryTypeCount) - 1);
 }
@@ -488,7 +640,7 @@ static VkResult qdb_create_modifier_image(struct device *d, VkDevice device, con
 {
 	const VkImageDrmFormatModifierExplicitCreateInfoEXT *ex =
 	    find_struct(ci->pNext, VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT);
-	if (ci->format == VK_FORMAT_G8_B8R8_2PLANE_420_UNORM && ex && ex->drmFormatModifier == QDB_MOD_LINEAR &&
+	if (ci->format == VK_FORMAT_G8_B8R8_2PLANE_420_UNORM && ex && qdb_nv12_mod(ex->drmFormatModifier) &&
 	    ex->drmFormatModifierPlaneCount == 2)
 		return qnv_create_image(d, device, ci, ex, alloc, out);
 	const VkImageDrmFormatModifierListCreateInfoEXT *li =
@@ -576,8 +728,8 @@ static VKAPI_ATTR VkResult VKAPI_CALL GetImageDrmFormatModifierProperties(VkDevi
                                                                          VkImageDrmFormatModifierPropertiesEXT *p)
 {
 	(void)device;
-	(void)image;
-	p->drmFormatModifier = QDB_MOD_LINEAR;
+	int n = qnv_find(image);
+	p->drmFormatModifier = n >= 0 ? qnv[n].mod : QDB_MOD_LINEAR;
 	return VK_SUCCESS;
 }
 

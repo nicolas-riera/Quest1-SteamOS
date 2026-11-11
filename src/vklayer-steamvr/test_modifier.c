@@ -6,7 +6,9 @@
 // (VkImageDrmFormatModifierExplicitCreateInfoEXT, DMA_BUF external memory) and its memory imported from the fd
 // (vkGetMemoryFdPropertiesKHR, VkImportMemoryFdInfoKHR, dedicated). An R8 image is copied to a buffer and compared;
 // an NV12 one (four flat colours) is sampled through an NV12 sampler YCbCr conversion by vkahbtest's compute shader
-// and compared with what BT.709 narrow range gives.
+// and compared with what BT.709 narrow range gives. NV12 also as vrlink makes its decoder's frame buffers and
+// vrcompositor shows them: an image with the QCOM_COMPRESSED modifier, dedicated memory exported as a dma-buf
+// (vkGetMemoryFdKHR), the fd written as the decoder writes it, then imported again (that modifier) and sampled.
 //
 // Build (on the headset): glslangValidator -V --vn vkahb_spv -o vkahb_spv.h ../vdectest/vkahbtest.comp
 //                         gcc -O2 -Wall -o test_modifier test_modifier.c -ldl
@@ -244,8 +246,56 @@ static int run(VkPhysicalDevice pd, uint32_t qf, VkFormat f, unsigned w, unsigne
 
 static int clamp8(double v) { return v < 0 ? 0 : v > 255 ? 255 : (int)(v + 0.5); }
 
-// an NV12 frame of w x h, as vrlink samples it: 0 if the four colours come out as BT.709 narrow range gives them
-static int run_nv12(VkPhysicalDevice pd, uint32_t qf, unsigned w, unsigned h)
+#define MOD_QCOM_COMPRESSED 0x0500000000000001ull
+
+// vrlink's frame buffer: an NV12 image with the QCOM_COMPRESSED modifier, dedicated memory exported as a dma-buf;
+// its fd (-1 on failure)
+static int exported_frame(unsigned w, unsigned h)
+{
+	I(vkCreateImage);
+	I(vkGetImageMemoryRequirements);
+	I(vkAllocateMemory);
+	I(vkBindImageMemory);
+	I(vkGetDeviceProcAddr);
+	PFN_vkGetMemoryFdKHR getfd = (PFN_vkGetMemoryFdKHR)vkGetDeviceProcAddr(dev, "vkGetMemoryFdKHR");
+	// planes as vrlink gives them (for UBWC: not venus's; the layer does not use them)
+	VkSubresourceLayout planes[2] = {{0, (VkDeviceSize)w * h, w, 0, 0}, {(VkDeviceSize)w * h, (VkDeviceSize)w * h / 2, w, 0, 0}};
+	VkImageDrmFormatModifierExplicitCreateInfoEXT ex = {VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT,
+	                                                     NULL, MOD_QCOM_COMPRESSED, 2, planes};
+	VkExternalMemoryImageCreateInfo emi = {VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO, &ex,
+	                                       VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT};
+	VkImageCreateInfo ici = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, &emi};
+	ici.imageType = VK_IMAGE_TYPE_2D;
+	ici.format = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
+	ici.extent = (VkExtent3D){w, h, 1};
+	ici.mipLevels = ici.arrayLayers = 1;
+	ici.samples = VK_SAMPLE_COUNT_1_BIT;
+	ici.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
+	ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+	VkImage img;
+	VkMemoryRequirements req;
+	VkDeviceMemory mem;
+	int fd = -1;
+	if (!getfd || vkCreateImage(dev, &ici, NULL, &img) != VK_SUCCESS)
+		return -1;
+	vkGetImageMemoryRequirements(dev, img, &req);
+	VkExportMemoryAllocateInfo exp = {VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO, NULL,
+	                                  VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT};
+	VkMemoryDedicatedAllocateInfo ded = {VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO, &exp, img};
+	VkMemoryAllocateInfo mai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &ded, req.size,
+	                            (uint32_t)__builtin_ctz(req.memoryTypeBits)};
+	if (vkAllocateMemory(dev, &mai, NULL, &mem) != VK_SUCCESS || vkBindImageMemory(dev, img, mem, 0) != VK_SUCCESS)
+		return -1;
+	VkMemoryGetFdInfoKHR gi = {VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR, NULL, mem,
+	                           VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT};
+	if (getfd(dev, &gi, &fd) != VK_SUCCESS)
+		return -1;
+	return fd; // the image and its memory stay, as vrlink's do
+}
+
+// an NV12 frame of w x h, as vrlink samples it (or, exported, as vrcompositor samples vrlink's frame buffer): 0 if
+// the four colours come out as BT.709 narrow range gives them
+static int run_nv12(VkPhysicalDevice pd, uint32_t qf, unsigned w, unsigned h, int exported)
 {
 	I(vkCreateImage);
 	I(vkGetImageMemoryRequirements);
@@ -280,18 +330,22 @@ static int run_nv12(VkPhysicalDevice pd, uint32_t qf, unsigned w, unsigned h)
 	I(vkQueueWaitIdle);
 	I(vkGetDeviceProcAddr);
 	PFN_vkGetMemoryFdPropertiesKHR fdprops = (PFN_vkGetMemoryFdPropertiesKHR)vkGetDeviceProcAddr(dev, "vkGetMemoryFdPropertiesKHR");
-	printf("NV12 %ux%u sampled: ", w, h);
+	printf("NV12 %ux%u %s: ", w, h, exported ? "exported, imported again and sampled" : "sampled");
 
 	static const uint8_t col[4][3] = {{235, 128, 128}, {81, 90, 240}, {145, 54, 34}, {41, 240, 110}};
 	const unsigned stride = AL(w, 128), scan = AL(h, 32);
 	// venus's buffer size (msm_media_info.h's VENUS_BUFFER_SIZE for NV12, what gralloc gives with the video usage):
 	// the planes, 4096 bytes of UV alignment and room for the decoder's metadata
-	const size_t uv = (size_t)stride * scan,
-	             size = AL(uv + (size_t)stride * AL((h + 1) / 2, 16) + 4096 + 8 * (size_t)stride, 4096);
-	int fd = ion_buffer(size);
+	const size_t uv = (size_t)stride * scan, extra = 8 * (size_t)stride > 16384 ? 8 * (size_t)stride : 16384,
+	             size = AL(uv + (size_t)stride * AL((h + 1) / 2, 16) + 4096 + extra, 4096);
+	int fd = exported ? exported_frame(w, h) : ion_buffer(size);
+	if (exported && fd >= 0 && lseek(fd, 0, SEEK_END) < (off_t)size) {
+		printf("the exported dma-buf has %lld bytes, venus writes %zu\n", (long long)lseek(fd, 0, SEEK_END), size);
+		return 1;
+	}
 	uint8_t *m = fd >= 0 ? mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) : MAP_FAILED;
 	if (m == MAP_FAILED) {
-		printf("no ION buffer\n");
+		printf("no %s\n", exported ? "exported dma-buf" : "ION buffer");
 		return 1;
 	}
 	for (unsigned y = 0; y < h; y++)
@@ -317,7 +371,7 @@ static int run_nv12(VkPhysicalDevice pd, uint32_t qf, unsigned w, unsigned h)
 
 	VkSubresourceLayout planes[2] = {{0, 0, stride, 0, 0}, {uv, 0, stride, 0, 0}};
 	VkImageDrmFormatModifierExplicitCreateInfoEXT ex = {VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT,
-	                                                     NULL, 0, 2, planes};
+	                                                     NULL, exported ? MOD_QCOM_COMPRESSED : 0, 2, planes};
 	VkExternalMemoryImageCreateInfo emi = {VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO, &ex,
 	                                       VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT};
 	VkImageCreateInfo ici = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, &emi};
@@ -493,13 +547,14 @@ int main(int argc, char **argv)
 	dci.ppEnabledExtensionNames = exts;
 	CHECK(vkCreateDevice(pd, &dci, NULL, &dev));
 
-	const char *def[] = {"1920x1080", "2880x1600", "1832x1920"};
+	const char *def[] = {"1920x1080", "2880x1600", "1832x1920", "1024x4096"};
 	int fails = 0;
-	for (int i = 0; i < (argc > 1 ? argc - 1 : 3); i++) {
+	for (int i = 0; i < (argc > 1 ? argc - 1 : 4); i++) {
 		unsigned w, h;
 		if (sscanf(argc > 1 ? argv[i + 1] : def[i], "%ux%u", &w, &h) != 2)
 			continue;
-		fails += run_nv12(pd, qf, w, h) != 0;
+		fails += run_nv12(pd, qf, w, h, 0) != 0;
+		fails += run_nv12(pd, qf, w, h, 1) != 0;
 		// a linear one-plane image is the blob's own: venus's 128-byte rows fit it only when the width is a multiple
 		if (w % 128 == 0)
 			fails += run(pd, qf, VK_FORMAT_R8_UNORM, w, h) != 0;

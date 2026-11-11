@@ -49,7 +49,9 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <signal.h>
 #include <string.h>
+#include <sys/epoll.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -799,6 +801,27 @@ EXPORT int poll(struct pollfd *fds, nfds_t n, int timeout)
 {
 	struct q1dec *d = n == 1 && fds && fds[0].fd >= 0 ? q1dec_find(fds[0].fd) : NULL;
 	return d ? q1dec_poll(d, fds, timeout) : q1_sys_poll(fds, n, timeout);
+}
+
+// epoll on the decoder: a SOURCE_CHANGE for the client is an eventfd of ours in its set (quest1_vdec.c)
+EXPORT int epoll_ctl(int epfd, int op, int fd, struct epoll_event *ev)
+{
+	int r = (int)syscall(SYS_epoll_ctl, epfd, op, fd, ev);
+	struct q1dec *d = r == 0 && fd >= 0 ? q1dec_find(fd) : NULL;
+	if (d)
+		q1dec_epoll_ctl(d, epfd, op, ev);
+	return r;
+}
+
+EXPORT int epoll_pwait(int epfd, struct epoll_event *ev, int max, int timeout, const sigset_t *ss)
+{
+	int n = (int)syscall(SYS_epoll_pwait, epfd, ev, max, timeout, ss, _NSIG / 8);
+	return q1dec_epoll_events(epfd, ev, n);
+}
+
+EXPORT int epoll_wait(int epfd, struct epoll_event *ev, int max, int timeout)
+{
+	return epoll_pwait(epfd, ev, max, timeout, NULL);
 }
 
 EXPORT int close(int fd)

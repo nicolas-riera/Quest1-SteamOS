@@ -15,3 +15,6 @@ void q1dec_forget(struct q1dec *d);  // after close()
 struct pollfd;
 int q1dec_poll(struct q1dec *d, struct pollfd *fd, int timeout_ms); // poll() on a decoder fd alone
 int q1_sys_poll(struct pollfd *fds, unsigned long n, int timeout_ms); // the system's poll, past the hook
+struct epoll_event;
+void q1dec_epoll_ctl(struct q1dec *d, int epfd, int op, const struct epoll_event *ev); // after the client's
+int q1dec_epoll_events(int epfd, struct epoll_event *ev, int n); // what the client's epoll_wait gives it
