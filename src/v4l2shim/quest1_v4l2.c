@@ -846,6 +846,8 @@ EXPORT int close(int fd)
 {
 	struct enc *e = fd >= 0 ? find(fd) : NULL;
 	struct q1dec *d = fd >= 0 && !e ? q1dec_find(fd) : NULL;
+	if (d && q1dec_close_async(d, fd))
+		return 0;
 	if (d)
 		q1dec_closing(d); // its thread must be off the fd before the number can be another file's
 	int r = (int)syscall(SYS_close, fd);

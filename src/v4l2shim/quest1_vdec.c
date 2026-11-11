@@ -170,6 +170,8 @@ struct q1dec {
 	bool pend_q[MAXBUF];
 	bool await_cap;    // the firmware waits for the client's CAPTURE (its "port reconfiguration")
 	bool early;        // the client was given the size of the stream before (known_*) and sets its CAPTURE up
+	uint64_t seq_ns;   // when the stream's first sequence came (for a client that waits with epoll)
+	bool stall_logged;
 	bool low_latency;  // frames in decode order, realtime priority (the client's DISPLAY_DELAY 0)
 	int evfd;          // in the client's epoll set: readable while a SOURCE_CHANGE or a skipped packet waits; -1 if none
 	bool ev_ready;     // it is readable
@@ -326,6 +328,41 @@ static void ion_free(struct ionbuf *b)
 	memset(b, 0, sizeof(*b));
 }
 
+// Packet buffers of a closed decoder, for the next one of this process: vrlink opens a new decoder at each reset of
+// its own and must have its first frame 800 ms after it; making its 17 buffers of 4 MB took 140 ms (2026-11-11).
+static struct ionbuf out_cache[MAXBUF + 1];
+static pthread_mutex_t out_cache_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static int out_alloc(struct q1dec *e, size_t len, struct ionbuf *b)
+{
+	bool got = false;
+	pthread_mutex_lock(&out_cache_mu);
+	for (uint32_t i = 0; i <= MAXBUF && !got; i++)
+		if (out_cache[i].size == AL(len, PAGE)) {
+			*b = out_cache[i];
+			memset(&out_cache[i], 0, sizeof(out_cache[i]));
+			got = true;
+		}
+	pthread_mutex_unlock(&out_cache_mu);
+	return got ? 0 : ion_alloc(e, len, b);
+}
+
+static void out_keep(struct q1dec *e)
+{
+	pthread_mutex_lock(&out_cache_mu);
+	for (uint32_t i = 0, k = 0; i <= MAXBUF; i++) {
+		if (!e->b[OUT][i].size)
+			continue;
+		while (k <= MAXBUF && out_cache[k].size)
+			k++;
+		if (k > MAXBUF)
+			break;
+		out_cache[k] = e->b[OUT][i];
+		memset(&e->b[OUT][i], 0, sizeof(e->b[OUT][i]));
+	}
+	pthread_mutex_unlock(&out_cache_mu);
+}
+
 static void free_bufs(struct q1dec *e, int q)
 {
 	for (uint32_t i = 0; i <= MAXBUF; i++) {
@@ -348,6 +385,7 @@ void q1dec_forget(struct q1dec *e)
 	q1dec_closing(e);
 	if (e->frames)
 		logf_("closed: %llu frames", (unsigned long long)e->frames);
+	out_keep(e);
 	free_bufs(e, OUT);
 	free_bufs(e, CAP);
 	if (e->ion >= 0)
@@ -466,6 +504,18 @@ static void *ev_loop(void *arg)
 			pthread_mutex_unlock(&e->mu);
 		} else if (n > 0) {
 			usleep(5000); // the driver says POLLERR while a queue has no buffer: not an event
+		}
+		if (e->seq_ns && !e->frames && !e->stall_logged && now_ns() - e->seq_ns > 250000000ull) {
+			pthread_mutex_lock(&e->mu);
+			unsigned o = 0, c = 0;
+			for (uint32_t i = 0; i <= MAXBUF; i++) {
+				o += e->indrv[OUT][i];
+				c += i < MAXBUF && e->indrv[CAP][i];
+			}
+			e->stall_logged = true;
+			logf_("no frame 250 ms after the stream's first sequence: the driver holds %u packets and %u of %u frame "
+			      "buffers, %u packets given back", o, c, e->count[CAP], e->skipped_n);
+			pthread_mutex_unlock(&e->mu);
 		}
 		if (!e->booted && (e->first_packet_ns || e->epfd >= 0)) {
 			pthread_mutex_lock(&e->mu);
@@ -792,7 +842,10 @@ static int reconfigure(struct q1dec *e)
 		return -1;
 	}
 	rb.count = e->count[CAP];
-	if (sys_ioctl(e->fd, VIDIOC_REQBUFS, &rb) < 0 || rb.count < e->count[CAP]) {
+	int rr = sys_ioctl(e->fd, VIDIOC_REQBUFS, &rb);
+	if (rr == 0 && rb.count != e->count[CAP])
+		logf_("reconfiguration: the driver wants %u frame buffers, the client has %u", rb.count, e->count[CAP]);
+	if (rr < 0 || rb.count < e->count[CAP]) {
 		logf_("reconfiguration, REQBUFS %u: %s", e->count[CAP], strerror(errno));
 		return -1;
 	}
@@ -1070,10 +1123,17 @@ static void seq_changed(struct q1dec *e, const struct v4l2_event *ev)
 		}
 		set_dims(e, w, h);
 	} else {
+		uint64_t t0 = now_ns();
 		if (insufficient && e->on[CAP] && reconfigure(e) < 0) {
 			dead(e, "reconfiguration failed");
 			return;
 		}
+		if (e->epfd >= 0 && !e->frames && !e->seq_ns)
+			e->seq_ns = now_ns();
+		if (e->epfd >= 0 && !e->frames)
+			logf_("the stream's first sequence: %s, %ux%u (%u buffers), %s in %.0f ms",
+			      insufficient ? "insufficient" : "sufficient", w, h, e->count[CAP],
+			      insufficient && e->on[CAP] ? "CAPTURE set up again" : "nothing to do", (now_ns() - t0) / 1e6);
 		// Nothing changed for the client, so no source change: Steam's stream client sets CAPTURE up again at any
 		// of them, which this driver does not survive.
 		e->quiet_change = true;
@@ -1199,6 +1259,8 @@ static int reqbufs(struct q1dec *e, struct v4l2_requestbuffers *rb)
 	d.memory = V4L2_MEMORY_USERPTR;
 	if (!rb->count) {
 		int r = sys_ioctl(e->fd, VIDIOC_REQBUFS, &d);
+		if (q == OUT)
+			out_keep(e);
 		free_bufs(e, q);
 		return r;
 	}
@@ -1222,6 +1284,8 @@ static int reqbufs(struct q1dec *e, struct v4l2_requestbuffers *rb)
 		logf_("REQBUFS %s %u: %s", q == OUT ? "OUTPUT" : "CAPTURE", d.count, strerror(err));
 		return fail(err);
 	}
+	if (q == OUT)
+		out_keep(e);
 	free_bufs(e, q);
 	uint32_t n = d.count > MAXBUF + (q == OUT) ? MAXBUF + (q == OUT) : d.count;
 	// The client has that many and no more: Steam's stream client keeps 16 in a table of 16, does not read the
@@ -1235,7 +1299,8 @@ static int reqbufs(struct q1dec *e, struct v4l2_requestbuffers *rb)
 			e->cap_cfd[i] = -1;
 	}
 	for (uint32_t i = 0; i < n; i++)
-		if ((!dmabuf && ion_alloc(e, q == CAP ? e->cap_size : e->in_size, &e->b[q][i]) < 0) ||
+		if ((q == OUT && out_alloc(e, e->in_size, &e->b[q][i]) < 0) ||
+		    (q == CAP && !dmabuf && ion_alloc(e, e->cap_size, &e->b[q][i]) < 0) ||
 		    (q == CAP && e->cap_planes > 1 && ion_alloc(e, e->extra_size, &e->x[i]) < 0)) {
 			logf_("ION buffer of %u bytes: %s", q == CAP ? e->cap_size : e->in_size, strerror(errno));
 			free_bufs(e, q);
@@ -1479,6 +1544,8 @@ static int dqbuf(struct q1dec *e, struct v4l2_buffer *b)
 			    (p[0].reserved[4] != e->crop_w || p[0].reserved[5] != e->crop_h))
 				logf_("the firmware's picture is %ux%u, the client was told %ux%u", p[0].reserved[4], p[0].reserved[5],
 				      e->crop_w, e->crop_h);
+			if (p[0].bytesused && e->frames == 1 && e->epfd >= 0)
+				logf_("first frame, %.0f ms after the first packet", (now_ns() - e->first_packet_ns) / 1e6);
 			if (eos)
 				e->last_seen = true;
 		}
@@ -1629,6 +1696,51 @@ int q1dec_ioctl(struct q1dec *e, unsigned long req, void *arg)
 // --- a client that waits with epoll
 
 static atomic_int ep_users; // decoders with our eventfd in an epoll set
+
+struct closer {
+	struct q1dec *e;
+	int fd;
+};
+
+static void *close_run(void *arg)
+{
+	struct closer *c = arg;
+	q1dec_closing(c->e);
+	syscall(SYS_close, c->fd);
+	q1dec_forget(c->e);
+	free(c);
+	return NULL;
+}
+
+// A decoder of a client that waits with epoll (vrlink) is closed in the background: its session stopping took
+// 240 ms of the 800 vrlink gives its next decoder after a reset of its own (2026-11-11). It leaves the client's epoll
+// set now; the fd number stays taken until it is closed, so no other file of the client is mistaken for it.
+int q1dec_close_async(struct q1dec *e, int fd)
+{
+	struct closer *c = e->epfd >= 0 ? malloc(sizeof(*c)) : NULL;
+	if (!c)
+		return 0;
+	pthread_mutex_lock(&e->mu);
+	syscall(SYS_epoll_ctl, e->epfd, EPOLL_CTL_DEL, fd, NULL);
+	if (e->evfd >= 0)
+		syscall(SYS_epoll_ctl, e->epfd, EPOLL_CTL_DEL, e->evfd, NULL);
+	e->epfd = -1;
+	atomic_fetch_sub(&ep_users, 1);
+	pthread_mutex_unlock(&e->mu);
+	c->e = e;
+	c->fd = fd;
+	pthread_t t;
+	pthread_attr_t a;
+	pthread_attr_init(&a);
+	pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
+	int r = pthread_create(&t, &a, close_run, c);
+	pthread_attr_destroy(&a);
+	if (r != 0) {
+		close_run(c);
+		return 1;
+	}
+	return 1;
+}
 
 static int slot_of(struct q1dec *e)
 {

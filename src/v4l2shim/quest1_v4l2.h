@@ -12,6 +12,7 @@ int q1dec_ioctl(struct q1dec *d, unsigned long req, void *arg);
 void *q1dec_mmap(struct q1dec *d, void *addr, size_t len, int prot, int flags, off_t off);
 void q1dec_closing(struct q1dec *d); // before close()
 void q1dec_forget(struct q1dec *d);  // after close()
+int q1dec_close_async(struct q1dec *d, int fd); // 1 if the close was taken over (done in the background)
 struct pollfd;
 int q1dec_poll(struct q1dec *d, struct pollfd *fd, int timeout_ms); // poll() on a decoder fd alone
 int q1_sys_poll(struct pollfd *fds, unsigned long n, int timeout_ms); // the system's poll, past the hook

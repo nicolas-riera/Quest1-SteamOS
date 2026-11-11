@@ -263,6 +263,17 @@ static void qnv_forget(VkImage image)
 	pthread_mutex_unlock(&qdb_lock);
 }
 
+// Images with a modifier and NV12 images are forgotten when destroyed: else only a new image that got the same
+// handle took an entry back, and vrcompositor ran out of them after a few of vrlink's decoder resets (2026-11-11:
+// "Unable to create VkImage", and vrlink waited for its texture forever).
+static VKAPI_ATTR void VKAPI_CALL DestroyImage(VkDevice device, VkImage image, const VkAllocationCallbacks *alloc)
+{
+	struct device *d = device_of(device);
+	((PFN_vkDestroyImage)d->gdpa(device, "vkDestroyImage"))(device, image, alloc);
+	if (image)
+		qdb_mod_forget(image);
+}
+
 //! The external format of venus NV12 gralloc buffers (and its features), from a small one; 0 if there is none.
 static uint64_t qnv_external_format(struct device *d, VkDevice device, VkFormatFeatureFlags *features)
 {
@@ -341,6 +352,7 @@ static VkResult qnv_create_image(struct device *d, VkDevice device, const VkImag
 	}
 	pthread_mutex_unlock(&qdb_lock);
 	if (i == sizeof(qnv) / sizeof(qnv[0])) {
+		LOG("dma-buf: NV12 image %ux%u: %u of them already\n", ci->extent.width, ci->extent.height, i);
 		((PFN_vkDestroyImage)d->gdpa(device, "vkDestroyImage"))(device, *out, alloc);
 		*out = VK_NULL_HANDLE;
 		return VK_ERROR_OUT_OF_HOST_MEMORY;
