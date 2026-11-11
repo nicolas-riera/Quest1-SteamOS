@@ -130,6 +130,9 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - Desktop mode: lag and dashboard freezes while it is used (memory, llvmpipe; docs/desktop.md); the control bar's keyboard and
   close; mouse, scroll and keyboard in the headset; the Vapor look on a fresh user; install an app from Discover.
 - Snapshots show q1desktop's overlay turned by 180 degrees while it is right in the headset: find why.
+- SteamVR restarted alone (Steam kept running) breaks Steam's VR UI: steamwebhelper's GPU process takes GPU page faults when
+  vrcompositor stops (2026-11-11 17:50 and 17:51, two restarts) and the dashboard then shows its lower half empty and loses
+  its bottom bar (restarting Steam brought it back, user). SteamVR alone should restart cleanly.
 
 ## Power
 
