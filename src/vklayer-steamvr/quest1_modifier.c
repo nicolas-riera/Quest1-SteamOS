@@ -70,6 +70,7 @@ static VkImageAspectFlags qdb_plane_aspect(VkFormat f, uint32_t p)
 }
 
 static unsigned qdb_logs; //!< the first calls are logged, to see what a new user asks for
+static void qnv_prewarm(void);
 
 static VKAPI_ATTR void VKAPI_CALL GetPhysicalDeviceFormatProperties2(VkPhysicalDevice pd, VkFormat format,
                                                                     VkFormatProperties2 *p)
@@ -80,6 +81,8 @@ static VKAPI_ATTR void VKAPI_CALL GetPhysicalDeviceFormatProperties2(VkPhysicalD
 		return;
 	VkFormatFeatureFlags lin = p->formatProperties.linearTilingFeatures;
 	bool nv12 = format == VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
+	if (nv12)
+		qnv_prewarm(); // vrlink asks at its start, seconds before the PC streams
 	if (!nv12 && !qdb_vrlink())
 		lin = 0;
 	static const uint64_t mods[] = {QDB_MOD_LINEAR, QDB_MOD_QCOM_COMPRESSED};
@@ -298,6 +301,7 @@ static VkResult qnv_create_image(struct device *d, VkDevice device, const VkImag
                                  const VkImageDrmFormatModifierExplicitCreateInfoEXT *ex,
                                  const VkAllocationCallbacks *alloc, VkImage *out)
 {
+	qnv_prewarm();
 	uint64_t xfmt = qnv_external_format(d, device, NULL);
 	if (!xfmt || ex->pPlaneLayouts[0].offset != 0) {
 		LOG("dma-buf: NV12 image %ux%u: %s\n", ci->extent.width, ci->extent.height,
@@ -348,6 +352,46 @@ static VkResult qnv_create_image(struct device *d, VkDevice device, const VkImag
 	return VK_SUCCESS;
 }
 
+// The gralloc buffer whose handle an imported NV12 dma-buf takes as a model, and its description as gralloc gives it
+// (its stride, ...: the handle is checked against it). Kept: making one for each import was a 6 MB buffer each
+// time, while vrlink waits for vrcompositor to import its 16 frame buffers.
+static AHardwareBuffer *qnv_model(unsigned w, unsigned h, uint64_t usage, qdb_desc *md)
+{
+	static struct
+	{
+		AHardwareBuffer *b;
+		unsigned w, h;
+		uint64_t usage;
+		qdb_desc md;
+	} models[4]; // (two usages are tried, for one size in practice)
+	AHardwareBuffer *b = NULL;
+	pthread_mutex_lock(&qdb_lock);
+	unsigned k = 0;
+	for (; k < 4 && models[k].b; k++)
+		if (models[k].w == w && models[k].h == h && models[k].usage == usage) {
+			b = models[k].b;
+			*md = models[k].md;
+			break;
+		}
+	if (!b && k < 4) {
+		qdb_desc d = {w, h, 1, QNV_AHB_FORMAT, usage, 0, 0, 0};
+		if (qdb.allocate(&d, &b) == 0) {
+			if (qdb.describe)
+				qdb.describe(b, &d);
+			*md = d;
+			models[k].b = b;
+			models[k].w = w;
+			models[k].h = h;
+			models[k].usage = usage;
+			models[k].md = d;
+		} else {
+			b = NULL;
+		}
+	}
+	pthread_mutex_unlock(&qdb_lock);
+	return b;
+}
+
 //! vkAllocateMemory of a dma-buf for an NV12 image of ours (dedicated to it): true if it was one (*r is the result).
 static bool qnv_import(struct device *d, VkDevice device, const VkMemoryAllocateInfo *ai, int fd,
                        const VkAllocationCallbacks *alloc, VkDeviceMemory *out, VkResult *r)
@@ -367,13 +411,10 @@ static bool qnv_import(struct device *d, VkDevice device, const VkMemoryAllocate
 	static const uint64_t usages[] = {QNV_AHB_USAGE, QNV_AHB_USAGE & ~(1ull << 16)};
 	int sizes[2] = {-1, -1};
 	for (unsigned u = 0; u < 2 && !b && props_of && qdb.allocate; u++) {
-		qdb_desc md = {qnv[i].w, qnv[i].h, 1, QNV_AHB_FORMAT, usages[u], 0, 0, 0};
-		AHardwareBuffer *model = NULL;
-		if (qdb.allocate(&md, &model) != 0)
+		qdb_desc md;
+		AHardwareBuffer *model = qnv_model(qnv[i].w, qnv[i].h, usages[u], &md);
+		if (!model)
 			continue;
-		// the model's description as gralloc gives it (its stride, ...): the handle is checked against it
-		if (qdb.describe)
-			qdb.describe(model, &md);
 		const qdb_handle *m = qdb.native_handle(model);
 		size_t bytes = sizeof(*m) + (size_t)(m->numFds + m->numInts) * sizeof(int);
 		qdb_handle *h = m->numFds >= 1 && m->numInts > QDB_SIZE ? malloc(bytes) : NULL;
@@ -392,7 +433,6 @@ static bool qnv_import(struct device *d, VkDevice device, const VkMemoryAllocate
 			}
 			free(h);
 		}
-		qdb.release(model);
 	}
 	if (!b) {
 		LOG("dma-buf: NV12 %ux%u: a dma-buf of %lld bytes, gralloc's are %d and %d\n", qnv[i].w, qnv[i].h,
@@ -423,8 +463,88 @@ static struct
 {
 	VkDeviceMemory mem;
 	AHardwareBuffer *b; //!< ours: its fd is the dma-buf
+	unsigned w, h;
 } qnv_exp[64];
 static atomic_int qnv_nexp;
+
+// vrlink sets its 16 frame buffers up in its decoder thread, which takes no packet buffer back meanwhile, and gives
+// up when the decoder holds all 16 (220 ms at 72 fps). A gralloc buffer of 6 MB took 13 to 66 ms to make, 1.1 s for
+// the 16 (2026-11-11); the Frame's driver takes a few. So the buffers vrlink frees stay here for its next set (it
+// sets them up again at each reset of its decoder), and 16 of its size are made in the background as soon as it
+// asks about NV12, before the PC streams.
+#define QNV_POOL 32
+#define QNV_PREWARM_N 16
+#define QNV_PREWARM_W 1024 // vrlink's atlas for the Quest 1 identity: four 1024x1024 views
+#define QNV_PREWARM_H 4096
+static struct
+{
+	AHardwareBuffer *b;
+	unsigned w, h;
+} qnv_pool[QNV_POOL];
+
+static AHardwareBuffer *qnv_pool_take(unsigned w, unsigned h)
+{
+	AHardwareBuffer *b = NULL;
+	pthread_mutex_lock(&qdb_lock);
+	for (unsigned k = 0; k < QNV_POOL && !b; k++)
+		if (qnv_pool[k].b && qnv_pool[k].w == w && qnv_pool[k].h == h) {
+			b = qnv_pool[k].b;
+			qnv_pool[k].b = NULL;
+		}
+	pthread_mutex_unlock(&qdb_lock);
+	return b;
+}
+
+static void qnv_pool_put(AHardwareBuffer *b, unsigned w, unsigned h)
+{
+	unsigned k = 0;
+	pthread_mutex_lock(&qdb_lock);
+	while (k < QNV_POOL && qnv_pool[k].b)
+		k++;
+	if (k < QNV_POOL) {
+		qnv_pool[k].b = b;
+		qnv_pool[k].w = w;
+		qnv_pool[k].h = h;
+	}
+	pthread_mutex_unlock(&qdb_lock);
+	if (k == QNV_POOL)
+		qdb.release(b);
+}
+
+static void *qnv_prewarm_run(void *arg)
+{
+	(void)arg;
+	struct timespec t0, t1;
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	unsigned n = 0;
+	for (; n < QNV_PREWARM_N; n++) {
+		qdb_desc md = {QNV_PREWARM_W, QNV_PREWARM_H, 1, QNV_AHB_FORMAT, QNV_AHB_USAGE, 0, 0, 0};
+		AHardwareBuffer *b = NULL;
+		if (qdb.allocate(&md, &b) != 0)
+			break;
+		qnv_pool_put(b, QNV_PREWARM_W, QNV_PREWARM_H);
+	}
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	LOG("dma-buf: %u NV12 %ux%u frame buffers made ahead in %.0f ms\n", n, QNV_PREWARM_W, QNV_PREWARM_H,
+	    (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6);
+	return NULL;
+}
+
+static void qnv_prewarm_once(void)
+{
+	pthread_once(&qdb.once, qdb_load);
+	pthread_t t;
+	if (qdb.allocate && pthread_create(&t, NULL, qnv_prewarm_run, NULL) == 0)
+		pthread_detach(t);
+}
+
+//! vrlink's frame buffers, made in the background (once)
+static void qnv_prewarm(void)
+{
+	static pthread_once_t once = PTHREAD_ONCE_INIT;
+	if (qdb_vrlink())
+		pthread_once(&once, qnv_prewarm_once);
+}
 
 //! vkAllocateMemory of exportable (dma-buf) memory for an NV12 image of ours: true if it was one (*r is the result).
 static bool qnv_export(struct device *d, VkDevice device, const VkMemoryAllocateInfo *ai,
@@ -439,8 +559,8 @@ static bool qnv_export(struct device *d, VkDevice device, const VkMemoryAllocate
 	PFN_vkGetAndroidHardwareBufferPropertiesANDROID props_of =
 	    (PFN_vkGetAndroidHardwareBufferPropertiesANDROID)d->gdpa(device, "vkGetAndroidHardwareBufferPropertiesANDROID");
 	qdb_desc md = {qnv[i].w, qnv[i].h, 1, QNV_AHB_FORMAT, QNV_AHB_USAGE, 0, 0, 0};
-	AHardwareBuffer *b = NULL;
-	if (!props_of || !qdb.allocate || qdb.allocate(&md, &b) != 0) {
+	AHardwareBuffer *b = props_of ? qnv_pool_take(qnv[i].w, qnv[i].h) : NULL;
+	if (!b && (!props_of || !qdb.allocate || qdb.allocate(&md, &b) != 0)) {
 		LOG("dma-buf: NV12 %ux%u: no gralloc buffer\n", qnv[i].w, qnv[i].h);
 		*r = VK_ERROR_OUT_OF_DEVICE_MEMORY;
 		return true;
@@ -464,6 +584,8 @@ static bool qnv_export(struct device *d, VkDevice device, const VkMemoryAllocate
 		if (k < sizeof(qnv_exp) / sizeof(qnv_exp[0])) {
 			qnv_exp[k].mem = *out;
 			qnv_exp[k].b = b;
+			qnv_exp[k].w = qnv[i].w;
+			qnv_exp[k].h = qnv[i].h;
 			atomic_fetch_add(&qnv_nexp, 1);
 		}
 		pthread_mutex_unlock(&qdb_lock);
@@ -500,16 +622,19 @@ static void qnv_free_memory(VkDeviceMemory m)
 	if (!m || !atomic_load(&qnv_nexp))
 		return;
 	AHardwareBuffer *b = NULL;
+	unsigned w = 0, h = 0;
 	pthread_mutex_lock(&qdb_lock);
 	for (unsigned k = 0; k < sizeof(qnv_exp) / sizeof(qnv_exp[0]) && !b; k++)
 		if (qnv_exp[k].mem == m) {
 			b = qnv_exp[k].b;
+			w = qnv_exp[k].w;
+			h = qnv_exp[k].h;
 			qnv_exp[k].mem = VK_NULL_HANDLE;
 			atomic_fetch_sub(&qnv_nexp, 1);
 		}
 	pthread_mutex_unlock(&qdb_lock);
 	if (b)
-		qdb.release(b);
+		qnv_pool_put(b, w, h); // for vrlink's next set
 }
 
 static VKAPI_ATTR VkResult VKAPI_CALL GetMemoryFd(VkDevice device, const VkMemoryGetFdInfoKHR *gi, int *fd)
