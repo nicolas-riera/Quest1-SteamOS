@@ -64,6 +64,14 @@ vm.dirty_background_ratio=5
 vm.dirty_expire_centisecs=200
 EOF
 
+# Steam Link VR (vrlink) receives the PC's video over UDP and asks for a socket buffer larger than the kernel's
+# default cap (208 KiB, "could not set socket buffer size"): with it, ~500 datagrams/s were dropped on the headset
+# itself (/proc/net/snmp RcvbufErrors), which vrlink took as network loss (FEC retries, decoder resets; 2026-11-11).
+# Only a cap: memory goes to the sockets that ask.
+cat > /etc/sysctl.d/90-quest1-net.conf <<'EOF'
+net.core.rmem_max=16777216
+EOF
+
 # Block devices as Android tunes them: CFQ without idling (slice_idle/group_idle 0: idling is for spinning disks, on
 # flash it holds reads back), 128 KiB read-ahead (512 by default: under memory pressure every code page fault read
 # 512 KiB). On 2026-11-08 the headset froze twice under memory pressure with Steam busy: every process that needed a

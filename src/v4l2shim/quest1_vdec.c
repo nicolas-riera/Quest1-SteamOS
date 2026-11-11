@@ -83,6 +83,7 @@
 
 // --- msm_vidc's private V4L2 additions (kernel include/uapi/linux/{v4l2-controls,videodev2}.h)
 #define VIDC_CID(n) ((V4L2_CTRL_CLASS_MPEG | 0x2000) + (n))
+#define CID_CONTINUE_DATA VIDC_CID(5)       // 1: the driver continues by itself at a sufficient sequence
 #define CID_OUTPUT_ORDER VIDC_CID(7)        // 0 display, 1 decode
 #define CID_BUFFER_SIZE_LIMIT VIDC_CID(64)  // the largest packet, in bytes
 #define CID_PRIORITY VIDC_CID(83)           // 0 realtime, 1 not
@@ -633,10 +634,13 @@ static int s_fmt(struct q1dec *e, struct v4l2_format *f, bool try)
 		limit = PACKET_MAX;
 	struct v4l2_control lc = {.id = CID_BUFFER_SIZE_LIMIT, .value = (int32_t)AL(limit < (1u << 19) ? 1u << 19 : limit, PAGE)};
 	if (d.fmt.pix_mp.width > VENUS_MAX_SIDE || d.fmt.pix_mp.height > VENUS_MAX_SIDE) {
-		logf_("%ux%u is larger than venus decodes: a bound, the stream's size comes from the stream",
-		      d.fmt.pix_mp.width, d.fmt.pix_mp.height);
-		d.fmt.pix_mp.width = 1920;
-		d.fmt.pix_mp.height = 1088;
+		// The firmware finds its resources sufficient at the first sequence only for the size given here: the size
+		// of this client's last stream when there was one (vrlink's decoder again after a reset of its own)
+		bool known = known_w && known_pix == p->pixelformat;
+		logf_("%ux%u is larger than venus decodes: a bound, the stream's size comes from the stream (%ux%u until then)",
+		      d.fmt.pix_mp.width, d.fmt.pix_mp.height, known ? known_w : 1920, known ? known_h : 1088);
+		d.fmt.pix_mp.width = known ? known_w : 1920;
+		d.fmt.pix_mp.height = known ? known_h : 1088;
 	}
 	// (S_FMT works the size out: once for the codec, which opens the firmware session the control needs, and once
 	// more with the limit)
@@ -1076,6 +1080,12 @@ static void boot_check(struct q1dec *e)
 		// one (it resets again when no frame came 800 ms after its reset, which that took, 2026-11-11).
 		set_dims(e, known_w, known_h);
 		apply_cap_fmt(e); // (the driver's frame size, as the client is told)
+		// With CAPTURE at the stream's size already, the firmware finds its buffers sufficient at the first sequence:
+		// the driver then sends it its "continue" itself instead of an "insufficient" that would want CAPTURE set up
+		// again, which the firmware did not always survive here (every packet and frame buffer held, 2026-11-11).
+		struct v4l2_control cd = {.id = CID_CONTINUE_DATA, .value = 1};
+		if (sys_ioctl(e->fd, VIDIOC_S_CTRL, &cd) < 0)
+			logf_("control 0x%x = 1 (continue at a sufficient sequence): %s", cd.id, strerror(errno));
 		e->early = true;
 		e->start_seen = false;
 		e->skipped_all = 0;

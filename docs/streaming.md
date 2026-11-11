@@ -435,12 +435,39 @@ vrlink writes its own log, `~/.local/share/Steam/logs/vrlink.txt` (the PC's side
    start (parameter sets / IDR) back at once, through its eventfd (EPOLLOUT); the driver's EPOLLIN for our own CAPTURE is
    hidden from the client. Result: at most 2-3 packets held, SOURCE_CHANGE 17 ms and the first frame 50 ms after the first
    packet, 11 ms from packet to frame, about two epoll wake-ups per frame. FFmpeg's H.264/HEVC decode stays bit-exact.
+8. **The picture shows** (2026-11-11 afternoon: the PC's dashboard and its Quest Touch models in both eyes, vrcompositor at 71 fps).
+   What it took, in the order found:
+   - vrlink's `SVLCodecV4L2::CheckStuck` (read in its code): it takes the older of two times, the last packet buffer it got back
+     and the last frame (also set when its CaptureSetup ends). Past 330 ms it asks the PC for an I-frame (every 100 ms), past
+     800 ms it closes the decoder and opens a new one. Its first decoder is always reset this way. So a new decoder has 800 ms to
+     give a frame, I-frame wait included. The decoder layer now makes that: the stream's size of the previous decoder in the
+     process is kept; the next one gets it at once (OUTPUT set up at that size instead of 1920x1088 when vrlink gives its
+     1536x6144 bound, CAPTURE's format and the client's SOURCE_CHANGE before any packet), its close runs in the background
+     (it took 240 ms), and its packet buffers are kept for the next one (140 ms of ION allocation).
+   - With OUTPUT at the stream's size and `CONTINUE_DATA_TRANSFER` set, the firmware finds its buffers sufficient at the first
+     sequence and the driver sends it its "continue" itself. Before, its "insufficient" wanted CAPTURE set up again, after which
+     it often held every packet and every frame buffer (14 of 15 resets in a row gave no frame).
+   - The layer forgot NV12 images when they were destroyed only at device end: after a few resets vrcompositor's import table
+     was full ("Unable to create VkImage") and vrlink waited for it forever. Images are now forgotten in `vkDestroyImage`.
+     vrcompositor imports each frame buffer and then exports it again for itself as OPAQUE_FD: the layer hands back the
+     dma-buf it imported.
+   - **Packet loss was the headset's own**: `net.core.rmem_max` was the kernel's 208 KiB, vrlink could not get the socket buffer
+     it asks for ("could not set socket buffer size") and ~500 datagrams/s were dropped (`/proc/net/snmp` RcvbufErrors; vrlink
+     logs them as FEC "substantive retry" and resets its decoder at "too many packets were missing"). `device/holo-perf.sh`
+     sets 16 MiB: none dropped since.
+   - Starting a session from the headset without the user (for tests): Steam's `SharedJSContext` (CEF remote debugging on
+     127.0.0.1:8080) runs `SteamClient.Apps.StreamGame(250820, "<PC client id>", -1)`, the dashboard button's call (the id is in
+     `logs/remote_connections.txt`); `SteamClient.RemotePlay.StopStreamingSession()` stops it. The panels must be on.
+   Still open: vrlink hangs on its way out (a thread waits in vrclient for a reply of vrcompositor, the main thread joins it),
+   and while it lives Steam starts no new session: it has to be killed. The headset's identity on the PC (Quest 1 as Virtual
+   Desktop shows it) and the PC's overlays.
 
 Plan:
 0. ~~Capture vrlink's own output~~ done (above).
 1. ~~`/dev/video-dec0` and a decode test~~ done (`vrdevice_path`, items 5 and 6).
 2. ~~Vulkan dma-buf import shim~~ done (items 2 and 6).
-3. Next: the picture in the headset (vrcompositor's import of vrlink's frames, the layers vrlink submits), then controller input.
+3. ~~The picture in the headset~~ done (item 8). Next: the user's check in the headset (latency, head tracking), vrlink's
+   exit hang, controller input, identity, overlays.
 4. Alternative: ALVR or WiVRn (PC-side driver + headset client with V4L2 or software HEVC decode). 1-2 weeks, avoids Valve's stack but loses Steam integration.
 Not worth pursuing: patching vrlink (internal interfaces `IVRMailbox`, `IVRBlockQueue`).
 
