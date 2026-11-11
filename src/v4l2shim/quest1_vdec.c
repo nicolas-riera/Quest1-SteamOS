@@ -181,6 +181,7 @@ struct q1dec {
 };
 
 #define BOOT_AFTER_NS 50000000ull
+#define CLIENT_CAPTURE 9 // frame buffers for a client that waits with epoll: the firmware's 6, and 3 for it to hold
 #define SKIP_MAX 144 // packets given back while no stream start came: 2 s at 72 fps, then they all go to the driver
 #define LOW_LATENCY_FPS 90
 #define PACKET_MAX (4u << 20)
@@ -1174,6 +1175,12 @@ static int reqbufs(struct q1dec *e, struct v4l2_requestbuffers *rb)
 	if (q < 0 || (rb->memory != V4L2_MEMORY_MMAP && !dmabuf))
 		return sys_ioctl(e->fd, VIDIOC_REQBUFS, rb);
 	set_up(e);
+	if (dmabuf && rb->count > CLIENT_CAPTURE && e->epfd >= 0) {
+		// vrlink makes a Vulkan image for each and shares it with vrcompositor, ~15 ms each, in the thread that
+		// takes its 16 packet buffers back: 16 of them took longer than those last at 72 fps (2026-11-11). It reads
+		// the count back.
+		rb->count = CLIENT_CAPTURE;
+	}
 	if (q == CAP && e->boot && e->boot_sized && e->epfd >= 0) { // kept until its STREAMON (boot_swap)
 		e->pend_count = rb->count > MAXBUF ? MAXBUF : rb->count;
 		e->cap_pending = e->pend_count > 0;

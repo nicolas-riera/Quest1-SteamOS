@@ -234,7 +234,7 @@ static struct
 	uint32_t w, h;
 	VkDeviceSize pitch, uv; //!< the caller's plane layouts
 	uint64_t mod;           //!< the caller's modifier
-} qnv[32];
+} qnv[128]; // (vrcompositor keeps the last sets of vrlink while it makes a new one at each decoder reset)
 static atomic_int qnv_n;
 
 static int qnv_find(VkImage image)
@@ -399,7 +399,7 @@ static struct
 {
 	VkDeviceMemory mem;
 	int fd;
-} qnv_imp[64];
+} qnv_imp[128];
 static atomic_int qnv_nimp;
 
 static void qnv_imported(VkDeviceMemory m, int fd)
@@ -508,7 +508,7 @@ static struct
 	VkDeviceMemory mem;
 	AHardwareBuffer *b; //!< ours: its fd is the dma-buf
 	unsigned w, h;
-} qnv_exp[64];
+} qnv_exp[128];
 static atomic_int qnv_nexp;
 
 // vrlink sets its 16 frame buffers up in its decoder thread, which takes no packet buffer back meanwhile, and gives

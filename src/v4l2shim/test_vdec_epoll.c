@@ -240,6 +240,7 @@ static int run(int argc, char **argv)
 				if (x(VIDIOC_REQBUFS, &cr, "REQBUFS CAPTURE") < 0)
 					return 1;
 				ncap = (int)cr.count;
+				double qbuf_ms = 0;
 				for (int i = 0; i < ncap; i++) { // vrlink checks each buffer's size before it queues them
 					struct v4l2_plane qp = {0};
 					struct v4l2_buffer qb = {.index = (uint32_t)i, .type = ct, .memory = V4L2_MEMORY_DMABUF,
@@ -265,11 +266,16 @@ static int run(int argc, char **argv)
 					struct v4l2_plane p = {.m.fd = capfd[i], .length = (uint32_t)a.len};
 					struct v4l2_buffer b = {.index = (uint32_t)i, .type = ct, .memory = V4L2_MEMORY_DMABUF, .m.planes = &p,
 					                        .length = 1};
+					double q0 = now_ms();
 					if (x(VIDIOC_QBUF, &b, "QBUF CAPTURE") < 0)
 						return 1;
+					qbuf_ms += now_ms() - q0;
 				}
+				double s0 = now_ms();
 				if (x(VIDIOC_STREAMON, &ct, "STREAMON CAPTURE") < 0)
 					return 1;
+				printf("CAPTURE: %d QBUF in %.1f ms, STREAMON in %.1f ms (vrlink takes no packet buffer back meanwhile)\n",
+				       ncap, qbuf_ms, now_ms() - s0);
 			}
 			struct v4l2_plane p;
 			struct v4l2_buffer b;
