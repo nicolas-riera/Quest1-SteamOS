@@ -136,9 +136,6 @@ tools/build-boot.sh kernel work kernel-out
 tools/build-boot.sh image  work kernel-out boot-native-holo.img
 ```
 
-The [Prerelease workflow](.github/workflows/prerelease.yml) runs the same two commands on
-every push to `main`.
-
 The parts that run on the headset (Monado, the SteamVR driver, the Vulkan layer) are built
 on the headset or cross-built in WSL. Their `build.sh` scripts and the `device/` scripts
 show how.

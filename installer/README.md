@@ -50,7 +50,7 @@ flashes from the PC, and the PC keeps the finished image: re-flashing or repairi
 
    | What | From | Status |
    | --- | --- | --- |
-   | Our files | this repository's source tree (a zip of the branch, not a release): scripts, configs; our arm64 binaries, the boot and installer images from its `prebuilt` branch, built by CI ([`prebuilt.yml`](../.github/workflows/prebuilt.yml), [`tools/build-native.sh`](../tools/build-native.sh)) | scripts work; binaries: built locally, CI to run |
+   | Our files | this repository's source tree (a zip of the branch, not a release): scripts, configs; our arm64 binaries, the boot and installer images from its `prebuilt` branch, built locally and pushed by hand ([`tools/build-native.sh`](../tools/build-native.sh), [`tools/build-boot.sh`](../tools/build-boot.sh); no CI) | scripts work; binaries: built locally |
    | Holo packages | Holo's pacman repositories (public, the rootfs's snapshot): [`device/packages.txt`](../device/packages.txt) + dependencies, resolved like pacman does, each file checked against the repository database | works: 367 packages, 434 MB (temporary list, it will change) |
    | SteamOS Holo core aarch64 | `holo-packages.steamos.cloud` (public), `system.rootfs.zst` (tar.zst), 385 MB | works |
    | Steam client arm64 | Valve's client CDN, channel `steam_client_linuxarm64` (public): 35 zips, ~1 GB, staged as they are (the build unpacks them) | works |
@@ -128,9 +128,9 @@ The user must not reinstall for each improvement. The system is split so that ea
 
 - `Quest1-SteamOS.exe` is the release asset; releases are normal releases (not prereleases), starting at
   **0.0.1**.
-- The prerelease workflow (`.github/workflows/prerelease.yml`, boot image built on each push) is removed
-  then: the boot and installer images and our binaries are on the `prebuilt` branch (one commit, replaced by
-  each CI build, so the history does not grow with binaries), which the app downloads.
+- The boot and installer images and our binaries are on the `prebuilt` branch (one commit, replaced by each
+  build, so the history does not grow with binaries), which the app downloads. There is no CI (removed
+  2026-11-11): they are built locally and pushed there by hand.
 
 ## To check on the headset
 

@@ -41,7 +41,7 @@
     "list": "device/packages.txt"
   },
   "prebuilt": {
-    "comment": "Our binaries, built by .github/workflows/prebuilt.yml from this repository and published on its prebuilt branch: manifest.json lists each file's sha256.",
+    "comment": "Our binaries, built from this repository (tools/build-native.sh, tools/build-boot.sh) and published on its prebuilt branch: manifest.json lists each file's sha256.",
     "base": "https://raw.githubusercontent.com/nicolas-riera/Quest1-SteamOS/prebuilt/",
     "files": [
       "native-arm64.tar.zst",

@@ -26,7 +26,7 @@ Flashed partitions: `boot_a`, `boot_b`, `userdata`; `system_a`/`system_b` erased
 app/build.sh [version]     # Linux/WSL, Go 1.27+: fetches platform-tools, writes app/Quest1-SteamOS.exe
 ```
 
-A `v*` tag builds and publishes it as a release ([release.yml](../.github/workflows/release.yml)).
+There is no CI: a release is built with this script and published by hand.
 `third_party/go-webview2` is a patched copy of the WebView2 binding (see its `PATCHED.md`).
 
 ## Not done yet

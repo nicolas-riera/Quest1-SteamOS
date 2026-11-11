@@ -5,8 +5,7 @@
 # stubs, SteamVR tools against the public OpenVR SDK.
 #
 # Runs as root inside a Holo aarch64 root with network (pacman installs the build tools):
-#   CI:   .github/workflows/native.yml (GitHub's arm64 runner, a chroot, no emulation)
-#   dev:  WSL 2 + qemu-user binfmt, a chroot of Holo's system.rootfs.zst (slow), or on the headset
+#   WSL 2 + qemu-user binfmt, a chroot of Holo's system.rootfs.zst (slow), or on the headset
 # usage: build-native.sh <repo dir> <output .tar.zst>      (JOBS=n, default: the CPU count)
 #
 # Contents (paths in the image):

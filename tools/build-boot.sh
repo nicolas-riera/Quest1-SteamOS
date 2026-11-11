@@ -9,7 +9,7 @@
 # Nothing comes from a device dump: no Meta blob ends up in the image. Same result as
 # tools/mknative.sh holo, without the stock boot image (the header values are written here) and
 # with the kernel's built-in trusted keys left empty (that build used Meta's verity cert).
-# Used by .github/workflows/prerelease.yml; runs on any x86_64 Debian/Ubuntu with
+# Runs on any x86_64 Debian/Ubuntu with
 #   bc bison flex libssl-dev device-tree-compiler cpio gcc-aarch64-linux-gnu curl git python3 unzip
 # usage: build-boot.sh kernel <workdir> <kernel-out dir>      (Image.gz-dtb + gen_init_cpio)
 #        build-boot.sh image <workdir> <kernel-out dir> <output.img>
