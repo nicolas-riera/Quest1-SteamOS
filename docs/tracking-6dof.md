@@ -73,6 +73,13 @@ and nothing opens SyncBoss.
   A null status (to make the next one new) aborts trackingservice: "Received nullptr status (unpaired
   controller) but RemoteTrackedDevice is valid". fakelogd prints the HAL's and trackingservice's
   controller connection lines (`stateChangeNotifierFunc ... paired=2 connected=2`) to the journal.
+* **`onStatus`'s int is a handedness (2026-11-11):** trackingservice looks the paired controller up
+  by it (`getDeviceHandedness` of the HAL's `PairedControllerInfo`: 0 right, 1 left, 2 unknown) and
+  asks for that controller's event fd; "Failed to get PairedControllerInfo ...; id: N" prints that
+  int. ovrstub sent its own type (0 left, 1 right), so each announcement took the other controller:
+  both came when they woke together, but on 2026-11-11 the left one, announced alone for 3.5 min,
+  failed (the right one was off), and the right one's first announcement took the left one; the right
+  one was never taken (connected, not tracked, dead in SteamVR). ovrstub now sends the handedness.
 * The Android 10 interface token is `int32 strict-mode policy`, `int32 work-source uid (-1)`,
   then `String16` descriptor. servicemanager accepted it (addService works).
 * **Linker namespaces:** the global property area has no `ro.vndk.version`, so the bionic linker

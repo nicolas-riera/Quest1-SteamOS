@@ -555,13 +555,19 @@ static void remote_announce(void)
 		if (rctl[i].announced && (rctl[i].fd_given || ++rctl[i].ticks < 3))
 			continue;
 		rctl[i].ticks = 0;
+		/* onStatus's int is the handedness trackingservice looks the paired controller up by (its
+		 * getDeviceHandedness: 0 right, 1 left; read in its code, 2026-11-11), not our type. With our
+		 * type there, each controller's announcement made it take the other one: fine when both woke
+		 * together, but a controller that woke up later was never taken (the right one, 2026-11-11). */
+		int hand = rctl[i].type == 0 ? 1 : 0;
 		struct parcel p = {0};
 		p_token(&p, "oculus.internal.remote.IRemoteServiceStatusCallback");
-		p_i32(&p, rctl[i].type);
+		p_i32(&p, hand);
 		p_status(&p, &rctl[i]);
 		bc_txn(BC_TRANSACTION, remote_cb, 1, TF_ONE_WAY, &p);
 		rctl[i].announced = 1;
-		logf_("OVRRemoteService: onStatus(type %d) -> callback handle %u", rctl[i].type, remote_cb);
+		logf_("OVRRemoteService: onStatus(handedness %d, the %s controller) -> callback handle %u", hand,
+		      rctl[i].type == 0 ? "left" : "right", remote_cb);
 	}
 }
 
