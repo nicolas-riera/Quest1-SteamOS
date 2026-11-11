@@ -154,12 +154,12 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   hardware path and no CPU copy of the frames.
 
 - Steam Link from a PC (docs/streaming.md, section 1): the picture shows, decoded by venus (user, 2026-11-11).
-  Next: (1) performance: "ok" alone, falls apart as soon as anything else runs on the headset (user); the frames
-  go through the CPU: into ANGLE with no copy (dma-buf import turned into AHardwareBuffer imports in the compat
-  layer); (2) a change of the stream's size (the PC's game window minimised: 1920x1080 to 270x1080) kills the
+  Next: (1) performance: "pas mal" since the frames reach the GPU with no copy (user, 2026-11-11), more is welcome:
+  measure the uncached frame buffers, then the client's main and network threads; (2) a change of the stream's size (the PC's game window minimised: 1920x1080 to 270x1080) kills the
   decoder and closes the stream; (3) the stream's sound stutters; the Vulkan/OpenGL semaphore is refused (glFinish
-  fallback); (4) the user's list: 72 fps, microphone, gamepads, the PC's overlays, the headset's dashboard and not
-  the PC's SteamVR one; then VR (vrlink).
+  fallback); (4) VR streaming (vrlink), once the 2D stream runs well (user, 2026-11-11: before the rest of the
+  list); (5) the user's list: 72 fps, microphone, gamepads, the PC's overlays, the headset's dashboard and not the
+  PC's SteamVR one.
 - Reference for making Steam Link accept a Quest 1 (device identity, etc.):
   github.com/MisterAnderson91/quest1-steamlink-patcher (it patches Valve's Steam Link VR APK; we use it as a guide
   only, for SteamOS's native streaming, user 2026-11-09).

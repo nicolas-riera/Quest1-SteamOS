@@ -236,6 +236,8 @@ struct device
 	PFN_vkCmdCopyBuffer CmdCopyBuffer;
 	PFN_vkBindBufferMemory BindBufferMemory;
 	PFN_vkBindBufferMemory2 BindBufferMemory2;
+	PFN_vkBindImageMemory BindImageMemory;
+	PFN_vkBindImageMemory2 BindImageMemory2;
 	PFN_vkMapMemory MapMemory;
 	PFN_vkUnmapMemory UnmapMemory;
 	PFN_vkFreeMemory FreeMemory;
@@ -1107,6 +1109,7 @@ static PFN_vkVoidFunction debug_utils_stub(const char *name)
 
 #include "quest1_display.c"
 #include "quest1_facet.c"
+#include "quest1_dmabuf.c"
 
 
 // --- fences ----------------------------------------------------------------------------------------------
@@ -1909,7 +1912,12 @@ static VKAPI_ATTR VkResult VKAPI_CALL AllocateMemory(VkDevice device, const VkMe
 	struct device *d = device_of(device);
 	if (ai->allocationSize >= LAZY_MIN_SIZE && called_from_vrclient())
 		lazy_hint(ai->allocationSize);
+	int keep = qdb_keep(ai);
 	VkResult r = d->AllocateMemory(device, ai, alloc, out);
+	if (r == VK_ERROR_INVALID_EXTERNAL_HANDLE && keep >= 0)
+		r = qdb_import(d, device, ai, keep, alloc, out); // a dma-buf the blob does not know (quest1_dmabuf.c)
+	if (keep >= 0)
+		close(keep);
 	if (r != VK_SUCCESS && fail_logs < 40) {
 		fail_logs++;
 		LOG("vkAllocateMemory %llu bytes, memory type %u: %d\n", (unsigned long long)ai->allocationSize, ai->memoryTypeIndex, r);
@@ -1961,7 +1969,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateImage(VkDevice device, const VkImage
 			single.samples = VK_SAMPLE_COUNT_1_BIT;
 			ci = &single;
 		}
-		VkResult r = d->CreateImage(device, ci, alloc, out);
+		VkResult r = qdb_create_image(d, device, ci, alloc, out); // a plane of a dma-buf, or not (quest1_dmabuf.c)
 		if (r == VK_SUCCESS)
 			qs_scene_note(*out, ci); // scene mode: vrcompositor's eye render targets (quest1_scanout.c)
 		if (r != VK_SUCCESS && fail_logs < 40) {
@@ -2722,7 +2730,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice pd, const Vk
 	PFN_vkCreateDevice next_create = (PFN_vkCreateDevice)gipa(in->handle, "vkCreateDevice");
 
 	// remove the advertised-only extensions and their feature structures
-	const char **exts = calloc(ci->enabledExtensionCount + 3, sizeof(char *));
+	const char **exts = calloc(ci->enabledExtensionCount + 4, sizeof(char *));
 	uint32_t ne = 0;
 	bool have_ahb = false, have_foreign = false;
 	for (uint32_t i = 0; i < ci->enabledExtensionCount; i++) {
@@ -2734,10 +2742,10 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice pd, const Vk
 		else
 			exts[ne++] = e;
 	}
-	// direct scanout imports gralloc buffers (quest1_scanout.c)
-	if (qs_enabled() && !have_ahb)
+	// direct scanout imports gralloc buffers (quest1_scanout.c), and so does a dma-buf import (quest1_dmabuf.c)
+	if (!have_ahb)
 		exts[ne++] = VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME;
-	if (qs_enabled() && !have_foreign)
+	if (!have_foreign)
 		exts[ne++] = VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME;
 	VkDeviceCreateInfo copy = *ci;
 	copy.enabledExtensionCount = ne;
@@ -2851,6 +2859,10 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice pd, const Vk
 	GET(BindBufferMemory2);
 	if (!d->BindBufferMemory2)
 		d->BindBufferMemory2 = (PFN_vkBindBufferMemory2)gdpa(*out, "vkBindBufferMemory2KHR");
+	GET(BindImageMemory);
+	GET(BindImageMemory2);
+	if (!d->BindImageMemory2)
+		d->BindImageMemory2 = (PFN_vkBindImageMemory2)gdpa(*out, "vkBindImageMemory2KHR");
 	GET(MapMemory);
 	GET(UnmapMemory);
 	GET(FreeMemory);
@@ -2969,6 +2981,9 @@ static PFN_vkVoidFunction device_intercept(const char *name)
 	I("vkBindBufferMemory", BindBufferMemory)
 	I("vkBindBufferMemory2", BindBufferMemory2)
 	I("vkBindBufferMemory2KHR", BindBufferMemory2)
+	I("vkBindImageMemory", BindImageMemory)
+	I("vkBindImageMemory2", BindImageMemory2)
+	I("vkBindImageMemory2KHR", BindImageMemory2)
 	I("vkMapMemory", MapMemory)
 	I("vkUnmapMemory", UnmapMemory)
 	I("vkFreeMemory", FreeMemory)

@@ -303,9 +303,41 @@ else runs on the headset and drops as soon as something else does. What it took,
   `glFramebufferRenderbuffer`. `QUEST1_ANGLE_EGL_TRACE` also traces vrclient's copy into the shared texture (a pixel
   before and after `glBlitFramebuffer`).
 
-Still open: the frames go through the CPU (upload of 3 MB NV12 per frame); when the PC's game window is minimised
-the stream's size changes (1920x1080 to 270x1080) and the decoder does not survive it (the client restarts its queues
-by itself after the driver's event); the sound stutters; the Vulkan/OpenGL semaphore is refused (glFinish).
+Still open: when the PC's game window is minimised the stream's size changes (1920x1080 to 270x1080) and the decoder
+does not survive it (the client restarts its queues by itself after the driver's event); the sound stutters; the
+Vulkan/OpenGL semaphore is refused (glFinish).
+
+### 2026-11-11: the frames reach the GPU with no copy
+
+The user: performance "pas mal" now, where it used to fall apart as soon as anything else ran. The client takes its
+own zero-copy path (`CEGLFrames`): per decoder buffer, one SDL NV12 texture whose two OpenGL textures each get an EGL
+image of one plane of the dma-buf (`EGL_LINUX_DMA_BUF_EXT`, `DRM_FORMAT_R8` for Y and `DRM_FORMAT_GR88` for UV, fd,
+offset, pitch), with `glEGLImageTargetTexture2DOES`, and SDL's NV12 shader samples them. Pieces:
+- **`EGL_EXT_image_dma_buf_import` in the client's EGL** (`quest1_angle_egl.c`): ANGLE has it only on a Vulkan with
+  dma-buf and DRM modifiers, which the Adreno blob lacks. The shim adds it to `eglQueryString` and makes each plane
+  itself: the dma-buf is imported with `GL_EXT_memory_object_fd` as a linear texture (`glTexStorageMemFlags2DANGLE`),
+  which is the source of a real ANGLE EGL image (`EGL_GL_TEXTURE_2D_KHR`). A plane whose pitch is not the width
+  times the pixel size (odd sizes such as 270x1080) is refused: the client copies by CPU then, as before.
+- **The blob refuses an ION dma-buf as `OPAQUE_FD` memory** (`VK_ERROR_INVALID_EXTERNAL_HANDLE`), **and closes the
+  fd anyway**. The compat layer (`quest1_dmabuf.c`) keeps a duplicate of the fd and, on that refusal, imports the
+  same dma-buf as a gralloc buffer: `AHardwareBuffer_createFromHandle` on the native handle of a small BLOB buffer of
+  its own with the fd and size replaced. The blob binds plain (non-external) linear images to such memory at any
+  offset, so linear images made for `OPAQUE_FD` memory are created plain (an `OPAQUE_FD` image refuses AHB memory, an
+  AHB image wants a dedicated import of its own format). Tried on the headset with `vkimp`/`vkblob` tests first.
+- **ANGLE binds at offset 0** whatever offset it is given: the UV plane came out as Y. The shim chains a structure of
+  ours (`0x51310001`, the plane's offset) to ANGLE's `VkImageCreateInfo` through `glTexStorageMemFlags2DANGLE`; the
+  layer takes it out and binds the image at that offset (`vkBindImageMemory`, `vkBindImageMemory2`).
+- **`glActiveTextureARB`**: the client asks for it, logs "falling back to CPU texture upload" when it is missing,
+  and calls it anyway (a jump to address 0). `eglGetProcAddress` now gives the core function for an `ARB` name.
+- Every Vulkan device gets `VK_ANDROID_external_memory_android_hardware_buffer` and `VK_EXT_queue_family_foreign`
+  (only direct scanout had them).
+- `src/v4l2shim/test_dmabuf_egl.c` checks the whole path as the client uses it: an ION buffer in venus's NV12 layout,
+  both planes read back exact at 1920x1080, 1280x720 and 3840x2160, again after the buffer changed, and 270x1080
+  refused.
+
+Measured during the user's stream (1080p): the client at about half a core (decoder thread 17 %, main thread 16 %,
+network 9 %). A quarter of a core went to msm_vidc's cache maintenance of the frame buffers (cached ION, cleaned and
+invalidated on each QBUF), which the CPU no longer reads.
 
 Plan (hardware decode only: software decode is not an option, user decision 2026-11-07):
 1. ~~Standalone V4L2 test on venus~~ **done 2026-11-07** (`src/vdectest`, `run-tests.sh`): bit-exact, 9-11 ms per 1080p60 frame (above).
