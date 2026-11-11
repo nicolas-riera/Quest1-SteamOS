@@ -880,6 +880,10 @@ static void boot_end(struct q1dec *e, uint32_t w, uint32_t h, bool tell)
 		return;
 	set_dims(e, w, h);
 	e->await_cap = true;
+	if (e->epfd >= 0) { // what comes until the client's CAPTURE streams is given back; then the next stream start
+		e->start_seen = false;
+		e->skipped_all = 0;
+	}
 	src_pending(e);
 	logf_("the stream is %ux%u: CAPTURE is the client's now", w, h);
 }
@@ -1061,8 +1065,6 @@ static int reqbufs(struct q1dec *e, struct v4l2_requestbuffers *rb)
 	set_up(e);
 	if (q == CAP && e->boot) // the client sets CAPTURE up before the stream's size came after all
 		boot_end(e, 0, 0, false);
-	if (q == CAP && rb->count)
-		e->await_cap = false;
 	if (e->on[q])
 		stream(e, VIDIOC_STREAMOFF, q);
 	struct v4l2_requestbuffers d = *rb;
@@ -1205,18 +1207,23 @@ static int qbuf(struct q1dec *e, struct v4l2_buffer *b)
 		size_t end = pl->bytesused < ib->size ? pl->bytesused : ib->size, off = pl->data_offset < end ? pl->data_offset : 0;
 		// Before the stream's start, a client that waits with epoll gets its packets back at once (our eventfd: its
 		// EPOLLOUT); vrlink sends pictures that need others until the I-frame it asks for after a reset of its own.
-		if (!e->start_seen && (e->epfd < 0 || e->skipped_all >= SKIP_MAX || e->skipped_n > MAXBUF ||
-		                       stream_start(e->out_fmt.fmt.pix_mp.pixelformat, ib->map + off, end - off))) {
+		// So it does while it sets its CAPTURE up (await_cap): the firmware would hold them all, and vrlink takes
+		// ~25 ms for each of its 16 frame buffers (2026-11-11); decoding starts again at the next stream start.
+		bool waiting = e->await_cap && e->epfd >= 0;
+		if (!e->start_seen && !waiting &&
+		    (e->epfd < 0 || e->skipped_all >= SKIP_MAX || e->skipped_n > MAXBUF ||
+		     stream_start(e->out_fmt.fmt.pix_mp.pixelformat, ib->map + off, end - off))) {
 			e->start_seen = true;
 			if (e->skipped_all)
-				logf_("%u packets before the stream's start given back undecoded", e->skipped_all);
+				logf_("%u packets given back undecoded before the stream's start", e->skipped_all);
 		}
-		if (e->start_seen) {
+		if (e->start_seen && !waiting) {
 			r = drv_qbuf(e, OUT, b->index, b, 0);
 		} else {
 			e->skipped[e->skipped_n] = b->index;
 			e->skipped_ts[e->skipped_n++] = b->timestamp;
-			e->skipped_all++;
+			if (!waiting)
+				e->skipped_all++;
 			ev_sync(e);
 		}
 	}
@@ -1347,6 +1354,11 @@ static int stream(struct q1dec *e, unsigned long req, int q)
 			return r;
 	}
 	e->on[q] = req == VIDIOC_STREAMON;
+	if (req == VIDIOC_STREAMON && q == CAP && e->await_cap) {
+		e->await_cap = false; // (the driver sent the firmware its "continue")
+		if (e->epfd >= 0)
+			logf_("the client's CAPTURE streams: decoding again from the next stream start");
+	}
 	if (req == VIDIOC_STREAMOFF) {
 		memset(e->indrv[q], 0, sizeof(e->indrv[q]));
 		if (q == CAP) {

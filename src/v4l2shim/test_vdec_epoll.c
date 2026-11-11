@@ -3,7 +3,7 @@
 // epoll wait for SOURCE_CHANGE, and only then CAPTURE, with dma-bufs of the client's own (ION here; vrlink's are
 // Vulkan memory it exports). Paced like a live stream; reports the frames, when the first came, and the latency.
 //
-//   LD_PRELOAD=libquest1_v4l2.so test_vdec_epoll stream.265 [fps] [first] [stop]
+//   LD_PRELOAD=libquest1_v4l2.so test_vdec_epoll stream.265 [fps] [first] [stop|stopMS]
 // "stop": at SOURCE_CHANGE, OUTPUT off and the decoder closed with no CAPTURE set up (vrlink resetting its decoder
 // then, 2026-11-11: the firmware stopped answering); "stopMS": the same MS ms after the first packet, in whatever
 // state. Fails when that takes 500 ms or more; check the kernel log, then run once more without it.
@@ -96,7 +96,7 @@ static size_t split(const uint8_t *p, size_t n, size_t *start, size_t max)
 int main(int argc, char **argv)
 {
 	if (argc < 2) {
-		fprintf(stderr, "usage: test_vdec_epoll stream.265 [fps] [first] [stop|stopMS]\n");
+		fprintf(stderr, "usage: test_vdec_epoll stream.265 [fps] [first] [stop|stopMS|-]\n");
 		return 2;
 	}
 	double fps = argc > 2 ? atof(argv[2]) : 72;
