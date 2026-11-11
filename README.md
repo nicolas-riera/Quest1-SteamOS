@@ -47,6 +47,9 @@ from Valve's servers and from Meta's last Quest 1 update image.
 | Access | USB network (`ssh root@192.168.77.1`), a serial console over USB, native Wi-Fi |
 | Bluetooth | The WCN3990's Bluetooth with BlueZ, like the Steam Frame: the controller comes up with the headset's own address and finds devices (pairing to test). See [docs/bluetooth.md](docs/bluetooth.md) |
 | Desktop mode | The Steam Frame's desktop (nested KDE Plasma with Dolphin, Konsole, Discover...) from Steam's "+" menu, shown as a SteamVR overlay with the laser, scroll and keyboard. See [docs/desktop.md](docs/desktop.md) |
+| Video decode | The headset's hardware video decoder (venus) for H.264 and HEVC, through V4L2: FFmpeg and VLC with `q1-hwdec <program>` |
+| Steam Link (2D) | A PC game streamed to the headset in Steam's 2D stream, decoded in hardware, with the decoded frames going to the GPU without a copy (about 17% of a CPU core at 1080p60). See [docs/streaming.md](docs/streaming.md) |
+| Spectator | Steam's "share your view" stream of the headset, encoded in hardware at about 35 fps |
 
 ## Work in progress
 
@@ -59,7 +62,9 @@ from Valve's servers and from Meta's last Quest 1 update image.
 - **Passthrough.** Each eye sees a composite of its bottom and top camera, but the depth is a fixed sphere,
   so near objects (controllers, hands) are not at their true distance: a stereo depth mesh is being tuned.
 - **Sleep.** Suspend to RAM loses Meta's tracking and the sound on resume.
-- **Streaming** from a PC (Steam Link), **x86 games** (FEX, Proton).
+- **Streaming** from a PC: VR streaming (Steam Link VR) is next. In the 2D stream, a change of the
+  PC window's size stops the decoder, and the sound stutters.
+- **x86 games** (FEX, Proton).
 - **The installer** (see above): downloads and the image build work end to end; flashing the
   built image is to do.
 
