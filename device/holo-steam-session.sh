@@ -237,8 +237,11 @@ Before=steam.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-# (these two only: v4l_id on the camera nodes takes minutes too)
-ExecStart=/usr/bin/udevadm trigger --action=add --settle /sys/class/video4linux/video32 /sys/class/video4linux/video33
+# (these two only: v4l_id on the camera nodes takes minutes too). --settle waits for the events udev is still on: at
+# one boot the first v4l_id's were left zombies and it waited forever, with Steam and SteamVR behind it (2026-11-11);
+# 60 s, then again without waiting.
+ExecStart=-/usr/bin/timeout 60 /usr/bin/udevadm trigger --action=add --settle /sys/class/video4linux/video32 /sys/class/video4linux/video33
+ExecStart=/bin/sh -c '[ -e /dev/video-dec0 ] || /usr/bin/udevadm trigger --action=add /sys/class/video4linux/video32 /sys/class/video4linux/video33'
 
 [Install]
 WantedBy=multi-user.target

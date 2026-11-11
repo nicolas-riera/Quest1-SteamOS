@@ -35,12 +35,24 @@ mkdir -p /usr/local/lib/q1splash
 [ -n "$2" ] && cd "$2" && gcc -O2 -Wall -o /usr/local/lib/q1splash/q1splash q1splash.c -Iinc -I/opt/hybris/include -L/opt/hybris/lib \
 	-Wl,-rpath,/opt/hybris/lib -lhybris-common
 
+# GStreamer here only sees the plugins the movie needs, with a registry of its own: scanning all of them opened the
+# video nodes (video4linux2 plugin), and the venus decoder's open waits for its firmware, which comes ~60 s into the
+# boot; the unit timed out at 30 s before the scan could write its registry, so every boot scanned again and showed
+# nothing (2026-11-11: "0 frames shown").
+G=/usr/local/lib/q1splash/gst-plugins
+rm -rf $G; mkdir -p $G /var/cache/q1splash
+for p in coreelements matroska vpx videoconvertscale opus audioconvert audioresample pulseaudio; do
+	ln -s /usr/lib/gstreamer-1.0/libgst$p.so $G/
+done
+
 cat > /usr/local/sbin/q1splash-play <<'EOF'
 #!/bin/sh
 # Plays the Steam Frame's startup movie on the panels (q1splash), its sound on PipeWire when the user
 # session is up. Picture and sound are two pipelines: in one, a sound sink that is not ready (the ADSP's card
 # comes up late on some boots) held the whole pipeline before its first frame, and the boot showed nothing
 # (2026-11-09: "0 frames shown", no sound, the unit timed out).
+export GST_PLUGIN_SYSTEM_PATH_1_0=/usr/local/lib/q1splash/gst-plugins GST_PLUGIN_PATH_1_0= \
+	GST_REGISTRY_1_0=/var/cache/q1splash/registry.bin # (holo-bootsplash.sh: no scan of the video nodes)
 M=/home/steamos/.local/share/Steam/steamui/movies/steamframe_startup_450x450.webm
 [ -f "$M" ] || { echo "q1splash-play: no $M (Steam not installed yet)"; systemd-notify --ready; exit 0; }
 P=/run/user/1000/pulse/native

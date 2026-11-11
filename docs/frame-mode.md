@@ -49,6 +49,9 @@ lists what is left to do).
   at its start (black) used to replace it. While the headset is not worn before that, Monado asks q1splash to turn
   the panels off (`/run/quest1-splash-off`) and q1splash lights them again with the logo when it is put back on.
   Monado used to take the panels over then, and they came back black until SteamVR's first frame (2026-11-11).
+  GStreamer only sees the plugins the movie needs, with a registry of its own (device/holo-bootsplash.sh):
+  scanning all of them opened the venus decoder, whose open waits ~60 s for its firmware, so the 30 s unit was
+  killed before the registry was written and no boot showed anything (2026-11-11).
 - Restart from Steam: retest. If it works, drop the sshd `pam_systemd` workaround in
   `device/holo-perf.sh`.
 
