@@ -1261,6 +1261,16 @@ static int adopt_dmabuf(struct q1dec *e, uint32_t i, int fd)
 static int querybuf(struct q1dec *e, struct v4l2_buffer *b)
 {
 	int q;
+	if (qof(b->type) == CAP && b->memory == V4L2_MEMORY_DMABUF && e->cap_pending && b->length >= 1 && b->m.planes) {
+		if (b->index >= e->pend_count) // the client's buffers, kept until its STREAMON (boot_swap)
+			return fail(EINVAL);
+		memset(&b->m.planes[0], 0, sizeof(b->m.planes[0]));
+		b->m.planes[0].length = e->cap_size;
+		b->m.planes[0].m.fd = e->pend_fd[b->index];
+		b->length = 1;
+		b->flags = V4L2_BUF_FLAG_TIMESTAMP_COPY | (e->pend_q[b->index] ? V4L2_BUF_FLAG_QUEUED : 0);
+		return 0;
+	}
 	if (!mine(e, b, &q))
 		return sys_ioctl(e->fd, VIDIOC_QUERYBUF, b);
 	struct v4l2_plane *p = &b->m.planes[0];

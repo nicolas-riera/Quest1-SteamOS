@@ -239,6 +239,18 @@ int main(int argc, char **argv)
 				if (x(VIDIOC_REQBUFS, &cr, "REQBUFS CAPTURE") < 0)
 					return 1;
 				ncap = (int)cr.count;
+				for (int i = 0; i < ncap; i++) { // vrlink checks each buffer's size before it queues them
+					struct v4l2_plane qp = {0};
+					struct v4l2_buffer qb = {.index = (uint32_t)i, .type = ct, .memory = V4L2_MEMORY_DMABUF,
+					                         .m.planes = &qp, .length = 1};
+					if (x(VIDIOC_QUERYBUF, &qb, "QUERYBUF CAPTURE") < 0)
+						return 1;
+					if (qp.length < g.fmt.pix_mp.plane_fmt[0].sizeimage) {
+						fprintf(stderr, "test_vdec_epoll: CAPTURE %d is %u bytes, %u needed\n", i, qp.length,
+						        g.fmt.pix_mp.plane_fmt[0].sizeimage);
+						return 1;
+					}
+				}
 				for (int i = 0; i < ncap; i++) {
 					struct ion_allocation_data a = {.len = (g.fmt.pix_mp.plane_fmt[0].sizeimage + 4095) & ~4095u,
 					                                .align = 4096, .heap_id_mask = 1u << 25};
