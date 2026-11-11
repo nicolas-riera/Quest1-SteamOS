@@ -1,4 +1,4 @@
-# Quest1-SteamOS
+# SteamOS on the Oculus Quest
 
 > **Disclaimer: this whole project was entirely vibecoded.** Every line of code, every
 > script and this README were written by an AI (Claude), directed and tested on real
