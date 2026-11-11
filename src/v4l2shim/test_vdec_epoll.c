@@ -3,7 +3,8 @@
 // epoll wait for SOURCE_CHANGE, and only then CAPTURE, with dma-bufs of the client's own (ION here; vrlink's are
 // Vulkan memory it exports). Paced like a live stream; reports the frames, when the first came, and the latency.
 //
-//   LD_PRELOAD=libquest1_v4l2.so test_vdec_epoll stream.265 [fps] [first] [stop|stopMS]
+//   LD_PRELOAD=libquest1_v4l2.so test_vdec_epoll stream.265 [fps] [first] [stop|stopMS|flush]
+// "flush": at SOURCE_CHANGE, OUTPUT off and on again before CAPTURE is set up (vrlink's flush then).
 // "stop": at SOURCE_CHANGE, OUTPUT off and the decoder closed with no CAPTURE set up (vrlink resetting its decoder
 // then, 2026-11-11: the firmware stopped answering); "stopMS": the same MS ms after the first packet, in whatever
 // state. Fails when that takes 500 ms or more; check the kernel log, then run once more without it.
@@ -96,13 +97,14 @@ static size_t split(const uint8_t *p, size_t n, size_t *start, size_t max)
 int main(int argc, char **argv)
 {
 	if (argc < 2) {
-		fprintf(stderr, "usage: test_vdec_epoll stream.265 [fps] [first] [stop|stopMS|-]\n");
+		fprintf(stderr, "usage: test_vdec_epoll stream.265 [fps] [first] [stop|stopMS|flush|-]\n");
 		return 2;
 	}
 	double fps = argc > 2 ? atof(argv[2]) : 72;
 	size_t skip = argc > 3 ? (size_t)atol(argv[3]) : 0;
 	int stop = argc > 4 && !strncmp(argv[4], "stop", 4);
 	double stop_ms = stop && argv[4][4] ? atof(argv[4] + 4) : -1; // after the first packet; else at SOURCE_CHANGE
+	int flush_first = argc > 4 && !strcmp(argv[4], "flush");
 	int sf = open(argv[1], O_RDONLY);
 	struct stat st;
 	if (sf < 0 || fstat(sf, &st) < 0)
@@ -218,6 +220,15 @@ int main(int argc, char **argv)
 				       g.fmt.pix_mp.height, g.fmt.pix_mp.plane_fmt[0].bytesperline, g.fmt.pix_mp.plane_fmt[0].sizeimage);
 				if (stop && stop_ms < 0) // CAPTURE never set up
 					return stop_now("at SOURCE_CHANGE");
+				if (flush_first) { // vrlink's flush while it sets CAPTURE up: OUTPUT off and on, every packet back
+					int ot = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+					double f0 = now_ms();
+					if (x(VIDIOC_STREAMOFF, &ot, "STREAMOFF OUTPUT (flush)") < 0 || x(VIDIOC_STREAMON, &ot, "STREAMON OUTPUT (flush)") < 0)
+						return 1;
+					for (unsigned i = 0; i < rb.count; i++)
+						infree[i] = in[i] != MAP_FAILED;
+					printf("OUTPUT flushed in %.1f ms\n", now_ms() - f0);
+				}
 				int ct = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
 				x(VIDIOC_STREAMOFF, &ct, "STREAMOFF CAPTURE");
 				struct v4l2_requestbuffers cr = {.count = 0, .type = ct, .memory = V4L2_MEMORY_DMABUF};

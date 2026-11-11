@@ -163,7 +163,12 @@ struct q1dec {
 	uint32_t fifo_used[MAXBUF], fifo_n;
 	uint64_t frames;
 	bool boot, booted; // CAPTURE is set up here until the stream's size is known (the client waits for it)
-	bool await_cap;    // since then the firmware waits for the client's CAPTURE (its "port reconfiguration")
+	bool boot_sized;   // ... and is at the stream's size now: the client's CAPTURE calls are kept until its STREAMON
+	bool cap_pending;  // the client set its CAPTURE up meanwhile (DMABUF): pend_count buffers, the ones queued
+	uint32_t pend_count;
+	int pend_fd[MAXBUF];
+	bool pend_q[MAXBUF];
+	bool await_cap;    // the firmware waits for the client's CAPTURE (its "port reconfiguration")
 	bool low_latency;  // frames in decode order, realtime priority (the client's DISPLAY_DELAY 0)
 	int evfd;          // in the client's epoll set: readable while a SOURCE_CHANGE or a skipped packet waits; -1 if none
 	bool ev_ready;     // it is readable
@@ -421,6 +426,9 @@ static bool pump(struct q1dec *e);
 static void boot_check(struct q1dec *e);
 static void boot_recycle(struct q1dec *e);
 static void leave_reconfig(struct q1dec *e);
+static int reqbufs(struct q1dec *e, struct v4l2_requestbuffers *rb);
+static int adopt_dmabuf(struct q1dec *e, uint32_t i, int fd);
+static int stream(struct q1dec *e, unsigned long req, int q);
 
 static uint64_t now_ns(void)
 {
@@ -875,7 +883,7 @@ static void boot_end(struct q1dec *e, uint32_t w, uint32_t h, bool tell)
 		dead(e, "our CAPTURE could not be taken down");
 	e->on[CAP] = false;
 	free_bufs(e, CAP);
-	e->boot = false; // (only now: its frames done in the driver are not the client's, q1dec_epoll_events)
+	e->boot = e->boot_sized = false; // (only now: its frames done in the driver are not the client's)
 	if (!tell)
 		return;
 	set_dims(e, w, h);
@@ -886,6 +894,73 @@ static void boot_end(struct q1dec *e, uint32_t w, uint32_t h, bool tell)
 	}
 	src_pending(e);
 	logf_("the stream is %ux%u: CAPTURE is the client's now", w, h);
+}
+
+// The stream's size came: our CAPTURE is set up again at that size, so the firmware goes on decoding (into buffers of
+// ours, given straight back) while the client sets its own up, and the client gets its SOURCE_CHANGE. A firmware
+// that waits for CAPTURE instead holds every packet (vrlink, ~25 ms for each of its 16 frame buffers, ran out of
+// packet buffers) and takes no stop and no flush and continue in between well (2026-11-11).
+static int boot_resize(struct q1dec *e, uint32_t w, uint32_t h)
+{
+	int t = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+	struct v4l2_requestbuffers rb = {.count = 0, .type = t, .memory = V4L2_MEMORY_USERPTR};
+	if (drain_capture(e, false) < 0 || sys_ioctl(e->fd, VIDIOC_STREAMOFF, &t) < 0 ||
+	    sys_ioctl(e->fd, VIDIOC_REQBUFS, &rb) < 0) {
+		logf_("our CAPTURE at the stream's size: taking the first one down: %s", strerror(errno));
+		return -1;
+	}
+	e->on[CAP] = false;
+	free_bufs(e, CAP);
+	set_dims(e, w, h);
+	if (apply_cap_fmt(e) < 0)
+		return -1;
+	rb.count = min_capture(e);
+	if (sys_ioctl(e->fd, VIDIOC_REQBUFS, &rb) < 0) {
+		logf_("our CAPTURE at the stream's size: REQBUFS %u: %s", rb.count, strerror(errno));
+		return -1;
+	}
+	uint32_t n = rb.count > MAXBUF ? MAXBUF : rb.count;
+	e->count[CAP] = n;
+	for (uint32_t i = 0; i < n; i++)
+		if (ion_alloc(e, e->cap_size, &e->b[CAP][i]) < 0 ||
+		    (e->cap_planes > 1 && ion_alloc(e, e->extra_size, &e->x[i]) < 0) || drv_qbuf(e, CAP, i, NULL, 0) < 0) {
+			logf_("our CAPTURE at the stream's size: %u buffers of %u kB: %s", n, e->cap_size / 1024, strerror(errno));
+			return -1;
+		}
+	if (sys_ioctl(e->fd, VIDIOC_STREAMON, &t) < 0) { // (the firmware's "continue")
+		logf_("our CAPTURE at the stream's size: STREAMON: %s", strerror(errno));
+		return -1;
+	}
+	e->on[CAP] = true;
+	e->boot_sized = true;
+	src_pending(e);
+	logf_("the stream is %ux%u: decoded into %u buffers of ours (%u kB each) until the client's CAPTURE streams", w, h,
+	      n, e->cap_size / 1024);
+	return 0;
+}
+
+// The client's CAPTURE STREAMON after it set its buffers up while ours ran (cap_pending): ours go (the session
+// stops), the client's are set up and queued, and the session starts again with them; decoding resumes at the
+// next stream start, which vrlink asks for itself when no frame comes for 300 ms.
+static int boot_swap(struct q1dec *e)
+{
+	boot_end(e, 0, 0, false);
+	if (e->dead)
+		return fail(EIO);
+	e->cap_pending = false;
+	struct v4l2_requestbuffers rb = {.count = e->pend_count, .type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
+	                                 .memory = V4L2_MEMORY_DMABUF};
+	if (reqbufs(e, &rb) < 0)
+		return -1;
+	for (uint32_t i = 0; i < e->pend_count && i < e->count[CAP]; i++)
+		if (e->pend_q[i] && (adopt_dmabuf(e, i, e->pend_fd[i]) < 0 || drv_qbuf(e, CAP, i, NULL, 0) < 0))
+			return -1;
+	e->start_seen = false;
+	e->skipped_all = 0;
+	int r = stream(e, VIDIOC_STREAMON, CAP);
+	if (r == 0)
+		logf_("the client's CAPTURE streams: decoding again from the next stream start");
+	return r;
 }
 
 // The client stops before it set CAPTURE up (vrlink resets its decoder when no frame came for 800 ms, which can be
@@ -944,7 +1019,17 @@ static void seq_changed(struct q1dec *e, const struct v4l2_event *ev)
 	if (d[3] > 0) // HAL_COLOR_FORMAT 8-bit is 0
 		logf_("%u-bit stream: only 8-bit NV12 comes out of this", d[3] == 1 ? 10 : d[3]);
 	if (e->boot) {
-		boot_end(e, w ? w : e->cw, h ? h : e->ch, true);
+		w = w ? w : e->cw;
+		h = h ? h : e->ch;
+		if (e->boot_sized && w == e->cw && h == e->ch) { // about our CAPTURE at the stream's size already
+			if (insufficient && reconfigure(e) < 0)
+				dead(e, "reconfiguration of our CAPTURE failed");
+			return;
+		}
+		// the size for our CAPTURE when an epoll client waits (vrlink); else the client's own CAPTURE, set up
+		// while the firmware waits for it
+		if (e->epfd < 0 || boot_resize(e, w, h) < 0)
+			boot_end(e, w, h, true);
 		return;
 	}
 	if (w && h && (w != e->cw || h != e->ch)) {
@@ -1063,6 +1148,16 @@ static int reqbufs(struct q1dec *e, struct v4l2_requestbuffers *rb)
 	if (q < 0 || (rb->memory != V4L2_MEMORY_MMAP && !dmabuf))
 		return sys_ioctl(e->fd, VIDIOC_REQBUFS, rb);
 	set_up(e);
+	if (q == CAP && e->boot && e->boot_sized && e->epfd >= 0) { // kept until its STREAMON (boot_swap)
+		e->pend_count = rb->count > MAXBUF ? MAXBUF : rb->count;
+		e->cap_pending = e->pend_count > 0;
+		for (uint32_t i = 0; i < MAXBUF; i++) {
+			e->pend_fd[i] = -1;
+			e->pend_q[i] = false;
+		}
+		rb->count = e->pend_count;
+		return 0;
+	}
 	if (q == CAP && e->boot) // the client sets CAPTURE up before the stream's size came after all
 		boot_end(e, 0, 0, false);
 	if (e->on[q])
@@ -1191,6 +1286,19 @@ void *q1dec_mmap(struct q1dec *e, void *addr, size_t len, int prot, int flags, o
 static int qbuf(struct q1dec *e, struct v4l2_buffer *b)
 {
 	int q;
+	if (qof(b->type) == CAP && b->memory == V4L2_MEMORY_DMABUF && b->length >= 1 && b->m.planes) {
+		pthread_mutex_lock(&e->mu);
+		bool kept = e->cap_pending && b->index < e->pend_count;
+		if (kept) { // set up at the client's STREAMON (boot_swap)
+			e->pend_fd[b->index] = b->m.planes[0].m.fd;
+			e->pend_q[b->index] = true;
+		}
+		pthread_mutex_unlock(&e->mu);
+		if (kept) {
+			b->flags = V4L2_BUF_FLAG_QUEUED | V4L2_BUF_FLAG_TIMESTAMP_COPY;
+			return 0;
+		}
+	}
 	if (!mine(e, b, &q))
 		return sys_ioctl(e->fd, VIDIOC_QBUF, b);
 	pthread_mutex_lock(&e->mu);
@@ -1266,6 +1374,8 @@ static void to_client(struct q1dec *e, int q, struct v4l2_buffer *b, const struc
 static int dqbuf(struct q1dec *e, struct v4l2_buffer *b)
 {
 	int q = qof(b->type);
+	if (q == CAP && __atomic_load_n(&e->boot_sized, __ATOMIC_RELAXED) && e->epfd >= 0)
+		return fail(EAGAIN); // the CAPTURE in the driver is ours yet
 	if (q < 0 || (b->memory != V4L2_MEMORY_MMAP && !(q == CAP && e->cap_dmabuf && b->memory == V4L2_MEMORY_DMABUF)) ||
 	    b->length < 1 || !b->m.planes)
 		return sys_ioctl(e->fd, VIDIOC_DQBUF, b);
@@ -1336,6 +1446,13 @@ static int dqbuf(struct q1dec *e, struct v4l2_buffer *b)
 static int stream(struct q1dec *e, unsigned long req, int q)
 {
 	int t = q == OUT ? V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE : V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+	if (q == CAP && e->boot && e->boot_sized && e->epfd >= 0) { // the CAPTURE in the driver is ours yet
+		if (req == VIDIOC_STREAMOFF) {
+			memset(e->pend_q, 0, sizeof(e->pend_q));
+			return 0;
+		}
+		return e->cap_pending ? boot_swap(e) : fail(EINVAL);
+	}
 	if (req == VIDIOC_STREAMOFF && q == OUT)
 		leave_reconfig(e);
 	if (req == VIDIOC_STREAMOFF && q == CAP && e->on[CAP]) {
