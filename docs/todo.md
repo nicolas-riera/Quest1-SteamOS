@@ -109,6 +109,7 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   memcpy of each composite into the shared image): do it on the GPU.
 - The cameras as a real SteamVR camera (settings in SteamVR, used by the boundary drawing too), as on the Frame.
 - Tint slider: check that it changes the colour.
+- The camera test in SteamVR's camera settings (passthrough) does not work (user, 2026-11-11).
 - Camera power-up race at some boots (trackingservice "Timeout: (power: SLEEP) => (power: STANDBY)", 3DoF
   only), and udev helpers hanging ~3 min at the same boots (2026-11-08: `libinput-device-group` on event0 and
   `scsi_id` on sdd/sde, killed after 2 min 59 s): q1-hangwatch starts at sysinit now and logs D-state threads with
@@ -154,8 +155,9 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   hardware path and no CPU copy of the frames.
 
 - Steam Link from a PC (docs/streaming.md, section 1): the picture shows, decoded by venus (user, 2026-11-11).
-  Next: (1) performance: "pas mal" since the frames reach the GPU with no copy (user, 2026-11-11), more is welcome:
-  measure the uncached frame buffers, then the client's main and network threads; (2) a change of the stream's size (the PC's game window minimised: 1920x1080 to 270x1080) kills the
+  Next: (1) performance: "pas mal" since the frames reach the GPU with no copy (user, 2026-11-11), the client at
+  17 % of a core; more is welcome: the kernel emulates atomic instructions for Steam's programs (`emulate_atomic`
+  in the profiles), the semaphore below instead of glFinish; (2) a change of the stream's size (the PC's game window minimised: 1920x1080 to 270x1080) kills the
   decoder and closes the stream; (3) the stream's sound stutters; the Vulkan/OpenGL semaphore is refused (glFinish
   fallback); (4) VR streaming (vrlink), once the 2D stream runs well (user, 2026-11-11: before the rest of the
   list); (5) the user's list: 72 fps, microphone, gamepads, the PC's overlays, the headset's dashboard and not the

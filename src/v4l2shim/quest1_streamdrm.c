@@ -193,7 +193,6 @@ struct ion_fd_data {
 #define ION_IOC_FREE _IOWR('I', 1, int)
 #define ION_IOC_SHARE _IOWR('I', 4, struct ion_fd_data)
 #define ION_SYSTEM_HEAP_ID 25
-#define ION_FLAG_CACHED 1
 
 struct create_dumb {
 	uint32_t height, width, bpp, flags, handle, pitch;
@@ -221,8 +220,10 @@ EXPORT int drmIoctl(int fd, unsigned long req, void *arg)
 			ion = open("/dev/ion", O_RDONLY | O_CLOEXEC);
 		c->pitch = c->width * ((c->bpp + 7) / 8);
 		c->size = ((uint64_t)c->pitch * c->height + 4095) & ~4095ull;
-		struct ion_allocation_data a = {.len = c->size, .align = 4096, .heap_id_mask = 1u << ION_SYSTEM_HEAP_ID,
-		                                .flags = ION_FLAG_CACHED};
+		// uncached: the GPU reads the frames (quest1_angle_egl.c imports them), and msm_vidc cleans and invalidates
+		// a cached buffer's 3-4 MB in the CPU caches each time the client queues it again (__inval_cache_range: a
+		// quarter of a core at 1080p60). The CPU copy the client falls back to for odd sizes reads slower then.
+		struct ion_allocation_data a = {.len = c->size, .align = 4096, .heap_id_mask = 1u << ION_SYSTEM_HEAP_ID};
 		int slot = 0;
 		while (slot < NBUF && bufs[slot])
 			slot++;

@@ -337,7 +337,10 @@ offset, pitch), with `glEGLImageTargetTexture2DOES`, and SDL's NV12 shader sampl
 
 Measured during the user's stream (1080p): the client at about half a core (decoder thread 17 %, main thread 16 %,
 network 9 %). A quarter of a core went to msm_vidc's cache maintenance of the frame buffers (cached ION, cleaned and
-invalidated on each QBUF), which the CPU no longer reads.
+invalidated on each QBUF), which the CPU no longer reads: `quest1_streamdrm.c` allocates them uncached since. With
+that, at 60 decoded frames a second (`perf stat -e v4l2:v4l2_dqbuf`: 300 frames in 5 s), the client takes 17 % of a
+core in all (decoder thread 6 %, network 4.6 %, main thread 2.4 %, mostly waiting on fences: vrclient's glFinish).
+The CPU copy the client falls back to for odd sizes reads uncached memory now, slower.
 
 Plan (hardware decode only: software decode is not an option, user decision 2026-11-07):
 1. ~~Standalone V4L2 test on venus~~ **done 2026-11-07** (`src/vdectest`, `run-tests.sh`): bit-exact, 9-11 ms per 1080p60 frame (above).
