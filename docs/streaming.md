@@ -508,13 +508,26 @@ vrlink writes its own log, `~/.local/share/Steam/logs/vrlink.txt` (the PC's side
      and venus's frame of packet 300 is bit-exact against FFmpeg's (luma MSE 0). The compression blocks the user sees
      are in what the PC encodes: ~75 Mbit/s of video for four 1024x1024 views at 72 fps (P-frames of 120-130 KB when
      the head moves, 4-10 KB still; the I-frame 73 KB), the rest of the ~108 Mbit/s on the wire is vrlink's FEC.
+10. **A new picture each frame** (2026-11-12; user: "clairement plus fluide"). The headset showed only vrlink's buffer 0,
+    as the decoder wrote over it every 9 frames: a few pictures a second, each late. vrlink itself was fine: it picks a new
+    decoded frame every 1/72 s (read in its memory without stopping it: its last shown frame stays ~2 behind the newest).
+    It submits each frame as a texture set (`IVRClientInternal_XXX` slot 40): the 16 frame buffers it shared, and the index
+    of the one to show. vrclient gives vrcompositor the set's first texture as the eye texture, with the index and the 16
+    handles (`SubmitTextureSetInfo`, frame state offset 0xcf88); vrcompositor's `UpdateCachedTextures` then copies
+    texture[index] into texture[0] through a graphics device method that does nothing in its Vulkan device (vrcompositor
+    0x7c9e0 calls vtable+384, a bare `ret`), and draws texture[0]. The shim (`quest1_vrlink.c`) wraps that interface in
+    vrlink, as it does IVRSystem: the frame to show goes first in the set, submitted with index 0 (the same 16 buffers,
+    two of them swapped). vrcompositor then reads 9 buffers in turn, a new picture 329 times out of 330, at 71 fps.
+    - The "1.65 s" lead of the night before was gdb's doing: its breakpoints stop vrlink, frames pile up, and only then do
+      they all fall more than 1 s in the past. Frame IDs, the PC clock offset and the timing are fine without it.
+    - Each NV12 import does show its own buffer (`test_modifier` checks a second frame next to the first now).
 
 Plan:
 0. ~~Capture vrlink's own output~~ done (above).
 1. ~~`/dev/video-dec0` and a decode test~~ done (`vrdevice_path`, items 5 and 6).
 2. ~~Vulkan dma-buf import shim~~ done (items 2 and 6).
-3. ~~The picture in the headset~~ done (items 8-9), in 8 and 10 bits. Next (docs/todo.md): the stream trembles in the
-   headset only, is not fluid and looks heavily compressed (user, 2026-11-11); vrlink's exit hang, controller input.
+3. ~~The picture in the headset~~ done (items 8-10), in 8 and 10 bits, a new picture each frame. Next (docs/todo.md):
+   the stream trembles and looks heavily compressed; vrlink's exit hang, controller input.
 4. Alternative: ALVR or WiVRn (PC-side driver + headset client with V4L2 or software HEVC decode). 1-2 weeks, avoids Valve's stack but loses Steam integration.
 Not worth pursuing: patching vrlink (internal interfaces `IVRMailbox`, `IVRBlockQueue`).
 

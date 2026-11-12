@@ -105,22 +105,15 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 
 ## Streaming
 
-- Steam Link VR (docs/streaming.md, section 2): the stream shows in 8 or 10 bits, but trembles, runs at a few
-  pictures a second and looks heavily compressed (user, 2026-11-11; a Quest 3 on the same PC is fine). The decode is
-  exact, so the compression is the PC's encode.
-  Lead found 2026-11-11 night, to confirm: vrcompositor shows the same one of vrlink's frame buffers for the whole
-  session. vrlink's renderer (`GetBestImage`, SVLRendererVulkan.cpp) takes, among the last 5 decoded frames, the one
-  whose display time (its PC time through vrlink's PC clock offset estimate) is nearest to now + ~33 ms, and only
-  within 1 s. The newest decoded frame comes out 1.65 s in the past, so no frame qualifies: vrlink submits again the
-  buffer it picked last, which venus writes over every 9 frames. That makes a few pictures a second, each with an old
-  pose. Ruled out: the decoder (74 frames a second, consecutive frame ids, each buffer's index and fd as vrlink queued
-  them), the UDP receive queue (~0), the headset's clocks (vrlink uses CLOCK_MONOTONIC_RAW throughout), the frame
-  timing (now + 28-40 ms). Next: time each frame id from its packet to its decoded frame in the shim and compare with
-  the PC's time for it (`vrlink_aftm_*.csv`): a real 1.65 s backlog, or an offset estimate wrong by that much (its two
-  terms were -13446933 and 13449403 µs, a 2.5 ms round trip).
-  Also: vrcompositor leaks a sync_fence fd for each vrlink frame (~40 a second, ~5000 open after 2 min): a long
-  session will run out of fds. The PC's overlays show only when the PC's SteamVR started after vrlink; stopping a
-  session from the headset (`StopStreamingSession`) does nothing and vrlink hangs on its way out.
+- Steam Link VR (docs/streaming.md, section 2): a new picture each frame now (user, 2026-11-12: "clairement plus
+  fluide"), but it looks heavily compressed and trembles. Compression: the PC encodes four 1024x1024 views
+  ("Setting m_nTargetSquareViewSize: 1024" in the PC's driver_vrlink.txt; its `driver_vrlink` settings have
+  `streamFormatWidth` and `automaticStreamFormatWidth`) for 1440x1600 panels. A wider view makes a taller atlas
+  (1024x4096 now): check what venus decodes at 72 fps first. Trembling: the user sees it on other things too and thinks of Monado's re-projection (the
+  view itself is fine, the apps' content follows the trembling).
+  Also: vrcompositor leaks a sync_fence fd for each vrlink frame (~70 a second, limit 524288: ~2 h of session; they
+  do not come through vkImportSemaphoreFdKHR). The PC's overlays show only when the PC's SteamVR started after
+  vrlink; stopping a session from the headset (`StopStreamingSession`) does nothing and vrlink hangs on its way out.
 - Steam Link from a PC, 2D (docs/streaming.md, section 1): it works well (user, 2026-11-12); more performance is
   welcome: the kernel emulates atomic instructions for Steam's programs (`emulate_atomic` in the profiles), the
   Vulkan/OpenGL semaphore is refused (glFinish fallback).

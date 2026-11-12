@@ -295,7 +295,7 @@ static int exported_frame(unsigned w, unsigned h)
 
 // an NV12 frame of w x h, as vrlink samples it (or, exported, as vrcompositor samples vrlink's frame buffer): 0 if
 // the four colours come out as BT.709 narrow range gives them
-static int run_nv12(VkPhysicalDevice pd, uint32_t qf, unsigned w, unsigned h, int exported)
+static int run_nv12(VkPhysicalDevice pd, uint32_t qf, unsigned w, unsigned h, int exported, int shift)
 {
 	I(vkCreateImage);
 	I(vkGetImageMemoryRequirements);
@@ -330,7 +330,8 @@ static int run_nv12(VkPhysicalDevice pd, uint32_t qf, unsigned w, unsigned h, in
 	I(vkQueueWaitIdle);
 	I(vkGetDeviceProcAddr);
 	PFN_vkGetMemoryFdPropertiesKHR fdprops = (PFN_vkGetMemoryFdPropertiesKHR)vkGetDeviceProcAddr(dev, "vkGetMemoryFdPropertiesKHR");
-	printf("NV12 %ux%u %s: ", w, h, exported ? "exported, imported again and sampled" : "sampled");
+	printf("NV12 %ux%u %s%s: ", w, h, exported ? "exported, imported again and sampled" : "sampled",
+	       shift ? ", colours turned (a second frame next to the first)" : "");
 
 	static const uint8_t col[4][3] = {{235, 128, 128}, {81, 90, 240}, {145, 54, 34}, {41, 240, 110}};
 	const unsigned stride = AL(w, 128), scan = AL(h, 32);
@@ -350,10 +351,10 @@ static int run_nv12(VkPhysicalDevice pd, uint32_t qf, unsigned w, unsigned h, in
 	}
 	for (unsigned y = 0; y < h; y++)
 		for (unsigned x = 0; x < w; x++)
-			m[(size_t)y * stride + x] = col[(y >= h / 2) * 2 + (x >= w / 2)][0];
+			m[(size_t)y * stride + x] = col[((y >= h / 2) * 2 + (x >= w / 2) + shift) & 3][0];
 	for (unsigned y = 0; y < h / 2; y++)
 		for (unsigned x = 0; x < w / 2; x++) {
-			const uint8_t *c = col[(y >= h / 4) * 2 + (x >= w / 4)];
+			const uint8_t *c = col[((y >= h / 4) * 2 + (x >= w / 4) + shift) & 3];
 			m[uv + (size_t)y * stride + 2 * x] = c[1];
 			m[uv + (size_t)y * stride + 2 * x + 1] = c[2];
 		}
@@ -494,7 +495,8 @@ static int run_nv12(VkPhysicalDevice pd, uint32_t qf, unsigned w, unsigned h, in
 
 	int bad = 0;
 	for (int k = 0; k < 4; k++) {
-		double Y = (col[k][0] - 16) * 255.0 / 219, Cb = (col[k][1] - 128.0) * 255 / 224, Cr = (col[k][2] - 128.0) * 255 / 224;
+		const uint8_t *c = col[(k + shift) & 3];
+		double Y = (c[0] - 16) * 255.0 / 219, Cb = (c[1] - 128.0) * 255 / 224, Cr = (c[2] - 128.0) * 255 / 224;
 		const double kr = 0.2126, kb = 0.0722, kg = 1 - kr - kb;
 		int e[3] = {clamp8(Y + 2 * (1 - kr) * Cr), clamp8(Y - 2 * kb * (1 - kb) / kg * Cb - 2 * kr * (1 - kr) / kg * Cr),
 		            clamp8(Y + 2 * (1 - kb) * Cb)};
@@ -553,8 +555,10 @@ int main(int argc, char **argv)
 		unsigned w, h;
 		if (sscanf(argc > 1 ? argv[i + 1] : def[i], "%ux%u", &w, &h) != 2)
 			continue;
-		fails += run_nv12(pd, qf, w, h, 0) != 0;
-		fails += run_nv12(pd, qf, w, h, 1) != 0;
+		fails += run_nv12(pd, qf, w, h, 0, 0) != 0;
+		fails += run_nv12(pd, qf, w, h, 1, 0) != 0;
+		// vrcompositor imports all of vrlink's frame buffers: each must show its own frame
+		fails += run_nv12(pd, qf, w, h, 1, 1) != 0;
 		// a linear one-plane image is the blob's own: venus's 128-byte rows fit it only when the width is a multiple
 		if (w % 128 == 0)
 			fails += run(pd, qf, VK_FORMAT_R8_UNORM, w, h) != 0;

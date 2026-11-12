@@ -254,6 +254,69 @@ __attribute__((constructor)) static void rt_watch_start(void)
 	}
 }
 
+// vrlink submits each frame as a texture set: the 16 frame buffers it shared with vrcompositor and the index of the
+// one to show (IVRClientInternal_XXX slot 40, vrlink.bin 0x340fc). vrclient gives vrcompositor the set's first
+// texture as the eye texture, with the index (SubmitTextureSetInfo); vrcompositor then copies texture[index] into
+// texture[0] with a method that does nothing in its Vulkan device (vrcompositor 0x7c9e0 -> 0x2c00c8, a bare ret), and
+// shows texture[0]. So the headset showed vrlink's buffer 0 only, as the decoder wrote over it every 9 frames: a few
+// pictures a second, each late (2026-11-12; vrlink itself picked a new frame every 1/72 s). Here the frame to show
+// goes first in the set, which is then submitted with index 0: the same 16 buffers, two of them swapped.
+enum { SLOT_SUBMIT_SET = 40, SET_MAX = 16 };
+typedef uint32_t (*submit_set_t)(void *self, int32_t index, uint32_t count, const uint64_t *handles, const void *eye_l,
+                                 const void *eye_r, const void *bounds_l, const void *bounds_r, uint32_t flags,
+                                 double seconds);
+static submit_set_t real_submit_set;
+static void *client_vtable_copy[2 + NSLOTS];
+
+static uint32_t submit_set(void *self, int32_t index, uint32_t count, const uint64_t *handles, const void *eye_l,
+                           const void *eye_r, const void *bounds_l, const void *bounds_r, uint32_t flags,
+                           double seconds)
+{
+	uint64_t set[SET_MAX];
+	if (handles && index > 0 && (uint32_t)index < count && count <= SET_MAX) {
+		memcpy(set, handles, count * sizeof(set[0]));
+		set[0] = handles[index];
+		set[index] = handles[0];
+		handles = set;
+		index = 0;
+	}
+	return real_submit_set(self, index, count, handles, eye_l, eye_r, bounds_l, bounds_r, flags, seconds);
+}
+
+static void patch_client(void *client)
+{
+	void ***obj = client;
+	void **copy = client_vtable_copy + 2;
+	if (*obj == copy)
+		return;
+	void **vt = *obj;
+	uintptr_t start = 0, end = 0, a = (uintptr_t)vt;
+	FILE *maps = fopen("/proc/self/maps", "r");
+	char line[512];
+	while (maps && fgets(line, sizeof(line), maps)) {
+		unsigned long lo, hi;
+		if (sscanf(line, "%lx-%lx", &lo, &hi) == 2 && a >= lo && a < hi) {
+			start = lo;
+			end = hi;
+			break;
+		}
+	}
+	if (maps)
+		fclose(maps);
+	size_t slots = end ? (end - a) / sizeof(void *) : 0;
+	if (slots > NSLOTS)
+		slots = NSLOTS;
+	if (slots <= SLOT_SUBMIT_SET || a < start + 2 * sizeof(void *)) {
+		fprintf(stderr, "quest1_v4l2: vrlink: IVRClientInternal's vtable not found in the mappings: frames left alone\n");
+		return;
+	}
+	memcpy(client_vtable_copy, vt - 2, (2 + slots) * sizeof(void *));
+	real_submit_set = (submit_set_t)vt[SLOT_SUBMIT_SET];
+	copy[SLOT_SUBMIT_SET] = (void *)submit_set;
+	*obj = copy;
+	fprintf(stderr, "quest1_v4l2: vrlink: each frame goes first in its texture set\n");
+}
+
 EXPORT void *VR_GetGenericInterface(const char *version, int *err)
 {
 	static void *(*real)(const char *, int *);
@@ -266,9 +329,12 @@ EXPORT void *VR_GetGenericInterface(const char *version, int *err)
 	}
 	void *p = real(version, err);
 	static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
-	if (p && version && !strcmp(version, "IVRSystem_026") && !strcmp(program_invocation_short_name, "vrlink")) {
+	if (p && version && is_vrlink() && (!strcmp(version, "IVRSystem_026") || !strcmp(version, "IVRClientInternal_XXX"))) {
 		pthread_mutex_lock(&lock);
-		patch(p);
+		if (version[3] == 'S')
+			patch(p);
+		else
+			patch_client(p);
 		pthread_mutex_unlock(&lock);
 	}
 	return p;
