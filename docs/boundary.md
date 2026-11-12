@@ -117,7 +117,8 @@ AnchorUuid = 16 bytes in text order; Parcelables are preceded by an int32 non-nu
   anchor and saves the map uuid in `/data/misc/tracking/world-map.uuid`; it writes `/run/q1track/frame-state`:
   `static` (the current map is the saved one, or none is saved yet) or `anchor` (a map is saved but the current one is
   another: relocalization failed). `touch /tmp/quest1-clear-map` (the settings page's "Clear") calls `removeAllMaps` and
-  forgets the uuids.
+  forgets the uuids. The 45 s worn count starts again after a clear: the time worn before it made q1anchord persist
+  the new map 3 s after the clear, holding a few views from one spot (2026-11-12).
 - `chaperone_frame.cpp` uses Meta's frame as is in `static` state (raw y = world y + eye height; floor and boundary
   in `chaperone_info.vrchap` stay valid because the frame is persistent) and falls back to the head anchoring above
   in `anchor` state or when `frame-state` is missing.
@@ -167,6 +168,28 @@ persisted map keeps growing (mapdb rewritten) while used.
   and passthrough, all 8 cores busy, kswapd at 30 %): "Bad map tracking" on submap 0, "big search" relocalizations,
   both controllers "Lost position tracking, waiting for 6DoF reset".
 
+
+## Tracking starved of CPU (2026-11-12/13, open in docs/todo.md)
+
+The user set a new playspace, took the headset off and on: the boundary was elsewhere, and the engine kept opening
+new submaps instead of finding the saved ones. `/var/log/quest1-map.log` around that put-on: the engine relocalized in
+the saved map within 16 s ("Relocalization + ViT succeeded", "Switching Map Context ... to" the saved uuid), then
+"All submaps have bad map tracking", evicted the temporary context and started again, three times in 25 s; while it
+tracks two contexts it skips map building. Before it, while the playspace was being drawn, "Map tracking lost after
+... bad frames" and "No map tracking for too long. Transition from 6DoF to 3DoF".
+
+- "Map tracking did not run" up to once a second and "Bad map tracking" 30-50 times a minute while worn.
+- trackingservice is pinned to CPUs 0-3 (the little cores) by its unit, as Android's `tracking` cpuset does, and
+  needs ~3 of them (5 s of per-thread samples: IOTcam ~1.2 cores, CtrlTracking + CtrllrCam ~0.85, SBEventHandler,
+  IOTmotion, the SyncBoss SPI thread and the sensors HAL ~0.7). Android keeps everything else off those cores; here
+  vrserver, the vrwebhelpers, Steam, q1apps and others ran there too: CPUs 0-3 at ~400 % together, 4-7 at ~35 %
+  each.
+- Everything but the `android-*` units and kernel threads moved to CPUs 4-7 (`taskset -a -p f0`, live): CPUs 0-3 at
+  ~215 %, then worn: 0-1 "Bad map tracking" a minute, no new context at the next put-on, the playspace in place
+  (user). The CPU affinity is lost with each restarted process and with a reboot; after the next reboot the
+  playspace was off again (user, 2026-11-13: not yet checked whether the split was in place by then).
+- The user, 2026-11-13: the boundary shifts mostly after a reset of the tracking, e.g. when its service is
+  restarted. A restart starts a new context that has to relocalize in the saved map, the step that failed above.
 
 ## Notes moved from the to-do list (2026-11-08): Boundary
 

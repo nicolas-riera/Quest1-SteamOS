@@ -1,0 +1,75 @@
+diff --git a/src/steamvr-quest1/driver_quest1.cpp b/src/steamvr-quest1/driver_quest1.cpp
+index bbe8bff..f34d103 100644
+--- a/src/steamvr-quest1/driver_quest1.cpp
++++ b/src/steamvr-quest1/driver_quest1.cpp
+@@ -701,6 +701,36 @@ bool XrBackend::CreateSwapchains()
+ 	return true;
+ }
+ 
++// TEMP: /tmp/q1-fake-yaw "<deg> <hz> [<m>]": a yaw sine (and a sideways x sine) added to every head pose (motion test
++// on a still headset)
++static double q1_fake_yaw(XrSpaceLocation &loc, int64_t monoNs, double *xvel = nullptr)
++{
++	static int64_t chk;
++	static double amp, hz, pos;
++	if (monoNs - chk > 300000000ll || monoNs < chk) {
++		chk = monoNs;
++		FILE *f = fopen("/tmp/q1-fake-yaw", "r");
++		int n = f ? fscanf(f, "%lf %lf %lf", &amp, &hz, &pos) : 0;
++		if (n < 2)
++			amp = hz = 0;
++		if (n < 3)
++			pos = 0;
++		if (f)
++			fclose(f);
++	}
++	if (hz == 0)
++		return 0;
++	double ph = 2 * M_PI * hz * (double)(monoNs % 1000000000000ll) * 1e-9;
++	loc.pose.position.x += (float)(pos * sin(ph));
++	if (xvel)
++		*xvel = pos * 2 * M_PI * hz * cos(ph);
++	double th = amp * M_PI / 180 * sin(ph), c = cos(th / 2), s = sin(th / 2);
++	XrQuaternionf q = loc.pose.orientation;
++	loc.pose.orientation = {(float)(c * q.x + s * q.z), (float)(c * q.y + s * q.w), (float)(c * q.z - s * q.x),
++	                        (float)(c * q.w - s * q.y)};
++	return amp * M_PI / 180 * 2 * M_PI * hz * cos(ph); // yaw rate, rad/s
++}
++
+ bool XrBackend::LocateAhead(DriverPose_t &pose, XrPosef *xrPose)
+ {
+ 	pose = {};
+@@ -724,6 +754,7 @@ bool XrBackend::LocateAhead(DriverPose_t &pose, XrPosef *xrPose)
+ 	}
+ 	HoldPosition(loc);
+ 	ApplyNeckModel(loc);
++	q1_fake_yaw(loc, lastWhenNs);
+ 	*xrPose = loc.pose;
+ 	Quest1FrameUpdate(loc.pose, (loc.locationFlags & XR_SPACE_LOCATION_POSITION_TRACKED_BIT) != 0);
+ 	Quest1FrameApply(pose);
+@@ -757,6 +788,8 @@ bool XrBackend::LocateNow(q1_hmd_pose &out)
+ 	bool tracked = (loc.locationFlags & XR_SPACE_LOCATION_POSITION_TRACKED_BIT) != 0;
+ 	HoldPosition(loc);
+ 	ApplyNeckModel(loc);
++	double fake_xvel = 0;
++	vel.angularVelocity.y += (float)q1_fake_yaw(loc, (int64_t)mono.tv_sec * 1000000000ll + mono.tv_nsec, &fake_xvel);
+ 	const XrQuaternionf &q = loc.pose.orientation;
+ 	const XrVector3f &w = vel.angularVelocity;
+ 	XrVector3f v = {};
+@@ -774,7 +807,7 @@ bool XrBackend::LocateNow(q1_hmd_pose &out)
+ 	out.valid = 1;
+ 	out.q[0] = q.w, out.q[1] = q.x, out.q[2] = q.y, out.q[3] = q.z;
+ 	out.pos[0] = loc.pose.position.x, out.pos[1] = loc.pose.position.y, out.pos[2] = loc.pose.position.z;
+-	out.vel[0] = v.x, out.vel[1] = v.y, out.vel[2] = v.z;
++	out.vel[0] = v.x + fake_xvel, out.vel[1] = v.y, out.vel[2] = v.z;
+ 	// in the head's frame: q^-1 w q
+ 	XrVector3f c2 = {2 * (-q.y * w.z + q.z * w.y), 2 * (-q.z * w.x + q.x * w.z), 2 * (-q.x * w.y + q.y * w.x)};
+ 	out.ang[0] = w.x + q.w * c2.x + (-q.y * c2.z + q.z * c2.y);
+@@ -824,6 +857,7 @@ bool XrBackend::LocateRawAt(int64_t monoNs, HmdMatrix34_t &raw)
+ 		return false;
+ 	HoldPosition(loc);
+ 	ApplyNeckModel(loc);
++	q1_fake_yaw(loc, monoNs);
+ 	DriverPose_t p = {};
+ 	Quest1FrameApply(p);
+ 	// raw = worldFromDriver * head: rotation qw * q, translation qw * position + tw

@@ -564,6 +564,41 @@ vrlink writes its own log, `~/.local/share/Steam/logs/vrlink.txt` (the PC's side
     - Left (docs/todo.md): the stream still trembles, less. The frames' poses match the head ~20 ms after vrlink
       submits them, and vrcompositor shows them ~60 ms after; 40 ms more of prediction (closer, by the logs) changed
       nothing the user could see.
+13. **Measuring where the stream's frames land** (2026-11-12/13; open, docs/todo.md). The user: the stream jumps
+    ("des à-coups") at every head movement, even a tiny one, never while still; the whole picture, near or far; depth
+    feels wrong while turning ("j'ai presque l'impression de loucher"); SteamVR's HUD overlays (IPD, volume) jump in
+    exactly the same way, while the dashboard and the chaperone are steady. A Quest 3 on the same PC (same overlays)
+    has none of it: the cause is on this headset.
+    - Method (tools/headset-dev/README.md): the headset lies still with its panels on (`QUEST1_IGNORE_PROX=1`),
+      `fake-motion.patch` gives it a known smooth head motion (4° at 2 Hz, 50°/s at most), and the layer's snapshots
+      (vrcompositor's output, before Monado) are taken in a series. A world-locked overlay (`q1marker`) is measured in
+      the same snapshot as a stream region: the error of when a snapshot was taken cancels. Without the marker, that
+      error (one or two of vrcompositor's frames) hid everything at 72 fps, and at ~52 fps a series showed the stream
+      smooth because the region was partly the dashboard: check each region's contrast, and that it stays put without
+      motion (Aurora's sky moves).
+    - vrcompositor's re-projection is exact: a stream frame left on screen (vrlink stopped, the last frame shown
+      again) follows the marker within 0.8 px.
+    - Live frames: ~75 % land within 4 ms of motion of where their pose says; ~20 % are 30-100 ms off, most ~65 ms
+      (the picture newer than its pose), 1-5° at 50°/s: the jumps.
+    - vrcompositor re-projects with the pose vrlink submits with each frame (`VRTextureWithPose_t` at byte 16 of each
+      eye's 176-byte struct, flags 0x2018018): turning that pose turns the picture. The submit's time (`seconds`) does
+      nothing.
+    - Not the cause: the velocities given to vrlink (none at all: the same), the time given with the pose (±20 ms:
+      the same), the decoder (each frame back in order with its own timestamp, 1:1, ~14 ms to decode), the PC (its app
+      frames repeat only during rare ~1 s stalls in `vrlink_aftm_*.csv`, whose "remote" times are the headset's
+      CLOCK_MONOTONIC in µs, so both sides can be lined up).
+    - One cause found, in the layer: it copied vrlink's NV12 frame into its RGBA output at each of vrcompositor's frames,
+      also when vrcompositor showed the same frame again, but by then vrlink may have given that buffer back to the
+      decoder (9 buffers), which wrote a newer picture into it: that newer picture went out under the old pose.
+      Copying each frame once (`qcp_record`, uncommitted): the 52-76 ms cluster is gone, but with vrcompositor at
+      ~57 fps (not 72) only ~31 % of frames landed right, the others spread over ±40 ms; the user still saw the
+      stream tremble. Suspected: vrcompositor takes the frame's texture and its pose from vrlink's latest submit at
+      two moments. The shim's swap (`submit_set`) changes which buffer is `texture[0]` at every submit, while the real
+      vrcompositor copies `texture[index]` into `texture[0]` when the submit arrives, together with its pose; with
+      vrcompositor slower than vrlink's ~74 submits a second, a submit lands between the two reads.
+    - The HUD overlays moving with the stream mean vrcompositor re-projects them with the stream frame's pose too:
+      fixing the frame/pose pairing should steady both. Their own trembling without a stream is to be looked at first
+      (user, 2026-11-13).
 
 Plan:
 0. ~~Capture vrlink's own output~~ done (above).

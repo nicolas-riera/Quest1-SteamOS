@@ -3,6 +3,11 @@
 Only what is left to do, roughly by priority. Done work leaves this list: it is described in the other docs
 (`docs/*.md`) and in the commit log.
 
+- SteamVR's HUD overlays (the IPD and volume overlays) tremble like the stream (user, 2026-11-13: "exactly the same
+  trembling"), while the dashboard and the chaperone are steady. First without a stream (user: next session): measure
+  a head-locked overlay against a world-locked one with tools/headset-dev (`q1marker` with a head-relative transform,
+  `fake-motion.patch`), then see how vrcompositor and Monado's warp place head-locked layers. With a stream, see
+  Streaming below.
 - Performance (docs/performance.md): GPU-bound, ~12.4 of 13.9 ms a frame. Levers left, all visible, so the user
   decides: achromatic distortion (vrcompositor's distortion pass is ~2 ms per eye), a lighter environment than Aurora
   (~4 ms; passthrough itself is cheaper), simpler controller models (~2 ms), the 4x MSAA of the dashboard layer.
@@ -27,6 +32,20 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   delocalization"): clear the map with the user and walk the room before setting the playspace again; persist only
   once the room is covered, then again while tracking is good. See also whether a starved trackingservice makes it
   worse (2026-11-10: "the tracking sneezed and I flew off" with all 8 cores busy).
+- The playspace is not where it was drawn (user, 2026-11-12: a new boundary, the headset off and on, no longer in
+  place, "the space anchors work really badly"; again on 2026-11-13 after a reboot), and the engine opens new
+  submaps instead of finding the saved ones (user). The boundary shifts mostly after a reset of the tracking, e.g.
+  when the tracking service is restarted (user, 2026-11-13): test the playspace across stack restarts first. Found
+  2026-11-12 (docs/boundary.md "Tracking starved of CPU"):
+  - Meta's tracking is pinned to CPUs 0-3 as on Android (~3 cores' worth: IOTcam ~1.2, controllers ~0.85), but
+    here vrserver, the vrwebhelpers, Steam and q1apps run there too: the four little cores at 100 %, the engine
+    logging "Map tracking did not run" up to once a second, "Bad map tracking" 30-50 times a minute, falling to 3DoF,
+    and while it tracks two contexts it skips map building. With everything else moved to CPUs 4-7 (a live
+    `taskset`, lost at each restart): 0-1 "Bad map tracking" a minute worn, no new context at a put-on, and the
+    boundary was in place after that put-on. Make it permanent (an `AllowedCPUs`/`CPUAffinity` for everything but the
+    `android-*` units: Steam's own 2-6 pinning of its webhelpers must not bring them back to 2-3), then test the
+    playspace over several sessions and reboots.
+  - The playspace drawn at 21:40 was drawn while the tracking was failing (the frame may have slid under it).
 - Meta's tracking runs from boot, worn or not (trackingservice IOTcam ~50 % of a core, CtrllrCam ~11 %,
   2026-11-08). Do as Meta's OS (user, 2026-11-09): after power-on, tracking stays off until the headset is worn the
   first time; from then on it stays on, even when the headset is taken off. It stops only when the headset goes to
@@ -85,6 +104,8 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 
 - `ComputeInverseDistortion` returns identity while direct scanout distorts.
 - Pairing Quest controllers from Steam's UI (`syncboss_input_pair`: never without the user's explicit go).
+- SteamVR's playspace setup (user, 2026-11-12): the controllers' models are wrong there (seen before elsewhere too: a
+  dark disc where the ring should be), and it runs poorly.
 
 ## Steam settings and Steam
 
@@ -116,24 +137,25 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   a build or a test running); only a reboot helped, and the journal is not kept. Keep the journal (or pstore), then
   read q1-hangwatch's D-state stacks.
 - A GPU page fault in a steamwebhelper (2026-11-12 20:28, during a stream) took vrcompositor's device with it
-  (`vkQueueSubmit` -4): SteamVR restarted by itself.
+  (`vkQueueSubmit` -4): SteamVR restarted by itself. Again at 21:48, same fault address: the layer's "q1 display
+  done" thread spun at 93 % in its fence wait for 5 s, then VK_ERROR_DEVICE_LOST and vrcompositor aborted.
 
 ## Streaming
 
 - Steam Link VR (docs/streaming.md, section 2): a new picture each frame and a sharp centre now (user, 2026-11-12:
   "c'est net"), but it trembles, flashes black now and then and runs below 72 fps.
-  - Trembling: the stream only (the headset's own chaperone and dashboard are steady), much less since the PC gets
-    a smooth pose (docs/streaming.md item 12), but still jolts of the whole picture, head still too, more as it
-    turns (user, 2026-11-12). Leads, measured that evening:
-    - vrcompositor may read a newer vrlink frame than the one its commands were recorded for (the layer's black
-      frames, `qcp_out_get`): if it then takes that frame's pose too, the shared output still holds the older frame's
-      copy, and the picture is off by the head's move between two frames. Check whether the pose goes with the slot
-      (e.g. mark the copy and give each frame a fake pitch keyed to it, then compare in snapshots).
-    - vrlink submitted ~54 frames a second, unevenly (13.5-30 ms, up to 63): the PC's app repeated its frame 3 to 7
-      times in a row ~7 times a second (`vrlink_aftm_*.csv`, Present ID) with its GPU at 15 %, and the PC logged ~10
-      "Bad link event"s a second (8-20 ms, holdoff 1). Find what holds the app or the link back.
-    - vrcompositor re-projects vrlink's frames by moving the picture (exact in the middle, no roll): a re-projection
-      of our own in the layer's copy, from the frame's pose to the render pose, would do better.
+  - Trembling: jumps of the whole stream at every head movement, none while still, and SteamVR's HUD overlays (IPD,
+    volume) jump the same way (user, 2026-11-13; a Quest 3 on the same PC has none). Measured (docs/streaming.md item
+    13, tools in tools/headset-dev): ~20 % of the frames show a picture 30-100 ms of motion away from the pose vrlink
+    submits with it, while vrcompositor's re-projection itself is exact. Next:
+    - Pair each frame with its own pose. Copying each frame once (uncommitted, `qcp_record` in quest1_modifier.c)
+      removed the ~65 ms cluster (the decoder's recycled buffer copied again); a ±40 ms spread stayed with
+      vrcompositor at ~57 fps, and the user still saw it tremble. Suspected: the shim's buffer swap in `submit_set`
+      lets the texture change between vrcompositor's reads of texture and pose. Try: keep vrlink's set in place and
+      copy `texture[index]` into the layer's output when the submit arrives (as the real vrcompositor does), or carry
+      the frame's identity from the shim to the layer with its pose. Measure again with the marker (target: the
+      frozen frame's 0.8 px), at 72 fps and below.
+    - Then check the HUD overlays with a stream, and the PC's VR view (it trembled the same way, user).
   - Black flashes (user, 2026-11-12): vrlink logs no decoder reset outside the session's start; not found yet.
   - Frame rate: the layer's inset pass costs ~2.5 ms of GPU (58-60 fps against ~69 with the dashboard open).
     vrcompositor has the Frame's own way, free: `distort_ps_achromatic_se2` blends the inset in its distortion pass,

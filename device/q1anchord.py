@@ -202,6 +202,9 @@ def main():
             if os.path.exists(CLEAR):
                 os.unlink(CLEAR)
                 forget()
+                # the new map must grow for 45 s worn before it is persisted: the time worn before the clear
+                # persisted it 3 s after (2026-11-12), when it held a few views from one spot
+                worn_since = None
             now = time.time()
             m = chap_mtime()
             if m is not None and m != chap_seen:
