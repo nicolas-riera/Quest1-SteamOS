@@ -477,3 +477,15 @@ prediction and the render pose were fixed (sections above). To check that it has
 `warp prediction error` and `late commit` lines, the compat layer's `pose wait ... ran out`. Tools (on the headset,
 temporary): /root/tmp/jitter.sh (its Steam load flashes the page: never while the user wears the headset),
 posegap.py, measure.sh on|off.
+
+## Notes moved from the to-do list (2026-11-12)
+
+- After each put-on, ~10 s where every commit blocked ~10.7 ms in `MSMFB_ATOMIC_COMMIT` (a frame late each),
+  reproduced without wearing it (2026-11-08: `/run/quest1-standby` for 6 s, then panels on: 58 then 3 late commits in
+  two 2 s windows). The user does not notice it (2026-11-12): not pursued.
+- Frame rate drops while the controllers moved fast: it was Steam's UI lagging as the pointer went over a Steam
+  page, fixed with the Steam UI work above; vrcompositor's frame rate is solid now (user, 2026-11-12).
+- Frames vrcompositor itself does not render (69-71 fps worn) repeat their content ("Trembling: how to watch for it"
+  above). The user sees no effect of it (2026-11-12): not pursued.
+- Desktop mode itself no longer makes the headset lag; heavy desktop apps can, which is part of the general
+  performance work (user, 2026-11-12).

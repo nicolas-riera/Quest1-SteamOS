@@ -15,9 +15,6 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - Audio: a click at each Steam start (user, 2026-11-12: still there; the crackle is gone). The output no longer
   closes between sounds (docs/audio.md), so find what Steam does at its start: a sound of its own, or a stream it
   opens and closes.
-- After each put-on, ~10 s where every commit blocks ~10.7 ms in `MSMFB_ATOMIC_COMMIT` (a frame late each). Reproduced
-  without wearing it (2026-11-08): `/run/quest1-standby` for 6 s, then panels on: 58 then 3 late commits in two 2 s windows.
-
 ## Tracking
 
 - The room comes back a bit off at the first put-on after a boot: the engine relocalizes in the saved map, logs "All
@@ -33,7 +30,6 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   controllers come back fine after each start.
 - The kernel logs "SPI transaction rejected by SyncBoss" / "Bad magic number 0xcacacaca" several times a
   minute: compare with Android, check whether IMU or controller data is lost.
-- Frame rate drops while the controllers move fast (Meta's controller tracking threads work harder).
 - Controllers, more tests (user, 2026-11-12): one woken up late (battery out and in while Meta's stack starts) must
   still connect (docs/tracking-6dof.md); after a real tracking loss the headset keeps its last position and the
   controllers come back.
@@ -43,11 +39,8 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - 90 Hz mode, selectable from the refresh rate setting (low priority). Base: github.com/TheCez/quest1-90hz-orangefox.
 - Per-panel lens decenter and roll from the calibration (`*_screen_offset.json`), once Meta's convention is known.
 - Scene mode (`/etc/quest1-warp-lens` 2, docs/performance.md) as the default in the image: the user checked it in
-  the headset (2026-11-12).
-- The 4x MSAA system layer costs ~25 ms a frame in mode 0 (~37 fps): Steam's loading screen at each start. Force it to
-  1 sample there too, as scene mode does (the user allows no MSAA).
-- Frames vrcompositor itself does not render (69-71 fps worn) repeat their content (docs/performance.md
-  "Trembling: how to watch for it").
+  the headset (2026-11-12). It also takes away the 4x MSAA system layer's ~25 ms a frame of mode 0 (Steam's loading
+  screen at ~37 fps).
 - Activating passthrough freezes the view (the only freeze left in Steam's VR UI, user 2026-11-12): vrcompositor
   stalls ~0.3 s (2026-11-09 16:44:02, CTrackedCamera "Late initialization"): find what it builds then (pipelines?
   camera textures?) and do it at start.
@@ -65,8 +58,6 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   page): the pages render on the Adreno (webhelper GPU process, ANGLE Vulkan), but Steam's browser process copies
   each frame for the VR overlay with GLX on Mesa llvmpipe (`webhelper_vr.txt` "Loaded GL 4.5", docs/steam-gpu.md
   "Known issues"). Move that copy to the GPU.
-- Remote Play from the headset: encode at 13-17 ms a frame in the stream (venus at its top clock 355 MHz; 8-9 ms on
-  a quiet headset): the DDR bandwidth vote (`venus_bus_ddr`) or a firmware low-latency mode.
 - SteamVR's global render resolution slider: remove it as on the Steam Frame, later (user, 2026-11-09), without the
   side effects found so far (docs/frame-mode.md).
 
@@ -77,7 +68,6 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   vrcompositor no roomview restart then: catch it with `PT_DUMP=1` (record states once a second) while it happens.
 - q1-ptprovider composites the cameras on the CPU (~25 % of a core while passthrough shows, a third of it the
   memcpy of each composite into the shared image): do it on the GPU.
-- The cameras as a real SteamVR camera (settings in SteamVR, used by the boundary drawing too), as on the Frame.
 - The camera test in SteamVR's camera settings (passthrough) does not work (user, 2026-11-11).
 - Camera power-up race at some boots (trackingservice "Timeout: (power: SLEEP) => (power: STANDBY)", 3DoF
   only), and udev helpers hanging ~3 min at the same boots (2026-11-08: `libinput-device-group` on event0 and
@@ -86,7 +76,6 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 
 ## Boundary and room setup
 
-- Leaving the room setup, Steam showed a "something went wrong" popup once.
 - `ComputeInverseDistortion` returns identity while direct scanout distorts.
 - Pairing Quest controllers from Steam's UI (`syncboss_input_pair`: never without the user's explicit go).
 
@@ -94,9 +83,6 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 
 - Timezone dropdown hidden (Steam shows it only under gamescope: `IN_GAMESCOPE` comes from steamui.so itself).
 - Steam's first-run setup of the Frame: untested.
-- Desktop mode: lag and dashboard freezes while it is used (memory, llvmpipe; docs/desktop.md); the control bar's
-  keyboard and close.
-- Snapshots show q1desktop's overlay turned by 180 degrees while it is right in the headset: find why.
 - SteamVR restarted alone (Steam kept running) breaks Steam's VR UI: steamwebhelper's GPU process takes GPU page faults when
   vrcompositor stops (2026-11-11 17:50 and 17:51, two restarts) and the dashboard then shows its lower half empty and loses
   its bottom bar (restarting Steam brought it back, user). SteamVR alone should restart cleanly.
@@ -135,34 +121,31 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   Also: vrcompositor leaks a sync_fence fd for each vrlink frame (~40 a second, ~5000 open after 2 min): a long
   session will run out of fds. The PC's overlays show only when the PC's SteamVR started after vrlink; stopping a
   session from the headset (`StopStreamingSession`) does nothing and vrlink hangs on its way out.
-- Steam Link from a PC, 2D (docs/streaming.md, section 1): (1) more performance: the kernel emulates atomic
-  instructions for Steam's programs (`emulate_atomic` in the profiles), the semaphore below instead of glFinish;
-  (2) a change of the stream's size (the PC's game window minimised: 1920x1080 to 270x1080) kills the decoder and
-  closes the stream; (3) the stream's sound stutters; the Vulkan/OpenGL semaphore is refused (glFinish fallback);
-  (4) the user's list: 72 fps, microphone, gamepads, the PC's overlays, the headset's dashboard and not the PC's
-  SteamVR one.
+- Steam Link from a PC, 2D (docs/streaming.md, section 1): it works well (user, 2026-11-12); more performance is
+  welcome: the kernel emulates atomic instructions for Steam's programs (`emulate_atomic` in the profiles), the
+  Vulkan/OpenGL semaphore is refused (glFinish fallback).
 - Hardware video decoding for the whole system (user, 2026-11-09: "décodage vidéo matériel system wide, dont
   Chromium"). FFmpeg's `*_v4l2m2m` decoders and VLC use venus (`q1-hwdec`, docs/streaming.md "The decoder"). Left:
   GStreamer's v4l2 decoders (they fall back by themselves, but set CAPTURE up after SOURCE_CHANGE: the library must
   start the firmware session itself first); Chromium decodes with VA-API only (Arch's build has no V4L2 decoder): a
   VA-API driver on top, or another build. The user's target (2026-11-10): the stream at 72 fps next to the dashboard
   and overlays, so everything on the hardware path and no CPU copy of the frames.
-- Wi-Fi power saving comes back on at each boot (`iw dev wlan0 set power_save off` by hand for the stream): keep it
-  off for good, if the stream needs it.
+- Wi-Fi power saving: off only while a lot of data goes through (a stream, a download), back on once it calms
+  down (user, 2026-11-12). Today it is on at each boot; it was not the cause of the streams' problems.
 
 ## Hardware
 
 - Heat after hours of use: read the thermal zones after a long session (stream, games) and check whether the
   kernel's thermal mitigation throttles the CPU/GPU meanwhile (the fan and the CPU clocks follow the temperature now,
   docs/performance.md).
-- Bluetooth: keyboard/mouse, audio (A2DP), Steam's and Plasma's Bluetooth settings, what Plasma's toggle does
-  to the chip's power, a faster patch download (~11 s), the UART's power cost (in-band sleep).
+- Bluetooth works (user, 2026-11-12): more tests and polish: keyboard/mouse, audio (A2DP), Steam's and Plasma's
+  Bluetooth settings, what Plasma's toggle does to the chip's power, a faster patch download (~11 s), the UART's
+  power cost (in-band sleep).
 - Power LED colour controlled by the user (low priority).
 - USB OTG: keyboards, storage and other devices on the headset's port (low priority).
 
 ## Steam Frame features
 
-- Passthrough toggle on a double click of a button the Touch controllers have (once passthrough is final).
 - Performance overlay (fps, then temperatures and clocks).
 - Frame rate limiter; GPU clock in the quick menu.
 

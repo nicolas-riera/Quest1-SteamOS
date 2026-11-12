@@ -506,6 +506,9 @@ lists what is left to do).
 - 2026-11-03 late, user feedback and fixes: eye button OK (Prop 2105); scale OK; shaking reduced (capture
   poses from Monado, frames without one dropped) - to recheck; left eye lower: fixed by the fisheye fit
   (to recheck); double click Menu/Oculus = toggle room view (vrcompositor bindings); Edge styles hidden and
-  tint slider shown (props 2122 and 1062) - to check that the slider changes the colour.
+  tint slider shown (props 2122 and 1062); the slider changes the colour (user, 2026-11-12).
 - Later: depth from the bottom stereo pair (a per-frame depth mesh, like Meta's libmrengine) so near
   objects sit at their true depth (the fixed 3 m sphere and the 11 cm camera baseline make them wrong).
+
+2026-11-12 (user): the cameras show as SteamVR's camera; double click toggles passthrough. SteamVR's camera test
+still does not work (docs/todo.md).

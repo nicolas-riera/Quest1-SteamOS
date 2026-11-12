@@ -201,6 +201,8 @@ lists what is left to do).
   - snapshots (/root/snap.sh) show q1desktop's overlay turned by 180 degrees while it is right in the headset
     (user, 2026-11-05; Steam's overlays are right in both): don't trust snapshots for that overlay's
     orientation, find why they differ.
+- 2026-11-12 (user): desktop mode works, with Steam's virtual keyboard and the laser pointer (no physical keyboard or
+  mouse tried yet); the snapshots no longer show q1desktop's overlay turned.
 - Steam crashed while the desktop was used (user, 2026-11-05 ~18:07) and its VR UI did not come back:
   vrdashboard asserts "stalled cross-thread pipe (pipe is disconnected)" (/tmp/dumps), the headset deep in swap.
   The dashboard's vrwebhelper (started by vrdashboard) died with it and vrdashboard never restarted it. The

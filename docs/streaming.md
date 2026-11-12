@@ -553,3 +553,16 @@ lists what is left to do).
   compositor: libhybris GL lacks GL_EXT_memory_object(_fd) and GL_EXT_semaphore(_fd) (ASSERTs in
   sharedresource_linux.cpp), so the stream shows black. Logs in `/root/stream-crash-20261102/`.
   SteamVR now restarts by itself when it quits.
+
+## Notes moved from the to-do list (2026-11-12)
+
+- Remote Play from the headset works well enough for what it is (user, 2026-11-12). Left as measured: the encode
+  takes 13-17 ms a frame during a stream (venus at its top clock, 355 MHz) against 8-9 ms on a quiet headset; the DDR
+  bandwidth vote (`venus_bus_ddr`) or a firmware low-latency mode could close the gap.
+- Steam Link 2D from a PC works well (user, 2026-11-12); more performance is welcome (docs/todo.md). Points noted on
+  2026-11-11 that the user has not run into since: a change of the stream's size (the PC's game window minimised:
+  1920x1080 to 270x1080) killed the decoder and closed the stream; the stream's sound stuttered; the Vulkan/OpenGL
+  semaphore is refused (glFinish fallback); the user's list then was 72 fps, microphone, gamepads, the PC's overlays,
+  the headset's dashboard and not the PC's SteamVR one.
+- Wi-Fi power saving was turned off by hand while looking for the cause of the VR stream's problems; it was not the
+  cause.
