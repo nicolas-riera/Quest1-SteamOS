@@ -5,6 +5,7 @@
 // it sits in. It submits the wide views (the bounds) and, after each eye's VRTextureWithPoseAndDepth_t, the inset's
 // place over the wide view in the atlas and a view count of 2. vrcompositor here leaves the inset out (2026-11-12:
 // only the wide view showed, its centre coded with few bits, as the inset was to cover it).
+// It also says that vrlink runs (alive_ns), for direct scanout's stream mode (quest1_scanout.c: qs_streaming).
 #pragma once
 #include <stdint.h>
 
@@ -16,4 +17,5 @@ struct q1_views
 	uint32_t eyes;     //!< 2 once vrlink submitted a frame with its insets
 	float wide[2][4];  //!< each eye's wide view in the atlas: u0 v0 u1 v1
 	float inset[2][4]; //!< the inset's place over it, in the atlas; the inset itself is the view just above
+	uint64_t alive_ns; //!< CLOCK_MONOTONIC, written every second while vrlink runs
 };

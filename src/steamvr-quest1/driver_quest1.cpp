@@ -2,7 +2,8 @@
 //
 // The headset is already driven by Monado (IMU fusion, lens distortion, panel scan-out, proximity
 // sensor). This driver is an OpenXR client of Monado:
-//   - poses: xrLocateSpace(VIEW in LOCAL) at 250 Hz -> TrackedDevicePoseUpdated
+//   - poses: xrLocateSpace(VIEW in LOCAL) -> TrackedDevicePoseUpdated, at each frame vrcompositor presents (250 Hz
+//     before); Steam Link VR's own pose, with velocities, at 250 Hz (quest1_hmd_pose.h)
 //   - frames: the HMD declares an identity distortion, so vrcompositor composites every layer into
 //     an undistorted side-by-side image. vrcompositor always presents through a direct-mode
 //     display, which the compat Vulkan layer simulates (src/vklayer-steamvr/quest1_display.c): its
@@ -45,6 +46,7 @@
 #include "battery.h"
 #include "camera.h"
 #include "chaperone_frame.h"
+#include "quest1_hmd_pose.h"
 #include "controllers.h"
 
 #include <atomic>
@@ -322,7 +324,12 @@ public:
 	// velocity, so SteamVR renders with exactly that pose) before vrcompositor resumes; frame k+1 is
 	// therefore rendered with it, and the frame thread submits frame k+1 to Monado with that same
 	// pose. Monado's reprojection then only corrects the latency, not a render/submit mismatch.
+	// A velocity would not do (2026-11-12): vrcompositor then renders for a time of its own, which is ~39 ms after
+	// the pose came, but ~7 ms later for seconds at a time, so frames would be off by velocity x 7 ms. Steam Link VR,
+	// which needs one, gets another pose (LocateNow, quest1_hmd_pose.h).
 	bool LocateAhead(DriverPose_t &pose, XrPosef *xrPose);
+	//! The head's pose now, with its velocities, for vrlink (quest1_hmd_pose.h); seq, publish_ns and reader_ns untouched
+	bool LocateNow(q1_hmd_pose &out);
 	//! The head's pose in SteamVR's raw space (as the HMD pose: floor and anchor applied) at a CLOCK_MONOTONIC time
 	bool LocateRawAt(int64_t monoNs, HmdMatrix34_t &raw);
 	void ApplyNeckModel(XrSpaceLocation &loc);
@@ -734,6 +741,48 @@ bool XrBackend::LocateAhead(DriverPose_t &pose, XrPosef *xrPose)
 //! Tracking lost (Meta's 6DoF status falls to 0, Monado clears POSITION_TRACKED and its position goes to the origin, which
 //! put the head on the floor): keep the last tracked position, the head turning about it with the neck model, as Meta's
 //! OS does. A head never tracked since SteamVR started (3DoF, cameras off) is unchanged.
+bool XrBackend::LocateNow(q1_hmd_pose &out)
+{
+	timespec mono;
+	clock_gettime(CLOCK_MONOTONIC, &mono);
+	XrTime t = 0;
+	pxrConvertTimespecTimeToTimeKHR(instance, &mono, &t);
+	XrSpaceVelocity vel{XR_TYPE_SPACE_VELOCITY};
+	XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
+	loc.next = &vel;
+	if (XR_FAILED(pxrLocateSpace(view, local, t, &loc)) ||
+	    !(loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) ||
+	    !(vel.velocityFlags & XR_SPACE_VELOCITY_ANGULAR_VALID_BIT))
+		return false;
+	bool tracked = (loc.locationFlags & XR_SPACE_LOCATION_POSITION_TRACKED_BIT) != 0;
+	HoldPosition(loc);
+	ApplyNeckModel(loc);
+	const XrQuaternionf &q = loc.pose.orientation;
+	const XrVector3f &w = vel.angularVelocity;
+	XrVector3f v = {};
+	if (tracked && (vel.velocityFlags & XR_SPACE_VELOCITY_LINEAR_VALID_BIT)) {
+		v = vel.linearVelocity;
+	} else if (neckModel && !tracked) {
+		// the eyes turn about the neck (ApplyNeckModel): their velocity is w x (q n)
+		const XrVector3f n = {0, 0.075f, -0.0805f};
+		XrVector3f c = {2 * (q.y * n.z - q.z * n.y), 2 * (q.z * n.x - q.x * n.z), 2 * (q.x * n.y - q.y * n.x)};
+		XrVector3f r = {n.x + q.w * c.x + (q.y * c.z - q.z * c.y), n.y + q.w * c.y + (q.z * c.x - q.x * c.z),
+		                n.z + q.w * c.z + (q.x * c.y - q.y * c.x)};
+		v = {w.y * r.z - w.z * r.y, w.z * r.x - w.x * r.z, w.x * r.y - w.y * r.x};
+	}
+	out.time_ns = (int64_t)mono.tv_sec * 1000000000ll + mono.tv_nsec;
+	out.valid = 1;
+	out.q[0] = q.w, out.q[1] = q.x, out.q[2] = q.y, out.q[3] = q.z;
+	out.pos[0] = loc.pose.position.x, out.pos[1] = loc.pose.position.y, out.pos[2] = loc.pose.position.z;
+	out.vel[0] = v.x, out.vel[1] = v.y, out.vel[2] = v.z;
+	// in the head's frame: q^-1 w q
+	XrVector3f c2 = {2 * (-q.y * w.z + q.z * w.y), 2 * (-q.z * w.x + q.x * w.z), 2 * (-q.x * w.y + q.y * w.x)};
+	out.ang[0] = w.x + q.w * c2.x + (-q.y * c2.z + q.z * c2.y);
+	out.ang[1] = w.y + q.w * c2.y + (-q.z * c2.x + q.x * c2.z);
+	out.ang[2] = w.z + q.w * c2.z + (-q.x * c2.y + q.y * c2.x);
+	return true;
+}
+
 void XrBackend::HoldPosition(XrSpaceLocation &loc)
 {
 	std::lock_guard<std::mutex> l(holdMutex);
@@ -1604,11 +1653,12 @@ public:
 		Quest1CameraAttach(c, [this] { return GetPose(); }, // camera.cpp: tracking cameras (off unless enabled)
 		                   [this](int64_t monoNs, HmdMatrix34_t &raw) { return xr.LocateRawAt(monoNs, raw); });
 
+		OpenHmdPose();
 		poseThreadRunning = true;
 		poseThread = std::thread([this] {
 			pthread_setname_np(pthread_self(), "quest1 poses");
 			// while vrcompositor presents, poses are published by PublishFramePose only; before
-			// that (start-up, virtual display) at 250 Hz
+			// that (start-up, virtual display) at 250 Hz. vrlink's pose: at 250 Hz while it reads it.
 			for (unsigned tick = 0; poseThreadRunning; tick++) {
 				std::this_thread::sleep_for(std::chrono::milliseconds(4));
 				if (tick % 128 == 0)
@@ -1617,6 +1667,7 @@ public:
 					ReadPoseAge();
 				if (tick % 128 == 64)
 					UpdateIpd();
+				WriteHmdPose();
 				if (MonotonicSeconds() - xr.lastPresent < 0.2)
 					continue;
 				XrPosef unused;
@@ -1696,7 +1747,52 @@ public:
 		std::lock_guard<std::mutex> lock(poseMutex);
 		lastPose = p;
 		VRServerDriverHost()->TrackedDevicePoseUpdated(id, p, sizeof(p));
+		if (hmdPose) {
+			timespec ts;
+			clock_gettime(CLOCK_MONOTONIC, &ts);
+			__atomic_store_n(&hmdPose->publish_ns, (int64_t)ts.tv_sec * 1000000000ll + ts.tv_nsec, __ATOMIC_RELEASE);
+		}
 	}
+
+	//! vrlink's pose (quest1_hmd_pose.h)
+	void OpenHmdPose()
+	{
+		int fd = open(Q1_HMD_POSE_PATH, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+		void *m = fd >= 0 && ftruncate(fd, sizeof(q1_hmd_pose)) == 0
+		              ? mmap(nullptr, sizeof(q1_hmd_pose), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0)
+		              : MAP_FAILED;
+		if (fd >= 0)
+			close(fd);
+		hmdPose = m == MAP_FAILED ? nullptr : (q1_hmd_pose *)m;
+		if (!hmdPose)
+			Log("quest1: %s: %s (Steam Link VR gets the frames' poses)\n", Q1_HMD_POSE_PATH, strerror(errno));
+	}
+	void WriteHmdPose()
+	{
+		if (!hmdPose)
+			return;
+		timespec ts;
+		clock_gettime(CLOCK_MONOTONIC, &ts);
+		int64_t now = (int64_t)ts.tv_sec * 1000000000ll + ts.tv_nsec;
+		int64_t reader = __atomic_load_n(&hmdPose->reader_ns, __ATOMIC_RELAXED);
+		if (now - reader > 1000000000ll)
+			return; // vrlink does not run
+		q1_hmd_pose p{};
+		bool ok = xr.LocateNow(p);
+		uint32_t seq = __atomic_load_n(&hmdPose->seq, __ATOMIC_RELAXED);
+		__atomic_store_n(&hmdPose->seq, seq | 1, __ATOMIC_RELAXED);
+		__atomic_thread_fence(__ATOMIC_RELEASE);
+		hmdPose->valid = ok;
+		if (ok) {
+			hmdPose->time_ns = p.time_ns;
+			memcpy(hmdPose->q, p.q, sizeof(p.q));
+			memcpy(hmdPose->pos, p.pos, sizeof(p.pos));
+			memcpy(hmdPose->vel, p.vel, sizeof(p.vel));
+			memcpy(hmdPose->ang, p.ang, sizeof(p.ang));
+		}
+		__atomic_store_n(&hmdPose->seq, (seq | 1) + 1, __ATOMIC_RELEASE);
+	}
+	q1_hmd_pose *hmdPose = nullptr;
 
 	//! The pose display frame `frame` will be rendered with.
 	void PublishFramePose(uint64_t frame)

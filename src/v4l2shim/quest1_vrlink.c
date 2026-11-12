@@ -32,8 +32,10 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
+#include <time.h>
 #include <unistd.h>
 
+#include "../steamvr-quest1/quest1_hmd_pose.h"
 #include "../vklayer-steamvr/quest1_views.h"
 
 #define EXPORT __attribute__((visibility("default")))
@@ -216,10 +218,38 @@ static const struct
 	int prio;
 } rt_threads[] = {{"vrlinkrunthread", RT_MAX - 2}, {"EventsThread", RT_MAX - 2}, {"data-loop.0", RT_MAX - 4}};
 
+// The views shared with vrcompositor's layer (quest1_views.h), made as vrlink starts.
+static struct q1_views *views_shm;
+static pthread_once_t views_once = PTHREAD_ONCE_INIT;
+
+static void views_open_once(void)
+{
+	int fd = open(Q1_VIEWS_PATH, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+	void *m = fd >= 0 && ftruncate(fd, sizeof(*views_shm)) == 0
+	              ? mmap(NULL, sizeof(*views_shm), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) : MAP_FAILED;
+	if (fd >= 0)
+		close(fd);
+	views_shm = m == MAP_FAILED ? NULL : m;
+	fprintf(stderr, "quest1_v4l2: vrlink: views for vrcompositor in %s: %s\n", Q1_VIEWS_PATH,
+	        views_shm ? "ok" : strerror(errno));
+}
+
+static struct q1_views *views_open(void)
+{
+	pthread_once(&views_once, views_open_once);
+	return views_shm;
+}
+
 static void *rt_watch(void *arg)
 {
 	(void)arg;
 	for (;;) {
+		struct q1_views *v = views_open();
+		if (v) { // vrlink runs, also while it submits nothing (the headset's dashboard open: seconds)
+			struct timespec ts;
+			clock_gettime(CLOCK_MONOTONIC, &ts);
+			__atomic_store_n(&v->alive_ns, (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec, __ATOMIC_RELAXED);
+		}
 		DIR *d = opendir("/proc/self/task");
 		struct dirent *de;
 		while (d && (de = readdir(d))) {
@@ -278,9 +308,7 @@ enum { EYE_INSET = 152, EYE_VIEWS = 168, SUBMIT_TEXTURE_WITH_DEPTH = 0x10 };
 //! The insets' places, for vrcompositor's layer (quest1_views.h): written when they change.
 static void publish_views(const void *const eye[2], const void *const bounds[2], uint32_t flags)
 {
-	static struct q1_views *v;
-	static bool failed;
-	struct q1_views n = {0, 2};
+	struct q1_views n = {0, 2, {{0}}, {{0}}, 0};
 	for (int e = 0; e < 2; e++) {
 		uint32_t views;
 		if (!(flags & SUBMIT_TEXTURE_WITH_DEPTH) || !eye[e] || !bounds[e])
@@ -292,17 +320,7 @@ static void publish_views(const void *const eye[2], const void *const bounds[2],
 		if (views != 2 || !(r[0] >= w[0] && r[0] < r[2] && r[2] <= w[2] && r[1] >= w[1] && r[1] < r[3] && r[3] <= w[3]))
 			n.eyes = 0;
 	}
-	if (!v && !failed) {
-		int fd = open(Q1_VIEWS_PATH, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
-		void *m = fd >= 0 && ftruncate(fd, sizeof(*v)) == 0
-		              ? mmap(NULL, sizeof(*v), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) : MAP_FAILED;
-		if (fd >= 0)
-			close(fd);
-		failed = m == MAP_FAILED;
-		v = failed ? NULL : m;
-		fprintf(stderr, "quest1_v4l2: vrlink: foveated insets for vrcompositor in %s: %s\n", Q1_VIEWS_PATH,
-		        failed ? strerror(errno) : "ok");
-	}
+	struct q1_views *v = views_open();
 	if (!v || (v->eyes == n.eyes && !memcmp(v->wide, n.wide, sizeof(n.wide)) && !memcmp(v->inset, n.inset, sizeof(n.inset))))
 		return;
 	uint32_t seq = __atomic_load_n(&v->seq, __ATOMIC_RELAXED);
@@ -327,7 +345,119 @@ static uint32_t submit_set(void *self, int32_t index, uint32_t count, const uint
 		index = 0;
 	}
 	publish_views((const void *const[2]){eye_l, eye_r}, (const void *const[2]){bounds_l, bounds_r}, flags);
+	// An empty submit (no eyes, no textures) shows nothing: vrcompositor draws black for that frame. vrlink sends one
+	// when it has no picture ready in time, which happens when the headset is loaded (a stream's start: a dozen in the
+	// first 20 s, 2026-11-12), and the user saw the stream flash black. Between pictures it is left out, so that
+	// vrcompositor shows the last picture again; a run of them (loading, the stream's end) still goes through.
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	uint64_t now = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+	static uint64_t last_picture;
+	if (eye_l && eye_r && count)
+		last_picture = now;
+	else if (!eye_l && !eye_r && !count && last_picture && now - last_picture < 200000000ull) {
+		return 0; // VRCompositorError_None
+	}
 	return real_submit_set(self, index, count, handles, eye_l, eye_r, bounds_l, bounds_r, flags, seconds);
+}
+
+// vrlink's HMD pose (quest1_hmd_pose.h). vrlink reads SteamVR's raw driver pose of a device through
+// IVRClientInternal_XXX slot 12 (vrclient copies it from vrserver's shared memory; vrlink.bin 0x56044, from its
+// EventsThread), predicts it itself and sends it to the PC. The copy is a CLOCK_MONOTONIC time in ns then
+// DriverPose_t (offsets checked against what driver_quest1 published, 2026-11-12). The time is vrserver's: when the
+// pose came, plus a lead of its own (35 ms; ~39 from the driver's call), which is measured (raw_pose_lead) and kept, so
+// that vrlink reads driver_quest1's pose of the head now as it would read a pose SteamVR had just been given.
+enum {
+	SLOT_RAW_POSE = 12,
+	RAW_TIME = 0, RAW_TIME_OFFSET = 8, RAW_POSITION = 0x80, RAW_VELOCITY = 0x98, RAW_ROTATION = 0xc8,
+	RAW_ANGULAR = 0xe8,
+};
+typedef uint64_t (*raw_pose_t)(void *self, uint32_t dev, void *out);
+static raw_pose_t real_raw_pose;
+
+static struct q1_hmd_pose *hmd_pose_open(uint64_t now)
+{
+	static struct q1_hmd_pose *p;
+	static uint64_t tried;
+	if (p || (tried && now - tried < 1000000000ull))
+		return p;
+	tried = now;
+	int fd = open(Q1_HMD_POSE_PATH, O_RDWR | O_CLOEXEC);
+	void *m = fd >= 0 ? mmap(NULL, sizeof(*p), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) : MAP_FAILED;
+	if (fd >= 0)
+		close(fd);
+	p = m == MAP_FAILED ? NULL : m;
+	if (p)
+		fprintf(stderr, "quest1_v4l2: vrlink: the head's pose from driver_quest1 (%s)\n", Q1_HMD_POSE_PATH);
+	return p;
+}
+
+//! vrserver's lead: its time of the pose it gave last minus when driver_quest1 gave it. A pose given a moment ago
+//! that vrserver has not taken yet reads a frame short: such readings are left out.
+static bool raw_pose_lead(int64_t sample, int64_t *lead)
+{
+	static int64_t est;
+	static unsigned off;
+	if (sample <= 0 || sample > 100000000) {
+		*lead = est;
+		return est != 0;
+	}
+	if (!est || off > 50) {
+		est = sample;
+		off = 0;
+	} else if (sample > est - 2000000 && sample < est + 2000000) {
+		est += (sample - est) / 16;
+		off = 0;
+	} else {
+		off++;
+	}
+	*lead = est;
+	return true;
+}
+
+static uint64_t raw_pose(void *self, uint32_t dev, void *out)
+{
+	uint64_t r = real_raw_pose(self, dev, out);
+	if (dev != 0 || !out)
+		return r;
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	uint64_t now = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+	static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+	pthread_mutex_lock(&lock);
+	struct q1_hmd_pose *shm = hmd_pose_open(now), p;
+	if (!shm) {
+		pthread_mutex_unlock(&lock);
+		return r;
+	}
+	__atomic_store_n(&shm->reader_ns, (int64_t)now, __ATOMIC_RELAXED);
+	unsigned char *o = out;
+	int64_t vr_time, lead = 0;
+	memcpy(&vr_time, o + RAW_TIME, sizeof(vr_time));
+	bool have_lead = raw_pose_lead(vr_time - __atomic_load_n(&shm->publish_ns, __ATOMIC_ACQUIRE), &lead);
+	uint32_t seq;
+	int tries = 0;
+	do {
+		seq = __atomic_load_n(&shm->seq, __ATOMIC_ACQUIRE);
+		memcpy(&p, shm, sizeof(p));
+		__atomic_thread_fence(__ATOMIC_ACQUIRE);
+	} while (((seq & 1) || seq != __atomic_load_n(&shm->seq, __ATOMIC_RELAXED)) && ++tries < 100);
+	double q[4];
+	memcpy(q, o + RAW_ROTATION, sizeof(q));
+	double qn = q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3];
+	// the driver's pose, fresh, and a copy laid out as expected (a unit quaternion where the rotation goes)
+	if (have_lead && tries < 100 && p.valid && now - (uint64_t)p.time_ns < 50000000ull && qn > 0.99 && qn < 1.01) {
+		int64_t t = p.time_ns + lead;
+		double zero = 0;
+		memcpy(o + RAW_TIME, &t, sizeof(t));
+		memcpy(o + RAW_TIME_OFFSET, &zero, sizeof(zero));
+		memcpy(o + RAW_POSITION, p.pos, sizeof(p.pos));
+		memcpy(o + RAW_VELOCITY, p.vel, sizeof(p.vel));
+		memcpy(o + RAW_ROTATION, p.q, sizeof(p.q));
+		memcpy(o + RAW_ANGULAR, p.ang, sizeof(p.ang));
+	}
+	pthread_mutex_unlock(&lock);
+	return r;
 }
 
 static void patch_client(void *client)
@@ -360,8 +490,10 @@ static void patch_client(void *client)
 	memcpy(client_vtable_copy, vt - 2, (2 + slots) * sizeof(void *));
 	real_submit_set = (submit_set_t)vt[SLOT_SUBMIT_SET];
 	copy[SLOT_SUBMIT_SET] = (void *)submit_set;
+	real_raw_pose = (raw_pose_t)vt[SLOT_RAW_POSE];
+	copy[SLOT_RAW_POSE] = (void *)raw_pose;
 	*obj = copy;
-	fprintf(stderr, "quest1_v4l2: vrlink: each frame goes first in its texture set\n");
+	fprintf(stderr, "quest1_v4l2: vrlink: each frame goes first in its texture set; the head's pose from driver_quest1\n");
 }
 
 EXPORT void *VR_GetGenericInterface(const char *version, int *err)

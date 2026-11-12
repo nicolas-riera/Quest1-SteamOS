@@ -541,6 +541,29 @@ vrlink writes its own log, `~/.local/share/Steam/logs/vrlink.txt` (the PC's side
       vrlink shares 16 frame buffers, and 16 copies of 16 MB each were made as the session started: the headset swapped
       ~700 MB within seconds and stalled (Monado's re-projection too). ~150-250 MB now; vrcompositor's GPU memory went
       from 666 to 397 MB.
+12. **The head's pose for the PC** (2026-11-12; user: "ça tremble BEAUCOUP moins", the PC's VR view too). The PC's
+    own VR view shook far more than the head. driver_quest1 changes the HMD pose only when vrcompositor presents, with
+    no velocity (so that vrcompositor renders with exactly the pose the layer gives Monado, docs/steamvr-port.md): the
+    PC saw a pose that stood still, then jumped, at uneven times (10-27 ms apart during a head turn, logged on the PC
+    with `GetDeviceToAbsoluteTrackingPose`), and could not predict it. Replayed on a recorded head turn, what the PC
+    rendered at 72 Hz was ~6 times rougher than the head.
+    - A velocity in the HMD pose does not do: vrcompositor renders with it for a time of its own, ~39 ms after the
+      pose came, but ~7 ms later for seconds at a time (measured with a fake velocity, from the shift of the picture in
+      snapshots), so its frames would be off by velocity x 7 ms.
+    - vrlink reads the pose elsewhere: not through `WaitGetPoses` (it passes no arrays, for the timing only) nor
+      `IVRSystem`, but SteamVR's raw driver pose, `IVRClientInternal_XXX` slot 12 (`vrlink.bin` 0x56044, from its
+      EventsThread, ~200 times a second; found with a hardware read watchpoint on vrserver's shared memory). vrclient
+      copies a CLOCK_MONOTONIC time then a `DriverPose_t`; vrlink predicts it with its velocity and sends it.
+    - So the driver also writes the head's current pose with its velocities at 250 Hz (`/dev/shm/quest1-hmd-pose`,
+      `quest1_hmd_pose.h`, while vrlink reads it), and the shim gives vrlink that one, with vrserver's time convention
+      (the pose's time plus a lead vrserver adds, ~39 ms from the driver's call, measured as it runs). The PC's pose now
+      moves at every query (~650 changes a second) instead of in steps; the headset's own frames are unchanged.
+    - vrlink turns `vecAngularVelocity` by the head's orientation: it takes it in the head's frame (fitted on the PC's
+      poses: cosine 0.99 that way, ~0 given in the driver's space, which made the PC predict a nod as a roll and lean
+      the view as the headset was lifted). The linear velocity is in the driver's space.
+    - Left (docs/todo.md): the stream still trembles, less. The frames' poses match the head ~20 ms after vrlink
+      submits them, and vrcompositor shows them ~60 ms after; 40 ms more of prediction (closer, by the logs) changed
+      nothing the user could see.
 
 Plan:
 0. ~~Capture vrlink's own output~~ done (above).

@@ -15,6 +15,10 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - Audio: a click at each Steam start (user, 2026-11-12: still there; the crackle is gone). The output no longer
   closes between sounds (docs/audio.md), so find what Steam does at its start: a sound of its own, or a stream it
   opens and closes.
+- Microphone: noise suppression and echo cancellation (user, 2026-11-12: it picks up everything, from the speakers'
+  sound to the fan's noise). E.g. PipeWire's echo-cancel module (WebRTC) between the speakers and the mic, as the
+  default source.
+
 ## Tracking
 
 - The room comes back a bit off at the first put-on after a boot: the engine relocalizes in the saved map, logs "All
@@ -108,16 +112,28 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - The telemetry HAL's loop (docs/performance.md, 2026-11-11 heat): once an event cannot go to ovrstub's
   TelemetryService it retries with no pause (a core at 100 %, ~50000 log lines/s, fakelogd at 90 %). Stopping the HAL
   froze the tracking: make the stand-in accept the events, or find what it fails on.
+- Storage hang: twice on 2026-11-12 (and earlier) the headset stopped answering (ping fine, sshd's banner timing out,
+  a build or a test running); only a reboot helped, and the journal is not kept. Keep the journal (or pstore), then
+  read q1-hangwatch's D-state stacks.
+- A GPU page fault in a steamwebhelper (2026-11-12 20:28, during a stream) took vrcompositor's device with it
+  (`vkQueueSubmit` -4): SteamVR restarted by itself.
 
 ## Streaming
 
 - Steam Link VR (docs/streaming.md, section 2): a new picture each frame and a sharp centre now (user, 2026-11-12:
   "c'est net"), but it trembles, flashes black now and then and runs below 72 fps.
-  - Trembling: the stream only (the headset's own chaperone and dashboard are steady). Not Monado's re-projection:
-    with it off everything trembled more (2026-11-12). Lead: the PC predicts each frame's display ~92 ms after it
-    renders it (`vrlink_aftm_*.csv`: send 8 ms, network 5, decode 15, then the frame waits ~62 ms in vrlink for that
-    predicted time), so its poses are predicted ~90 ms ahead. Find what makes the PC predict that far (what vrlink
-    reports: `query_to_display`/`decode_to_display`, our frame timing, the "DecodeSlow" and "Mispredicted" flags).
+  - Trembling: the stream only (the headset's own chaperone and dashboard are steady), much less since the PC gets
+    a smooth pose (docs/streaming.md item 12), but still jolts of the whole picture, head still too, more as it
+    turns (user, 2026-11-12). Leads, measured that evening:
+    - vrcompositor may read a newer vrlink frame than the one its commands were recorded for (the layer's black
+      frames, `qcp_out_get`): if it then takes that frame's pose too, the shared output still holds the older frame's
+      copy, and the picture is off by the head's move between two frames. Check whether the pose goes with the slot
+      (e.g. mark the copy and give each frame a fake pitch keyed to it, then compare in snapshots).
+    - vrlink submitted ~54 frames a second, unevenly (13.5-30 ms, up to 63): the PC's app repeated its frame 3 to 7
+      times in a row ~7 times a second (`vrlink_aftm_*.csv`, Present ID) with its GPU at 15 %, and the PC logged ~10
+      "Bad link event"s a second (8-20 ms, holdoff 1). Find what holds the app or the link back.
+    - vrcompositor re-projects vrlink's frames by moving the picture (exact in the middle, no roll): a re-projection
+      of our own in the layer's copy, from the frame's pose to the render pose, would do better.
   - Black flashes (user, 2026-11-12): vrlink logs no decoder reset outside the session's start; not found yet.
   - Frame rate: the layer's inset pass costs ~2.5 ms of GPU (58-60 fps against ~69 with the dashboard open).
     vrcompositor has the Frame's own way, free: `distort_ps_achromatic_se2` blends the inset in its distortion pass,
@@ -129,6 +145,9 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   Also: vrcompositor leaks a sync_fence fd for each vrlink frame (~70 a second, limit 524288: ~2 h of session; they
   do not come through vkImportSemaphoreFdKHR). The PC's overlays show only when the PC's SteamVR started after
   vrlink; stopping a session from the headset (`StopStreamingSession`) does nothing and vrlink hangs on its way out.
+  With the USB cable in, vrlink and the PC send the stream over the USB network too (each datagram on each link: about
+  a core on the headset, 2026-11-12). Hiding usb0 from vrlink (getifaddrs, and dropping what it sends there) made it
+  never connect ("Timed out getting information from the server"): the PC reached it over USB first.
 - Steam Link from a PC, 2D (docs/streaming.md, section 1): it works well (user, 2026-11-12); more performance is
   welcome: the kernel emulates atomic instructions for Steam's programs (`emulate_atomic` in the profiles), the
   Vulkan/OpenGL semaphore is refused (glFinish fallback).
