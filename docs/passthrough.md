@@ -390,7 +390,7 @@ reference; shifts from layer snapshots by profile correlation, a band of the das
 - Fix (replaced 2026-11-08, below): ptprovider writes +144 as the capture **rotation only** (translation 0). Pitch +-10 after: camera -156/+150,
   dashboard -156/+169. The compositor so corrects rotation only between capture and display (like Monado's warp); a
   head translation in those ~60 ms (a few cm walking) is not corrected, below a degree on the 3 m sphere.
-- To confirm worn (user): the shake and tilt when the head moves. Depth (a real mesh) after that.
+- Checked worn (user, 2026-11-12): no shake or tilt any more. Depth (a real mesh) is next (docs/todo.md).
 
 ### The view 35 degrees too low (2026-11-08)
 
@@ -427,7 +427,7 @@ model(capture pose)") draws it. So:
   the capture (head pose at capture * DeviceFromCamera), which becomes the shader's `_m3` (camera projection of the
   raw-space mesh). +96 stays DeviceFromCamera (head frame): the per-eye camera choice compares it with the eyes.
 Checked in the uniforms: `_m0` = the head's position (0, 1.65, 0), `_m1` = head -> eye * P^-1, `_m3` = the camera's raw
-pose. To confirm worn: no shake with the head still, the room steady as the head turns.
+pose. Checked worn (user, 2026-11-12): no shake with the head still, the room steady as the head turns.
 
 ## The top cameras: one composite image per eye (2026-11-08)
 
@@ -485,7 +485,7 @@ lists what is left to do).
   clean (6DoF, no udev stall): a boot race in the camera drivers, to catch again with its logs.
 - Shake/tilt (user, 2026-11-06: only the camera image, "almost nauseating"): vrcompositor turned the capture-to-display
   rotation about the capture pose's position (the head 1.65 m above the floor), so every pitch or roll also moved the image.
-  Fixed 2026-11-07 (ptprovider gives +144 as a rotation only; measured, docs/passthrough.md). To confirm worn (user). Then
+  Fixed 2026-11-07 (ptprovider gives +144 as a rotation only; measured, docs/passthrough.md); checked worn 2026-11-12. Then
   Meta's depth engine through MrSystemServiceIPCServer instead of our fixed mesh (user's call).
 - Regression (user, 2026-11-05 night): passthrough shakes a lot and tends to tilt when the head moves.
   Broken by that night's memory work; suspects, in order: the KGSL lazy rings (first-touch page faults in

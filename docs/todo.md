@@ -34,18 +34,25 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - The kernel logs "SPI transaction rejected by SyncBoss" / "Bad magic number 0xcacacaca" several times a
   minute: compare with Android, check whether IMU or controller data is lost.
 - Frame rate drops while the controllers move fast (Meta's controller tracking threads work harder).
+- Controllers, more tests (user, 2026-11-12): one woken up late (battery out and in while Meta's stack starts) must
+  still connect (docs/tracking-6dof.md); after a real tracking loss the headset keeps its last position and the
+  controllers come back.
 
 ## Display
 
 - 90 Hz mode, selectable from the refresh rate setting (low priority). Base: github.com/TheCez/quest1-90hz-orangefox.
 - Per-panel lens decenter and roll from the calibration (`*_screen_offset.json`), once Meta's convention is known.
+- Scene mode (`/etc/quest1-warp-lens` 2, docs/performance.md) as the default in the image: the user checked it in
+  the headset (2026-11-12).
 - The 4x MSAA system layer costs ~25 ms a frame in mode 0 (~37 fps): Steam's loading screen at each start. Force it to
   1 sample there too, as scene mode does (the user allows no MSAA).
 - Frames vrcompositor itself does not render (69-71 fps worn) repeat their content (docs/performance.md
   "Trembling: how to watch for it").
-- Activating passthrough stalls vrcompositor ~0.3 s (user: "lags half a second", 2026-11-09 16:44:02,
-  CTrackedCamera "Late initialization"): find what it builds then (pipelines? camera textures?) and do it at start.
-- Steam's VR UI frame rate: ~10 fps while a page animates, any damage size. The GPU is the limit now (100 % busy):
+- Activating passthrough freezes the view (the only freeze left in Steam's VR UI, user 2026-11-12): vrcompositor
+  stalls ~0.3 s (2026-11-09 16:44:02, CTrackedCamera "Late initialization"): find what it builds then (pipelines?
+  camera textures?) and do it at start.
+- Steam's VR UI frame rate (user, 2026-11-12: SteamVR itself is very fluid, Steam is "usable" but needs more
+  performance): ~10 fps while a page animates, any damage size. The GPU is the limit now (100 % busy):
   ~24 ms of GPU per Steam frame in the gaps vrcompositor leaves, for the full composite of the 1920x1080 page, its
   capture and readback. Find what costs that much (backdrop-filter blurs? the capture copy? ANGLE on this blob), or
   avoid the readback: frames from the GPU process to vrcompositor without the CPU (CEF OSR has no shared texture
@@ -99,6 +106,8 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - The sleep animation shows inside the dashboard panel instead of full screen.
 - Real sleep (suspend to RAM, `/etc/quest1-sleep` deep, opt-in): on resume Meta's tracking is lost, no sound,
   the proximity sensor wakes the headset while worn, the fan and power LED stay on.
+- Restart from Steam: with the OS started by `fastboot boot` it restarts into Android; test it once the OS is
+  flashed (user), then drop the sshd `pam_systemd` workaround in `device/holo-perf.sh` if it works.
 
 ## System
 
