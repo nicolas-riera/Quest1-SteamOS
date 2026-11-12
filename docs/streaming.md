@@ -521,13 +521,33 @@ vrlink writes its own log, `~/.local/share/Steam/logs/vrlink.txt` (the PC's side
     - The "1.65 s" lead of the night before was gdb's doing: its breakpoints stop vrlink, frames pile up, and only then do
       they all fall more than 1 s in the past. Frame IDs, the PC clock offset and the timing are fine without it.
     - Each NV12 import does show its own buffer (`test_modifier` checks a second frame next to the first now).
+11. **The sharp centre** (2026-11-12; user: "c'est net"). The centre broke up into blocks as soon as a controller moved
+    ("art abstrait"), the edges much less. The decode was not it: 40 frames that venus decoded while the user moved a
+    controller (1440 frames of a session, recorded at the decoder's input) match FFmpeg's decode of the same packets
+    (PSNR ~53.5 dB in every view, the 10-to-8-bit rounding), no packet missing. vrcompositor showed only the wide views
+    (a snapshot of its eye buffers), whose centre the PC codes with few bits, as the inset is to cover it.
+    - vrlink submits each eye's wide view (the bounds) and, after each eye's VRTextureWithPoseAndDepth_t (offset 152), the
+      inset's place over it in the atlas (left (0.4, 0.329, 0.780, 0.415), right (0.220, 0.829, 0.600, 0.915): measured
+      in the frames too) and a view count of 2 (offset 168); the inset is the view just above its wide view. The Frame's
+      shader for that, `distort_ps_achromatic_se2`, blends the inset into the wide view in the distortion pass; here
+      vrcompositor draws with `distort_ps_layered` (its fragment shader bound twice a frame, read in the layer), which
+      knows no inset, although `enableAchromaticDistortion` is true.
+    - So the layer does it: the shim publishes the places as vrlink submits (`/dev/shm/quest1-vrlink-views`,
+      `quest1_views.h`), and vrcompositor's copy of each frame goes on to an output 1.5 times as large (its eye buffers
+      are 1500x1664 for a 1024x1024 wide view) where each wide view gets its inset blended in, read at the level of
+      the copy that fits its ~1.8 times reduction, with the edge of Valve's shader (`nv12_inset.frag`). It costs ~2.5 ms
+      of GPU a frame: 58-60 fps against ~69 without it, 71 without any copy (dashboard open, panels forced on).
+    - The copies (and outputs) of one size share one memory: each frame copies only the frame vrcompositor then reads.
+      vrlink shares 16 frame buffers, and 16 copies of 16 MB each were made as the session started: the headset swapped
+      ~700 MB within seconds and stalled (Monado's re-projection too). ~150-250 MB now; vrcompositor's GPU memory went
+      from 666 to 397 MB.
 
 Plan:
 0. ~~Capture vrlink's own output~~ done (above).
 1. ~~`/dev/video-dec0` and a decode test~~ done (`vrdevice_path`, items 5 and 6).
 2. ~~Vulkan dma-buf import shim~~ done (items 2 and 6).
-3. ~~The picture in the headset~~ done (items 8-10), in 8 and 10 bits, a new picture each frame. Next (docs/todo.md):
-   the stream trembles and looks heavily compressed; vrlink's exit hang, controller input.
+3. ~~The picture in the headset~~ done (items 8-11), in 8 and 10 bits, a new picture each frame, a sharp centre. Next (docs/todo.md):
+   the stream trembles, flashes black now and then and runs below 72 fps (item 11); vrlink's exit hang.
 4. Alternative: ALVR or WiVRn (PC-side driver + headset client with V4L2 or software HEVC decode). 1-2 weeks, avoids Valve's stack but loses Steam integration.
 Not worth pursuing: patching vrlink (internal interfaces `IVRMailbox`, `IVRBlockQueue`).
 

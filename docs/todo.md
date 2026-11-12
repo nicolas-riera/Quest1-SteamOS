@@ -33,6 +33,9 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - Controllers, more tests (user, 2026-11-12): one woken up late (battery out and in while Meta's stack starts) must
   still connect (docs/tracking-6dof.md); after a real tracking loss the headset keeps its last position and the
   controllers come back.
+- Sometimes, as the headset is put on, the floor's direction seems uncertain and is seen to adjust (user,
+  2026-11-12; not remembered from Meta's OS). To investigate: gravity/orientation at the first poses after wake,
+  and whether the room's floor comes from the relocalization above.
 
 ## Display
 
@@ -86,6 +89,9 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - SteamVR restarted alone (Steam kept running) breaks Steam's VR UI: steamwebhelper's GPU process takes GPU page faults when
   vrcompositor stops (2026-11-11 17:50 and 17:51, two restarts) and the dashboard then shows its lower half empty and loses
   its bottom bar (restarting Steam brought it back, user). SteamVR alone should restart cleanly.
+- A setting in the VR settings' Oculus Quest category, on by default: ignore the Oculus and Menu buttons while the
+  controller moves (they are easy to press by mistake on Touch controllers; Meta's OS and the Rift S, same controllers,
+  do the same).
 
 ## Power
 
@@ -105,18 +111,21 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 
 ## Streaming
 
-- Steam Link VR (docs/streaming.md, section 2): a new picture each frame now (user, 2026-11-12: "clairement plus
-  fluide"), but it trembles and the centre breaks up when something moves.
+- Steam Link VR (docs/streaming.md, section 2): a new picture each frame and a sharp centre now (user, 2026-11-12:
+  "c'est net"), but it trembles, flashes black now and then and runs below 72 fps.
   - Trembling: the stream only (the headset's own chaperone and dashboard are steady). Not Monado's re-projection:
     with it off everything trembled more (2026-11-12). Lead: the PC predicts each frame's display ~92 ms after it
     renders it (`vrlink_aftm_*.csv`: send 8 ms, network 5, decode 15, then the frame waits ~62 ms in vrlink for that
     predicted time), so its poses are predicted ~90 ms ahead. Find what makes the PC predict that far (what vrlink
     reports: `query_to_display`/`decode_to_display`, our frame timing, the "DecodeSlow" and "Mispredicted" flags).
-  - Compression: the user sees the centre (the PC's fixed foveation: two 1024x1024 inset views in the 1024x4096 atlas)
-    break up into blocks as soon as a controller moves, the edges much less, while the PC sends a high bitrate. A
-    decoded frame of a still scene is clean (its inset sharp, 2026-11-12). Next: a frame decoded while something moves,
-    against FFmpeg's decode of the same packets (in 10 bits: split mode was only checked on a clip), and whether the
-    PC lowers its quality on "DecodeSlow" (decode 15 ms, more than a 13.9 ms frame).
+  - Black flashes (user, 2026-11-12): vrlink logs no decoder reset outside the session's start; not found yet.
+  - Frame rate: the layer's inset pass costs ~2.5 ms of GPU (58-60 fps against ~69 with the dashboard open).
+    vrcompositor has the Frame's own way, free: `distort_ps_achromatic_se2` blends the inset in its distortion pass,
+    but here it draws with `distort_ps_layered` (chromatic, overlays in the pass), with `enableAchromaticDistortion`
+    true in steamvr.vrsettings. Find what picks the shader (its settings block reads achromatic off at run time).
+  - Start of a session: the headset stalls for seconds (Monado's re-projection too), the system swaps ~150-250 MB
+    as vrlink and vrcompositor allocate (it was ~700 MB before the copies shared their memory). Lock Monado's (and
+    the tracking's) memory, and find what else allocates then.
   Also: vrcompositor leaks a sync_fence fd for each vrlink frame (~70 a second, limit 524288: ~2 h of session; they
   do not come through vkImportSemaphoreFdKHR). The PC's overlays show only when the PC's SteamVR started after
   vrlink; stopping a session from the headset (`StopStreamingSession`) does nothing and vrlink hangs on its way out.

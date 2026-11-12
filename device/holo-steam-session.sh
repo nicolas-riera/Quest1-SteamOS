@@ -16,7 +16,8 @@
 # Usage (on the headset): [VKSRC=<src/vklayer-steamvr copy>] [V4L2SRC=<src/v4l2shim copy>] [RPSRC=<src/rpspectator copy>]
 #   [SCSRC=<src/q1screencast copy>] holo-steam-session.sh install
 #   VKSRC: build and install the Vulkan shim + dlopen redirect into /usr/local/lib/quest1-vk-steam
-#   V4L2SRC: build and install /usr/local/lib/libquest1_v4l2.so (the image has it from tools/build-native.sh)
+#   V4L2SRC: build and install /usr/local/lib/libquest1_v4l2.so (the image has it from tools/build-native.sh;
+#            the copy needs src/vklayer-steamvr/quest1_views.h next to it, as in the repo)
 #   RPSRC: build and install /usr/local/lib/libquest1_rpspectator.so (src/rpspectator; same)
 #   SCSRC: build and install /usr/local/bin/q1screencast (src/q1screencast; same)
 set -e

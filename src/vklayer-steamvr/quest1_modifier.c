@@ -833,24 +833,38 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateSamplerYcbcrConversionKHR(VkDevice d
 
 // --- vrlink's frames in vrcompositor: an RGBA copy of each NV12 frame
 //
-// vrcompositor draws a frame of vrlink in its distortion pass (distort_ps_achromatic_se2.spv), through a plain view of
-// the NV12 image and a separate sampler. The blob samples NV12 only through a YCbCr conversion, which takes an
+// vrcompositor draws a frame of vrlink in its distortion pass (here distort_ps_layered: the Frame's
+// distort_ps_achromatic_se2, which would blend the inset in, is not used), through a plain view of the NV12 image and
+// a separate sampler. The blob samples NV12 only through a YCbCr conversion, which takes an
 // immutable combined sampler, so nothing came out (black, 2026-11-11). Here each of vrcompositor's NV12 images has an
 // RGBA8 copy, whose views vrcompositor gets instead of NV12 ones, filled right after vrcompositor's barrier on the NV12
 // image, which comes each frame before its distortion pass reads it. The copy holds RGB (BT.709, full range):
 // vrcompositor shows what it samples as it is, and raw YCbCr (R = Cr, G = Y, B = Cb) came out magenta.
+// vrcompositor reads each eye's wide view only, so the copy goes on to an output at its eye buffers' size where each
+// wide view gets its foveated inset blended in (nv12_inset.frag, the insets' places from vrlink: quest1_views.h).
+// Without it the centre showed the wide view's, coded with few bits under the inset: blocks as soon as anything moved
+// (user, 2026-11-12: "art abstrait"; sharp with it). It costs ~2.5 ms of GPU a frame (58-60 fps against ~69 with the
+// dashboard open, panels forced on).
+// The copies and outputs of a size share one memory: each frame copies only the frame it then reads, after the reads
+// of the frames before it (the passes' dependency), so one of each is all they need. vrlink shares 16 frame buffers:
+// 16 copies of 16 MB each were made at once as the stream started, and the headset swapped hard (2026-11-12).
 
 #include "quest1_nv12_spv.h"
+#include "quest1_views.h"
+
+enum { QCP_LEVELS = 3 }; //!< the copy and two halvings, for the inset that comes out smaller (see qcp_record)
 
 static struct qnv_copy
 {
 	VkImage nv12; //!< vrcompositor's NV12 image
-	VkImage img;  //!< the RGBA8 copy
-	VkDeviceMemory mem;
-	VkImageView src, dst; //!< the NV12 through the conversion, the copy as an attachment
-	VkFramebuffer fb;
-	VkDescriptorSet set;
-	uint32_t w, h;
+	VkImage img;  //!< the RGBA8 copy with its smaller levels, bound to the shared memory of its size
+	VkImage out;  //!< what vrcompositor reads: the wide views with their insets, at its eye buffers' size
+	int mem, out_mem;          //!< their memories (qcs.mem)
+	VkImageView src, dst;      //!< the NV12 through the conversion, the copy as an attachment
+	VkImageView all, out_view; //!< the copy with its levels, the output as an attachment
+	VkFramebuffer fb, out_fb;
+	VkDescriptorSet set, out_set;
+	uint32_t w, h, ow, oh;
 } qcp[128];
 static atomic_int qcp_n;
 
@@ -865,8 +879,71 @@ static struct
 	VkPipelineLayout pl;
 	VkRenderPass rp;
 	VkPipeline pipe;
+	VkSampler sampler2; //!< the inset pass's: linear, with levels
+	VkDescriptorSetLayout dsl2;
+	VkPipelineLayout pl2;
+	VkPipeline pipe2;
 	VkDescriptorPool pool;
+	struct
+	{
+		VkDeviceMemory mem;
+		VkDeviceSize size;
+		uint32_t type;
+		int users;
+	} mem[4]; //!< the copies' and outputs' memories, one per size
 } qcs = {PTHREAD_MUTEX_INITIALIZER};
+
+//! log2 of x >= 1 within 0.01 (0 below; the layer does without libm)
+static float qcp_log2(float x)
+{
+	float e = 0;
+	while (x >= 2.0f) {
+		x *= 0.5f;
+		e += 1.0f;
+	}
+	return x < 1.0f ? 0.0f : e + (x - 1.0f) * (1.4427f - 0.4427f * (x - 1.0f));
+}
+
+//! nv12_inset.frag's push constants
+struct qcp_inset
+{
+	float place[4]; //!< the inset over the wide view, in the atlas (u1 <= u0: none)
+	float view[4];  //!< the inset's own view
+	float lod;
+};
+
+//! vrlink's views (quest1_views.h) in vrcompositor, or false when it published none.
+static bool qcp_views(struct q1_views *out)
+{
+	static const struct q1_views *v;
+	static uint64_t tried_ns;
+	if (strcmp(program_invocation_short_name, "vrcompositor") != 0) // (not test_modifier's frames)
+		return false;
+	if (!v) {
+		uint64_t t = now_ns();
+		if (t - tried_ns < 1000000000ull) // vrlink writes it at its first frame
+			return false;
+		tried_ns = t;
+		int fd = open(Q1_VIEWS_PATH, O_RDONLY | O_CLOEXEC);
+		void *m = fd >= 0 ? mmap(NULL, sizeof(*v), PROT_READ, MAP_SHARED, fd, 0) : MAP_FAILED;
+		if (fd >= 0)
+			close(fd);
+		if (m == MAP_FAILED)
+			return false;
+		v = m;
+		LOG("dma-buf: Steam Link VR's foveated insets from %s\n", Q1_VIEWS_PATH);
+	}
+	for (int tries = 0; tries < 8; tries++) {
+		uint32_t seq = __atomic_load_n(&v->seq, __ATOMIC_ACQUIRE);
+		if (seq & 1)
+			continue;
+		memcpy(out, (const void *)v, sizeof(*out));
+		__atomic_thread_fence(__ATOMIC_ACQUIRE);
+		if (__atomic_load_n(&v->seq, __ATOMIC_RELAXED) == seq)
+			return out->eyes == 2;
+	}
+	return false;
+}
 
 //! Call with qcs.lock held: the conversion, sampler, pipeline and pool, once per device.
 static bool qcs_init(struct device *d, VkDevice device)
@@ -967,13 +1044,39 @@ static bool qcs_init(struct device *d, VkDevice device)
 	gp.renderPass = qcs.rp;
 	if (r == VK_SUCCESS)
 		r = d->CreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gp, NULL, &qcs.pipe);
+	if (fs)
+		dsm(device, fs, NULL);
+	fs = VK_NULL_HANDLE;
+	// the inset pass (nv12_inset.frag): the copy through a linear sampler with its levels, the inset in push constants
+	VkSamplerCreateInfo sc2 = {VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+	sc2.magFilter = sc2.minFilter = VK_FILTER_LINEAR;
+	sc2.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+	sc2.addressModeU = sc2.addressModeV = sc2.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	sc2.maxLod = QCP_LEVELS;
+	if (r == VK_SUCCESS)
+		r = ((PFN_vkCreateSampler)d->gdpa(device, "vkCreateSampler"))(device, &sc2, NULL, &qcs.sampler2);
+	b.pImmutableSamplers = &qcs.sampler2;
+	if (r == VK_SUCCESS)
+		r = d->CreateDescriptorSetLayout(device, &dc, NULL, &qcs.dsl2);
+	VkPushConstantRange pr = {VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(struct qcp_inset)};
+	VkPipelineLayoutCreateInfo plc2 = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, 1, &qcs.dsl2, 1, &pr};
+	if (r == VK_SUCCESS)
+		r = d->CreatePipelineLayout(device, &plc2, NULL, &qcs.pl2);
+	VkShaderModuleCreateInfo mi = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, sizeof(nv12_inset_frag),
+	                               nv12_inset_frag};
+	if (r == VK_SUCCESS)
+		r = csm(device, &mi, NULL, &fs);
+	st[1].module = fs;
+	gp.layout = qcs.pl2;
+	if (r == VK_SUCCESS)
+		r = d->CreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gp, NULL, &qcs.pipe2);
 	if (vs)
 		dsm(device, vs, NULL);
 	if (fs)
 		dsm(device, fs, NULL);
-	VkDescriptorPoolSize ps = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 128};
+	VkDescriptorPoolSize ps = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 256};
 	VkDescriptorPoolCreateInfo pc = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, NULL,
-	                                 VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, 128, 1, &ps};
+	                                 VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, 256, 1, &ps};
 	if (r == VK_SUCCESS)
 		r = ((PFN_vkCreateDescriptorPool)d->gdpa(device, "vkCreateDescriptorPool"))(device, &pc, NULL, &qcs.pool);
 	qcs.ok = r == VK_SUCCESS;
@@ -996,7 +1099,97 @@ static int qcp_find(VkImage nv12)
 	return found;
 }
 
-//! The RGBA copy of vrcompositor's NV12 image `n` (made at its first view): its index, -1 if it cannot be made.
+//! Call with qcs.lock held: an RGBA8 image bound to the shared memory of its size (one per size: see above).
+static VkResult qcp_image(struct device *d, VkDevice device, uint32_t w, uint32_t h, uint32_t levels, VkImage *img,
+                          int *mem)
+{
+	VkImageCreateInfo ic = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+	ic.imageType = VK_IMAGE_TYPE_2D;
+	ic.format = VK_FORMAT_R8G8B8A8_UNORM;
+	ic.extent = (VkExtent3D){w, h, 1};
+	ic.mipLevels = levels;
+	ic.arrayLayers = 1;
+	ic.samples = VK_SAMPLE_COUNT_1_BIT;
+	ic.tiling = VK_IMAGE_TILING_OPTIMAL;
+	ic.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+	           VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+	*mem = -1;
+	VkResult r = d->CreateImage(device, &ic, NULL, img);
+	VkMemoryRequirements req = {0};
+	if (r == VK_SUCCESS)
+		d->GetImageMemoryRequirements(device, *img, &req);
+	uint32_t type = UINT32_MAX;
+	for (uint32_t t = 0; t < d->memprops.memoryTypeCount && type == UINT32_MAX; t++)
+		if ((req.memoryTypeBits & (1u << t)) &&
+		    (d->memprops.memoryTypes[t].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
+			type = t;
+	if (r == VK_SUCCESS && type == UINT32_MAX)
+		r = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+	const int nmem = (int)(sizeof(qcs.mem) / sizeof(qcs.mem[0]));
+	int m = 0;
+	while (r == VK_SUCCESS && m < nmem && !(qcs.mem[m].mem && qcs.mem[m].size == req.size && qcs.mem[m].type == type))
+		m++;
+	if (r == VK_SUCCESS && m == nmem) {
+		m = 0;
+		while (m < nmem && qcs.mem[m].mem)
+			m++;
+		VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, req.size, type};
+		r = m == nmem ? VK_ERROR_OUT_OF_DEVICE_MEMORY : d->AllocateMemory(device, &ai, NULL, &qcs.mem[m].mem);
+		if (r == VK_SUCCESS) {
+			qcs.mem[m].size = req.size;
+			qcs.mem[m].type = type;
+		}
+	}
+	if (r == VK_SUCCESS)
+		r = d->BindImageMemory(device, *img, qcs.mem[m].mem, 0);
+	if (r == VK_SUCCESS) {
+		qcs.mem[m].users++;
+		*mem = m;
+	}
+	return r;
+}
+
+//! Call with qcs.lock held: one user less of a shared memory; the memory to free when it was the last.
+static VkDeviceMemory qcp_unref(int m)
+{
+	VkDeviceMemory unused = VK_NULL_HANDLE;
+	if (m >= 0 && !--qcs.mem[m].users) {
+		unused = qcs.mem[m].mem;
+		qcs.mem[m].mem = VK_NULL_HANDLE;
+	}
+	return unused;
+}
+
+static void qcp_destroy(struct device *d, VkDevice device, const struct qnv_copy *c)
+{
+	PFN_vkFreeDescriptorSets fs = (PFN_vkFreeDescriptorSets)d->gdpa(device, "vkFreeDescriptorSets");
+	PFN_vkDestroyFramebuffer df = (PFN_vkDestroyFramebuffer)d->gdpa(device, "vkDestroyFramebuffer");
+	PFN_vkDestroyImageView dv = (PFN_vkDestroyImageView)d->gdpa(device, "vkDestroyImageView");
+	PFN_vkDestroyImage di = (PFN_vkDestroyImage)d->gdpa(device, "vkDestroyImage");
+	if (c->set)
+		fs(device, qcs.pool, 1, &c->set);
+	if (c->out_set)
+		fs(device, qcs.pool, 1, &c->out_set);
+	df(device, c->fb, NULL);
+	df(device, c->out_fb, NULL);
+	dv(device, c->dst, NULL);
+	dv(device, c->src, NULL);
+	dv(device, c->all, NULL);
+	dv(device, c->out_view, NULL);
+	di(device, c->img, NULL);
+	di(device, c->out, NULL);
+	pthread_mutex_lock(&qcs.lock);
+	VkDeviceMemory m1 = qcp_unref(c->mem), m2 = qcp_unref(c->out_mem);
+	pthread_mutex_unlock(&qcs.lock);
+	if (m1)
+		d->FreeMemory(device, m1, NULL);
+	if (m2)
+		d->FreeMemory(device, m2, NULL);
+}
+
+//! The RGBA copy of vrcompositor's NV12 image `n` and its output (made at its first view): its index, -1 if they
+//! cannot be made. The output is 1.5 times the frame: vrcompositor's eye buffers are 1500x1664 here, over the field
+//! of a 1024x1024 wide view (Steam Link VR's for a Frame), and the inset keeps that much of its detail.
 static int qcp_get(struct device *d, VkDevice device, int n)
 {
 	int k = qcp_find(qnv[n].image);
@@ -1010,31 +1203,12 @@ static int qcp_get(struct device *d, VkDevice device, int n)
 		pthread_mutex_unlock(&qcs.lock);
 		return -1;
 	}
-	struct qnv_copy c = {qnv[n].image, VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE,
-	                     VK_NULL_HANDLE, qnv[n].w, qnv[n].h};
-	VkImageCreateInfo ic = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-	ic.imageType = VK_IMAGE_TYPE_2D;
-	ic.format = VK_FORMAT_R8G8B8A8_UNORM;
-	ic.extent = (VkExtent3D){c.w, c.h, 1};
-	ic.mipLevels = ic.arrayLayers = 1;
-	ic.samples = VK_SAMPLE_COUNT_1_BIT;
-	ic.tiling = VK_IMAGE_TILING_OPTIMAL;
-	ic.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
-	           VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-	VkResult r = d->CreateImage(device, &ic, NULL, &c.img);
-	VkMemoryRequirements req = {0};
+	struct qnv_copy c = {.nv12 = qnv[n].image, .mem = -1, .out_mem = -1, .w = qnv[n].w, .h = qnv[n].h};
+	c.ow = c.w * 3 / 2;
+	c.oh = c.h * 3 / 2;
+	VkResult r = qcp_image(d, device, c.w, c.h, QCP_LEVELS, &c.img, &c.mem);
 	if (r == VK_SUCCESS)
-		d->GetImageMemoryRequirements(device, c.img, &req);
-	uint32_t type = UINT32_MAX;
-	for (uint32_t t = 0; t < d->memprops.memoryTypeCount && type == UINT32_MAX; t++)
-		if ((req.memoryTypeBits & (1u << t)) &&
-		    (d->memprops.memoryTypes[t].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
-			type = t;
-	VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, req.size, type};
-	if (r == VK_SUCCESS)
-		r = type == UINT32_MAX ? VK_ERROR_OUT_OF_DEVICE_MEMORY : d->AllocateMemory(device, &ai, NULL, &c.mem);
-	if (r == VK_SUCCESS)
-		r = d->BindImageMemory(device, c.img, c.mem, 0);
+		r = qcp_image(d, device, c.ow, c.oh, 1, &c.out, &c.out_mem);
 	VkSamplerYcbcrConversionInfo cinfo = {VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_INFO, NULL, qcs.conv};
 	VkImageViewCreateInfo vc = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, &cinfo, 0, c.nv12, VK_IMAGE_VIEW_TYPE_2D,
 	                            VK_FORMAT_UNDEFINED, {0}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
@@ -1045,24 +1219,47 @@ static int qcp_get(struct device *d, VkDevice device, int n)
 	vc.format = VK_FORMAT_R8G8B8A8_UNORM;
 	if (r == VK_SUCCESS)
 		r = d->CreateImageView(device, &vc, NULL, &c.dst);
+	vc.subresourceRange.levelCount = QCP_LEVELS;
+	if (r == VK_SUCCESS)
+		r = d->CreateImageView(device, &vc, NULL, &c.all);
+	vc.image = c.out;
+	vc.subresourceRange.levelCount = 1;
+	if (r == VK_SUCCESS)
+		r = d->CreateImageView(device, &vc, NULL, &c.out_view);
+	PFN_vkCreateFramebuffer cf = (PFN_vkCreateFramebuffer)d->gdpa(device, "vkCreateFramebuffer");
 	VkFramebufferCreateInfo fc = {VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, NULL, 0, qcs.rp, 1, &c.dst, c.w, c.h, 1};
 	if (r == VK_SUCCESS)
-		r = ((PFN_vkCreateFramebuffer)d->gdpa(device, "vkCreateFramebuffer"))(device, &fc, NULL, &c.fb);
+		r = cf(device, &fc, NULL, &c.fb);
+	fc.pAttachments = &c.out_view;
+	fc.width = c.ow;
+	fc.height = c.oh;
+	if (r == VK_SUCCESS)
+		r = cf(device, &fc, NULL, &c.out_fb);
+	PFN_vkAllocateDescriptorSets as = (PFN_vkAllocateDescriptorSets)d->gdpa(device, "vkAllocateDescriptorSets");
 	VkDescriptorSetAllocateInfo sa = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, NULL, qcs.pool, 1, &qcs.dsl};
 	if (r == VK_SUCCESS)
-		r = ((PFN_vkAllocateDescriptorSets)d->gdpa(device, "vkAllocateDescriptorSets"))(device, &sa, &c.set);
+		r = as(device, &sa, &c.set);
+	sa.pSetLayouts = &qcs.dsl2;
+	if (r == VK_SUCCESS)
+		r = as(device, &sa, &c.out_set);
 	if (r == VK_SUCCESS) {
-		VkDescriptorImageInfo ii = {VK_NULL_HANDLE, c.src, VK_IMAGE_LAYOUT_GENERAL};
-		VkWriteDescriptorSet w = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, c.set, 0, 0, 1,
-		                          VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &ii};
-		((PFN_vkUpdateDescriptorSets)d->gdpa(device, "vkUpdateDescriptorSets"))(device, 1, &w, 0, NULL);
+		VkDescriptorImageInfo ii[2] = {{VK_NULL_HANDLE, c.src, VK_IMAGE_LAYOUT_GENERAL},
+		                               {VK_NULL_HANDLE, c.all, VK_IMAGE_LAYOUT_GENERAL}};
+		VkWriteDescriptorSet w[2] = {
+		    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, c.set, 0, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &ii[0]},
+		    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, c.out_set, 0, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+		     &ii[1]},
+		};
+		((PFN_vkUpdateDescriptorSets)d->gdpa(device, "vkUpdateDescriptorSets"))(device, 2, w, 0, NULL);
 		qcp[i] = c;
 		atomic_fetch_add(&qcp_n, 1);
 	}
 	pthread_mutex_unlock(&qcs.lock);
+	if (r != VK_SUCCESS)
+		qcp_destroy(d, device, &c);
 	static atomic_int logs;
 	if (atomic_fetch_add(&logs, 1) < 4 || r != VK_SUCCESS)
-		LOG("dma-buf: RGBA copy %ux%u of NV12 image %p: %d\n", c.w, c.h, (void *)c.nv12, r);
+		LOG("dma-buf: RGBA copy %ux%u of NV12 image %p, output %ux%u: %d\n", c.w, c.h, (void *)c.nv12, c.ow, c.oh, r);
 	return r == VK_SUCCESS ? (int)i : -1;
 }
 
@@ -1072,19 +1269,12 @@ static void qcp_forget(VkDevice device, VkImage nv12)
 	int k = qcp_find(nv12);
 	if (k < 0)
 		return;
-	struct device *d = device_of(device);
 	pthread_mutex_lock(&qcs.lock);
 	struct qnv_copy c = qcp[k];
 	memset(&qcp[k], 0, sizeof(qcp[k]));
 	atomic_fetch_sub(&qcp_n, 1);
 	pthread_mutex_unlock(&qcs.lock);
-	((PFN_vkFreeDescriptorSets)d->gdpa(device, "vkFreeDescriptorSets"))(device, qcs.pool, 1, &c.set);
-	((PFN_vkDestroyFramebuffer)d->gdpa(device, "vkDestroyFramebuffer"))(device, c.fb, NULL);
-	PFN_vkDestroyImageView dv = (PFN_vkDestroyImageView)d->gdpa(device, "vkDestroyImageView");
-	dv(device, c.dst, NULL);
-	dv(device, c.src, NULL);
-	((PFN_vkDestroyImage)d->gdpa(device, "vkDestroyImage"))(device, c.img, NULL);
-	d->FreeMemory(device, c.mem, NULL);
+	qcp_destroy(device_of(device), device, &c);
 }
 
 //! Record the copy of NV12 image k's frame into its RGBA image (outside a render pass).
@@ -1098,6 +1288,9 @@ static void qcp_record(VkCommandBuffer cb, int k)
 	static PFN_vkCmdSetViewport viewport;
 	static PFN_vkCmdSetScissor scissor;
 	static PFN_vkCmdDraw draw;
+	static PFN_vkCmdBlitImage blit;
+	static PFN_vkCmdPipelineBarrier barrier;
+	static PFN_vkCmdPushConstants push;
 	if (!draw) {
 		VkDevice dev = d->handle;
 		begin = (PFN_vkCmdBeginRenderPass)d->gdpa(dev, "vkCmdBeginRenderPass");
@@ -1106,6 +1299,9 @@ static void qcp_record(VkCommandBuffer cb, int k)
 		sets = (PFN_vkCmdBindDescriptorSets)d->gdpa(dev, "vkCmdBindDescriptorSets");
 		viewport = (PFN_vkCmdSetViewport)d->gdpa(dev, "vkCmdSetViewport");
 		scissor = (PFN_vkCmdSetScissor)d->gdpa(dev, "vkCmdSetScissor");
+		blit = (PFN_vkCmdBlitImage)d->gdpa(dev, "vkCmdBlitImage");
+		barrier = (PFN_vkCmdPipelineBarrier)d->gdpa(dev, "vkCmdPipelineBarrier");
+		push = (PFN_vkCmdPushConstants)d->gdpa(dev, "vkCmdPushConstants");
 		draw = (PFN_vkCmdDraw)d->gdpa(dev, "vkCmdDraw");
 	}
 	pthread_mutex_lock(&qcs.lock);
@@ -1123,6 +1319,68 @@ static void qcp_record(VkCommandBuffer cb, int k)
 	sets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, qcs.pl, 0, 1, &c.set, 0, NULL);
 	draw(cb, 3, 1, 0, 0);
 	end(cb);
+	// The smaller levels: Steam Link's foveated insets (a narrow field at 1024x1024) come out ~1.8 times smaller in
+	// the output; read at one level, their detail would alias.
+	VkImageMemoryBarrier b = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+	                          VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+	                          VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, c.img,
+	                          {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+	VkImageMemoryBarrier bl[2] = {b, b};
+	bl[1].srcAccessMask = 0;
+	bl[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	bl[1].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	bl[1].subresourceRange.baseMipLevel = 1;
+	bl[1].subresourceRange.levelCount = QCP_LEVELS - 1;
+	barrier(cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 2, bl);
+	for (uint32_t l = 1; l < QCP_LEVELS; l++) {
+		int32_t w = (int32_t)(c.w >> (l - 1)), h = (int32_t)(c.h >> (l - 1));
+		VkImageBlit r = {{VK_IMAGE_ASPECT_COLOR_BIT, l - 1, 0, 1}, {{0, 0, 0}, {w, h, 1}},
+		                 {VK_IMAGE_ASPECT_COLOR_BIT, l, 0, 1}, {{0, 0, 0}, {w / 2, h / 2, 1}}};
+		blit(cb, c.img, VK_IMAGE_LAYOUT_GENERAL, c.img, VK_IMAGE_LAYOUT_GENERAL, 1, &r, VK_FILTER_LINEAR);
+		b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		b.subresourceRange.baseMipLevel = l;
+		if (l + 1 < QCP_LEVELS)
+			barrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &b);
+	}
+	// before vrcompositor reads it: level 0 by the copy pass, the others by the blits
+	b.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+	b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+	b.subresourceRange.baseMipLevel = 0;
+	b.subresourceRange.levelCount = QCP_LEVELS;
+	barrier(cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+	        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &b);
+	// What vrcompositor reads: each eye's half of the atlas, its inset blended into its wide view (nv12_inset.frag)
+	struct q1_views views;
+	bool insets = qcp_views(&views);
+	VkRect2D out = {{0, 0}, {c.ow, c.oh}};
+	VkRenderPassBeginInfo bo = {VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, NULL, qcs.rp, c.out_fb, out, 0, NULL};
+	begin(cb, &bo, VK_SUBPASS_CONTENTS_INLINE);
+	bind(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, qcs.pipe2);
+	VkViewport vo = {0, 0, (float)c.ow, (float)c.oh, 0, 1};
+	viewport(cb, 0, 1, &vo);
+	sets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, qcs.pl2, 0, 1, &c.out_set, 0, NULL);
+	for (int e = 0; e < 2; e++) {
+		struct qcp_inset pc = {{0}};
+		VkRect2D half = {{0, (int32_t)(e * c.oh / 2)}, {c.ow, c.oh / 2}};
+		if (insets) {
+			const float *w = views.wide[e], *r = views.inset[e];
+			memcpy(pc.place, r, sizeof(pc.place));
+			// the inset is the view above its wide view, as large
+			float iv[4] = {w[0], w[1] - (w[3] - w[1]), w[2], w[1]};
+			memcpy(pc.view, iv, sizeof(pc.view));
+			// its texels per output pixel: the level that fits
+			float sx = (iv[2] - iv[0]) * c.w / ((r[2] - r[0]) * c.ow), sy = (iv[3] - iv[1]) * c.h / ((r[3] - r[1]) * c.oh);
+			pc.lod = qcp_log2(sx > sy ? sx : sy);
+			// vrcompositor reads the wide view only (and a row around it, filtering)
+			int32_t y0 = (int32_t)(w[1] * c.oh) - 2, y1 = (int32_t)(w[3] * c.oh + 0.5f) + 2;
+			half.offset.y = y0 < 0 ? 0 : y0;
+			half.extent.height = (uint32_t)((y1 > (int32_t)c.oh ? (int32_t)c.oh : y1) - half.offset.y);
+		}
+		scissor(cb, 0, 1, &half);
+		push(cb, qcs.pl2, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), &pc);
+		draw(cb, 3, 1, 0, 0);
+	}
+	end(cb);
 	atomic_store(&qs_stream_ns, now_ns()); // (quest1_scanout.c: vrcompositor's distortion pass shows it)
 }
 
@@ -1135,6 +1393,11 @@ static VKAPI_ATTR void VKAPI_CALL CmdPipelineBarrier(VkCommandBuffer cb, VkPipel
 {
 	int copies[4], n = 0;
 	for (uint32_t i = 0; atomic_load(&qcp_n) && i < ni && n < 4; i++) {
+		// vrcompositor takes the frame from the foreign queue before it reads it and gives it back after: only
+		// the first is a new frame to copy (both were copied, a 1024x4096 pass for nothing each frame, 2026-11-11)
+		if (im[i].dstQueueFamilyIndex == VK_QUEUE_FAMILY_FOREIGN_EXT ||
+		    im[i].dstQueueFamilyIndex == VK_QUEUE_FAMILY_EXTERNAL)
+			continue;
 		int k = qcp_find(im[i].image);
 		if (k >= 0)
 			copies[n++] = k;
@@ -1170,7 +1433,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateImageView(VkDevice device, const VkI
 		VkImageViewCreateInfo c = *ci;
 		c.pNext = NULL;
 		pthread_mutex_lock(&qcs.lock);
-		c.image = qcp[k].img;
+		c.image = qcp[k].out;
 		pthread_mutex_unlock(&qcs.lock);
 		c.format = VK_FORMAT_R8G8B8A8_UNORM;
 		c.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;

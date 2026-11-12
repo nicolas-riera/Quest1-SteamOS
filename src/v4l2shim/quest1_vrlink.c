@@ -29,8 +29,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/syscall.h>
 #include <unistd.h>
+
+#include "../vklayer-steamvr/quest1_views.h"
 
 #define EXPORT __attribute__((visibility("default")))
 
@@ -268,6 +272,48 @@ typedef uint32_t (*submit_set_t)(void *self, int32_t index, uint32_t count, cons
 static submit_set_t real_submit_set;
 static void *client_vtable_copy[2 + NSLOTS];
 
+// After an eye's VRTextureWithPoseAndDepth_t (144 bytes): two floats, the inset's place in the atlas, the view count
+enum { EYE_INSET = 152, EYE_VIEWS = 168, SUBMIT_TEXTURE_WITH_DEPTH = 0x10 };
+
+//! The insets' places, for vrcompositor's layer (quest1_views.h): written when they change.
+static void publish_views(const void *const eye[2], const void *const bounds[2], uint32_t flags)
+{
+	static struct q1_views *v;
+	static bool failed;
+	struct q1_views n = {0, 2};
+	for (int e = 0; e < 2; e++) {
+		uint32_t views;
+		if (!(flags & SUBMIT_TEXTURE_WITH_DEPTH) || !eye[e] || !bounds[e])
+			return;
+		memcpy(&views, (const char *)eye[e] + EYE_VIEWS, sizeof(views));
+		memcpy(n.wide[e], bounds[e], sizeof(n.wide[e]));
+		memcpy(n.inset[e], (const char *)eye[e] + EYE_INSET, sizeof(n.inset[e]));
+		const float *w = n.wide[e], *r = n.inset[e];
+		if (views != 2 || !(r[0] >= w[0] && r[0] < r[2] && r[2] <= w[2] && r[1] >= w[1] && r[1] < r[3] && r[3] <= w[3]))
+			n.eyes = 0;
+	}
+	if (!v && !failed) {
+		int fd = open(Q1_VIEWS_PATH, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+		void *m = fd >= 0 && ftruncate(fd, sizeof(*v)) == 0
+		              ? mmap(NULL, sizeof(*v), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) : MAP_FAILED;
+		if (fd >= 0)
+			close(fd);
+		failed = m == MAP_FAILED;
+		v = failed ? NULL : m;
+		fprintf(stderr, "quest1_v4l2: vrlink: foveated insets for vrcompositor in %s: %s\n", Q1_VIEWS_PATH,
+		        failed ? strerror(errno) : "ok");
+	}
+	if (!v || (v->eyes == n.eyes && !memcmp(v->wide, n.wide, sizeof(n.wide)) && !memcmp(v->inset, n.inset, sizeof(n.inset))))
+		return;
+	uint32_t seq = __atomic_load_n(&v->seq, __ATOMIC_RELAXED);
+	__atomic_store_n(&v->seq, seq | 1, __ATOMIC_RELAXED);
+	__atomic_thread_fence(__ATOMIC_RELEASE);
+	v->eyes = n.eyes;
+	memcpy(v->wide, n.wide, sizeof(n.wide));
+	memcpy(v->inset, n.inset, sizeof(n.inset));
+	__atomic_store_n(&v->seq, (seq | 1) + 1, __ATOMIC_RELEASE);
+}
+
 static uint32_t submit_set(void *self, int32_t index, uint32_t count, const uint64_t *handles, const void *eye_l,
                            const void *eye_r, const void *bounds_l, const void *bounds_r, uint32_t flags,
                            double seconds)
@@ -280,6 +326,7 @@ static uint32_t submit_set(void *self, int32_t index, uint32_t count, const uint
 		handles = set;
 		index = 0;
 	}
+	publish_views((const void *const[2]){eye_l, eye_r}, (const void *const[2]){bounds_l, bounds_r}, flags);
 	return real_submit_set(self, index, count, handles, eye_l, eye_r, bounds_l, bounds_r, flags, seconds);
 }
 
