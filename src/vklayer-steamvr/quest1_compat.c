@@ -240,6 +240,7 @@ struct device
 	PFN_vkDestroyFence DestroyFence;
 	PFN_vkWaitForFences WaitForFences;
 	PFN_vkResetFences ResetFences;
+	PFN_vkGetFenceStatus GetFenceStatus;
 	PFN_vkGetSemaphoreFdKHR GetSemaphoreFdKHR;
 	PFN_vkImportSemaphoreFdKHR ImportSemaphoreFdKHR;
 	PFN_vkCmdUpdateBuffer CmdUpdateBuffer;
@@ -1145,7 +1146,9 @@ static VKAPI_ATTR VkResult VKAPI_CALL WaitForFences(VkDevice device, uint32_t n,
 	const uint64_t step = 100000000ull; // 100 ms
 	ft("waitfences", n ? (int64_t)(uint64_t)fences[0] : 0);
 	if (timeout <= step) {
-		VkResult r0 = d->WaitForFences(device, n, fences, all, timeout);
+		VkResult r0;
+		if (n != 1 || !qd_event_wait_pending(d, fences[0], &r0))
+			r0 = d->WaitForFences(device, n, fences, all, timeout);
 		ft("waited", r0);
 		return r0;
 	}
@@ -2884,6 +2887,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice pd, const Vk
 	GET(DestroyFence);
 	GET(WaitForFences);
 	GET(ResetFences);
+	GET(GetFenceStatus);
 	GET(GetSemaphoreFdKHR);
 	GET(ImportSemaphoreFdKHR);
 	GET(CmdUpdateBuffer);
@@ -2947,6 +2951,7 @@ static VKAPI_ATTR void VKAPI_CALL DestroyDevice(VkDevice device, const VkAllocat
 	pthread_join(d->completer, NULL);
 	for (uint32_t i = 0; i < d->fence_pool_count; i++)
 		d->DestroyFence(device, d->fence_pool[i], NULL);
+	qd_events_device_gone(d);
 	pthread_mutex_lock(&g_lock);
 	for (int i = 0; i < MAX_OBJS; i++)
 		if (g_devices[i] == d)
@@ -3004,6 +3009,7 @@ static PFN_vkVoidFunction device_intercept(const char *name)
 	I("vkCreateImage", CreateImage)
 	I("vkAllocateMemory", AllocateMemory)
 	I("vkWaitForFences", WaitForFences)
+	I("vkDestroyFence", qd_DestroyFence)
 	I("vkCreateGraphicsPipelines", CreateGraphicsPipelines)
 	I("vkCreateDescriptorSetLayout", CreateDescriptorSetLayout)
 	I("vkCreatePipelineLayout", CreatePipelineLayout)
