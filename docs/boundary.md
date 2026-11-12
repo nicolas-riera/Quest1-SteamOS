@@ -153,6 +153,20 @@ AnchorUuid = 16 bytes in text order; Parcelables are preceded by an int32 non-nu
 Not yet verified: relocalization after a real reboot with the headset worn and moved around the room; whether the
 persisted map keeps growing (mapdb rewritten) while used.
 
+## The room after a boot (2026-11-09/10, open in docs/todo.md)
+
+- The room (playspace) came back a bit off at the first put-on after a boot, then right (user, 2026-11-09). The engine
+  relocalized in the saved map 20 s after boot with the headset on the table, then logged "All submaps have bad map
+  tracking" for ~50 s until it relocalized again worn. The headset's rest position in the map frame matched the day
+  before within 1 cm (a yaw error would not show there). The user's guess: the saved anchors cover too little of the
+  room.
+- 2026-11-09 evening: the saved map holds 2 submaps (~4 MB, persisted on 2026-11-08 from one spot). The engine
+  relocalizes in it, logs "All submaps have bad map tracking" seconds later, evicts the context and starts over, again
+  and again; while it tracks two contexts it skips map building, so the saved map never grows.
+- 2026-11-10 00:53-00:54 (user: "the tracking sneezed and I flew off", the headset pushed hard; desktop mode, a stream
+  and passthrough, all 8 cores busy, kswapd at 30 %): "Bad map tracking" on submap 0, "big search" relocalizations,
+  both controllers "Lost position tracking, waiting for 6DoF reset".
+
 
 ## Notes moved from the to-do list (2026-11-08): Boundary
 

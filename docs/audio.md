@@ -276,7 +276,7 @@ and every open rebuilds the whole chain in the ADSP (ASM session, ADM/COPP, AFE 
 codec path, without calibration data (`send_afe_cal_type cal_block not found`, `q6asm_send_cal: cal_block is
 NULL` at each open). The `quest1-output` node is now always running (`node.always-process = true`,
 `session.suspend-timeout-seconds = 0`, `node.pause-on-idle = false`): the PCM stays open and plays silence
-between sounds (PipeWire ~0 % CPU). To confirm by ear in the headset (user).
+between sounds (PipeWire ~0 % CPU).
 
 ## 2026-11-08 (night): Steam's sounds starved of CPU; the ADSP's receive thread at FIFO 1
 
@@ -293,8 +293,6 @@ The user still heard crackles while Steam worked. Two threads on the way of a so
   receive kernel thread (`lpass_smem_glin`), which the kernel makes SCHED_FIFO 1, below every other real-time thread
   here. `holo-audio start` now makes it FIFO 87, just below PipeWire's data loop (88); it works < 1 ms at a time.
 
-To confirm by ear in the headset (user).
-
 ## 2026-11-09: the ADSP fed one period at a time (mmap); the output now writes
 
 The crackle came back after a reboot (the headset's installed `holo-audio` lacked the FIFO 87 line above; the repo
@@ -308,7 +306,8 @@ ADSP never holds more than that one period and any delay on the round trip (ADSP
 ADSP) leaves it without data: a gap, inaudible on silence. With read/write access every period PipeWire writes is
 sent to the ADSP at once (`msm_pcm_playback_copy`), so it holds what is buffered. The sink has
 `api.alsa.disable-mmap = true` (device/holo-audio.sh); the PCM's access is then RW_INTERLEAVED. The user heard no
-crackle afterwards, a stream running or not (2026-11-09).
+crackle afterwards, a stream running or not (2026-11-09), nor since (2026-11-12): fixed. The click at each Steam start
+is still there (docs/todo.md).
 
 Restarting PipeWire cuts Steam's audio until Steam restarts (it does not reconnect to the PulseAudio server).
 
