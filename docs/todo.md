@@ -106,11 +106,17 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 ## Streaming
 
 - Steam Link VR (docs/streaming.md, section 2): a new picture each frame now (user, 2026-11-12: "clairement plus
-  fluide"), but it looks heavily compressed and trembles. Compression: the PC encodes four 1024x1024 views
-  ("Setting m_nTargetSquareViewSize: 1024" in the PC's driver_vrlink.txt; its `driver_vrlink` settings have
-  `streamFormatWidth` and `automaticStreamFormatWidth`) for 1440x1600 panels. A wider view makes a taller atlas
-  (1024x4096 now): check what venus decodes at 72 fps first. Trembling: the user sees it on other things too and thinks of Monado's re-projection (the
-  view itself is fine, the apps' content follows the trembling).
+  fluide"), but it trembles and the centre breaks up when something moves.
+  - Trembling: the stream only (the headset's own chaperone and dashboard are steady). Not Monado's re-projection:
+    with it off everything trembled more (2026-11-12). Lead: the PC predicts each frame's display ~92 ms after it
+    renders it (`vrlink_aftm_*.csv`: send 8 ms, network 5, decode 15, then the frame waits ~62 ms in vrlink for that
+    predicted time), so its poses are predicted ~90 ms ahead. Find what makes the PC predict that far (what vrlink
+    reports: `query_to_display`/`decode_to_display`, our frame timing, the "DecodeSlow" and "Mispredicted" flags).
+  - Compression: the user sees the centre (the PC's fixed foveation: two 1024x1024 inset views in the 1024x4096 atlas)
+    break up into blocks as soon as a controller moves, the edges much less, while the PC sends a high bitrate. A
+    decoded frame of a still scene is clean (its inset sharp, 2026-11-12). Next: a frame decoded while something moves,
+    against FFmpeg's decode of the same packets (in 10 bits: split mode was only checked on a clip), and whether the
+    PC lowers its quality on "DecodeSlow" (decode 15 ms, more than a 13.9 ms frame).
   Also: vrcompositor leaks a sync_fence fd for each vrlink frame (~70 a second, limit 524288: ~2 h of session; they
   do not come through vkImportSemaphoreFdKHR). The PC's overlays show only when the PC's SteamVR started after
   vrlink; stopping a session from the headset (`StopStreamingSession`) does nothing and vrlink hangs on its way out.
