@@ -1755,6 +1755,7 @@ static bool ub_update(struct device *d, VkCommandBuffer cb, VkBuffer b, VkDevice
 static VKAPI_ATTR void VKAPI_CALL CmdUpdateBuffer(VkCommandBuffer cb, VkBuffer b, VkDeviceSize off, VkDeviceSize size,
                                                   const void *data)
 {
+	qh_note_update(cb, size, data); // quest1_hud.c
 	if (rm_update(cb, b, off, size, data))
 		return; // absorbed into a merged render pass (quest1_rpmerge.c)
 	bool u32 = size % 4 == 0 && u32_shaped(data, size / 2);

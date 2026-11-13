@@ -138,6 +138,10 @@ docs/streaming.md "The capture"):
   its own writes it to `/dev/shm/quest1-spectator` (two frames + a header with a sequence number), 1.6 ms a frame.
   Monado frees all of it 5 s after the file goes away. The copy time is logged every 10 s ("spectator: ...
   frames/s, copy ... ms each").
+- The frame is re-projected with the warp's rotation of that vsync, as the panels show it, and the head-locked
+  overlays (docs/direct-scanout.md, 2026-11-13) are blended over it. The eye render as it was trembled with each
+  frame's prediction error while the headset's view was steady (user, 2026-11-13). Checked with a fixed 3 deg warp
+  rotation (`yaw=3` in `/tmp/quest1-reproj`): the spectator moves 32 px with it.
 - q1screencast streams those frames. q1apps only turns its cover dark blue (#1b2838) for the session: q1screencast
   shows the X screen again after 0.5 s without a VR frame (the headset taken off and asleep: Monado renders
   nothing), as the Frame's stream turns dark blue. (Until 2026-11-10 q1apps painted every VR frame on the cover with

@@ -28,11 +28,16 @@ Stream picture placement (docs/streaming.md, "Measuring where the stream's frame
 - `fake-motion.patch`: test-only patch for driver_quest1 (`git apply`, never commit it applied): `/tmp/q1-fake-yaw`
   "DEG HZ [M]" (as steamos) adds a yaw sine (and a sideways x sine) to every head pose, local and the one vrlink
   sends, so a headset lying still sees a known, smooth head motion.
-- `q1marker.cpp [DOWN_M]`: a world-locked overlay with a random pattern, 1.5 m ahead and DOWN_M (0.45) below the
+- `q1marker.cpp [DOWN_M] [head]`: a world-locked overlay with a random pattern, 1.5 m ahead and DOWN_M (0.45) below the
   head: a local reference in the same snapshot as the stream's picture. Cross-build in WSL:
   `aarch64-linux-gnu-g++ -std=c++17 -O2 -I/root/openvr-sdk/headers q1marker.cpp -L/root/openvr-sdk/lib/linuxarm64
   -lopenvr_api -static-libstdc++ -static-libgcc`; run as steamos with
   `LD_LIBRARY_PATH=/opt/steamvr/bin/linuxarm64:/opt/hybris/lib LD_PRELOAD=/opt/hybris/lib/libbionictls.so`.
+  With `head` it is head-locked (placed relative to the headset like SteamVR's HUD, another pattern), to run next to
+  the world-locked one: a negative DOWN_M puts it above. Monado's own output (`touch /tmp/quest1-snap-monado`, with
+  `QUEST1_WARP_USAGE=0` for linear outputs) shows where the panels get it; for a motion both vrcompositor and the
+  warp see, apply `fake-motion-monado.patch` (test only, to the headset's Monado tree; same `/tmp/q1-fake-yaw`) instead
+  of the driver's patch (docs/direct-scanout.md, 2026-11-13).
 - `shift.c`: `shift A.ppm B.ppm X Y W H R`, the (dx, dy) that best moves a region of A onto B (build on the headset:
   `gcc -O2 -o shift shift.c -lm`). With `R` 2 and A = B it prints the region's contrast (sd): pick regions with
   some, and check they stay put without motion (Steam Link's animated skies do not).

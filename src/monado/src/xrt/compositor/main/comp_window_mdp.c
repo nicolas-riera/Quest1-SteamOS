@@ -175,6 +175,7 @@ struct direct_buf
 	VkFramebuffer fb;      //!< outputs
 	VkDescriptorSet set;   //!< sources
 	bool transfer_src;     //!< sources: can be blitted from (spect_tick)
+	bool hud;              //!< a buffer of head-locked overlays (sampled with a transparent border)
 };
 
 //! Re-project when /tmp/quest1-reproj does not say otherwise (it says "on" or "off", and tuning values, see warp_read_knobs)
@@ -201,6 +202,9 @@ struct direct_vk
 	VkDescriptorSetLayout dsl;
 	VkPipelineLayout pl;
 	VkPipeline pipe;
+	VkPipeline hud_pipe;    //!< head-locked overlays over the re-projected frame (warp_render)
+	VkSampler hud_sampler;  //!< transparent border
+	bool hud_mesh;          //!< the head-locked overlays' meshes (no rotation) are in the vertex buffer
 	VkDescriptorPool dpool;
 	VkBuffer vbuf, ibuf;
 	VkDeviceMemory vmem, imem;
@@ -263,6 +267,7 @@ struct mdp_direct_stats
 	uint32_t gaps;      //!< vsync events never seen (the thread woke more than a period late)
 	double wake_ms_max; //!< vsync event -> this thread running
 	uint32_t received;   //!< frames of the layer received
+	uint32_t hud;        //!< of them, with head-locked overlays apart (Q1D_FRAME's hud)
 	uint32_t superseded; //!< frames replaced by a newer one before a tick took them: never on the panels
 	uint32_t queued;     //!< ticks that showed `pend`, a frame a newer one had come after
 	//! when the frames came, in 2 ms steps after the last tick (MDP_PERIOD_NS / 2 ms = 7 buckets): a frame that comes
@@ -291,6 +296,10 @@ struct mdp_direct
 	pthread_mutex_t lock;
 
 	struct direct_buf buf[Q1D_MAX_IMAGES][2];
+	//! SteamVR's head-locked overlays (its HUD: volume, IPD), drawn by the layer apart from the frame (Q1D_FRAME's hud).
+	//! In the frame, the re-projection turned them with the world by the frame's prediction error, and they trembled
+	//! while the head moved (user, 2026-11-13: "exactly like the stream"); apart, they get the lens only.
+	struct direct_buf hud[Q1D_HUD_SETS][2];
 	uint32_t count, height;
 	//! the layer's buffers: the panel's size, or (scene mode, /etc/quest1-warp-lens "2") vrcompositor's undistorted eye
 	//! renders, of its render size, which only the warp (lens mode) can show
@@ -305,6 +314,9 @@ struct mdp_direct
 		int64_t time_ns;
 		float q[4];
 		bool pose_valid;
+		int hud;             //!< the set of `hud` holding its head-locked overlays, -1 when they are in the frame
+		uint32_t hud_halves; //!< bit h: half h has some
+		float hud_rect[2][4]; //!< where in each half's buffer (u0, v0, u1, v1)
 	} latest_frame;
 	bool fresh;        //!< `latest` was not on the panels yet
 	bool need_refresh; //!< the panels came back on: show the latest frame again
@@ -333,6 +345,7 @@ struct mdp_direct
 	struct direct_buf out[WARP_OUT_SETS][2];
 	struct direct_vk vk;
 	struct direct_spect spect;
+	float spect_delta[4]; //!< the rotation of the last warp (spect_tick re-projects the spectator's frame with it)
 	struct
 	{
 		bool off;
@@ -1067,6 +1080,14 @@ direct_reset(struct mdp_target *t)
 		}
 		D->held[i] = false;
 	}
+	for (int k = 0; k < Q1D_HUD_SETS; k++) {
+		for (int h = 0; h < 2; h++) {
+			if (D->hud[k][h].ahb != NULL) {
+				AHardwareBuffer_release(D->hud[k][h].ahb);
+			}
+			D->hud[k][h] = (struct direct_buf){0};
+		}
+	}
 	D->count = 0;
 	D->latest = -1;
 	D->pend = -1;
@@ -1123,7 +1144,24 @@ direct_thread_func(void *ptr)
 			direct_disconnect(t);
 			continue;
 		}
-		if (m.type == Q1D_BUFFER && m.index < Q1D_MAX_IMAGES && m.half < 2) {
+		if (m.type == Q1D_BUFFER && (m.half == 2 || m.half == 3) && m.index < Q1D_HUD_SETS) {
+			// the head-locked overlays' buffers, after the frames' ones (same size)
+			AHardwareBuffer *ahb = NULL;
+			if (D->recv_handle(D->client_fd, &ahb) != 0 || ahb == NULL) {
+				U_LOG_E("mdp: cannot receive a buffer from the layer");
+				direct_disconnect(t);
+				continue;
+			}
+			const mdp_native_handle *nh = t->get_native_handle(ahb);
+			pthread_mutex_lock(&D->lock);
+			struct direct_buf *b = &D->hud[m.index][m.half - 2];
+			if (b->ahb != NULL) { // (only after a reconnect, which freed its import)
+				AHardwareBuffer_release(b->ahb);
+			}
+			*b = (struct direct_buf){.ahb = ahb, .fd = nh->data[0], .stride_px = m.stride_px, .ubwc = m.ubwc, .hud = true};
+			pthread_mutex_unlock(&D->lock);
+			U_LOG_W("mdp: head-locked overlays' buffer %u/%u from the layer", m.index, m.half - 2);
+		} else if (m.type == Q1D_BUFFER && m.index < Q1D_MAX_IMAGES && m.half < 2) {
 			AHardwareBuffer *ahb = NULL;
 			if (D->recv_handle(D->client_fd, &ahb) != 0 || ahb == NULL) {
 				U_LOG_E("mdp: cannot receive a buffer from the layer");
@@ -1168,6 +1206,11 @@ direct_thread_func(void *ptr)
 			D->latest_frame.time_ns = m.time_ns;
 			D->latest_frame.pose_valid = m.pose_valid != 0;
 			memcpy(D->latest_frame.q, m.pose, sizeof(m.pose));
+			uint32_t hs = m.hud & 0xff;
+			D->latest_frame.hud = hs > 0 && hs <= Q1D_HUD_SETS && (m.hud & 0x300) != 0 ? (int)hs - 1 : -1;
+			D->latest_frame.hud_halves = (m.hud >> 8) & 3;
+			memcpy(D->latest_frame.hud_rect, m.hud_rect, sizeof(m.hud_rect));
+			D->stats.hud += D->latest_frame.hud >= 0;
 			D->fresh = true;
 			direct_release_unused(D);
 			pthread_mutex_unlock(&D->lock);
@@ -1895,7 +1938,8 @@ warp_import_usage(struct mdp_target *t, struct direct_buf *b, bool output, VkIma
 			warp_free_buf_vk(vk, b);
 			return false;
 		}
-		VkDescriptorImageInfo ii = {D->vk.sampler, b->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+		VkDescriptorImageInfo ii = {b->hud ? D->vk.hud_sampler : D->vk.sampler, b->view,
+		                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
 		VkWriteDescriptorSet w = {
 		    .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
 		    .dstSet = b->set,
@@ -1954,11 +1998,15 @@ warp_init(struct mdp_target *t)
 	VkDescriptorSetLayoutBinding bind = {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
 	VkDescriptorSetLayoutCreateInfo dslci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
 	                                         .bindingCount = 1, .pBindings = &bind};
-	VkDescriptorPoolSize psz = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 * Q1D_MAX_IMAGES};
+	VkDescriptorPoolSize psz = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 * (Q1D_MAX_IMAGES + Q1D_HUD_SETS)};
 	VkDescriptorPoolCreateInfo dpci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-	                                   .maxSets = 2 * Q1D_MAX_IMAGES, .poolSizeCount = 1, .pPoolSizes = &psz};
+	                                   .maxSets = 2 * (Q1D_MAX_IMAGES + Q1D_HUD_SETS), .poolSizeCount = 1,
+	                                   .pPoolSizes = &psz};
+	VkSamplerCreateInfo hsci = sci;
+	hsci.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
 	if (vk->vkCreateRenderPass(vk->device, &rpci, NULL, &V->rp) != VK_SUCCESS ||
 	    vk->vkCreateSampler(vk->device, &sci, NULL, &V->sampler) != VK_SUCCESS ||
+	    vk->vkCreateSampler(vk->device, &hsci, NULL, &V->hud_sampler) != VK_SUCCESS ||
 	    vk->vkCreateDescriptorSetLayout(vk->device, &dslci, NULL, &V->dsl) != VK_SUCCESS ||
 	    vk->vkCreateDescriptorPool(vk->device, &dpci, NULL, &V->dpool) != VK_SUCCESS) {
 		U_LOG_E("mdp: warp: render pass, sampler or descriptors failed");
@@ -2022,15 +2070,48 @@ warp_init(struct mdp_target *t)
 	    .renderPass = V->rp,
 	};
 	VkResult r = vk->vkCreateGraphicsPipelines(vk->device, VK_NULL_HANDLE, 1, &gpci, NULL, &V->pipe);
-	vk->vkDestroyShaderModule(vk->device, vs, NULL);
 	vk->vkDestroyShaderModule(vk->device, fs, NULL);
+	if (r == VK_SUCCESS && D->lens) {
+		// the head-locked overlays (lens mode only: they come with the eye renders), premultiplied, over the frame
+		VkShaderModuleCreateInfo hsci2 = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+		                                  .codeSize = sizeof(q1_warp_frag_hud_spv), .pCode = q1_warp_frag_hud_spv};
+		VkShaderModule hfs = VK_NULL_HANDLE;
+		VkPipelineColorBlendAttachmentState hcba = {
+		    .blendEnable = VK_TRUE,
+		    .srcColorBlendFactor = VK_BLEND_FACTOR_ONE,
+		    .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+		    .colorBlendOp = VK_BLEND_OP_ADD,
+		    .srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+		    .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+		    .alphaBlendOp = VK_BLEND_OP_ADD,
+		    .colorWriteMask = 0xf,
+		};
+		VkPipelineColorBlendStateCreateInfo hcb = cb;
+		hcb.pAttachments = &hcba;
+		VkPipelineShaderStageCreateInfo hstages[2] = {stages[0], stages[1]};
+		VkGraphicsPipelineCreateInfo hgpci = gpci;
+		hgpci.pStages = hstages;
+		hgpci.pColorBlendState = &hcb;
+		if (vk->vkCreateShaderModule(vk->device, &hsci2, NULL, &hfs) == VK_SUCCESS) {
+			hstages[1].module = hfs;
+			if (vk->vkCreateGraphicsPipelines(vk->device, VK_NULL_HANDLE, 1, &hgpci, NULL, &V->hud_pipe) != VK_SUCCESS) {
+				V->hud_pipe = VK_NULL_HANDLE;
+			}
+			vk->vkDestroyShaderModule(vk->device, hfs, NULL);
+		}
+		if (V->hud_pipe == VK_NULL_HANDLE) {
+			U_LOG_E("mdp: warp: no pipeline for the head-locked overlays: they stay in the frame");
+		}
+	}
+	vk->vkDestroyShaderModule(vk->device, vs, NULL);
 	if (r != VK_SUCCESS) {
 		U_LOG_E("mdp: warp: vkCreateGraphicsPipelines: %d", r);
 		return false;
 	}
 
-	// vertices (host visible, rewritten for every warp) and indices
-	const uint32_t nverts = 2 * (WARP_GRID + 1) * (WARP_GRID + 1);
+	// vertices (host visible): the two halves' meshes, rewritten for every warp, then the two of the head-locked
+	// overlays (made once); indices
+	const uint32_t nverts = 4 * (WARP_GRID + 1) * (WARP_GRID + 1);
 	V->nidx = WARP_GRID * WARP_GRID * 6;
 	VkBufferCreateInfo bci = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = nverts * WARP_VTX_FLOATS * sizeof(float),
 	                          .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
@@ -2144,6 +2225,11 @@ warp_free(struct mdp_target *t)
 			warp_free_buf_vk(vk, &D->buf[i][h]);
 		}
 	}
+	for (int k = 0; k < Q1D_HUD_SETS; k++) {
+		for (int h = 0; h < 2; h++) {
+			warp_free_buf_vk(vk, &D->hud[k][h]);
+		}
+	}
 	for (int k = 0; k < WARP_OUT_SETS; k++) {
 		for (int h = 0; h < 2; h++) {
 			struct direct_buf *b = &D->out[k][h];
@@ -2168,6 +2254,8 @@ warp_free(struct mdp_target *t)
 	if (V->fence != VK_NULL_HANDLE) vk->vkDestroyFence(vk->device, V->fence, NULL);
 	if (V->cpool != VK_NULL_HANDLE) vk->vkDestroyCommandPool(vk->device, V->cpool, NULL);
 	if (V->pipe != VK_NULL_HANDLE) vk->vkDestroyPipeline(vk->device, V->pipe, NULL);
+	if (V->hud_pipe != VK_NULL_HANDLE) vk->vkDestroyPipeline(vk->device, V->hud_pipe, NULL);
+	if (V->hud_sampler != VK_NULL_HANDLE) vk->vkDestroySampler(vk->device, V->hud_sampler, NULL);
 	if (V->pl != VK_NULL_HANDLE) vk->vkDestroyPipelineLayout(vk->device, V->pl, NULL);
 	if (V->dpool != VK_NULL_HANDLE) vk->vkDestroyDescriptorPool(vk->device, V->dpool, NULL);
 	if (V->dsl != VK_NULL_HANDLE) vk->vkDestroyDescriptorSetLayout(vk->device, V->dsl, NULL);
@@ -2230,6 +2318,54 @@ warp_lens_setup(struct mdp_target *t)
 	        D->tan_l[1], D->tan_r[1], D->tan_u[1], D->tan_d[1]);
 }
 
+//! The part of the output the head-locked overlays' mesh (`mesh`, no rotation) maps from `rect` of their buffer: the
+//! cells whose texture coordinates (any channel) reach into it. Blending them over the whole panel cost ~2 ms of GPU
+//! a vsync; SteamVR's HUD covers a small part of it. False when no cell does.
+static bool
+warp_hud_scissor(const struct mdp_direct *D, const float *mesh, const float *rect, VkRect2D *out)
+{
+	const float m = 0.01f; // texture coordinates: a margin for the quads' antialiased edges
+	const float r0 = rect[0] - m, r1 = rect[1] - m, r2 = rect[2] + m, r3 = rect[3] + m;
+	float x0 = 2, y0 = 2, x1 = -2, y1 = -2;
+	for (int j = 0; j < WARP_GRID; j++) {
+		for (int i = 0; i < WARP_GRID; i++) {
+			float u0 = 1e9f, v0 = 1e9f, u1 = -1e9f, v1 = -1e9f;
+			for (int c = 0; c < 4; c++) {
+				const float *vtx = mesh + WARP_VTX_FLOATS * ((j + (c >> 1)) * (WARP_GRID + 1) + i + (c & 1));
+				for (int k = 0; k < 3; k++) {
+					u0 = fminf(u0, vtx[2 + 2 * k]);
+					u1 = fmaxf(u1, vtx[2 + 2 * k]);
+					v0 = fminf(v0, vtx[3 + 2 * k]);
+					v1 = fmaxf(v1, vtx[3 + 2 * k]);
+				}
+			}
+			if (u1 < r0 || u0 > r2 || v1 < r1 || v0 > r3) {
+				continue;
+			}
+			const float *a = mesh + WARP_VTX_FLOATS * (j * (WARP_GRID + 1) + i);
+			const float *b = mesh + WARP_VTX_FLOATS * ((j + 1) * (WARP_GRID + 1) + i + 1);
+			x0 = fminf(x0, fminf(a[0], b[0]));
+			x1 = fmaxf(x1, fmaxf(a[0], b[0]));
+			y0 = fminf(y0, fminf(a[1], b[1]));
+			y1 = fmaxf(y1, fmaxf(a[1], b[1]));
+		}
+	}
+	if (x1 < x0 || y1 < y0) {
+		return false;
+	}
+	int px0 = (int)floorf((x0 + 1) * 0.5f * MDP_HALF), px1 = (int)ceilf((x1 + 1) * 0.5f * MDP_HALF);
+	int py0 = (int)floorf((y0 + 1) * 0.5f * D->height), py1 = (int)ceilf((y1 + 1) * 0.5f * D->height);
+	px0 = px0 < 0 ? 0 : px0;
+	py0 = py0 < 0 ? 0 : py0;
+	px1 = px1 > MDP_HALF ? MDP_HALF : px1;
+	py1 = py1 > (int)D->height ? (int)D->height : py1;
+	if (px1 <= px0 || py1 <= py0) {
+		return false;
+	}
+	*out = (VkRect2D){{px0, py0}, {(uint32_t)(px1 - px0), (uint32_t)(py1 - py0)}};
+	return true;
+}
+
 //! Call with D->lock held: draw the latest frame warped by `delta` into output set `o`. GPU time in ms.
 static bool
 warp_render(struct mdp_target *t, int o, const float *delta_top, const float *delta_bot, double *gpu_ms)
@@ -2244,9 +2380,32 @@ warp_render(struct mdp_target *t, int o, const float *delta_top, const float *de
 			return false;
 		}
 	}
+	// the frame's head-locked overlays, if the layer drew them apart
+	struct direct_buf *hud = D->latest_frame.hud >= 0 && V->hud_pipe != VK_NULL_HANDLE ? D->hud[D->latest_frame.hud] : NULL;
+	uint32_t hud_halves = D->latest_frame.hud_halves;
+	for (int h = 0; hud != NULL && h < 2; h++) {
+		if (!(hud_halves & (1u << h))) {
+			continue;
+		}
+		if (hud[h].ahb == NULL || (hud[h].image == VK_NULL_HANDLE && !warp_import(t, &hud[h], false))) {
+			static int logged;
+			if (logged++ < 4) {
+				U_LOG_E("mdp: warp: no head-locked overlays' buffer %d/%d", D->latest_frame.hud, h);
+			}
+			hud = NULL;
+		}
+	}
+	const size_t mesh_floats = WARP_VTX_FLOATS * (WARP_GRID + 1) * (WARP_GRID + 1);
+	if (hud != NULL && !V->hud_mesh) {
+		static const float identity[4] = {0, 0, 0, 1};
+		for (int h = 0; h < 2; h++) {
+			warp_build_mesh(D, h, identity, identity, V->vptr + (2 + h) * mesh_floats);
+		}
+		V->hud_mesh = true;
+	}
 	int64_t tm0 = os_monotonic_get_ns();
 	for (int h = 0; h < 2; h++) {
-		warp_build_mesh(D, h, delta_top, delta_bot, V->vptr + h * WARP_VTX_FLOATS * (WARP_GRID + 1) * (WARP_GRID + 1));
+		warp_build_mesh(D, h, delta_top, delta_bot, V->vptr + h * mesh_floats);
 	}
 	D->tick_mesh_ns = os_monotonic_get_ns() - tm0;
 	D->stats.mesh_ms_sum += (double)D->tick_mesh_ns / 1e6;
@@ -2272,6 +2431,11 @@ warp_render(struct mdp_target *t, int o, const float *delta_top, const float *de
 		};
 		vk->vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0,
 		                         NULL, 0, NULL, 1, &ib);
+		if (hud != NULL && (hud_halves & (1u << h))) {
+			ib.image = hud[h].image;
+			vk->vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+			                         0, NULL, 0, NULL, 1, &ib);
+		}
 		VkRenderPassBeginInfo rpbi = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
 		                              .renderPass = V->rp,
 		                              .framebuffer = D->out[o][h].fb,
@@ -2287,6 +2451,16 @@ warp_render(struct mdp_target *t, int o, const float *delta_top, const float *de
 		vk->vkCmdBindVertexBuffers(cmd, 0, 1, &V->vbuf, &off);
 		vk->vkCmdBindIndexBuffer(cmd, V->ibuf, 0, VK_INDEX_TYPE_UINT16);
 		vk->vkCmdDrawIndexed(cmd, V->nidx, 1, 0, 0, 0);
+		VkRect2D hsc;
+		if (hud != NULL && (hud_halves & (1u << h)) &&
+		    warp_hud_scissor(D, V->vptr + (2 + h) * mesh_floats, D->latest_frame.hud_rect[h], &hsc)) {
+			vk->vkCmdSetScissor(cmd, 0, 1, &hsc);
+			vk->vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, V->hud_pipe);
+			vk->vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, V->pl, 0, 1, &hud[h].set, 0, NULL);
+			VkDeviceSize hoff = (VkDeviceSize)(2 + h) * mesh_floats * sizeof(float);
+			vk->vkCmdBindVertexBuffers(cmd, 0, 1, &V->vbuf, &hoff);
+			vk->vkCmdDrawIndexed(cmd, V->nidx, 1, 0, 0, 0);
+		}
 		vk->vkCmdEndRenderPass(cmd);
 	}
 	vk->vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, V->qp, 1);
@@ -2398,6 +2572,9 @@ struct spect_push
 {
 	float origin[2], scale[2];
 	uint32_t w, h, swap_rb;
+	uint32_t has_hud; //!< blend the head-locked overlays (binding 2)
+	float tan[4];     //!< the eye render's tangents: left, right, up, down
+	float rot[3][4];  //!< rows: the warp's rotation, from the head of the display time into the head of the render
 };
 
 static void *
@@ -2514,14 +2691,15 @@ spect_init(struct mdp_target *t, const struct direct_buf *src)
 	                           .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
 	                           .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
 	                           .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE};
-	VkDescriptorSetLayoutBinding dslb[2] = {
+	VkDescriptorSetLayoutBinding dslb[3] = {
 	    {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
 	    {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
+	    {2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
 	};
 	VkDescriptorSetLayoutCreateInfo dslci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-	                                         .bindingCount = 2,
+	                                         .bindingCount = 3,
 	                                         .pBindings = dslb};
-	VkDescriptorPoolSize dps[2] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1}};
+	VkDescriptorPoolSize dps[2] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1}};
 	VkDescriptorPoolCreateInfo dpci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
 	                                   .maxSets = 1,
 	                                   .poolSizeCount = 2,
@@ -2728,7 +2906,13 @@ spect_tick(struct mdp_target *t)
 	// The set is free: the last pass using it has finished (!submitted).
 	VkDescriptorImageInfo dii = {S->sampler, src->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
 	VkDescriptorBufferInfo dbi = {S->gbuf, 0, VK_WHOLE_SIZE};
-	VkWriteDescriptorSet wds[2] = {
+	// the frame's head-locked overlays, if the warp drew some for this half (its buffer is imported and readable)
+	const struct direct_buf *hud = D->latest_frame.hud >= 0 && (D->latest_frame.hud_halves & 2) ? &D->hud[D->latest_frame.hud][1] : NULL;
+	if (hud != NULL && hud->view == VK_NULL_HANDLE) {
+		hud = NULL;
+	}
+	VkDescriptorImageInfo hii = {S->sampler, hud != NULL ? hud->view : src->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+	VkWriteDescriptorSet wds[3] = {
 	    {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
 	     .dstSet = S->set,
 	     .dstBinding = 0,
@@ -2741,8 +2925,14 @@ spect_tick(struct mdp_target *t)
 	     .descriptorCount = 1,
 	     .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
 	     .pBufferInfo = &dbi},
+	    {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+	     .dstSet = S->set,
+	     .dstBinding = 2,
+	     .descriptorCount = 1,
+	     .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+	     .pImageInfo = &hii},
 	};
-	vk->vkUpdateDescriptorSets(vk->device, 2, wds, 0, NULL);
+	vk->vkUpdateDescriptorSets(vk->device, 3, wds, 0, NULL);
 	// The view returns red and blue swapped for linear BGRA inputs unless it swizzles them back (warp_import_usage:
 	// only when the outputs are UBWC); UBWC inputs are RGBA (bgra 0).
 	struct spect_push pc = {
@@ -2751,7 +2941,21 @@ spect_tick(struct mdp_target *t)
 	    .w = SPECT_W,
 	    .h = SPECT_H,
 	    .swap_rb = D->bgra && !D->out[0][0].ubwc,
+	    .has_hud = hud != NULL,
+	    .tan = {D->tan_l[1], D->tan_r[1], D->tan_u[1], D->tan_d[1]},
 	};
+	// the warp's rotation as a matrix (quat_rotate's): the spectator sees the frame where the panels show it, not with
+	// its prediction error
+	const float *q = D->spect_delta;
+	float x = q[0], y = q[1], z = q[2], w = q[3];
+	const float rot[3][3] = {{1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)},
+	                         {2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)},
+	                         {2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)}};
+	for (int i = 0; i < 3; i++) {
+		for (int j = 0; j < 3; j++) {
+			pc.rot[i][j] = rot[i][j];
+		}
+	}
 	vk->vkBeginCommandBuffer(cmd, &bi);
 	vk->vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, S->pipeline);
 	vk->vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, S->playout, 0, 1, &S->set, 0, NULL);
@@ -3069,6 +3273,7 @@ direct_tick(struct mdp_target *t, int64_t vsync)
 				}
 				float delta[4], delta_top[4], delta_bot[4];
 				warp_delta(D, qr, qd, delta);
+				memcpy(D->spect_delta, delta, sizeof(delta));
 				memcpy(delta_top, delta, sizeof(delta));
 				memcpy(delta_bot, delta, sizeof(delta));
 				if (D->knobs.scan_ms > 0) {
@@ -3201,9 +3406,9 @@ direct_tick(struct mdp_target *t, int64_t vsync)
 		        s->no_set, s->late, s->late_skips, s->gaps, s->wake_ms_max, (double)WARP_MAX_DEG, s->wild, s->age_n ? s->age_ms_sum / s->age_n : 0.0, s->age_ms_min,
 		        s->age_ms_max, D->tick_offset_ns > 0 ? (double)(MDP_PERIOD_NS - D->tick_offset_ns) / 1e6 : 0.0,
 		        D->knobs.display_delay_ms);
-		U_LOG_W("mdp: direct: frames received %.1f/s, shown a period late (queued) %u, never shown %u; came after the tick at "
-		        "0-2 ms %u, 2-4 %u, 4-6 %u, 6-8 %u, 8-10 %u, 10-12 %u, 12+ %u",
-		        s->received / el, s->queued, s->superseded, s->phase[0], s->phase[1], s->phase[2], s->phase[3], s->phase[4],
+		U_LOG_W("mdp: direct: frames received %.1f/s (%u with head-locked overlays apart), shown a period late (queued) %u, "
+		        "never shown %u; came after the tick at 0-2 ms %u, 2-4 %u, 4-6 %u, 6-8 %u, 8-10 %u, 10-12 %u, 12+ %u",
+		        s->received / el, s->hud, s->queued, s->superseded, s->phase[0], s->phase[1], s->phase[2], s->phase[3], s->phase[4],
 		        s->phase[5], s->phase[6]);
 		U_LOG_W("mdp: direct: warp prediction error %.3f deg avg (max %.2f), over 0.1 deg %u, 0.25 %u, 0.5 %u of %u",
 		        s->perr_n ? s->perr_sum / s->perr_n : 0.0, s->perr_max, s->perr_over[0], s->perr_over[1],

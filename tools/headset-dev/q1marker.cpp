@@ -1,10 +1,13 @@
-// q1marker: a world-locked overlay with a random pattern, 1.5 m ahead of the head and a bit low (test tool: a local
-// reference next to the stream's picture in the same snapshot). Runs until killed.
+// q1marker [DOWN_M] [head]: a world-locked overlay with a random pattern, 1.5 m ahead of the head and a bit low (test
+// tool: a local reference next to the stream's picture in the same snapshot). With "head", a head-locked one (placed
+// relative to the headset, like SteamVR's HUD overlays) with its own pattern, to run next to the world-locked one.
+// Runs until killed.
 #include <openvr.h>
 
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 #include <unistd.h>
 
 int main(int argc, char **argv)
@@ -15,13 +18,15 @@ int main(int argc, char **argv)
 		fprintf(stderr, "q1marker: VR_Init: %s\n", vr::VR_GetVRInitErrorAsEnglishDescription(err));
 		return 1;
 	}
+	bool head = argc > 2 && std::string(argv[2]) == "head";
+	float down = argc > 1 ? (float)atof(argv[1]) : 0.45f;
 	vr::IVROverlay *ov = vr::VROverlay();
 	vr::VROverlayHandle_t h = vr::k_ulOverlayHandleInvalid;
-	if (ov->CreateOverlay("q1.marker", "q1marker", &h) != vr::VROverlayError_None)
+	if (ov->CreateOverlay(head ? "q1.marker.head" : "q1.marker", "q1marker", &h) != vr::VROverlayError_None)
 		return 1;
 	enum { W = 128, H = 64 };
 	static unsigned char px[W * H * 4];
-	srand(1);
+	srand(head ? 2 : 1);
 	for (int by = 0; by < H / 4; by++)
 		for (int bx = 0; bx < W / 4; bx++) {
 			unsigned char v = rand() & 1 ? 230 : 20;
@@ -34,6 +39,15 @@ int main(int argc, char **argv)
 		}
 	ov->SetOverlayRaw(h, px, W, H, 4);
 	ov->SetOverlayWidthInMeters(h, 0.8f);
+	if (head) {
+		vr::HmdMatrix34_t t = {{{1, 0, 0, 0}, {0, 1, 0, -down}, {0, 0, 1, -1.5f}}};
+		ov->SetOverlayTransformTrackedDeviceRelative(h, vr::k_unTrackedDeviceIndex_Hmd, &t);
+		ov->ShowOverlay(h);
+		printf("q1marker: shown, head-locked\n");
+		fflush(stdout);
+		for (;;)
+			sleep(1);
+	}
 	vr::TrackedDevicePose_t pose;
 	vr::VRSystem()->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseStanding, 0, &pose, 1);
 	const vr::HmdMatrix34_t &m = pose.mDeviceToAbsoluteTracking;
@@ -41,7 +55,7 @@ int main(int argc, char **argv)
 	fx /= n, fz /= n;
 	float yaw = std::atan2(-fx, -fz); // the overlay faces the head
 	float c = std::cos(yaw), s = std::sin(yaw);
-	vr::HmdMatrix34_t t = {{{c, 0, s, m.m[0][3] + 1.5f * fx}, {0, 1, 0, m.m[1][3] - (argc > 1 ? (float)atof(argv[1]) : 0.45f)}, {-s, 0, c, m.m[2][3] + 1.5f * fz}}};
+	vr::HmdMatrix34_t t = {{{c, 0, s, m.m[0][3] + 1.5f * fx}, {0, 1, 0, m.m[1][3] - down}, {-s, 0, c, m.m[2][3] + 1.5f * fz}}};
 	ov->SetOverlayTransformAbsolute(h, vr::TrackingUniverseStanding, &t);
 	ov->ShowOverlay(h);
 	printf("q1marker: shown\n");

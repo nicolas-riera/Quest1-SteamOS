@@ -10,11 +10,14 @@
 
 #define Q1D_SOCKET "/run/monado/quest1_direct"
 #define Q1D_MAX_IMAGES 4
+//! Sets of buffers of head-locked overlays (see Q1D_BUFFER and Q1D_FRAME's `hud`): one per image, the frame's own
+#define Q1D_HUD_SETS Q1D_MAX_IMAGES
 
 enum q1d_msg_type
 {
 	//! layer -> Monado: describes the buffer (image `index`, half `half`); the next packet is the
-	//! AHardwareBuffer itself (AHardwareBuffer_sendHandleToUnixSocket)
+	//! AHardwareBuffer itself (AHardwareBuffer_sendHandleToUnixSocket). Half 2 and 3: the head-locked overlays of
+	//! half 0 and 1 in set `index` (< Q1D_HUD_SETS), the eye render's size, premultiplied alpha
 	Q1D_BUFFER = 1,
 	//! layer -> Monado: image `index` holds the finished frame `frame`, rendered with `pose`
 	Q1D_FRAME = 2,
@@ -52,4 +55,12 @@ struct q1d_msg
 	uint64_t frame;
 	int64_t time_ns;  //!< Q1D_FRAME: time the render pose was predicted for; Q1D_DISPLAYED: when
 	float pose[4];    //!< Q1D_FRAME: render orientation x, y, z, w (OpenXR LOCAL space)
+	//! Q1D_FRAME: the frame's head-locked overlays (SteamVR's HUD: the volume, the IPD) drawn apart: bits 0-7 are 1 +
+	//! the set of buffers holding them (0: none, they are in the frame), bits 8 and 9 the halves that have some. They
+	//! are drawn over the re-projected frame without its rotation, so they stay where they were drawn instead of
+	//! moving with the frame's prediction error.
+	uint32_t hud;
+	//! Q1D_FRAME, with `hud`: per half, the part of its buffer the head-locked overlays may cover (u0, v0, u1, v1, in
+	//! 0..1 of the buffer, row 0 first): Monado blends them only there
+	float hud_rect[2][4];
 };

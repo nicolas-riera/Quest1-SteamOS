@@ -195,6 +195,34 @@ This is what Meta's timewarp does on the same panels: never show a frame unwarpe
 the latching vsync, the shortest lead without late commits), use the real time each part of the panel lights up,
 and predict from the IMU (libossdk, which we already use).
 
+### 2026-11-13: SteamVR's head-locked overlays drawn apart
+
+The user: SteamVR's HUD (the volume and IPD overlays) jumped whenever the head moved, the dashboard and the
+chaperone did not. Measured on the table (tools/headset-dev: `q1marker -0.4 head`, a head-locked overlay, next to the
+world-locked one, under a fake head yaw): in vrcompositor's output the head-locked marker never moved (0 px in 50
+snapshots while the world moved +-50 px). vrcompositor draws it right; the warp then turns the whole frame by the
+frame's prediction error (its render pose against the head pose at the display time), which puts the world where it
+is but moves what is fixed to the head by that error, a different one at every frame. With the head pose given to
+both vrcompositor and the warp as a function of time (an exact prediction), the marker in Monado's output still
+jumped -16 to +14 px between snapshots (render-to-display timing alone); Meta's runtime avoids it with head-locked
+layers that are never re-projected.
+
+So the layer draws them apart (`quest1_hud.c`, scene mode): vrcompositor draws each overlay of an eye as a quad after
+the scene, with a 624-byte uniform update before it (the overlay's model matrix, the eye's view, the projection). A
+quad whose transform in the eye's space (view * model) is the same as one of the previous frame's while its model is
+not (the head moved, the overlay followed) is head-locked; with the head still it keeps what it was. Its draw goes
+into a buffer of its own (the eye render's size, a set per swapchain image, ~80 MB made at the first one), in a render
+pass of its own between the eye's (rpmerge's state is settled first). Q1D_FRAME says which halves have some and the
+part of the buffer they cover; Monado's warp draws them over the re-projected frame with the lens only (no rotation),
+blended (premultiplied alpha), clipped to the mesh cells that cover that part. Measured: the head-locked marker 0 px
+in 40 snapshots of Monado's output under the same fake yaw; head still, the same picture as before; the warp's GPU
+time 2.4 -> 2.7 ms a vsync while a HUD shows (4.3 ms when it was blended over the whole panel), nothing otherwise.
+The user: the HUD stays put. With 2 or 3 sets, 1 frame in 7 found none free (Monado can still hold three images
+while a fourth renders). "nohud" in `/tmp/quest1-layer` turns it off live (A/B).
+
+Not covered yet: while Steam Link VR streams, vrcompositor composes the overlays in its distortion pass
+(docs/todo.md).
+
 ## Plan: Monado presents vrcompositor's frames and re-projects them
 
 Monado already has everything a 72 Hz re-projection needs: the head pose at any time, a

@@ -206,6 +206,10 @@ static struct
 	bool in_run, redirect; //!< an eye's passes are being recorded; into its gralloc buffer
 	int eye, idx;          //!< that eye's half, the frame's reserved swapchain index (-1: none)
 	unsigned runs;         //!< eyes begun in this recording
+	// the eye's latest pass into its gralloc buffer (quest1_hud.c goes out of it and back)
+	uint64_t cur_rp, cur_fb, app_fb; //!< the app's render pass, the twin framebuffer, the app's framebuffer
+	VkRect2D area;
+	bool hud_cleared; //!< the eye's buffer of head-locked overlays was cleared in this run
 } qs_cbst[16];
 static pthread_mutex_t qs_cbst_lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -962,10 +966,12 @@ static void qs_ts_stamp(VkCommandBuffer cb, int e, const char *label)
 
 //! Once per displayed frame: arms the instrumentation, then logs the results.
 static void rm_stats(void); // quest1_rpmerge.c
+static void qh_stats(void); // quest1_hud.c
 
 static void qs_ts_frame(void)
 {
 	rm_stats();
+	qh_stats();
 	pthread_mutex_lock(&qs_ts_lock);
 	if (qs_ts.state == 0 && unlink("/tmp/quest1-gputime") == 0) {
 		qs_ts.state = 1;
@@ -1143,6 +1149,8 @@ static int qs_reserve(struct qd_swapchain **out)
 		if (!sc->app_owned[i] && !sc->driver_owned[i])
 			r = (int)i;
 	}
+	if (r >= 0 && !sc->reserved1)
+		sc->hud_of[r] = 0; // a new frame in it (quest1_hud.c)
 	if (r >= 0)
 		sc->reserved1 = (uint32_t)r + 1;
 	pthread_mutex_unlock(&sc->mutex);
@@ -1264,6 +1272,8 @@ static bool qs_scene_copy(VkCommandBuffer cb, VkImage half)
 	return true;
 }
 
+#include "quest1_hud.c"
+
 static VKAPI_ATTR void VKAPI_CALL qs_CmdBeginRenderPass(VkCommandBuffer cb, const VkRenderPassBeginInfo *bi,
                                                        VkSubpassContents contents)
 {
@@ -1308,7 +1318,9 @@ static VKAPI_ATTR void VKAPI_CALL qs_CmdBeginRenderPass(VkCommandBuffer cb, cons
 			if (e->runs++ == 0)
 				e->idx = idx;
 			e->redirect = e->idx >= 0;
+			e->hud_cleared = false;
 		}
+		int started_eye = start ? e->eye : -1;
 		VkImage target = VK_NULL_HANDLE;
 		if (e && e->redirect) {
 			pthread_mutex_lock(&qs_twin_lock);
@@ -1318,8 +1330,19 @@ static VKAPI_ATTR void VKAPI_CALL qs_CmdBeginRenderPass(VkCommandBuffer cb, cons
 			pthread_mutex_unlock(&qs_twin_lock);
 		}
 		pthread_mutex_unlock(&qs_cbst_lock);
+		if (started_eye >= 0)
+			qh_eye_start(started_eye);
 		VkFramebuffer stw = target ? qs_scene_twin(device_of(cb)->handle, bi->framebuffer, target) : VK_NULL_HANDLE;
 		if (stw) {
+			pthread_mutex_lock(&qs_cbst_lock);
+			e = qs_cbst_get(cb, false);
+			if (e) {
+				e->cur_rp = (uint64_t)bi->renderPass;
+				e->cur_fb = (uint64_t)stw;
+				e->app_fb = (uint64_t)bi->framebuffer;
+				e->area = bi->renderArea;
+			}
+			pthread_mutex_unlock(&qs_cbst_lock);
 			sb = *bi;
 			sb.framebuffer = stw;
 			bi = &sb;
@@ -1514,11 +1537,14 @@ static VKAPI_ATTR void VKAPI_CALL qs_CmdDrawIndexed(VkCommandBuffer cb, uint32_t
 	QS_TRACE_NEXT(PFN_vkCmdDrawIndexed, "vkCmdDrawIndexed")
 	if (qs_skipping(cb))
 		return;
+	bool hud = qh_before_draw(cb, n);
 	rm_draw(cb);
 	if (qs_trace_left > 0 && qs_trace_left--)
 		LOG("trace: cb %p DrawIndexed %u x%u first %u\n", (void *)cb, n, ic, fi);
 	qs_ts_draw(cb, n * ic);
 	next(cb, n, ic, fi, vo, fin);
+	if (hud)
+		qh_after_draw(cb);
 }
 
 static VKAPI_ATTR void VKAPI_CALL qs_CmdBindPipeline(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipeline p)
@@ -1797,6 +1823,11 @@ static bool qs_mon_present(struct qd_swapchain *sc, uint32_t idx, uint64_t frame
 		memcpy(m.pose, sc->pose[frame % 64].q, sizeof(m.pose));
 		m.time_ns = sc->pose[frame % 64].time_ns;
 	}
+	// the frame's head-locked overlays drawn apart (quest1_hud.c): their buffers go first, once
+	if (sc->hud_of[idx] && qh_send_locked(sc, sc->mon_sock)) {
+		m.hud = sc->hud_of[idx];
+		memcpy(m.hud_rect, sc->hud_rect[idx], sizeof(m.hud_rect));
+	}
 	sc->app_owned[idx] = false;
 	sc->driver_owned[idx] = true; // until Monado's Q1D_RELEASE
 	bool ok = send(sc->mon_sock, &m, sizeof(m), MSG_NOSIGNAL | MSG_DONTWAIT) == (ssize_t)sizeof(m);
@@ -2017,12 +2048,18 @@ static void qs_destroy(struct qd_swapchain *sc)
 			if (sc->half_ahb[h][i])
 				qs_ahb.release(sc->half_ahb[h][i]);
 	}
+	for (int s = 0; s < Q1D_HUD_SETS; s++)
+		for (int h = 0; h < 2; h++)
+			if (sc->hud_ahb[s][h])
+				qs_ahb.release(sc->hud_ahb[s][h]);
 	qs_twins_forget(sc);
 	pthread_mutex_lock(&qs_scene_lock);
 	for (unsigned i = 0; i < qs_nstwins;) {
 		bool mine = false;
 		for (uint32_t k = 0; k < QD_MAX_IMAGES; k++)
 			mine |= qs_stwins[i].half == (uint64_t)sc->half_image[0][k] || qs_stwins[i].half == (uint64_t)sc->half_image[1][k];
+		for (int k = 0; k < Q1D_HUD_SETS; k++)
+			mine |= qs_stwins[i].half == (uint64_t)sc->hud_image[k][0] || qs_stwins[i].half == (uint64_t)sc->hud_image[k][1];
 		if (mine) {
 			((PFN_vkDestroyFramebuffer)sc->d->gdpa(sc->device, "vkDestroyFramebuffer"))(sc->device, (VkFramebuffer)qs_stwins[i].twin, NULL);
 			((PFN_vkDestroyImageView)sc->d->gdpa(sc->device, "vkDestroyImageView"))(sc->device, (VkImageView)qs_stwins[i].view, NULL);

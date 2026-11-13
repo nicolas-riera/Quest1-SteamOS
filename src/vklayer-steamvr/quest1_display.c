@@ -21,6 +21,7 @@
 typedef struct AHardwareBuffer AHardwareBuffer;
 
 #include "quest1_display_proto.h"
+#include "quest1_direct_proto.h"
 
 #define QD_DISPLAY ((VkDisplayKHR)(uintptr_t)0x51d1500d)
 #define QD_MODE ((VkDisplayModeKHR)(uintptr_t)0x51d1500e)
@@ -503,6 +504,17 @@ struct qd_swapchain
 	int half_fd[2][QD_MAX_IMAGES]; //!< owned by the AHardwareBuffer
 	uint32_t half_stride_px[2][QD_MAX_IMAGES];
 	bool half_ubwc[2][QD_MAX_IMAGES];
+	// head-locked overlays drawn apart (quest1_hud.c): Q1D_HUD_SETS sets of a buffer per eye, made at the first one
+	AHardwareBuffer *hud_ahb[Q1D_HUD_SETS][2];
+	VkImage hud_image[Q1D_HUD_SETS][2];
+	VkDeviceMemory hud_memory[Q1D_HUD_SETS][2];
+	int hud_fd[Q1D_HUD_SETS][2];
+	uint32_t hud_stride_px[Q1D_HUD_SETS][2];
+	bool hud_ubwc[Q1D_HUD_SETS][2];
+	bool hud_made, hud_failed;
+	int hud_sent_sock;              //!< 1 + the Monado socket the buffers went to, 0 none
+	uint32_t hud_of[QD_MAX_IMAGES]; //!< Q1D_FRAME's hud for the image's frame (1 + set, eyes << 8), 0 none
+	float hud_rect[QD_MAX_IMAGES][2][4]; //!< Q1D_FRAME's hud_rect for the image's frame
 	struct
 	{
 		int fd;
@@ -940,6 +952,13 @@ static void qd_destroy(struct qd_swapchain *sc)
 					sc->DestroyImage(sc->device, sc->half_image[h][i], NULL);
 				if (sc->half_memory[h][i])
 					sc->FreeMemory(sc->device, sc->half_memory[h][i], NULL);
+			}
+		for (int s = 0; s < Q1D_HUD_SETS; s++)
+			for (int h = 0; h < 2; h++) {
+				if (sc->hud_image[s][h])
+					sc->DestroyImage(sc->device, sc->hud_image[s][h], NULL);
+				if (sc->hud_memory[s][h])
+					sc->FreeMemory(sc->device, sc->hud_memory[s][h], NULL);
 			}
 		qs_destroy(sc);
 	}

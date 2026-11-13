@@ -596,9 +596,8 @@ vrlink writes its own log, `~/.local/share/Steam/logs/vrlink.txt` (the PC's side
       two moments. The shim's swap (`submit_set`) changes which buffer is `texture[0]` at every submit, while the real
       vrcompositor copies `texture[index]` into `texture[0]` when the submit arrives, together with its pose; with
       vrcompositor slower than vrlink's ~74 submits a second, a submit lands between the two reads.
-    - The HUD overlays moving with the stream mean vrcompositor re-projects them with the stream frame's pose too:
-      fixing the frame/pose pairing should steady both. Their own trembling without a stream is to be looked at first
-      (user, 2026-11-13).
+    - The HUD overlays' trembling was not the stream's: Monado's warp moved them with each frame's prediction error,
+      stream or not. They are drawn apart now, without a stream so far (docs/direct-scanout.md, 2026-11-13).
 
 Plan:
 0. ~~Capture vrlink's own output~~ done (above).

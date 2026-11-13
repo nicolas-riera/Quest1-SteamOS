@@ -3,11 +3,6 @@
 Only what is left to do, roughly by priority. Done work leaves this list: it is described in the other docs
 (`docs/*.md`) and in the commit log.
 
-- SteamVR's HUD overlays (the IPD and volume overlays) tremble like the stream (user, 2026-11-13: "exactly the same
-  trembling"), while the dashboard and the chaperone are steady. First without a stream (user: next session): measure
-  a head-locked overlay against a world-locked one with tools/headset-dev (`q1marker` with a head-relative transform,
-  `fake-motion.patch`), then see how vrcompositor and Monado's warp place head-locked layers. With a stream, see
-  Streaming below.
 - Performance (docs/performance.md): GPU-bound, ~12.4 of 13.9 ms a frame. Levers left, all visible, so the user
   decides: achromatic distortion (vrcompositor's distortion pass is ~2 ms per eye), a lighter environment than Aurora
   (~4 ms; passthrough itself is cheaper), simpler controller models (~2 ms), the 4x MSAA of the dashboard layer.
@@ -144,18 +139,20 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 
 - Steam Link VR (docs/streaming.md, section 2): a new picture each frame and a sharp centre now (user, 2026-11-12:
   "c'est net"), but it trembles, flashes black now and then and runs below 72 fps.
-  - Trembling: jumps of the whole stream at every head movement, none while still, and SteamVR's HUD overlays (IPD,
-    volume) jump the same way (user, 2026-11-13; a Quest 3 on the same PC has none). Measured (docs/streaming.md item
+  - Trembling: jumps of the whole stream at every head movement, none while still (user, 2026-11-13; a Quest 3 on the
+    same PC has none). Measured (docs/streaming.md item
     13, tools in tools/headset-dev): ~20 % of the frames show a picture 30-100 ms of motion away from the pose vrlink
     submits with it, while vrcompositor's re-projection itself is exact. Next:
-    - Pair each frame with its own pose. Copying each frame once (uncommitted, `qcp_record` in quest1_modifier.c)
-      removed the ~65 ms cluster (the decoder's recycled buffer copied again); a ±40 ms spread stayed with
+    - Pair each frame with its own pose. Copying each frame once (`qcp_record` in quest1_modifier.c) removed the ~65 ms cluster (the decoder's recycled buffer copied again); a ±40 ms spread stayed with
       vrcompositor at ~57 fps, and the user still saw it tremble. Suspected: the shim's buffer swap in `submit_set`
       lets the texture change between vrcompositor's reads of texture and pose. Try: keep vrlink's set in place and
       copy `texture[index]` into the layer's output when the submit arrives (as the real vrcompositor does), or carry
       the frame's identity from the shim to the layer with its pose. Measure again with the marker (target: the
       frozen frame's 0.8 px), at 72 fps and below.
-    - Then check the HUD overlays with a stream, and the PC's VR view (it trembled the same way, user).
+    - SteamVR's HUD while streaming: without a stream it is drawn apart and steady (docs/direct-scanout.md,
+      2026-11-13), but a stream runs vrcompositor's distortion pass, which blends all overlays from one layer:
+      `quest1_hud.c` has to catch the head-locked quads where that layer is drawn too. Then the PC's VR view (it
+      trembled the same way, user).
   - Black flashes (user, 2026-11-12): vrlink logs no decoder reset outside the session's start; not found yet.
   - Frame rate: the layer's inset pass costs ~2.5 ms of GPU (58-60 fps against ~69 with the dashboard open).
     vrcompositor has the Frame's own way, free: `distort_ps_achromatic_se2` blends the inset in its distortion pass,

@@ -1,0 +1,30 @@
+diff --git a/src/monado/src/xrt/drivers/quest1/quest1_hmd.c b/src/monado/src/xrt/drivers/quest1/quest1_hmd.c
+index c32d128..1600bb7 100644
+--- a/src/monado/src/xrt/drivers/quest1/quest1_hmd.c
++++ b/src/monado/src/xrt/drivers/quest1/quest1_hmd.c
+@@ -879,6 +879,25 @@ hmd_get_tracked_pose(struct xrt_device *xdev,
+ 	} else {
+ 		predict_orientation_accel(h, at_timestamp_ns, &rel.pose.orientation); // past the newest pose only
+ 	}
++	{
++		static int64_t chk;
++		static double amp, hz;
++		if (at_timestamp_ns - chk > 300000000ll || at_timestamp_ns < chk) {
++			chk = at_timestamp_ns;
++			FILE *f = fopen("/tmp/q1-fake-yaw", "r");
++			if (!f || fscanf(f, "%lf %lf", &amp, &hz) != 2)
++				amp = hz = 0;
++			if (f)
++				fclose(f);
++		}
++		if (hz != 0) {
++			double ph = 2 * M_PI * hz * (double)(at_timestamp_ns % 1000000000000ll) * 1e-9;
++			double th = amp * M_PI / 180 * sin(ph), c = cos(th / 2), s = sin(th / 2);
++			struct xrt_quat q = rel.pose.orientation, y = {0, (float)s, 0, (float)c}, o;
++			math_quat_rotate(&y, &q, &o);
++			rel.pose.orientation = o;
++		}
++	}
+ 	*out_relation = rel;
+ 	return XRT_SUCCESS;
+ }
