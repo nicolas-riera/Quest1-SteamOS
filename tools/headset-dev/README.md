@@ -53,6 +53,9 @@ Stream picture placement (docs/streaming.md, "Measuring where the stream's frame
   "X Y Z" deg/s, `/tmp/q1-veloff` "X Y Z" cm/s; and `/tmp/q1-labellog`: each submit's pose to `/tmp/q1lab.txt`. With
   pcmarker next to q1marker, the headset still: a pose that is right in the headset shows the PC's marker at 0 px
   for any change of the pose the PC renders with (docs/streaming.md item 13, 2026-11-13 night).
+- `vrc-trace-layer.patch` (test only, to the layer, never commit it applied): traces of vrcompositor's descriptors,
+  buffer bindings, uniform updates and buffer copies (with the copied data), and a lock-in on its mapped memory, to
+  find where it keeps the stream frame's pose (its header has the trigger files).
 - `shift.c`: `shift A.ppm B.ppm X Y W H R`, the (dx, dy) that best moves a region of A onto B (build on the headset:
   `gcc -O2 -o shift shift.c -lm`). With `R` 2 and A = B it prints the region's contrast (sd): pick regions with
   some, and check they stay put without motion (Steam Link's animated skies do not).

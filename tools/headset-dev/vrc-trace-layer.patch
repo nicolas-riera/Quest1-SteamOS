@@ -1,0 +1,473 @@
+# Test-only patch for the SteamVR layer (src/vklayer-steamvr; never commit it applied). What vrcompositor does with
+# its memory and its commands, to find where it takes the stream frame's pose (docs/streaming.md item 13, 2026-11-14):
+# - /tmp/q1-trace: per process, /tmp/q1trace.<name>.<pid>.txt: descriptor writes (W), buffer bindings (M), sets
+#   bound (S), vkCmdUpdateBuffer (U, size only) and vkCmdCopyBuffer (C, with the source's floats when the layer knows
+#   its mapping: vkMapMemory, vkMapMemory2, host-pointer imports). ~0.25 MB/s for vrcompositor: keep it short.
+# - /tmp/q1-maplist: the mapped allocations to /tmp/q1maps.txt.
+# - /tmp/q1-lockin "HZ MAXBYTES": every float of the mapped allocations up to MAXBYTES, sampled at each submit, its
+#   component at HZ (the shim's /tmp/q1-posesine) to /tmp/q1lockin.txt when the file goes away. Fixed addresses only.
+--- a/src/vklayer-steamvr/quest1_compat.c
++++ b/src/vklayer-steamvr/quest1_compat.c
+@@ -31,6 +31,7 @@
+ #include <stdint.h>
+ #include <stdio.h>
+ #include <stdlib.h>
++#include <math.h> // TEMP lock-in
+ #include <string.h>
+ #include <sys/ioctl.h>
+ #include <sys/mman.h>
+@@ -878,9 +879,208 @@
+ 
+ static void ft(const char *what, int64_t arg); // quest1_display.c (frame trace)
+ 
++// TEMP lock-in: which float of vrcompositor's mapped memory oscillates at a known frequency (the shim's pose sine).
++// /tmp/q1-maplist: the mapped allocations to /tmp/q1maps.txt; /tmp/q1-lockin "HZ MAXBYTES": every float of the
++// mapped allocations up to MAXBYTES, sampled at each vkQueueSubmit (at most every 4 ms), to /tmp/q1lockin.txt when
++// the file goes away.
++#define LI_ALLOCS 8192
++static struct
++{
++	uint64_t mem, size;
++	uint32_t type;
++	uint8_t *ptr;
++	uint64_t mapsize;
++	double *acc; // per float: sum, sum sin, sum cos, sum sq
++	uint64_t nf;
++} li_a[LI_ALLOCS];
++static pthread_mutex_t li_lock = PTHREAD_MUTEX_INITIALIZER;
++static double li_hz;
++static uint64_t li_max, li_n, li_t0, li_last, li_chk;
++static bool li_on;
++
++static int li_find(uint64_t mem, bool add)
++{
++	int fr = -1;
++	for (int i = 0; i < LI_ALLOCS; i++) {
++		if (li_a[i].mem == mem)
++			return i;
++		if (!li_a[i].mem && fr < 0)
++			fr = i;
++	}
++	return add ? fr : -1;
++}
++
++static void li_alloc(VkDeviceMemory m, const VkMemoryAllocateInfo *ai)
++{
++	pthread_mutex_lock(&li_lock);
++	int i = li_find((uint64_t)m, true);
++	if (i >= 0) {
++		free(li_a[i].acc);
++		memset(&li_a[i], 0, sizeof(li_a[i]));
++		li_a[i].mem = (uint64_t)m;
++		li_a[i].size = ai->allocationSize;
++		li_a[i].type = ai->memoryTypeIndex;
++		const VkImportMemoryHostPointerInfoEXT *hp =
++		    find_struct(ai->pNext, VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT);
++		if (hp) { // host memory the CPU writes as it is
++			li_a[i].ptr = hp->pHostPointer;
++			li_a[i].mapsize = ai->allocationSize;
++			li_a[i].type |= 0x80000000u;
++		}
++	}
++	pthread_mutex_unlock(&li_lock);
++}
++
++static void li_map(VkDeviceMemory m, void *ptr, VkDeviceSize off, VkDeviceSize size)
++{
++	pthread_mutex_lock(&li_lock);
++	int i = li_find((uint64_t)m, false);
++	if (i >= 0) {
++		li_a[i].ptr = ptr;
++		li_a[i].mapsize = !ptr ? 0 : size == VK_WHOLE_SIZE ? li_a[i].size - off : size;
++		free(li_a[i].acc);
++		li_a[i].acc = NULL;
++		li_a[i].nf = 0;
++	}
++	pthread_mutex_unlock(&li_lock);
++}
++
++static void li_free(VkDeviceMemory m)
++{
++	pthread_mutex_lock(&li_lock);
++	int i = li_find((uint64_t)m, false);
++	if (i >= 0) {
++		free(li_a[i].acc);
++		memset(&li_a[i], 0, sizeof(li_a[i]));
++	}
++	pthread_mutex_unlock(&li_lock);
++}
++
++static void li_report(void)
++{
++	FILE *f = fopen("/tmp/q1lockin.txt", "w");
++	if (!f)
++		return;
++	fprintf(f, "samples %llu over %.1f s at %.2f Hz\n", (unsigned long long)li_n, (li_last - li_t0) * 1e-9, li_hz);
++	enum { TOP = 40 };
++	struct
++	{
++		double score, mean, amp, ph, sd;
++		int a;
++		uint64_t k;
++	} top[TOP];
++	memset(top, 0, sizeof(top));
++	for (int a = 0; a < LI_ALLOCS; a++) {
++		if (!li_a[a].acc)
++			continue;
++		for (uint64_t k = 0; k < li_a[a].nf; k++) {
++			double *x = li_a[a].acc + 4 * k, n = (double)li_n;
++			double mean = x[0] / n, var = x[3] / n - mean * mean;
++			double s = 2 * x[1] / n, c = 2 * x[2] / n, amp = sqrt(s * s + c * c);
++			if (!(var > 1e-14) || !(amp > 1e-6) || !isfinite(amp))
++				continue;
++			double score = amp / sqrt(2 * var); // 1 for a pure sine at the frequency
++			if (score <= top[TOP - 1].score)
++				continue;
++			int j = TOP - 1;
++			while (j > 0 && top[j - 1].score < score) {
++				top[j] = top[j - 1];
++				j--;
++			}
++			top[j].score = score;
++			top[j].mean = mean;
++			top[j].amp = amp;
++			top[j].ph = atan2(c, s);
++			top[j].sd = sqrt(var);
++			top[j].a = a;
++			top[j].k = k;
++		}
++	}
++	for (int j = 0; j < TOP && top[j].score > 0; j++)
++		fprintf(f, "score %.3f alloc %d size %llu type %u float %llu: mean %.6g amp %.6g sd %.6g phase %.1f\n", top[j].score,
++		        top[j].a, (unsigned long long)li_a[top[j].a].size, li_a[top[j].a].type, (unsigned long long)top[j].k,
++		        top[j].mean, top[j].amp, top[j].sd, top[j].ph * 57.29578);
++	fclose(f);
++}
++
++static void li_tick(struct device *d)
++{
++	uint64_t t = now_ns();
++	pthread_mutex_lock(&li_lock);
++	if (t - li_chk > 300000000ull) {
++		li_chk = t;
++		if (access("/tmp/q1-maplist", F_OK) == 0) {
++			unlink("/tmp/q1-maplist");
++			FILE *f = fopen("/tmp/q1maps.txt", "w");
++			for (int i = 0; f && i < LI_ALLOCS; i++)
++				if (li_a[i].ptr)
++					fprintf(f, "alloc %d size %llu mapped %llu type %u flags %x\n", i, (unsigned long long)li_a[i].size,
++					        (unsigned long long)li_a[i].mapsize, li_a[i].type,
++					        li_a[i].type < d->memprops.memoryTypeCount ? d->memprops.memoryTypes[li_a[i].type].propertyFlags
++					                                                  : 0);
++			if (f)
++				fclose(f);
++		}
++		FILE *f = fopen("/tmp/q1-lockin", "r");
++		double hz = 0;
++		unsigned long long mx = 0;
++		bool on = f && fscanf(f, "%lf %llu", &hz, &mx) == 2;
++		if (f)
++			fclose(f);
++		if (on && !li_on) {
++			li_on = true;
++			li_hz = hz;
++			li_max = mx;
++			li_n = 0;
++			li_t0 = t;
++			for (int i = 0; i < LI_ALLOCS; i++) {
++				free(li_a[i].acc);
++				li_a[i].acc = NULL;
++				li_a[i].nf = 0;
++				if (li_a[i].ptr && li_a[i].mapsize >= 64 && li_a[i].mapsize <= li_max) {
++					li_a[i].nf = li_a[i].mapsize / 4;
++					li_a[i].acc = calloc(4 * li_a[i].nf, sizeof(double));
++					if (!li_a[i].acc)
++						li_a[i].nf = 0;
++				}
++			}
++		} else if (!on && li_on) {
++			li_on = false;
++			li_report();
++			for (int i = 0; i < LI_ALLOCS; i++) {
++				free(li_a[i].acc);
++				li_a[i].acc = NULL;
++				li_a[i].nf = 0;
++			}
++		}
++	}
++	if (li_on && t - li_last > 4000000ull) {
++		li_last = t;
++		double w = 2 * M_PI * li_hz * (double)t * 1e-9, sn = sin(w), cs = cos(w);
++		li_n++;
++		for (int a = 0; a < LI_ALLOCS; a++) {
++			if (!li_a[a].acc || !li_a[a].ptr)
++				continue;
++			const float *p = (const float *)li_a[a].ptr;
++			double *x = li_a[a].acc;
++			for (uint64_t k = 0; k < li_a[a].nf; k++, x += 4) {
++				double v = p[k];
++				if (!isfinite(v))
++					v = 0;
++				x[0] += v;
++				x[1] += v * sn;
++				x[2] += v * cs;
++				x[3] += v * v;
++			}
++		}
++	}
++	pthread_mutex_unlock(&li_lock);
++}
++
+ static VKAPI_ATTR VkResult VKAPI_CALL QueueSubmit(VkQueue queue, uint32_t n, const VkSubmitInfo *submits, VkFence fence)
+ {
+ 	struct device *d = device_of(queue);
++	li_tick(d); // TEMP
+ 	q1_rt_cap();
+ 	ft("submit", (int64_t)(uint64_t)fence);
+ 	struct submit_job *j = job_build(queue, n, submits, fence);
+@@ -1752,10 +1952,14 @@
+ 	return true;
+ }
+ 
++static void tr_update(VkCommandBuffer cb, uint64_t off, uint64_t size, const void *data); // TEMP
++static void tr_copy(VkCommandBuffer cb, uint64_t src, uint64_t dst, uint64_t so, uint64_t dof, uint64_t size, const char *p); // TEMP
++
+ static VKAPI_ATTR void VKAPI_CALL CmdUpdateBuffer(VkCommandBuffer cb, VkBuffer b, VkDeviceSize off, VkDeviceSize size,
+                                                   const void *data)
+ {
+ 	qh_note_update(cb, size, data); // quest1_hud.c
++	tr_update(cb, off, size, data); // TEMP
+ 	if (rm_update(cb, b, off, size, data))
+ 		return; // absorbed into a merged render pass (quest1_rpmerge.c)
+ 	bool u32 = size % 4 == 0 && u32_shaped(data, size / 2);
+@@ -1786,6 +1990,26 @@
+ 		u32_note((uint64_t)dst, r[k].dstOffset,
+ 		         sp && r[k].size % 4 == 0 && u32_shaped((const uint16_t *)(sp + r[k].srcOffset), r[k].size / 2));
+ 	pthread_mutex_unlock(&u32_lock);
++	if (!sp) { // TEMP: host-pointer memory
++		uint64_t bm = 0, bo = 0;
++		pthread_mutex_lock(&u32_lock);
++		for (unsigned i = 0; i < U32_BUFS; i++)
++			if (u32_bufs[i].buf == (uint64_t)src) {
++				bm = u32_bufs[i].mem;
++				bo = u32_bufs[i].off;
++				break;
++			}
++		pthread_mutex_unlock(&u32_lock);
++		int li = bm ? li_find(bm, false) : -1;
++		if (li >= 0 && li_a[li].ptr)
++			sp = (const char *)li_a[li].ptr + bo;
++		static int logged;
++		if (!sp && logged++ < 20)
++			LOG("TEMP copy src %llx mem %llx li %d type %x\n", (unsigned long long)src, (unsigned long long)bm, li,
++			    li >= 0 ? li_a[li].type : 0);
++	}
++	for (uint32_t k = 0; k < n; k++) // TEMP
++		tr_copy(cb, (uint64_t)src, (uint64_t)dst, r[k].srcOffset, r[k].dstOffset, r[k].size, sp ? sp + r[k].srcOffset : NULL);
+ 	device_of(cb)->CmdCopyBuffer(cb, src, dst, n, r);
+ }
+ 
+@@ -1809,8 +2033,11 @@
+ 	device_of(cb)->CmdBindIndexBuffer(cb, b, off, t);
+ }
+ 
++static void tr_bind(VkBuffer b, VkDeviceMemory m, VkDeviceSize off); // TEMP
++
+ static void u32_bind(VkBuffer b, VkDeviceMemory m, VkDeviceSize off)
+ {
++	tr_bind(b, m, off); // TEMP
+ 	pthread_mutex_lock(&u32_lock);
+ 	int at = -1;
+ 	for (unsigned i = 0; i < U32_BUFS && at < 0; i++)
+@@ -1865,20 +2092,38 @@
+                                                 VkMemoryMapFlags f, void **pp)
+ {
+ 	VkResult r = device_of(device)->MapMemory(device, m, off, size, f, pp);
+-	if (r == VK_SUCCESS)
++	if (r == VK_SUCCESS) {
+ 		u32_map(m, *pp, off);
++		li_map(m, *pp, off, size); // TEMP
++	}
++	return r;
++}
++
++// TEMP: vkMapMemory2 (vrcompositor maps its uniform staging with it)
++static VKAPI_ATTR VkResult VKAPI_CALL MapMemory2Tmp(VkDevice device, const VkMemoryMapInfoKHR *mi, void **pp)
++{
++	static PFN_vkMapMemory2KHR next;
++	if (!next)
++		next = (PFN_vkMapMemory2KHR)device_of(device)->gdpa(device, "vkMapMemory2KHR");
++	if (!next)
++		next = (PFN_vkMapMemory2KHR)device_of(device)->gdpa(device, "vkMapMemory2");
++	VkResult r = next ? next(device, mi, pp) : VK_ERROR_EXTENSION_NOT_PRESENT;
++	if (r == VK_SUCCESS)
++		li_map(mi->memory, *pp, mi->offset, mi->size);
+ 	return r;
+ }
+ 
+ static VKAPI_ATTR void VKAPI_CALL UnmapMemory(VkDevice device, VkDeviceMemory m)
+ {
+ 	u32_map(m, NULL, 0);
++	li_map(m, NULL, 0, 0); // TEMP
+ 	device_of(device)->UnmapMemory(device, m);
+ }
+ 
+ static VKAPI_ATTR void VKAPI_CALL FreeMemory(VkDevice device, VkDeviceMemory m, const VkAllocationCallbacks *alloc)
+ {
+ 	u32_map(m, NULL, 0);
++	li_free(m); // TEMP
+ 	device_of(device)->FreeMemory(device, m, alloc);
+ 	qnv_free_memory(m); // exported NV12 memory: our gralloc buffer
+ }
+@@ -1956,6 +2201,8 @@
+ 		if (r == VK_SUCCESS && dmabuf)
+ 			close(imp->fd); // a successful import owns the fd (the blob closed the OPAQUE_FD one itself)
+ 	}
++	if (r == VK_SUCCESS)
++		li_alloc(*out, ai); // TEMP
+ 	if (keep >= 0)
+ 		close(keep);
+ 	if (r != VK_SUCCESS && fail_logs < 40) {
+@@ -2759,6 +3006,106 @@
+ 	return r;
+ }
+ 
++// TEMP trace: /tmp/q1-trace: descriptor writes and binds to /tmp/q1trace.txt
++static FILE *tr_f;
++static uint64_t tr_chk;
++static pthread_mutex_t tr_lock = PTHREAD_MUTEX_INITIALIZER;
++static FILE *tr_get(void)
++{
++	uint64_t t = now_ns();
++	if (t - tr_chk > 300000000ull) {
++		tr_chk = t;
++		bool on = access("/tmp/q1-trace", F_OK) == 0;
++		if (on && !tr_f) {
++			char fn[128];
++			snprintf(fn, sizeof(fn), "/tmp/q1trace.%s.%d.txt", program_invocation_short_name, (int)getpid());
++			tr_f = fopen(fn, "w");
++		}
++		else if (!on && tr_f) {
++			fclose(tr_f);
++			tr_f = NULL;
++		}
++	}
++	return tr_f;
++}
++
++static VKAPI_ATTR void VKAPI_CALL CmdBindDescriptorSetsTmp(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipelineLayout layout,
++                                                          uint32_t first, uint32_t n, const VkDescriptorSet *sets,
++                                                          uint32_t nd, const uint32_t *dyn)
++{
++	pthread_mutex_lock(&tr_lock);
++	FILE *f = tr_get();
++	if (f) {
++		fprintf(f, "S %llu %llx first %u n %u:", (unsigned long long)(now_ns() / 1000), (unsigned long long)(uintptr_t)cb & 0xffffff, first, n);
++		for (uint32_t i = 0; i < n; i++)
++			fprintf(f, " %llx", (unsigned long long)(uint64_t)sets[i]);
++		fprintf(f, " dyn %u:", nd);
++		for (uint32_t i = 0; i < nd; i++)
++			fprintf(f, " %u", dyn[i]);
++		fputc(10, f);
++	}
++	pthread_mutex_unlock(&tr_lock);
++	((PFN_vkCmdBindDescriptorSets)device_of(cb)->gdpa(device_of(cb)->handle, "vkCmdBindDescriptorSets"))(cb, bp, layout, first, n,
++	                                                                                                   sets, nd, dyn);
++}
++
++static void tr_update(VkCommandBuffer cb, uint64_t off, uint64_t size, const void *data)
++{
++	pthread_mutex_lock(&tr_lock);
++	FILE *f = tr_get();
++	if (f) {
++		fprintf(f, "U %llu %llx %llu %llu", (unsigned long long)(now_ns() / 1000), (unsigned long long)(uintptr_t)cb & 0xffffff,
++		        (unsigned long long)off, (unsigned long long)size);
++		(void)data;
++		fputc(10, f);
++	}
++	pthread_mutex_unlock(&tr_lock);
++}
++
++static void tr_bind(VkBuffer b, VkDeviceMemory m, VkDeviceSize off)
++{
++	pthread_mutex_lock(&tr_lock);
++	FILE *f = tr_get();
++	if (f) {
++		int i = li_find((uint64_t)m, false);
++		fprintf(f, "M buf %llx mem %llx off %llu memsize %llu\n", (unsigned long long)(uint64_t)b, (unsigned long long)(uint64_t)m,
++		        (unsigned long long)off, i >= 0 ? (unsigned long long)li_a[i].size : 0ull);
++	}
++	pthread_mutex_unlock(&tr_lock);
++}
++
++static void tr_copy(VkCommandBuffer cb, uint64_t src, uint64_t dst, uint64_t so, uint64_t dof, uint64_t size, const char *p)
++{
++	pthread_mutex_lock(&tr_lock);
++	FILE *f = tr_get();
++	if (f) {
++		fprintf(f, "C %llu %llx src %llx dst %llx so %llu do %llu size %llu", (unsigned long long)(now_ns() / 1000),
++		        (unsigned long long)(uintptr_t)cb & 0xffffff, (unsigned long long)src, (unsigned long long)dst,
++		        (unsigned long long)so, (unsigned long long)dof, (unsigned long long)size);
++		const float *v = (const float *)p;
++		for (unsigned i = 0; v && i < size / 4 && i < 256; i++)
++			fprintf(f, " %.6g", v[i]);
++		fputc(10, f);
++	}
++	pthread_mutex_unlock(&tr_lock);
++}
++
++static void tr_writes(uint32_t nw, const VkWriteDescriptorSet *w)
++{
++	pthread_mutex_lock(&tr_lock);
++	FILE *f = tr_get();
++	for (uint32_t i = 0; f && i < nw; i++) {
++		fprintf(f, "W %llu set %llx b %u type %u n %u", (unsigned long long)(now_ns() / 1000), (unsigned long long)(uint64_t)w[i].dstSet,
++		        w[i].dstBinding, w[i].descriptorType, w[i].descriptorCount);
++		if (w[i].pBufferInfo && (w[i].descriptorType >= 6 && w[i].descriptorType <= 9))
++			for (uint32_t k = 0; k < w[i].descriptorCount; k++)
++				fprintf(f, " buf %llx off %llu range %llu", (unsigned long long)(uint64_t)w[i].pBufferInfo[k].buffer,
++				        (unsigned long long)w[i].pBufferInfo[k].offset, (unsigned long long)w[i].pBufferInfo[k].range);
++		fputc(10, f);
++	}
++	pthread_mutex_unlock(&tr_lock);
++}
++
+ static VKAPI_ATTR void VKAPI_CALL UpdateDescriptorSets(VkDevice device, uint32_t nw, const VkWriteDescriptorSet *w,
+                                                       uint32_t nc, const VkCopyDescriptorSet *c)
+ {
+@@ -2766,6 +3113,7 @@
+ 	if (!next)
+ 		next = (PFN_vkUpdateDescriptorSets)device_of(device)->gdpa(device, "vkUpdateDescriptorSets");
+ 	rm_note_writes(nw, w, nc, c);
++	tr_writes(nw, w); // TEMP
+ 	next(device, nw, w, nc, c);
+ }
+ 
+@@ -2776,6 +3124,10 @@
+ 	if (!next)
+ 		next = (PFN_vkUpdateDescriptorSetWithTemplate)device_of(device)->gdpa(device, "vkUpdateDescriptorSetWithTemplate");
+ 	rm_note_template_write(s);
++	pthread_mutex_lock(&tr_lock);
++	if (tr_get())
++		fprintf(tr_f, "T %llu set %llx\n", (unsigned long long)(now_ns() / 1000), (unsigned long long)(uint64_t)s); // TEMP
++	pthread_mutex_unlock(&tr_lock);
+ 	next(device, s, t, data);
+ }
+ 
+@@ -3060,6 +3412,7 @@
+ 	I("vkDestroyBuffer", DestroyBuffer)
+ 	I("vkAllocateDescriptorSets", AllocateDescriptorSets)
+ 	I("vkUpdateDescriptorSets", UpdateDescriptorSets)
++	I("vkCmdBindDescriptorSets", CmdBindDescriptorSetsTmp) // TEMP
+ 	I("vkUpdateDescriptorSetWithTemplate", UpdateDescriptorSetWithTemplate)
+ 	I("vkUpdateDescriptorSetWithTemplateKHR", UpdateDescriptorSetWithTemplateKHR)
+ 	I("vkCreateComputePipelines", CreateComputePipelines)
+@@ -3087,6 +3440,8 @@
+ 	I("vkCreateSamplerYcbcrConversion", CreateSamplerYcbcrConversion)
+ 	I("vkCreateSamplerYcbcrConversionKHR", CreateSamplerYcbcrConversionKHR)
+ 	I("vkMapMemory", MapMemory)
++	I("vkMapMemory2KHR", MapMemory2Tmp) // TEMP
++	I("vkMapMemory2", MapMemory2Tmp) // TEMP
+ 	I("vkUnmapMemory", UnmapMemory)
+ 	I("vkFreeMemory", FreeMemory)
+ 	I("vkAllocateCommandBuffers", AllocateCommandBuffers)

@@ -648,6 +648,16 @@ vrlink writes its own log, `~/.local/share/Steam/logs/vrlink.txt` (the PC's side
       - Position: vrlink submits no depth (the depth flag on, the depth texture null), so vrcompositor re-projects by
         rotation only. A position 5 cm off moves B 21 px (the full parallax at ~1.8 m); the submitted pose carries
         it. Worn, the PC's 80 ms position prediction is off by 1.9 mm median (p99 7 mm, ~1-3 px at 1.8 m).
+      - Where vrcompositor keeps the stream frame's pose (2026-11-14, `tools/headset-dev/vrc-trace-layer.patch`, the
+        pose sent to the PC turned by a 2° 2.3 Hz sine, the submitted poses following it at 0.99 of a pure sine): in
+        none of its `vkCmdUpdateBuffer` data (the 624-byte overlay uniforms, the 800/120/272/1440/9600-byte ones: no
+        component at 2.3 Hz), no push constants, no descriptor writes while it runs (its sets are written once, no
+        dynamic offsets). Its only `vkMapMemory` mapping is the 256 MB ring. Its uniform buffers (each with a small
+        memory of its own, 192-2816 bytes) are filled by `vkCmdCopyBuffer` from host-visible staging buffers, 2800
+        bytes into the 2816-byte one and 400 bytes into others at every frame; that staging is not mapped through
+        `vkMapMemory` (`vkMapMemory2` presumably, hooked by the patch but not yet run). Next: read those copies'
+        data under the sine; the field that follows it, and which submit's pose it holds at each frame, tells what
+        vrcompositor pairs with which picture.
 
 Plan:
 0. ~~Capture vrlink's own output~~ done (above).

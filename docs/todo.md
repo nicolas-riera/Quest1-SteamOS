@@ -143,8 +143,8 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
     3 on the same PC has none). vrcompositor corrects the stream's picture for the pose the PC rendered it with only
     as far as that pose changes slowly (docs/streaming.md item 13, 2026-11-13 night): the noise of the PC's ~90 ms
     prediction shows as it is. Interim: the angular velocity vrlink gets is low-passed (40 ms). Next: find where
-    vrcompositor takes the stream frame's pose (in mapped memory, not in its command buffers) and what it pairs with
-    which picture; the table test is `pose-knobs-vrlink.patch`'s `/tmp/q1-posesine` (the stream marker at 0 px for
+    vrcompositor takes the stream frame's pose and what it pairs with which picture: most likely the per-frame 2800-byte
+    copy into its 2816-byte uniform buffer, from staging mapped with `vkMapMemory2` (`vrc-trace-layer.patch`); the table test is `pose-knobs-vrlink.patch`'s `/tmp/q1-posesine` (the stream marker at 0 px for
     any frequency once right). Also position: vrlink submits no depth, so a position error of the PC's prediction is
     not corrected at all.
   - On a system that had run for hours, the stream was 16.6 px rms off the world in Monado's output (2.5-3 px fresh).
