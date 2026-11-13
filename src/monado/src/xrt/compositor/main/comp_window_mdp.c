@@ -176,6 +176,7 @@ struct direct_buf
 	VkDescriptorSet set;   //!< sources
 	bool transfer_src;     //!< sources: can be blitted from (spect_tick)
 	bool hud;              //!< a buffer of head-locked overlays (sampled with a transparent border)
+	VkDescriptorSet combo; //!< head-locked overlays: theirs and the frame's (warp_render)
 };
 
 //! Re-project when /tmp/quest1-reproj does not say otherwise (it says "on" or "off", and tuning values, see warp_read_knobs)
@@ -203,6 +204,8 @@ struct direct_vk
 	VkPipelineLayout pl;
 	VkPipeline pipe;
 	VkPipeline hud_pipe;    //!< head-locked overlays over the re-projected frame (warp_render)
+	VkDescriptorSetLayout hud_dsl; //!< the frame and its head-locked overlays
+	VkPipelineLayout hud_pl;
 	VkSampler hud_sampler;  //!< transparent border
 	bool hud_mesh;          //!< the head-locked overlays' meshes (no rotation) are in the vertex buffer
 	VkDescriptorPool dpool;
@@ -1822,6 +1825,7 @@ warp_free_buf_vk(struct vk_bundle *vk, struct direct_buf *b)
 	b->image = VK_NULL_HANDLE;
 	b->mem = VK_NULL_HANDLE;
 	b->set = VK_NULL_HANDLE;
+	b->combo = VK_NULL_HANDLE;
 }
 
 //! Import the gralloc buffer as a R8G8B8A8_UNORM image: one of ours, 1440 x height, rendered to, or one of the layer's
@@ -1998,9 +2002,10 @@ warp_init(struct mdp_target *t)
 	VkDescriptorSetLayoutBinding bind = {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
 	VkDescriptorSetLayoutCreateInfo dslci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
 	                                         .bindingCount = 1, .pBindings = &bind};
-	VkDescriptorPoolSize psz = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 * (Q1D_MAX_IMAGES + Q1D_HUD_SETS)};
+	// a set per source buffer, and per buffer of head-locked overlays one more of two (see warp_render)
+	VkDescriptorPoolSize psz = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 * (Q1D_MAX_IMAGES + 3 * Q1D_HUD_SETS)};
 	VkDescriptorPoolCreateInfo dpci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-	                                   .maxSets = 2 * (Q1D_MAX_IMAGES + Q1D_HUD_SETS), .poolSizeCount = 1,
+	                                   .maxSets = 2 * (Q1D_MAX_IMAGES + 2 * Q1D_HUD_SETS), .poolSizeCount = 1,
 	                                   .pPoolSizes = &psz};
 	VkSamplerCreateInfo hsci = sci;
 	hsci.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
@@ -2072,31 +2077,53 @@ warp_init(struct mdp_target *t)
 	VkResult r = vk->vkCreateGraphicsPipelines(vk->device, VK_NULL_HANDLE, 1, &gpci, NULL, &V->pipe);
 	vk->vkDestroyShaderModule(vk->device, fs, NULL);
 	if (r == VK_SUCCESS && D->lens) {
-		// the head-locked overlays (lens mode only: they come with the eye renders), premultiplied, over the frame
-		VkShaderModuleCreateInfo hsci2 = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-		                                  .codeSize = sizeof(q1_warp_frag_hud_spv), .pCode = q1_warp_frag_hud_spv};
-		VkShaderModule hfs = VK_NULL_HANDLE;
-		VkPipelineColorBlendAttachmentState hcba = {
-		    .blendEnable = VK_TRUE,
-		    .srcColorBlendFactor = VK_BLEND_FACTOR_ONE,
-		    .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
-		    .colorBlendOp = VK_BLEND_OP_ADD,
-		    .srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
-		    .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
-		    .alphaBlendOp = VK_BLEND_OP_ADD,
-		    .colorWriteMask = 0xf,
+		// the head-locked overlays (lens mode only: they come with the eye renders), with the frame, per channel
+		VkDescriptorSetLayoutBinding hb[2] = {
+		    {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
+		    {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
 		};
-		VkPipelineColorBlendStateCreateInfo hcb = cb;
-		hcb.pAttachments = &hcba;
+		VkDescriptorSetLayoutCreateInfo hdslci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+		                                          .bindingCount = 2, .pBindings = hb};
+		VkShaderModuleCreateInfo hvsci = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+		                                  .codeSize = sizeof(q1_warp_hudc_vert_spv), .pCode = q1_warp_hudc_vert_spv};
+		VkShaderModuleCreateInfo hfsci = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+		                                  .codeSize = sizeof(q1_warp_hudc_frag_spv), .pCode = q1_warp_hudc_frag_spv};
+		VkShaderModule hvs = VK_NULL_HANDLE, hfs = VK_NULL_HANDLE;
+		// the frame's mesh (binding 0, as the warp's) and the overlays' (binding 1: its three texture coordinates)
+		VkVertexInputBindingDescription hvb[2] = {{0, WARP_VTX_FLOATS * sizeof(float), VK_VERTEX_INPUT_RATE_VERTEX},
+		                                          {1, WARP_VTX_FLOATS * sizeof(float), VK_VERTEX_INPUT_RATE_VERTEX}};
+		VkVertexInputAttributeDescription hva[7] = {{0, 0, VK_FORMAT_R32G32_SFLOAT, 0},
+		                                            {1, 0, VK_FORMAT_R32G32_SFLOAT, 2 * sizeof(float)},
+		                                            {2, 0, VK_FORMAT_R32G32_SFLOAT, 4 * sizeof(float)},
+		                                            {3, 0, VK_FORMAT_R32G32_SFLOAT, 6 * sizeof(float)},
+		                                            {4, 1, VK_FORMAT_R32G32_SFLOAT, 2 * sizeof(float)},
+		                                            {5, 1, VK_FORMAT_R32G32_SFLOAT, 4 * sizeof(float)},
+		                                            {6, 1, VK_FORMAT_R32G32_SFLOAT, 6 * sizeof(float)}};
+		VkPipelineVertexInputStateCreateInfo hvi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+		                                            .vertexBindingDescriptionCount = 2, .pVertexBindingDescriptions = hvb,
+		                                            .vertexAttributeDescriptionCount = 7, .pVertexAttributeDescriptions = hva};
 		VkPipelineShaderStageCreateInfo hstages[2] = {stages[0], stages[1]};
 		VkGraphicsPipelineCreateInfo hgpci = gpci;
 		hgpci.pStages = hstages;
-		hgpci.pColorBlendState = &hcb;
-		if (vk->vkCreateShaderModule(vk->device, &hsci2, NULL, &hfs) == VK_SUCCESS) {
-			hstages[1].module = hfs;
-			if (vk->vkCreateGraphicsPipelines(vk->device, VK_NULL_HANDLE, 1, &hgpci, NULL, &V->hud_pipe) != VK_SUCCESS) {
-				V->hud_pipe = VK_NULL_HANDLE;
+		hgpci.pVertexInputState = &hvi;
+		if (vk->vkCreateDescriptorSetLayout(vk->device, &hdslci, NULL, &V->hud_dsl) == VK_SUCCESS) {
+			VkPipelineLayoutCreateInfo hplci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+			                                    .setLayoutCount = 1, .pSetLayouts = &V->hud_dsl};
+			if (vk->vkCreatePipelineLayout(vk->device, &hplci, NULL, &V->hud_pl) == VK_SUCCESS &&
+			    vk->vkCreateShaderModule(vk->device, &hvsci, NULL, &hvs) == VK_SUCCESS &&
+			    vk->vkCreateShaderModule(vk->device, &hfsci, NULL, &hfs) == VK_SUCCESS) {
+				hstages[0].module = hvs;
+				hstages[1].module = hfs;
+				hgpci.layout = V->hud_pl;
+				if (vk->vkCreateGraphicsPipelines(vk->device, VK_NULL_HANDLE, 1, &hgpci, NULL, &V->hud_pipe) != VK_SUCCESS) {
+					V->hud_pipe = VK_NULL_HANDLE;
+				}
 			}
+		}
+		if (hvs != VK_NULL_HANDLE) {
+			vk->vkDestroyShaderModule(vk->device, hvs, NULL);
+		}
+		if (hfs != VK_NULL_HANDLE) {
 			vk->vkDestroyShaderModule(vk->device, hfs, NULL);
 		}
 		if (V->hud_pipe == VK_NULL_HANDLE) {
@@ -2255,6 +2282,8 @@ warp_free(struct mdp_target *t)
 	if (V->cpool != VK_NULL_HANDLE) vk->vkDestroyCommandPool(vk->device, V->cpool, NULL);
 	if (V->pipe != VK_NULL_HANDLE) vk->vkDestroyPipeline(vk->device, V->pipe, NULL);
 	if (V->hud_pipe != VK_NULL_HANDLE) vk->vkDestroyPipeline(vk->device, V->hud_pipe, NULL);
+	if (V->hud_pl != VK_NULL_HANDLE) vk->vkDestroyPipelineLayout(vk->device, V->hud_pl, NULL);
+	if (V->hud_dsl != VK_NULL_HANDLE) vk->vkDestroyDescriptorSetLayout(vk->device, V->hud_dsl, NULL);
 	if (V->hud_sampler != VK_NULL_HANDLE) vk->vkDestroySampler(vk->device, V->hud_sampler, NULL);
 	if (V->pl != VK_NULL_HANDLE) vk->vkDestroyPipelineLayout(vk->device, V->pl, NULL);
 	if (V->dpool != VK_NULL_HANDLE) vk->vkDestroyDescriptorPool(vk->device, V->dpool, NULL);
@@ -2393,7 +2422,24 @@ warp_render(struct mdp_target *t, int o, const float *delta_top, const float *de
 				U_LOG_E("mdp: warp: no head-locked overlays' buffer %d/%d", D->latest_frame.hud, h);
 			}
 			hud = NULL;
+			break;
 		}
+		// their set with the frame's buffer of this half (the last pass that read it has finished: warp_render waits)
+		if (hud[h].combo == VK_NULL_HANDLE) {
+			VkDescriptorSetAllocateInfo dai = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+			                                   .descriptorPool = V->dpool, .descriptorSetCount = 1, .pSetLayouts = &V->hud_dsl};
+			if (vk->vkAllocateDescriptorSets(vk->device, &dai, &hud[h].combo) != VK_SUCCESS) {
+				hud[h].combo = VK_NULL_HANDLE;
+				hud = NULL;
+				break;
+			}
+		}
+		VkDescriptorImageInfo ii[2] = {{V->sampler, src[h].view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+		                               {V->hud_sampler, hud[h].view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
+		VkWriteDescriptorSet w = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = hud[h].combo,
+		                          .descriptorCount = 2, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+		                          .pImageInfo = ii};
+		vk->vkUpdateDescriptorSets(vk->device, 1, &w, 0, NULL);
 	}
 	const size_t mesh_floats = WARP_VTX_FLOATS * (WARP_GRID + 1) * (WARP_GRID + 1);
 	if (hud != NULL && !V->hud_mesh) {
@@ -2456,9 +2502,10 @@ warp_render(struct mdp_target *t, int o, const float *delta_top, const float *de
 		    warp_hud_scissor(D, V->vptr + (2 + h) * mesh_floats, D->latest_frame.hud_rect[h], &hsc)) {
 			vk->vkCmdSetScissor(cmd, 0, 1, &hsc);
 			vk->vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, V->hud_pipe);
-			vk->vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, V->pl, 0, 1, &hud[h].set, 0, NULL);
-			VkDeviceSize hoff = (VkDeviceSize)(2 + h) * mesh_floats * sizeof(float);
-			vk->vkCmdBindVertexBuffers(cmd, 0, 1, &V->vbuf, &hoff);
+			vk->vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, V->hud_pl, 0, 1, &hud[h].combo, 0, NULL);
+			VkDeviceSize hoff[2] = {off, (VkDeviceSize)(2 + h) * mesh_floats * sizeof(float)};
+			VkBuffer hbufs[2] = {V->vbuf, V->vbuf};
+			vk->vkCmdBindVertexBuffers(cmd, 0, 2, hbufs, hoff);
 			vk->vkCmdDrawIndexed(cmd, V->nidx, 1, 0, 0, 0);
 		}
 		vk->vkCmdEndRenderPass(cmd);

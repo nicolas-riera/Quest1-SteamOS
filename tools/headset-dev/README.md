@@ -45,3 +45,8 @@ Stream picture placement (docs/streaming.md, "Measuring where the stream's frame
   (marker first, a stream region second) against a still reference.
 - `marker-fit.py HZ FILE...` (on the PC, `python -P`): the stream region against the marker, and each frame's error
   as a time offset (0 ms: the picture is where its pose says).
+- `mjit.py N X,Y...` (as root on the headset, with `shift` built next to it in `/tmp/q1hd`): the one test for every
+  case, on Monado's own output (`fake-motion-monado.patch` and `QUEST1_WARP_USAGE=0`): a still reference, then N
+  snapshots under a 4° 2 Hz yaw, each region's shift per line. With the world marker, the head marker and a stream
+  region: the head marker stays at 0 and the stream moves as the world marker (stream minus world: the error). The
+  snapshots stay on the headset and are deleted.

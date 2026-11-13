@@ -207,21 +207,30 @@ both vrcompositor and the warp as a function of time (an exact prediction), the 
 jumped -16 to +14 px between snapshots (render-to-display timing alone); Meta's runtime avoids it with head-locked
 layers that are never re-projected.
 
-So the layer draws them apart (`quest1_hud.c`, scene mode): vrcompositor draws each overlay of an eye as a quad after
-the scene, with a 624-byte uniform update before it (the overlay's model matrix, the eye's view, the projection). A
-quad whose transform in the eye's space (view * model) is the same as one of the previous frame's while its model is
-not (the head moved, the overlay followed) is head-locked; with the head still it keeps what it was. Its draw goes
-into a buffer of its own (the eye render's size, a set per swapchain image, ~80 MB made at the first one), in a render
-pass of its own between the eye's (rpmerge's state is settled first). Q1D_FRAME says which halves have some and the
-part of the buffer they cover; Monado's warp draws them over the re-projected frame with the lens only (no rotation),
-blended (premultiplied alpha), clipped to the mesh cells that cover that part. Measured: the head-locked marker 0 px
-in 40 snapshots of Monado's output under the same fake yaw; head still, the same picture as before; the warp's GPU
-time 2.4 -> 2.7 ms a vsync while a HUD shows (4.3 ms when it was blended over the whole panel), nothing otherwise.
-The user: the HUD stays put. With 2 or 3 sets, 1 frame in 7 found none free (Monado can still hold three images
-while a fourth renders). "nohud" in `/tmp/quest1-layer` turns it off live (A/B).
+So the layer draws them apart (`quest1_hud.c`): vrcompositor draws each overlay of an eye as a quad, with a 624-byte
+uniform update before it (the overlay's model matrix, the eye's view, the projection). A quad whose transform in the
+eye's space (view * model) is the same as one of the previous frame's while its model is not (the head moved, the
+overlay followed) is head-locked; with the head still it keeps what it was. Its draw goes into a buffer of its own
+(the eye render's size, one set per swapchain image, ~80 MB made at the first one), in a render pass of its own
+between the eye's (rpmerge's state is settled first). The detection is hooked on every eye run of the frame, not on
+one way of drawing it: in scene mode, on the layer's own frames, and while Steam Link VR streams, when vrcompositor
+composes the overlays over the stream's frame in its distortion pass (the eye then goes on being drawn where
+vrcompositor draws it; only its head-locked quads go apart). Q1D_FRAME says which halves have some and the part of
+the buffer they cover; Monado's warp draws them over the re-projected frame with the lens only (no rotation), clipped
+to the mesh cells that cover that part.
 
-Not covered yet: while Steam Link VR streams, vrcompositor composes the overlays in its distortion pass
-(docs/todo.md).
+The lens correction is per colour channel (each channel of the frame is read at its own place), so the HUD is too:
+blended with one alpha (the green channel's) its edges came out red and blue (user, 2026-11-13: "des bords
+rouge/bleu"). Monado draws each head-locked part with the frame in one pass now (`q1_warp_hudc_*`): per channel, the
+HUD read at that channel's place with its own alpha, over the frame read at that channel's place.
+
+Measured with one test for every case (tools/headset-dev: a fake head yaw in Monado's head pose, with its angular
+velocity, seen by vrcompositor, the warp, vrlink and the PC; a world-locked and a head-locked `q1marker` and a region
+of the stream in the same snapshots of Monado's output): the head-locked marker 0 px in every snapshot, with and
+without a stream, while the world moves +-60 px; head still, the same picture as before; the warp's GPU time 2.4 ->
+2.7 ms a vsync while a HUD shows, nothing otherwise. The user: the HUD stays put. With 2 or 3 sets, 1 frame in 7
+found none free (Monado can still hold three images while a fourth renders). "nohud" in `/tmp/quest1-layer` turns it
+off live (A/B).
 
 ## Plan: Monado presents vrcompositor's frames and re-projects them
 

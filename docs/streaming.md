@@ -590,14 +590,30 @@ vrlink writes its own log, `~/.local/share/Steam/logs/vrlink.txt` (the PC's side
     - One cause found, in the layer: it copied vrlink's NV12 frame into its RGBA output at each of vrcompositor's frames,
       also when vrcompositor showed the same frame again, but by then vrlink may have given that buffer back to the
       decoder (9 buffers), which wrote a newer picture into it: that newer picture went out under the old pose.
-      Copying each frame once (`qcp_record`, uncommitted): the 52-76 ms cluster is gone, but with vrcompositor at
-      ~57 fps (not 72) only ~31 % of frames landed right, the others spread over ±40 ms; the user still saw the
-      stream tremble. Suspected: vrcompositor takes the frame's texture and its pose from vrlink's latest submit at
-      two moments. The shim's swap (`submit_set`) changes which buffer is `texture[0]` at every submit, while the real
-      vrcompositor copies `texture[index]` into `texture[0]` when the submit arrives, together with its pose; with
-      vrcompositor slower than vrlink's ~74 submits a second, a submit lands between the two reads.
+      Copying each frame once (`qcp_record`): the 52-76 ms cluster is gone, but with vrcompositor at ~57 fps (not
+      72) only ~31 % of frames landed right, the others spread over ±40 ms; the user still saw the stream tremble.
     - The HUD overlays' trembling was not the stream's: Monado's warp moved them with each frame's prediction error,
-      stream or not. They are drawn apart now, without a stream so far (docs/direct-scanout.md, 2026-11-13).
+      stream or not. They are drawn apart now, stream or not (docs/direct-scanout.md, 2026-11-13).
+    - 2026-11-13, one test for every case: the fake yaw moved into Monado's head pose, with its angular velocity
+      (`fake-motion-monado.patch`), so that vrcompositor, the warp, vrlink and the PC all see it; a world-locked and a
+      head-locked `q1marker` and a stream region measured in the same snapshots of Monado's own output (`mjit.py`).
+      On a system that had run for hours with many sessions: the stream 16.6 px rms off the world (up to 50). After a
+      reboot: 2.5-3 px (max 4-5), the head marker 0 px, in every series since.
+    - Where frame and pose come apart was checked at each step, and it is nowhere on a fresh system:
+      - vrlink's submits: the shim read the luma of each submitted frame (the decoder's buffer of that index, mapped
+        in vrlink) and its shift against a still reference, next to the yaw of the pose submitted with it. In the
+        sharp inset the picture follows its own pose within 0.56° rms (0.3° of measurement noise at rest): vrlink and
+        the PC pair them right. (Measured in the wide view's centre, which the PC codes with few bits under the
+        inset, it looked 2° off: the blocks, not the pose.) The pose vrlink gives the PC is clean too: the fake sine
+        within 3.4 %, its angular velocity within 3.7 %.
+      - vrcompositor's frames: it settles on vrlink's frame 4-9 ms before it reads it, and ~25 % of the frames it
+        takes are older than vrlink's last submit. Drawing vrlink's last frame instead (each frame buffer tagged by the
+        shim, read by the layer) changed nothing: 2.8 px against 2.7 px, A/B on the same run. So those frames go out
+        with their own pose; not kept.
+      - The shim's texture handles are `fd << 32 | vrcompositor's pid`, the fd vrcompositor got for each of vrlink's
+        buffers; it duplicates and closes it, so that number names nothing later.
+    - Left (docs/todo.md): what makes a long-running system bad. vrcompositor leaks a `sync_fence` fd every frame and
+      slows down (64-71 -> 55 fps in 90 minutes, swap in use).
 
 Plan:
 0. ~~Capture vrlink's own output~~ done (above).

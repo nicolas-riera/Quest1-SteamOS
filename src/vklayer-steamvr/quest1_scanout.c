@@ -205,6 +205,7 @@ static struct
 	bool skipping;
 	bool in_run, redirect; //!< an eye's passes are being recorded; into its gralloc buffer
 	int eye, idx;          //!< that eye's half, the frame's reserved swapchain index (-1: none)
+	bool stream;           //!< the frame is rendered while streaming (into vrcompositor's images)
 	unsigned runs;         //!< eyes begun in this recording
 	// the eye's latest pass into its gralloc buffer (quest1_hud.c goes out of it and back)
 	uint64_t cur_rp, cur_fb, app_fb; //!< the app's render pass, the twin framebuffer, the app's framebuffer
@@ -1309,15 +1310,21 @@ static VKAPI_ATTR void VKAPI_CALL qs_CmdBeginRenderPass(VkCommandBuffer cb, cons
 		typeof(qs_cbst[0]) *e = scene_fb ? qs_cbst_get(cb, true) : NULL;
 		bool start = e && !e->in_run;
 		pthread_mutex_unlock(&qs_cbst_lock);
-		if (start && e->runs == 0 && !qs_streaming()) // (streaming: into vrcompositor's images, for its distortion pass)
+		// the frame's swapchain index, known before vrcompositor acquires it: the eyes render into its buffers, and the
+		// head-locked overlays into its set (quest1_hud.c), also while streaming
+		bool streaming = start && e->runs == 0 && qs_streaming();
+		if (start && e->runs == 0)
 			idx = qs_reserve(&sc);
 		pthread_mutex_lock(&qs_cbst_lock);
 		if (start) {
 			e->in_run = true;
 			e->eye = e->runs == 0 ? qs_first_eye : 1 - qs_first_eye;
-			if (e->runs++ == 0)
+			if (e->runs++ == 0) {
 				e->idx = idx;
-			e->redirect = e->idx >= 0;
+				e->stream = streaming;
+			}
+			// streaming: into vrcompositor's images, for its distortion pass (which then runs into the frame's buffers)
+			e->redirect = e->idx >= 0 && !e->stream;
 			e->hud_cleared = false;
 		}
 		int started_eye = start ? e->eye : -1;
@@ -1333,16 +1340,18 @@ static VKAPI_ATTR void VKAPI_CALL qs_CmdBeginRenderPass(VkCommandBuffer cb, cons
 		if (started_eye >= 0)
 			qh_eye_start(started_eye);
 		VkFramebuffer stw = target ? qs_scene_twin(device_of(cb)->handle, bi->framebuffer, target) : VK_NULL_HANDLE;
-		if (stw) {
+		if (scene_fb) {
 			pthread_mutex_lock(&qs_cbst_lock);
 			e = qs_cbst_get(cb, false);
-			if (e) {
+			if (e && e->in_run) {
 				e->cur_rp = (uint64_t)bi->renderPass;
-				e->cur_fb = (uint64_t)stw;
+				e->cur_fb = (uint64_t)(stw ? stw : bi->framebuffer);
 				e->app_fb = (uint64_t)bi->framebuffer;
 				e->area = bi->renderArea;
 			}
 			pthread_mutex_unlock(&qs_cbst_lock);
+		}
+		if (stw) {
 			sb = *bi;
 			sb.framebuffer = stw;
 			bi = &sb;

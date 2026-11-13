@@ -1,5 +1,6 @@
 // quest1_hud: SteamVR's head-locked overlays drawn apart (included by quest1_scanout.c after quest1_rpmerge.c;
-// vrcompositor, scene mode).
+// vrcompositor, scene mode: its own frames and, while Steam Link VR streams, the layer of overlays its distortion pass
+// blends over the stream; the same buffers either way, the eye render's size).
 //
 // vrcompositor draws each overlay of an eye as a quad after the scene, with a 624-byte uniform update before the draw
 // whose first two matrices are the overlay's model (overlay to tracking space) and the eye's view. A head-locked
@@ -258,7 +259,7 @@ static bool qh_before_draw(VkCommandBuffer cb, uint32_t n)
 		return false;
 	pthread_mutex_lock(&qs_cbst_lock);
 	typeof(qs_cbst[0]) *e = qs_cbst_get(cb, false);
-	bool run = e && e->in_run && e->redirect && e->idx >= 0 && e->cur_fb && e->app_fb;
+	bool run = e && e->in_run && e->idx >= 0 && e->cur_fb && e->app_fb;
 	int eye = run ? e->eye : -1, idx = run ? e->idx : -1;
 	VkRenderPass rp = run ? (VkRenderPass)e->cur_rp : VK_NULL_HANDLE;
 	VkFramebuffer app_fb = run ? (VkFramebuffer)e->app_fb : VK_NULL_HANDLE;
