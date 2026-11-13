@@ -1,20 +1,21 @@
-# Test-only patch (never commit it applied): /tmp/q1-fake-yaw "DEG HZ" adds a yaw sine and its rate to Monado's head pose,
-# seen alike by vrcompositor, the warp, vrlink and the PC (tools/headset-dev/README.md)
+# Test-only patch (never commit it applied): /tmp/q1-fake-yaw "DEG HZ [M]" adds a yaw sine and its rate (and a sideways
+# sine of M metres) to Monado's head pose, seen alike by vrcompositor, the warp, vrlink and the PC (tools/headset-dev/README.md)
 diff --git a/src/monado/src/xrt/drivers/quest1/quest1_hmd.c b/src/monado/src/xrt/drivers/quest1/quest1_hmd.c
 index c32d128..304a7fc 100644
 --- a/src/monado/src/xrt/drivers/quest1/quest1_hmd.c
 +++ b/src/monado/src/xrt/drivers/quest1/quest1_hmd.c
-@@ -879,6 +879,29 @@ hmd_get_tracked_pose(struct xrt_device *xdev,
+@@ -879,6 +879,36 @@ hmd_get_tracked_pose(struct xrt_device *xdev,
  	} else {
  		predict_orientation_accel(h, at_timestamp_ns, &rel.pose.orientation); // past the newest pose only
  	}
 +	{
 +		static int64_t chk;
-+		static double amp, hz;
++		static double amp, hz, mx;
 +		if (at_timestamp_ns - chk > 300000000ll || at_timestamp_ns < chk) {
 +			chk = at_timestamp_ns;
 +			FILE *f = fopen("/tmp/q1-fake-yaw", "r");
-+			if (!f || fscanf(f, "%lf %lf", &amp, &hz) != 2)
++			mx = 0;
++			if (!f || fscanf(f, "%lf %lf %lf", &amp, &hz, &mx) < 2)
 +				amp = hz = 0;
 +			if (f)
 +				fclose(f);
@@ -29,6 +30,12 @@ index c32d128..304a7fc 100644
 +			rel.angular_velocity.y += (float)(amp * M_PI / 180 * 2 * M_PI * hz * cos(ph));
 +			rel.relation_flags = (enum xrt_space_relation_flags)(rel.relation_flags |
 +			                                                      XRT_SPACE_RELATION_ANGULAR_VELOCITY_VALID_BIT);
++			// a sideways sine of MX metres, same phase (the eyes move as the head turns about the neck)
++			rel.pose.position.x += (float)(mx * sin(ph));
++			rel.linear_velocity.x += (float)(mx * 2 * M_PI * hz * cos(ph));
++			if (mx != 0)
++				rel.relation_flags = (enum xrt_space_relation_flags)(
++				    rel.relation_flags | XRT_SPACE_RELATION_LINEAR_VELOCITY_VALID_BIT);
 +		}
 +	}
  	*out_relation = rel;

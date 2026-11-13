@@ -140,12 +140,11 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - Steam Link VR (docs/streaming.md, section 2): a new picture each frame and a sharp centre now (user, 2026-11-12:
   "c'est net"), but it trembles, flashes black now and then and runs below 72 fps.
   - Trembling: jumps of the whole stream at every head movement, none while still (user, 2026-11-13; a Quest 3 on the
-    same PC has none). SteamVR's HUD jumped the same way: that one is fixed, stream or not (docs/direct-scanout.md,
-    2026-11-13). The stream itself, measured with the one test for every case (docs/streaming.md item 13): on a
-    freshly started system it follows the world within 2.5-3 px of Monado's output (the head marker 0 px); on a
-    system that had run for hours with many sessions, 16.6 px rms (up to 50). It gets worse with the time the system
-    has run, not with the pairing of frames and poses (checked 2026-11-13, see item 13). Next: follow it over a long
-    run (`mjit.py` every few minutes, with vrcompositor's fps, fds and memory) to find which of these takes it there:
+    same PC has none). Cause found 2026-11-13 evening: Monado's warp missed about one vsync in four whenever a
+    head-locked overlay showed (docs/direct-scanout.md, 2026-11-13 evening; docs/streaming.md item 13); fixed, the
+    user's check pending. Left: on a system that had run for hours, the stream was 16.6 px rms off the world in
+    Monado's output (2.5-3 px fresh). Follow it over a long run (`mjit.py` every few minutes, with vrcompositor's fps,
+    fds and memory) to find which of these takes it there:
     - vrcompositor leaks a `sync_fence` fd at every frame (~30-70 a second: 11 000 after 20 minutes, its limit of
       524288 in ~2 h of session). They come from the blob's `vkQueueSubmit` (IOCTL_KGSL_TIMESTAMP_EVENT, libgsl,
       called from the layer's submit thread). Not the cause: fence waits, resets or polls, semaphores, SYNC_FD

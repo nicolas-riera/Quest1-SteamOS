@@ -208,6 +208,9 @@ struct direct_vk
 	VkPipelineLayout hud_pl;
 	VkSampler hud_sampler;  //!< transparent border
 	bool hud_mesh;          //!< the head-locked overlays' meshes (no rotation) are in the vertex buffer
+	//! The same meshes in plain memory, for warp_hud_scissor: the vertex buffer's mapping is write-combined, and
+	//! reading them there took 5-7 ms of CPU a vsync (the warp then missed its vsync about once in four, 2026-11-13)
+	float *hud_cpu;
 	VkDescriptorPool dpool;
 	VkBuffer vbuf, ibuf;
 	VkDeviceMemory vmem, imem;
@@ -2290,6 +2293,7 @@ warp_free(struct mdp_target *t)
 	if (V->dsl != VK_NULL_HANDLE) vk->vkDestroyDescriptorSetLayout(vk->device, V->dsl, NULL);
 	if (V->sampler != VK_NULL_HANDLE) vk->vkDestroySampler(vk->device, V->sampler, NULL);
 	if (V->rp != VK_NULL_HANDLE) vk->vkDestroyRenderPass(vk->device, V->rp, NULL);
+	free(V->hud_cpu);
 	*V = (struct direct_vk){0};
 }
 
@@ -2444,10 +2448,18 @@ warp_render(struct mdp_target *t, int o, const float *delta_top, const float *de
 	const size_t mesh_floats = WARP_VTX_FLOATS * (WARP_GRID + 1) * (WARP_GRID + 1);
 	if (hud != NULL && !V->hud_mesh) {
 		static const float identity[4] = {0, 0, 0, 1};
-		for (int h = 0; h < 2; h++) {
-			warp_build_mesh(D, h, identity, identity, V->vptr + (2 + h) * mesh_floats);
+		if (V->hud_cpu == NULL) {
+			V->hud_cpu = malloc(2 * mesh_floats * sizeof(float));
 		}
-		V->hud_mesh = true;
+		if (V->hud_cpu == NULL) {
+			hud = NULL;
+		} else {
+			for (int h = 0; h < 2; h++) {
+				warp_build_mesh(D, h, identity, identity, V->hud_cpu + h * mesh_floats);
+			}
+			memcpy(V->vptr + 2 * mesh_floats, V->hud_cpu, 2 * mesh_floats * sizeof(float));
+			V->hud_mesh = true;
+		}
 	}
 	int64_t tm0 = os_monotonic_get_ns();
 	for (int h = 0; h < 2; h++) {
@@ -2499,7 +2511,7 @@ warp_render(struct mdp_target *t, int o, const float *delta_top, const float *de
 		vk->vkCmdDrawIndexed(cmd, V->nidx, 1, 0, 0, 0);
 		VkRect2D hsc;
 		if (hud != NULL && (hud_halves & (1u << h)) &&
-		    warp_hud_scissor(D, V->vptr + (2 + h) * mesh_floats, D->latest_frame.hud_rect[h], &hsc)) {
+		    warp_hud_scissor(D, V->hud_cpu + h * mesh_floats, D->latest_frame.hud_rect[h], &hsc)) {
 			vk->vkCmdSetScissor(cmd, 0, 1, &hsc);
 			vk->vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, V->hud_pipe);
 			vk->vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, V->hud_pl, 0, 1, &hud[h].combo, 0, NULL);

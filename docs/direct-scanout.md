@@ -232,6 +232,14 @@ without a stream, while the world moves +-60 px; head still, the same picture as
 found none free (Monado can still hold three images while a fourth renders). "nohud" in `/tmp/quest1-layer` turns it
 off live (A/B).
 
+Then the warp missed its vsync whenever a head-locked overlay showed (found 2026-11-13 evening, from the stream's
+trembling): `warp_hud_scissor` read the HUD meshes back from the vertex buffer's mapping, which is write-combined
+(CPU reads ~220 MB/s), 5-7 ms of CPU at every vsync. With the stream's GPU load on top, the commit came after the vsync
+about once in four (~17 "late commit" a second during the user's test, each a frame shown a period late: a jump
+while the head moves, never while it is still). The snapshots never showed it: each frame was right, only shown late.
+The meshes are kept in plain memory now (`hud_cpu`): with a stream and a head-locked overlay, 9.7-11 -> 5.3 ms of CPU
+a vsync and no late commit (`late commit` and the `warped`/`kept` rates in Monado's log: every vsync covered).
+
 ## Plan: Monado presents vrcompositor's frames and re-projects them
 
 Monado already has everything a 72 Hz re-projection needs: the head pose at any time, a

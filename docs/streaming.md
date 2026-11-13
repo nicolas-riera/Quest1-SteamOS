@@ -614,6 +614,16 @@ vrlink writes its own log, `~/.local/share/Steam/logs/vrlink.txt` (the PC's side
         buffers; it duplicates and closes it, so that number names nothing later.
     - Left (docs/todo.md): what makes a long-running system bad. vrcompositor leaks a `sync_fence` fd every frame and
       slows down (64-71 -> 55 fps in 90 minutes, swap in use).
+    - 2026-11-13 evening (user, on a fresh system: "ça tremble toujours"). The bench widened, all clean: both eyes
+      (the same error, no disparity between them); a 4 cm sideways sine (vrcompositor re-projects the stream with
+      vrlink's depth, in step with the world marker, < 0.5 px off); 190°/s (a smooth 3.4 ms lag in the wide views, the
+      same with vrlink stopped: vrcompositor's own re-projection, not the stream); and the user's recorded head
+      (`replay-head-monado.patch`: 85 s of Meta's poses fed to Monado's input, prediction included), stream next to
+      the world marker within 5 px. Every picture was in the right place: the jumps were in when they were shown.
+      Monado's log of the user's test: 53-65 frames a second on the panels, ~17 commits a second after their vsync,
+      each a frame shown a period late. The warp's CPU time went to reading the HUD's meshes from write-combined
+      memory whenever a head-locked overlay showed, as during every stream (docs/direct-scanout.md, 2026-11-13
+      evening). Fixed: no late commit with a stream and a HUD.
 
 Plan:
 0. ~~Capture vrlink's own output~~ done (above).

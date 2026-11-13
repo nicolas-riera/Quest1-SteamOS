@@ -1,0 +1,85 @@
+# Test-only patch (never commit it applied): /tmp/q1-replay "S" replays a recorded head motion (/tmp/q1hd/headrec.txt,
+# recorded with rec.py-style lines "t qx qy qz qw wx wy wz") at Monado's input, scaled by S, on the live pose: the
+# prediction and every consumer see a real head (tools/headset-dev/README.md)
+diff --git a/src/monado/src/xrt/drivers/quest1/quest1_hmd.c b/src/monado/src/xrt/drivers/quest1/quest1_hmd.c
+index c32d128..a9a530b 100644
+--- a/src/monado/src/xrt/drivers/quest1/quest1_hmd.c
++++ b/src/monado/src/xrt/drivers/quest1/quest1_hmd.c
+@@ -623,6 +623,68 @@ meta_push(struct quest1_hmd *h, const struct q1track_pose *p)
+ 	                                         p->orientation[3]};
+ 	rel.pose.position = (struct xrt_vec3){p->position[0], p->position[1], p->position[2]};
+ 	math_quat_normalize(&rel.pose.orientation);
++	float wrep[3] = {p->angular_velocity[0], p->angular_velocity[1], p->angular_velocity[2]};
++	{
++		// test only: /tmp/q1-replay "S" replays a recorded head (rec.py: t, quaternion, head-frame rate), its
++		// motion since its first pose scaled by S, on top of the live pose, before any prediction
++		static int64_t chk, t0, *rt;
++		static int n;
++		static float (*rq)[4], (*rw)[3];
++		static double sc;
++		if (ts - chk > 300000000ll || ts < chk) {
++			chk = ts;
++			FILE *f = fopen("/tmp/q1-replay", "r");
++			double ns = 0;
++			if (!f || fscanf(f, "%lf", &ns) != 1)
++				ns = 0;
++			if (f)
++				fclose(f);
++			if (ns != 0 && sc == 0)
++				t0 = ts;
++			sc = ns;
++			if (sc != 0 && rt == NULL) {
++				FILE *r = fopen("/tmp/q1hd/headrec.txt", "r");
++				int cap = 65536;
++				rt = calloc(cap, sizeof(*rt));
++				rq = calloc(cap, sizeof(*rq));
++				rw = calloc(cap, sizeof(*rw));
++				while (r && n < cap && fscanf(r, "%lld %f %f %f %f %f %f %f", (long long *)&rt[n], &rq[n][0], &rq[n][1],
++				                               &rq[n][2], &rq[n][3], &rw[n][0], &rw[n][1], &rw[n][2]) == 8)
++					n++;
++				if (r)
++					fclose(r);
++			}
++		}
++		if (sc != 0 && n > 1) {
++			int64_t want = rt[0] + (ts - t0) % (rt[n - 1] - rt[0]);
++			int lo = 0, hi = n - 1;
++			while (hi - lo > 1) {
++				int mid = (lo + hi) / 2;
++				if (rt[mid] <= want)
++					lo = mid;
++				else
++					hi = mid;
++			}
++			struct xrt_quat q0 = {rq[0][0], rq[0][1], rq[0][2], rq[0][3]}, qi = {rq[lo][0], rq[lo][1], rq[lo][2], rq[lo][3]};
++			struct xrt_quat q0i, d, live = rel.pose.orientation, o;
++			math_quat_invert(&q0, &q0i);
++			math_quat_rotate(&q0i, &qi, &d); // the head-frame motion since the first pose
++			math_quat_normalize(&d);
++			if (d.w < 0)
++				d = (struct xrt_quat){-d.x, -d.y, -d.z, -d.w};
++			double vn = sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
++			if (vn > 1e-9) {
++				double a = 2 * atan2(vn, d.w) * sc;
++				double k = sin(a / 2) / vn;
++				d = (struct xrt_quat){(float)(d.x * k), (float)(d.y * k), (float)(d.z * k), (float)cos(a / 2)};
++			}
++			math_quat_rotate(&live, &d, &o);
++			math_quat_normalize(&o);
++			rel.pose.orientation = o;
++			for (int i = 0; i < 3; i++)
++				wrep[i] += (float)(rw[lo][i] * sc);
++		}
++	}
+ 	int flags = 0;
+ 	// libossdk returned a state: the orientation is usable even while its status bits are 0
+ 	// (SLAM still initialising, IMU-only). A zero quaternion is not.
+@@ -642,7 +704,7 @@ meta_push(struct quest1_hmd *h, const struct q1track_pose *p)
+ 		// libossdk gives the head's angular velocity in the head frame (the gyro's), Monado wants it
+ 		// in the base frame like the linear one: measured against the orientation's derivative
+ 		// (2026-11-03; as base-frame vector it was off by 147 %, which sheared every re-projection)
+-		struct xrt_vec3 w_head = {p->angular_velocity[0], p->angular_velocity[1], p->angular_velocity[2]};
++		struct xrt_vec3 w_head = {wrep[0], wrep[1], wrep[2]};
+ 		math_quat_rotate_vec3(&rel.pose.orientation, &w_head, &rel.angular_velocity);
+ 		rel.linear_velocity =
+ 		    (struct xrt_vec3){p->linear_velocity[0], p->linear_velocity[1], p->linear_velocity[2]};

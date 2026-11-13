@@ -36,8 +36,13 @@ Stream picture placement (docs/streaming.md, "Measuring where the stream's frame
   With `head` it is head-locked (placed relative to the headset like SteamVR's HUD, another pattern), to run next to
   the world-locked one: a negative DOWN_M puts it above. Monado's own output (`touch /tmp/quest1-snap-monado`, with
   `QUEST1_WARP_USAGE=0` for linear outputs) shows where the panels get it; for a motion both vrcompositor and the
-  warp see, apply `fake-motion-monado.patch` (test only, to the headset's Monado tree; same `/tmp/q1-fake-yaw`) instead
-  of the driver's patch (docs/direct-scanout.md, 2026-11-13).
+  warp see, apply `fake-motion-monado.patch` (test only, to the headset's Monado tree; same `/tmp/q1-fake-yaw`, plus
+  an optional third number: a sideways sine of that many metres) instead of the driver's patch (docs/direct-scanout.md,
+  2026-11-13).
+- `replay-head-monado.patch` (test only, to the headset's Monado tree, with or without the one above):
+  `/tmp/q1-replay` "S" replays a recorded head (`/tmp/q1hd/headrec.txt`, lines "t qx qy qz qw wx wy wz" of Meta's
+  poses, angular rate in the head frame) at Monado's input, its motion scaled by S, so the prediction runs on real
+  data. The recording is the user's: keep it local.
 - `shift.c`: `shift A.ppm B.ppm X Y W H R`, the (dx, dy) that best moves a region of A onto B (build on the headset:
   `gcc -O2 -o shift shift.c -lm`). With `R` 2 and A = B it prints the region's contrast (sd): pick regions with
   some, and check they stay put without motion (Steam Link's animated skies do not).
@@ -49,4 +54,7 @@ Stream picture placement (docs/streaming.md, "Measuring where the stream's frame
   case, on Monado's own output (`fake-motion-monado.patch` and `QUEST1_WARP_USAGE=0`): a still reference, then N
   snapshots under a 4° 2 Hz yaw, each region's shift per line. With the world marker, the head marker and a stream
   region: the head marker stays at 0 and the stream moves as the world marker (stream minus world: the error). The
-  snapshots stay on the headset and are deleted.
+  snapshots stay on the headset and are deleted. `MOTION="DEG HZ [M]"` sets the fake motion, `REPLAY=S` replays the
+  recorded head instead (seconds since its start last on each line). Compare regions close to each other: under pitch
+  and roll, distant ones move apart even when right. Snapshots show where frames land, not when: a frame shown a
+  vsync late is right in them; check Monado's `late commit` count for that.
