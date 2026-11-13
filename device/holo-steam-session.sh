@@ -122,7 +122,7 @@ fi
 
 if [ -n "$V4L2SRC" ]; then
 	gcc -std=gnu11 -O2 -Wall -fPIC -shared -fvisibility=hidden -o /usr/local/lib/libquest1_v4l2.so \
-		"$V4L2SRC/quest1_v4l2.c" "$V4L2SRC/quest1_vdec.c" "$V4L2SRC/quest1_streamclient.c" "$V4L2SRC/quest1_vrlink.c" -lpthread
+		"$V4L2SRC/quest1_v4l2.c" "$V4L2SRC/quest1_vdec.c" "$V4L2SRC/quest1_streamclient.c" "$V4L2SRC/quest1_vrlink.c" -lpthread -lm
 	gcc -std=gnu11 -O2 -Wall -fPIC -shared -fvisibility=hidden -o /usr/local/lib/libquest1_angle_egl.so \
 		"$V4L2SRC/quest1_angle_egl.c" -ldl
 	gcc -std=gnu11 -O2 -Wall -fPIC -shared -fvisibility=hidden -o /usr/local/lib/libquest1_streamdrm.so \

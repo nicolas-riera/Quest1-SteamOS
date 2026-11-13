@@ -1,0 +1,107 @@
+--- a/src/v4l2shim/quest1_vrlink.c
++++ b/src/v4l2shim/quest1_vrlink.c
+@@ -359,6 +359,29 @@
+ 	else if (!eye_l && !eye_r && !count && last_picture && now - last_picture < 200000000ull) {
+ 		return 0; // VRCompositorError_None
+ 	}
++	{ // test only: /tmp/q1-labellog: each submit's pose (its forward vector) to /tmp/q1lab.txt
++		static uint64_t chk;
++		static FILE *lf;
++		if (now - chk > 300000000ull) {
++			chk = now;
++			if (access("/tmp/q1-labellog", F_OK) == 0) {
++				if (!lf)
++					lf = fopen("/tmp/q1lab.txt", "w");
++			} else if (lf) {
++				fclose(lf);
++				lf = NULL;
++			}
++		}
++		if (lf && eye_l) {
++			float m[12];
++			uint64_t dh;
++			memcpy(m, (const char *)eye_l + 16, sizeof(m));
++			memcpy(&dh, (const char *)eye_l + 64, sizeof(dh));
++			fprintf(lf, "%llu %x pos %.4f %.4f %.4f fwd %.4f %.4f %.4f depth %d\n", (unsigned long long)now, flags, m[3],
++			        m[7], m[11], -m[2], -m[6], -m[10], dh != 0);
++			fflush(lf);
++		}
++	}
+ 	return real_submit_set(self, index, count, handles, eye_l, eye_r, bounds_l, bounds_r, flags, seconds);
+ }
+ 
+@@ -469,6 +492,74 @@
+ 		for (int i = 0; i < 3; i++)
+ 			s[i] += k * (p.ang[i] - s[i]);
+ 		memcpy(o + RAW_ANGULAR, s, sizeof(s));
++		{ // test only (tools/headset-dev/pose-knobs-vrlink.patch): what vrlink and the PC get, from files read 3 times a second
++			static uint64_t chk;
++			static double po[3], ro[2], noise, sine_hz, wo[3], vo[3];
++			if (now - chk > 300000000ull) {
++				chk = now;
++				FILE *f;
++				po[0] = po[1] = po[2] = ro[0] = ro[1] = noise = sine_hz = wo[0] = wo[1] = wo[2] = vo[0] = vo[1] = vo[2] = 0;
++				if ((f = fopen("/tmp/q1-posoff", "r"))) { // "X Y Z" cm added to the position
++					if (fscanf(f, "%lf %lf %lf", &po[0], &po[1], &po[2]) != 3)
++						po[0] = po[1] = po[2] = 0;
++					fclose(f);
++				}
++				if ((f = fopen("/tmp/q1-poseoff", "r"))) { // "YAW PITCH" degrees, a turn in the head's frame
++					if (fscanf(f, "%lf %lf", &ro[0], &ro[1]) != 2)
++						ro[0] = ro[1] = 0;
++					fclose(f);
++				}
++				if ((f = fopen("/tmp/q1-posenoise", "r"))) { // "DEG": a random world yaw within +-DEG at each read
++					if (fscanf(f, "%lf", &noise) != 1)
++						noise = 0;
++					fclose(f);
++				}
++				if ((f = fopen("/tmp/q1-posesine", "r"))) { // "HZ": with posenoise, a yaw sine of DEG instead
++					if (fscanf(f, "%lf", &sine_hz) != 1)
++						sine_hz = 0;
++					fclose(f);
++				}
++				if ((f = fopen("/tmp/q1-angoff", "r"))) { // "X Y Z" deg/s added to the angular velocity
++					if (fscanf(f, "%lf %lf %lf", &wo[0], &wo[1], &wo[2]) != 3)
++						wo[0] = wo[1] = wo[2] = 0;
++					fclose(f);
++				}
++				if ((f = fopen("/tmp/q1-veloff", "r"))) { // "X Y Z" cm/s added to the linear velocity
++					if (fscanf(f, "%lf %lf %lf", &vo[0], &vo[1], &vo[2]) != 3)
++						vo[0] = vo[1] = vo[2] = 0;
++					fclose(f);
++				}
++			}
++			double v[3], w[3], q[4];
++			memcpy(v, o + RAW_POSITION, sizeof(v));
++			for (int i = 0; i < 3; i++)
++				v[i] += po[i] / 100;
++			memcpy(o + RAW_POSITION, v, sizeof(v));
++			memcpy(v, o + RAW_VELOCITY, sizeof(v));
++			memcpy(w, o + RAW_ANGULAR, sizeof(w));
++			for (int i = 0; i < 3; i++) {
++				v[i] += vo[i] / 100;
++				w[i] += wo[i] * M_PI / 180;
++			}
++			memcpy(o + RAW_VELOCITY, v, sizeof(v));
++			memcpy(o + RAW_ANGULAR, w, sizeof(w));
++			memcpy(q, o + RAW_ROTATION, sizeof(q)); // w x y z
++			if (ro[0] != 0 || ro[1] != 0) {
++				double y2 = ro[0] * M_PI / 360, p2 = ro[1] * M_PI / 360;
++				double r[4] = {cos(y2) * cos(p2), cos(y2) * sin(p2), sin(y2) * cos(p2), -sin(y2) * sin(p2)}; // yaw*pitch
++				double n[4] = {q[0] * r[0] - q[1] * r[1] - q[2] * r[2] - q[3] * r[3],
++				               q[0] * r[1] + q[1] * r[0] + q[2] * r[3] - q[3] * r[2],
++				               q[0] * r[2] - q[1] * r[3] + q[2] * r[0] + q[3] * r[1],
++				               q[0] * r[3] + q[1] * r[2] - q[2] * r[1] + q[3] * r[0]};
++				memcpy(o + RAW_ROTATION, n, sizeof(n));
++			} else if (noise > 0) {
++				double a = noise * M_PI / 180 *
++				           (sine_hz > 0 ? sin(2 * M_PI * sine_hz * (double)p.time_ns * 1e-9) : 2.0 * rand() / RAND_MAX - 1);
++				double c = cos(a / 2), s2 = sin(a / 2); // (c, 0, s, 0) * q
++				double n[4] = {c * q[0] - s2 * q[2], c * q[1] + s2 * q[3], c * q[2] + s2 * q[0], c * q[3] - s2 * q[1]};
++				memcpy(o + RAW_ROTATION, n, sizeof(n));
++			}
++		}
+ 	}
+ 	pthread_mutex_unlock(&lock);
+ 	return r;

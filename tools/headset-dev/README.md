@@ -43,6 +43,16 @@ Stream picture placement (docs/streaming.md, "Measuring where the stream's frame
   `/tmp/q1-replay` "S" replays a recorded head (`/tmp/q1hd/headrec.txt`, lines "t qx qy qz qw wx wy wz" of Meta's
   poses, angular rate in the head frame) at Monado's input, its motion scaled by S, so the prediction runs on real
   data. The recording is the user's: keep it local.
+- `pcmarker.py [DOWN_M] [SIDE_M]` (on the PC, `python -P`, during a Steam Link VR session): q1marker's twin on the
+  PC side, a world-locked overlay of the PC's SteamVR (another pattern), 1.5 m ahead of the head as the PC sees it,
+  DOWN_M (0.85) below and SIDE_M (0.5) to the right: the PC draws it into the stream, next to q1marker 0.85. Stop it
+  with Stop-Process (its process is `python3.13.exe`); a running one makes the next fail (CreateOverlay 17).
+- `pose-knobs-vrlink.patch` (test only, `git apply` to the shim, never commit it applied): files (as steamos) that
+  change the head pose vrlink gives the PC: `/tmp/q1-posoff` "X Y Z" cm, `/tmp/q1-poseoff` "YAW PITCH" degrees,
+  `/tmp/q1-posenoise` "DEG" (a random yaw at each read, or with `/tmp/q1-posesine` "HZ" a yaw sine), `/tmp/q1-angoff`
+  "X Y Z" deg/s, `/tmp/q1-veloff` "X Y Z" cm/s; and `/tmp/q1-labellog`: each submit's pose to `/tmp/q1lab.txt`. With
+  pcmarker next to q1marker, the headset still: a pose that is right in the headset shows the PC's marker at 0 px
+  for any change of the pose the PC renders with (docs/streaming.md item 13, 2026-11-13 night).
 - `shift.c`: `shift A.ppm B.ppm X Y W H R`, the (dx, dy) that best moves a region of A onto B (build on the headset:
   `gcc -O2 -o shift shift.c -lm`). With `R` 2 and A = B it prints the region's contrast (sd): pick regions with
   some, and check they stay put without motion (Steam Link's animated skies do not).

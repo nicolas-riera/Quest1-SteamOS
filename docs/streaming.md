@@ -624,6 +624,30 @@ vrlink writes its own log, `~/.local/share/Steam/logs/vrlink.txt` (the PC's side
       each a frame shown a period late. The warp's CPU time went to reading the HUD's meshes from write-combined
       memory whenever a head-locked overlay showed, as during every stream (docs/direct-scanout.md, 2026-11-13
       evening). Fixed: no late commit with a stream and a HUD.
+    - 2026-11-13 night (user: still trembles; a fast vibration as the head turns, and at each heartbeat while still;
+      more when leaning; the dashboard stays put, the PC's own VR view trembles a lot). A second marker drawn by the PC
+      (`tools/headset-dev/pcmarker.py`, a world-locked overlay of the PC's SteamVR, in the stream) next to `q1marker`,
+      the headset still on the table, and the pose vrlink gives the PC changed by the shim
+      (`pose-knobs-vrlink.patch`):
+      - A fixed turn (3°, 10°) of the pose the PC renders with: B stays at 0 px. A turn that changes, a yaw sine of 1°:
+        0.5 px at 0.25 Hz, 1-1.6 px at 1 Hz, 2-5 px at 3 Hz, over 25 px at 8 Hz; random each read (±1°): 9-12 px rms.
+        vrcompositor corrects the picture for its pose as far as that pose changes slowly; a change from one frame to
+        the next shows as it is (about the pose's change over ~25 ms).
+      - It is not the pairing: each picture follows the pose vrlink submits with it within 0.007-0.01°, in the inset
+        and in the wide view (the picture's shift in the decoded frame against the submitted pose's yaw, one frame off
+        gives 7 px). Nor the layer's choice of frame: drawing vrlink's last frame instead of the one vrcompositor took
+        (it took an older one 20-42 % of the time): 9.8 / 9.9 / 8.5 px rms, 100 snapshots each, interleaved. Nor push
+        constants or `vkCmdUpdateBuffer` (the stream's pose is in neither: mapped memory).
+      - On a smooth motion the PC's prediction is right and nothing shows (the earlier benches). Worn, the PC predicts
+        ~90 ms ahead (5.9° of picture for a 60°/s rate) from the angular velocity: its noise and the heartbeat's jolts
+        make the pose rendered with change from frame to frame, and that shows. So the shim low-passes the angular
+        velocity it gives vrlink (40 ms; user, blind A/B worn: less than none, 20 or 100 ms). Offline on the user's
+        recorded head (Meta's poses, the PC's prediction simulated): the shake above ~10 Hz falls as the filter gets
+        slower (0.34° rms raw, 0.30° at 40 ms, 0.28° at 100 ms) while the error that follows the head's turns grows
+        (the stream swims): a trade-off only, an adaptive (one-euro) filter barely better.
+      - Position: vrlink submits no depth (the depth flag on, the depth texture null), so vrcompositor re-projects by
+        rotation only. A position 5 cm off moves B 21 px (the full parallax at ~1.8 m); the submitted pose carries
+        it. Worn, the PC's 80 ms position prediction is off by 1.9 mm median (p99 7 mm, ~1-3 px at 1.8 m).
 
 Plan:
 0. ~~Capture vrlink's own output~~ done (above).

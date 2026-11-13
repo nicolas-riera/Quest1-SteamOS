@@ -139,12 +139,17 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 
 - Steam Link VR (docs/streaming.md, section 2): a new picture each frame and a sharp centre now (user, 2026-11-12:
   "c'est net"), but it trembles, flashes black now and then and runs below 72 fps.
-  - Trembling: jumps of the whole stream at every head movement, none while still (user, 2026-11-13; a Quest 3 on the
-    same PC has none). Cause found 2026-11-13 evening: Monado's warp missed about one vsync in four whenever a
-    head-locked overlay showed (docs/direct-scanout.md, 2026-11-13 evening; docs/streaming.md item 13); fixed, the
-    user's check pending. Left: on a system that had run for hours, the stream was 16.6 px rms off the world in
-    Monado's output (2.5-3 px fresh). Follow it over a long run (`mjit.py` every few minutes, with vrcompositor's fps,
-    fds and memory) to find which of these takes it there:
+  - Trembling (user, 2026-11-13 night: a fast vibration as the head turns, and at each heartbeat while still; a Quest
+    3 on the same PC has none). vrcompositor corrects the stream's picture for the pose the PC rendered it with only
+    as far as that pose changes slowly (docs/streaming.md item 13, 2026-11-13 night): the noise of the PC's ~90 ms
+    prediction shows as it is. Interim: the angular velocity vrlink gets is low-passed (40 ms). Next: find where
+    vrcompositor takes the stream frame's pose (in mapped memory, not in its command buffers) and what it pairs with
+    which picture; the table test is `pose-knobs-vrlink.patch`'s `/tmp/q1-posesine` (the stream marker at 0 px for
+    any frequency once right). Also position: vrlink submits no depth, so a position error of the PC's prediction is
+    not corrected at all.
+  - On a system that had run for hours, the stream was 16.6 px rms off the world in Monado's output (2.5-3 px fresh).
+    Follow it over a long run (`mjit.py` every few minutes, with vrcompositor's fps, fds and memory) to find which of
+    these takes it there:
     - vrcompositor leaks a `sync_fence` fd at every frame (~30-70 a second: 11 000 after 20 minutes, its limit of
       524288 in ~2 h of session). They come from the blob's `vkQueueSubmit` (IOCTL_KGSL_TIMESTAMP_EVENT, libgsl,
       called from the layer's submit thread). Not the cause: fence waits, resets or polls, semaphores, SYNC_FD
@@ -153,7 +158,6 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
       vrcompositor's command buffers.
     - The headset slowing down over time: 64-71 fps at the start, 55 fps 90 minutes later, ~380 MB available, swap
       in use, load ~14.
-    Then the PC's VR view (it trembled the same way, user).
   - Black flashes (user, 2026-11-12): vrlink logs no decoder reset outside the session's start; not found yet.
   - Frame rate: the layer's inset pass costs ~2.5 ms of GPU (58-60 fps against ~69 with the dashboard open).
     vrcompositor has the Frame's own way, free: `distort_ps_achromatic_se2` blends the inset in its distortion pass,
@@ -201,7 +205,10 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - Light overclocks within what other MSM8998 devices run stable (GPU, CPU), watching temperatures.
 - Hand tracking.
 - x86 games (FEX, Proton): very low priority.
-- Other controllers: Windows Mixed Reality, Quest 2 (github.com/Juspertinry/q2ctrl-module). Not Quest 3 / Pro.
+- Other controllers: Windows Mixed Reality, Quest 2 (github.com/Juspertinry/q2ctrl-module).
+- Quest 3 controllers (Touch Plus): github.com/Noculus-VR/TouchPlus-on-Quest-1 (user, 2026-11-13) pairs them with the
+  Quest 1 by patching `libsyncboss.so` (no MCU or firmware change). Not finished: wait until it is, then see what our
+  stack (q1trackd, libossdk) needs.
 - The installer app (app/, installer/); later a Linux version that builds the image on the PC.
 - While the headset's install system (the small Linux that builds the image on the headset) is building, the
   power LED blinks white <-> purple.

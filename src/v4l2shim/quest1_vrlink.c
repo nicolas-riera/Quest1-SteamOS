@@ -30,6 +30,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>
+#include <math.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <time.h>
@@ -454,7 +455,20 @@ static uint64_t raw_pose(void *self, uint32_t dev, void *out)
 		memcpy(o + RAW_POSITION, p.pos, sizeof(p.pos));
 		memcpy(o + RAW_VELOCITY, p.vel, sizeof(p.vel));
 		memcpy(o + RAW_ROTATION, p.q, sizeof(p.q));
-		memcpy(o + RAW_ANGULAR, p.ang, sizeof(p.ang));
+		// The angular velocity goes low-passed (40 ms). vrlink and the PC predict the head ~90 ms ahead with it, and
+		// vrcompositor corrects the stream's picture for the pose the PC rendered it with only as far as that pose
+		// changes slowly: a change from one frame to the next shows as it is (2026-11-13, table bench: the pose sent
+		// to the PC turned by a 1° sine was corrected at 0.25 Hz, 2 px off at 1 Hz, 5 at 3 Hz, all of it at 8 Hz).
+		// So the rate's noise, times 90 ms, shook the stream (and the heartbeat's jolts, while still). The user,
+		// blind, A/B worn: 40 ms trembles less than none, 20 or 100 (more lag: the stream swims as the head turns).
+		static uint64_t last;
+		static double s[3];
+		double dt = last ? (double)(now - last) * 1e-9 : 0;
+		last = now;
+		double k = dt > 0 && dt < 0.1 ? 1 - exp(-dt / 0.040) : 1;
+		for (int i = 0; i < 3; i++)
+			s[i] += k * (p.ang[i] - s[i]);
+		memcpy(o + RAW_ANGULAR, s, sizeof(s));
 	}
 	pthread_mutex_unlock(&lock);
 	return r;
