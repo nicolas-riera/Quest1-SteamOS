@@ -92,12 +92,15 @@ static int qs_first_eye = 1;            // the half vrcompositor renders first (
 // over black, 2026-11-11). So while a frame of vrlink came in the last second, the eyes render into vrcompositor's own
 // images and its distortion pass runs into the eye's buffer: its distortion is an identity here (driver_quest1), so
 // stretched from the panel's size to the buffer's (viewports, scissors) it gives what an eye render would have been.
+// That holds while vrlink runs, not only while its frames come: with the headset's dashboard open it submitted none
+// for seconds, the layer went back to scene mode, and the stream went black behind the dashboard (2026-11-12).
 static _Atomic uint64_t qs_stream_ns;
+static uint64_t qcp_vrlink_alive_ns(void); // quest1_modifier.c
 
 static bool qs_streaming(void)
 {
-	uint64_t t = atomic_load(&qs_stream_ns);
-	return t && now_ns() - t < 1000000000ull;
+	uint64_t t = atomic_load(&qs_stream_ns), now = now_ns(), alive = qcp_vrlink_alive_ns();
+	return (t && now - t < 1000000000ull) || (alive && now - alive < 2500000000ull);
 }
 
 static void qs_scene_size_path(char *out, size_t n)

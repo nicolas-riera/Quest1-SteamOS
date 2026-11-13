@@ -234,6 +234,8 @@ static struct
 	uint32_t w, h;
 	VkDeviceSize pitch, uv; //!< the caller's plane layouts
 	uint64_t mod;           //!< the caller's modifier
+	const uint8_t *map;     //!< vrcompositor's: the imported dma-buf, read-only, for qcp_hold (venus's layout)
+	size_t map_len;
 } qnv[128]; // (vrcompositor keeps the last sets of vrlink while it makes a new one at each decoder reset)
 static atomic_int qnv_n;
 
@@ -254,13 +256,20 @@ static void qnv_forget(VkImage image)
 {
 	if (!atomic_load(&qnv_n))
 		return;
+	const uint8_t *map = NULL;
+	size_t len = 0;
 	pthread_mutex_lock(&qdb_lock);
 	for (unsigned i = 0; i < sizeof(qnv) / sizeof(qnv[0]); i++)
 		if (qnv[i].image == image) {
 			qnv[i].image = VK_NULL_HANDLE;
+			map = qnv[i].map;
+			len = qnv[i].map_len;
+			qnv[i].map = NULL;
 			atomic_fetch_sub(&qnv_n, 1);
 		}
 	pthread_mutex_unlock(&qdb_lock);
+	if (map)
+		munmap((void *)map, len);
 }
 
 // Images with a modifier and NV12 images are forgotten when destroyed: else only a new image that got the same
@@ -505,8 +514,22 @@ static bool qnv_import(struct device *d, VkDevice device, const VkMemoryAllocate
 		VkMemoryAllocateInfo mi = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &imp, props.allocationSize,
 		                           (uint32_t)__builtin_ctz(props.memoryTypeBits)};
 		*r = d->AllocateMemory(device, &mi, alloc, out);
-		if (*r == VK_SUCCESS)
+		if (*r == VK_SUCCESS) {
 			qnv_imported(*out, fd);
+			// the frame's luma for qcp_hold
+			void *m = mmap(NULL, (size_t)size, PROT_READ, MAP_SHARED, fd, 0);
+			if (m != MAP_FAILED) {
+				pthread_mutex_lock(&qdb_lock);
+				if (qnv[i].image == ded->image && !qnv[i].map) {
+					qnv[i].map = m;
+					qnv[i].map_len = (size_t)size;
+					m = MAP_FAILED;
+				}
+				pthread_mutex_unlock(&qdb_lock);
+				if (m != MAP_FAILED)
+					munmap(m, (size_t)size);
+			}
+		}
 	} else if (*r == VK_SUCCESS) {
 		*r = VK_ERROR_INVALID_EXTERNAL_HANDLE;
 	}
@@ -845,9 +868,10 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateSamplerYcbcrConversionKHR(VkDevice d
 // Without it the centre showed the wide view's, coded with few bits under the inset: blocks as soon as anything moved
 // (user, 2026-11-12: "art abstrait"; sharp with it). It costs ~2.5 ms of GPU a frame (58-60 fps against ~69 with the
 // dashboard open, panels forced on).
-// The copies and outputs of a size share one memory: each frame copies only the frame it then reads, after the reads
-// of the frames before it (the passes' dependency), so one of each is all they need. vrlink shares 16 frame buffers:
-// 16 copies of 16 MB each were made at once as the stream started, and the headset swapped hard (2026-11-12).
+// The copies of a size share one memory, and their outputs are one image (qcp_out_get): each frame copies only the
+// frame it then reads, after the reads of the frames before it (the passes' dependency), so one of each is all they
+// need. vrlink shares 16 frame buffers: 16 copies of 16 MB each were made at once as the stream started, and the
+// headset swapped hard (2026-11-12).
 
 #include "quest1_nv12_spv.h"
 #include "quest1_views.h"
@@ -858,8 +882,8 @@ static struct qnv_copy
 {
 	VkImage nv12; //!< vrcompositor's NV12 image
 	VkImage img;  //!< the RGBA8 copy with its smaller levels, bound to the shared memory of its size
-	VkImage out;  //!< what vrcompositor reads: the wide views with their insets, at its eye buffers' size
-	int mem, out_mem;          //!< their memories (qcs.mem)
+	VkImage out;  //!< what vrcompositor reads: the wide views with their insets, at its eye buffers' size (qcs.out)
+	int mem;                   //!< the copy's memory (qcs.mem)
 	VkImageView src, dst;      //!< the NV12 through the conversion, the copy as an attachment
 	VkImageView all, out_view; //!< the copy with its levels, the output as an attachment
 	VkFramebuffer fb, out_fb;
@@ -891,6 +915,14 @@ static struct
 		uint32_t type;
 		int users;
 	} mem[4]; //!< the copies' and outputs' memories, one per size
+	struct
+	{
+		uint32_t w, h;
+		VkImage img;
+		VkImageView view;
+		VkFramebuffer fb;
+		int mem, users;
+	} out[4]; //!< the outputs, one per size, shared by the NV12 images of that size (qcp_out_get)
 } qcs = {PTHREAD_MUTEX_INITIALIZER};
 
 //! log2 of x >= 1 within 0.01 (0 below; the layer does without libm)
@@ -912,27 +944,48 @@ struct qcp_inset
 	float lod;
 };
 
+//! vrlink's shared views (quest1_views.h) in vrcompositor, mapped once vrlink made them; NULL before.
+static const struct q1_views *qcp_views_map(void)
+{
+	static const struct q1_views *_Atomic v;
+	static _Atomic uint64_t tried_ns;
+	const struct q1_views *m = atomic_load(&v);
+	if (m || strcmp(program_invocation_short_name, "vrcompositor") != 0) // (not test_modifier's frames)
+		return m;
+	uint64_t t = now_ns();
+	if (t - atomic_load(&tried_ns) < 1000000000ull) // vrlink makes them at its first frame
+		return NULL;
+	atomic_store(&tried_ns, t);
+	int fd = open(Q1_VIEWS_PATH, O_RDONLY | O_CLOEXEC);
+	struct stat st;
+	void *p = fd >= 0 && fstat(fd, &st) == 0 && st.st_size >= (off_t)sizeof(*m)
+	              ? mmap(NULL, sizeof(*m), PROT_READ, MAP_SHARED, fd, 0) : MAP_FAILED;
+	if (fd >= 0)
+		close(fd);
+	if (p == MAP_FAILED)
+		return NULL;
+	const struct q1_views *expected = NULL;
+	if (!atomic_compare_exchange_strong(&v, &expected, (const struct q1_views *)p)) {
+		munmap(p, sizeof(*m));
+		return expected;
+	}
+	LOG("dma-buf: Steam Link VR's foveated insets from %s\n", Q1_VIEWS_PATH);
+	return p;
+}
+
+//! When vrlink last said it runs (quest1_views.h), 0 if never.
+static uint64_t qcp_vrlink_alive_ns(void)
+{
+	const struct q1_views *v = qcp_views_map();
+	return v ? __atomic_load_n(&v->alive_ns, __ATOMIC_RELAXED) : 0;
+}
+
 //! vrlink's views (quest1_views.h) in vrcompositor, or false when it published none.
 static bool qcp_views(struct q1_views *out)
 {
-	static const struct q1_views *v;
-	static uint64_t tried_ns;
-	if (strcmp(program_invocation_short_name, "vrcompositor") != 0) // (not test_modifier's frames)
+	const struct q1_views *v = qcp_views_map();
+	if (!v)
 		return false;
-	if (!v) {
-		uint64_t t = now_ns();
-		if (t - tried_ns < 1000000000ull) // vrlink writes it at its first frame
-			return false;
-		tried_ns = t;
-		int fd = open(Q1_VIEWS_PATH, O_RDONLY | O_CLOEXEC);
-		void *m = fd >= 0 ? mmap(NULL, sizeof(*v), PROT_READ, MAP_SHARED, fd, 0) : MAP_FAILED;
-		if (fd >= 0)
-			close(fd);
-		if (m == MAP_FAILED)
-			return false;
-		v = m;
-		LOG("dma-buf: Steam Link VR's foveated insets from %s\n", Q1_VIEWS_PATH);
-	}
 	for (int tries = 0; tries < 8; tries++) {
 		uint32_t seq = __atomic_load_n(&v->seq, __ATOMIC_ACQUIRE);
 		if (seq & 1)
@@ -1160,6 +1213,59 @@ static VkDeviceMemory qcp_unref(int m)
 	return unused;
 }
 
+//! Call with qcs.lock held: the output of that size, made at its first user. One image for all the NV12 images of a size,
+//! not one each over a shared memory: vrcompositor late-latches the app's newest frame (its distortion pass reads the
+//! frame slot the app's last submit filled, which can be newer than the frame its commands were recorded for, and the
+//! pass copied), and the view it then read was of an output image the pass had not rendered: it read black, though
+//! the memory held the copy (the driver keeps per-image state: UBWC). The stream flashed black on ~5 % of the frames
+//! with the headset still, more under load (2026-11-12). With one image any view reads the pass's last output.
+static VkResult qcp_out_get(struct device *d, VkDevice device, struct qnv_copy *c)
+{
+	const unsigned n = sizeof(qcs.out) / sizeof(qcs.out[0]);
+	for (unsigned s = 0; s < n; s++)
+		if (qcs.out[s].users && qcs.out[s].w == c->ow && qcs.out[s].h == c->oh) {
+			qcs.out[s].users++;
+			c->out = qcs.out[s].img;
+			c->out_view = qcs.out[s].view;
+			c->out_fb = qcs.out[s].fb;
+			return VK_SUCCESS;
+		}
+	unsigned s = 0;
+	while (s < n && qcs.out[s].users)
+		s++;
+	if (s == n)
+		return VK_ERROR_OUT_OF_HOST_MEMORY;
+	VkImage img = VK_NULL_HANDLE;
+	VkImageView view = VK_NULL_HANDLE;
+	VkFramebuffer fb = VK_NULL_HANDLE;
+	int mem = -1;
+	VkResult r = qcp_image(d, device, c->ow, c->oh, 1, &img, &mem);
+	VkImageViewCreateInfo vc = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, NULL, 0, img, VK_IMAGE_VIEW_TYPE_2D,
+	                            VK_FORMAT_R8G8B8A8_UNORM, {0}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+	if (r == VK_SUCCESS)
+		r = d->CreateImageView(device, &vc, NULL, &view);
+	VkFramebufferCreateInfo fc = {VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, NULL, 0, qcs.rp, 1, &view, c->ow, c->oh, 1};
+	if (r == VK_SUCCESS)
+		r = ((PFN_vkCreateFramebuffer)d->gdpa(device, "vkCreateFramebuffer"))(device, &fc, NULL, &fb);
+	if (r != VK_SUCCESS) {
+		((PFN_vkDestroyFramebuffer)d->gdpa(device, "vkDestroyFramebuffer"))(device, fb, NULL);
+		((PFN_vkDestroyImageView)d->gdpa(device, "vkDestroyImageView"))(device, view, NULL);
+		((PFN_vkDestroyImage)d->gdpa(device, "vkDestroyImage"))(device, img, NULL);
+		VkDeviceMemory m = qcp_unref(mem);
+		if (m)
+			d->FreeMemory(device, m, NULL);
+		return r;
+	}
+	qcs.out[s].w = c->ow;
+	qcs.out[s].h = c->oh;
+	qcs.out[s].img = c->out = img;
+	qcs.out[s].view = c->out_view = view;
+	qcs.out[s].fb = c->out_fb = fb;
+	qcs.out[s].mem = mem;
+	qcs.out[s].users = 1;
+	return VK_SUCCESS;
+}
+
 static void qcp_destroy(struct device *d, VkDevice device, const struct qnv_copy *c)
 {
 	PFN_vkFreeDescriptorSets fs = (PFN_vkFreeDescriptorSets)d->gdpa(device, "vkFreeDescriptorSets");
@@ -1171,16 +1277,28 @@ static void qcp_destroy(struct device *d, VkDevice device, const struct qnv_copy
 	if (c->out_set)
 		fs(device, qcs.pool, 1, &c->out_set);
 	df(device, c->fb, NULL);
-	df(device, c->out_fb, NULL);
 	dv(device, c->dst, NULL);
 	dv(device, c->src, NULL);
 	dv(device, c->all, NULL);
-	dv(device, c->out_view, NULL);
 	di(device, c->img, NULL);
-	di(device, c->out, NULL);
 	pthread_mutex_lock(&qcs.lock);
-	VkDeviceMemory m1 = qcp_unref(c->mem), m2 = qcp_unref(c->out_mem);
+	VkDeviceMemory m1 = qcp_unref(c->mem), m2 = VK_NULL_HANDLE;
+	// the output, when this was its last user
+	VkFramebuffer ofb = VK_NULL_HANDLE;
+	VkImageView oview = VK_NULL_HANDLE;
+	VkImage oimg = VK_NULL_HANDLE;
+	for (unsigned s = 0; c->out && s < sizeof(qcs.out) / sizeof(qcs.out[0]); s++)
+		if (qcs.out[s].users && qcs.out[s].img == c->out && !--qcs.out[s].users) {
+			ofb = qcs.out[s].fb;
+			oview = qcs.out[s].view;
+			oimg = qcs.out[s].img;
+			m2 = qcp_unref(qcs.out[s].mem);
+			memset(&qcs.out[s], 0, sizeof(qcs.out[s]));
+		}
 	pthread_mutex_unlock(&qcs.lock);
+	df(device, ofb, NULL);
+	dv(device, oview, NULL);
+	di(device, oimg, NULL);
 	if (m1)
 		d->FreeMemory(device, m1, NULL);
 	if (m2)
@@ -1203,12 +1321,12 @@ static int qcp_get(struct device *d, VkDevice device, int n)
 		pthread_mutex_unlock(&qcs.lock);
 		return -1;
 	}
-	struct qnv_copy c = {.nv12 = qnv[n].image, .mem = -1, .out_mem = -1, .w = qnv[n].w, .h = qnv[n].h};
+	struct qnv_copy c = {.nv12 = qnv[n].image, .mem = -1, .w = qnv[n].w, .h = qnv[n].h};
 	c.ow = c.w * 3 / 2;
 	c.oh = c.h * 3 / 2;
 	VkResult r = qcp_image(d, device, c.w, c.h, QCP_LEVELS, &c.img, &c.mem);
 	if (r == VK_SUCCESS)
-		r = qcp_image(d, device, c.ow, c.oh, 1, &c.out, &c.out_mem);
+		r = qcp_out_get(d, device, &c);
 	VkSamplerYcbcrConversionInfo cinfo = {VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_INFO, NULL, qcs.conv};
 	VkImageViewCreateInfo vc = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, &cinfo, 0, c.nv12, VK_IMAGE_VIEW_TYPE_2D,
 	                            VK_FORMAT_UNDEFINED, {0}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
@@ -1222,19 +1340,10 @@ static int qcp_get(struct device *d, VkDevice device, int n)
 	vc.subresourceRange.levelCount = QCP_LEVELS;
 	if (r == VK_SUCCESS)
 		r = d->CreateImageView(device, &vc, NULL, &c.all);
-	vc.image = c.out;
-	vc.subresourceRange.levelCount = 1;
-	if (r == VK_SUCCESS)
-		r = d->CreateImageView(device, &vc, NULL, &c.out_view);
 	PFN_vkCreateFramebuffer cf = (PFN_vkCreateFramebuffer)d->gdpa(device, "vkCreateFramebuffer");
 	VkFramebufferCreateInfo fc = {VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, NULL, 0, qcs.rp, 1, &c.dst, c.w, c.h, 1};
 	if (r == VK_SUCCESS)
 		r = cf(device, &fc, NULL, &c.fb);
-	fc.pAttachments = &c.out_view;
-	fc.width = c.ow;
-	fc.height = c.oh;
-	if (r == VK_SUCCESS)
-		r = cf(device, &fc, NULL, &c.out_fb);
 	PFN_vkAllocateDescriptorSets as = (PFN_vkAllocateDescriptorSets)d->gdpa(device, "vkAllocateDescriptorSets");
 	VkDescriptorSetAllocateInfo sa = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, NULL, qcs.pool, 1, &qcs.dsl};
 	if (r == VK_SUCCESS)
@@ -1277,6 +1386,85 @@ static void qcp_forget(VkDevice device, VkImage nv12)
 	qcp_destroy(device_of(device), device, &c);
 }
 
+// The PC sends a black picture now and then: one frame (sometimes a few) with nothing but what its compositor draws
+// last, the chaperone, the controllers and the laser, on black, cut in and out with no fade. It is in the PC's own
+// mirror window (2026-11-12, 33 in 68 s of a capture; ~3% of the snapshots here, with or without the dashboard, the
+// headset's tracking steady as the PC saw it), so it is not made here. The output is one image (qcp_out_get): without
+// a copy it keeps the last picture, so a frame that is suddenly almost all black after a picture is not copied. A
+// black that lasts is the app's own (a fade, a loading screen) and goes through after QCP_HOLD_MAX frames.
+enum { QCP_HOLD_MAX = 4 };
+static struct
+{
+	pthread_mutex_t lock;
+	VkImage last; //!< the frame decided last (vrcompositor copies a frame again until there is a new one)
+	bool last_held;
+	int run;           //!< black frames in a row
+	uint64_t picture;  //!< when the last frame with a picture came
+	unsigned held, logged;
+	uint64_t log_ns;
+} qhold = {PTHREAD_MUTEX_INITIALIZER};
+
+//! The share of NV12 image n's luma at black (512 samples spread over the frame), -1 if it is not mapped. Each
+//! sample's cache line is cleaned and invalidated first: the decoder wrote the frame behind the CPU's cache.
+static float qnv_dark(int n)
+{
+	pthread_mutex_lock(&qdb_lock);
+	const uint8_t *y = qnv[n].map;
+	uint32_t w = qnv[n].w, h = qnv[n].h;
+	size_t len = qnv[n].map_len;
+	pthread_mutex_unlock(&qdb_lock);
+	size_t pitch = (w + 127u) & ~(size_t)127u; // venus's rows
+	if (!y || !w || !h || pitch * h > len)
+		return -1;
+	enum { ROWS = 32, COLS = 16 };
+	const volatile uint8_t *at[ROWS * COLS];
+	for (unsigned r = 0; r < ROWS; r++)
+		for (unsigned c = 0; c < COLS; c++)
+			at[r * COLS + c] = y + (size_t)((2 * r + 1) * h / (2 * ROWS)) * pitch + (2 * c + 1) * w / (2 * COLS);
+#if defined(__aarch64__)
+	for (unsigned i = 0; i < ROWS * COLS; i++)
+		__asm__ volatile("dc civac, %0" ::"r"(at[i]) : "memory");
+	__asm__ volatile("dsb ish" ::: "memory");
+#endif
+	unsigned dark = 0;
+	for (unsigned i = 0; i < ROWS * COLS; i++)
+		dark += *at[i] <= 28; // video range: black is 16
+	return (float)dark / (ROWS * COLS);
+}
+
+//! Whether the frame of NV12 image nv12 is one of the PC's black ones, to be left out (above).
+static bool qcp_hold(VkImage nv12)
+{
+	pthread_mutex_lock(&qhold.lock);
+	if (nv12 == qhold.last) {
+		bool held = qhold.last_held;
+		pthread_mutex_unlock(&qhold.lock);
+		return held;
+	}
+	int n = qnv_find(nv12);
+	float dark = n >= 0 ? qnv_dark(n) : -1;
+	uint64_t now = now_ns();
+	bool held = false;
+	if (dark >= 0.8f) {
+		held = qhold.run < QCP_HOLD_MAX && qhold.picture && now - qhold.picture < 500000000ull;
+		qhold.run++;
+		qhold.held += held;
+	} else {
+		qhold.run = 0;
+		if (dark >= 0 && dark < 0.5f)
+			qhold.picture = now;
+	}
+	qhold.last = nv12;
+	qhold.last_held = held;
+	if (qhold.held != qhold.logged && now - qhold.log_ns > 10000000000ull) {
+		LOG("stream: %u black frames from the PC left out so far (the last picture stays)\n", qhold.held);
+		qhold.logged = qhold.held;
+		qhold.log_ns = now;
+	}
+	pthread_mutex_unlock(&qhold.lock);
+	return held;
+}
+
 //! Record the copy of NV12 image k's frame into its RGBA image (outside a render pass).
 static void qcp_record(VkCommandBuffer cb, int k)
 {
@@ -1309,6 +1497,21 @@ static void qcp_record(VkCommandBuffer cb, int k)
 	pthread_mutex_unlock(&qcs.lock);
 	if (!c.fb)
 		return;
+	if (qcp_hold(c.nv12)) {
+		atomic_store(&qs_stream_ns, now_ns()); // still streaming
+		return;
+	}
+	// Each frame is copied once, when vrcompositor takes it first. vrcompositor takes the frame it shows again at each
+	// of its own frames until vrlink gives it a newer one, but by then vrlink may have given the buffer back to the
+	// decoder, which has only 9: a copy made again later read the newer picture the decoder had written there since,
+	// under the old frame's pose, ~65 ms of head motion off in 20 % of the frames (2026-11-13: the whole stream and the
+	// HUD jumped whenever the head moved). The output keeps the first copy.
+	static _Atomic uint64_t copied;
+	if ((uint64_t)c.nv12 == atomic_load(&copied)) {
+		atomic_store(&qs_stream_ns, now_ns());
+		return;
+	}
+	atomic_store(&copied, (uint64_t)c.nv12);
 	VkRect2D area = {{0, 0}, {c.w, c.h}};
 	VkRenderPassBeginInfo bi = {VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, NULL, qcs.rp, c.fb, area, 0, NULL};
 	begin(cb, &bi, VK_SUBPASS_CONTENTS_INLINE);

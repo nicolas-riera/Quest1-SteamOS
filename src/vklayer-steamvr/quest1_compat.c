@@ -2088,11 +2088,52 @@ static VKAPI_ATTR void VKAPI_CALL DestroyShaderModule(VkDevice device, VkShaderM
 	device_of(device)->DestroyShaderModule(device, m, alloc);
 }
 
+// vrcompositor's distortion pass with overlays (distort_ps_layered, SteamVR 2.x: 7724 bytes, its FNV-1a below) reads
+// the app's eye and the overlays' layer once per colour channel: six texture reads a pixel over both eyes' buffers
+// (1500x1664 here; 2.7 to 5 ms an eye measured when that pass did the lens, 2026-11-02). With Monado doing the lens
+// (/etc/quest1-warp-lens "1" or "2") driver_quest1's distortion is an identity and the three reads of each are at
+// one place, so distort_layered_identity.frag reads each once and gives the same picture. The pass runs while
+// Steam Link VR streams (quest1_scanout.c). Another version of SteamVR's shader is left as it is.
+#include "quest1_distort_spv.h"
+#define DISTORT_LAYERED_SIZE 7724
+#define DISTORT_LAYERED_FNV 0x2151f5242dccf0a6ull
+
+static bool distort_is_identity(void)
+{
+	static int on = -1;
+	if (on < 0) {
+		FILE *f = fopen("/etc/quest1-warp-lens", "r");
+		int c = f ? fgetc(f) : 0;
+		if (f)
+			fclose(f);
+		on = c == '1' || c == '2';
+	}
+	return on;
+}
+
+static bool is_distort_layered(const VkShaderModuleCreateInfo *ci)
+{
+	if (ci->codeSize != DISTORT_LAYERED_SIZE)
+		return false;
+	uint64_t h = 0xcbf29ce484222325ull;
+	const uint8_t *p = (const uint8_t *)ci->pCode;
+	for (size_t i = 0; i < ci->codeSize; i++)
+		h = (h ^ p[i]) * 0x100000001b3ull;
+	return h == DISTORT_LAYERED_FNV;
+}
+
 static VKAPI_ATTR VkResult VKAPI_CALL CreateShaderModule(VkDevice device, const VkShaderModuleCreateInfo *ci,
                                                          const VkAllocationCallbacks *alloc, VkShaderModule *out)
 {
-	VkShaderModuleCreateInfo rewritten;
+	VkShaderModuleCreateInfo rewritten, identity;
 	uint32_t *code = NULL, words = 0;
+	if (is_distort_layered(ci) && distort_is_identity()) {
+		identity = *ci;
+		identity.pCode = distort_layered_identity_frag;
+		identity.codeSize = sizeof(distort_layered_identity_frag);
+		ci = &identity;
+		LOG("shader module: distort_ps_layered with one read per texture (the distortion is an identity)\n");
+	}
 	if (ci->codeSize >= 20 && ci->pCode[0] == 0x07230203 && !getenv("QUEST1_COMPAT_NO_SPIRV_REWRITE") &&
 	    (code = rewrite_layer_builtins(ci->pCode, ci->codeSize / 4, &words))) {
 		rewritten = *ci;
