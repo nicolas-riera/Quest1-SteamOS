@@ -154,13 +154,7 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
     the PC's prediction is not corrected at all.
   - On a system that had run for hours, the stream was 16.6 px rms off the world in Monado's output (2.5-3 px fresh).
     Follow it over a long run (`mjit.py` every few minutes, with vrcompositor's fps, fds and memory) to find which of
-    these takes it there:
-    - vrcompositor leaks a `sync_fence` fd at every frame (~30-70 a second: 11 000 after 20 minutes, its limit of
-      524288 in ~2 h of session). They come from the blob's `vkQueueSubmit` (IOCTL_KGSL_TIMESTAMP_EVENT, libgsl,
-      called from the layer's submit thread). Not the cause: fence waits, resets or polls, semaphores, SYNC_FD
-      exports, empty submits, the present's wait, the HUD, the layer's knobs (`qrwait`, `pwwait`, `nomerge`): a test
-      program doing each with the blob leaks nothing. Next suspect: the external (gralloc, dma-buf) images in
-      vrcompositor's command buffers.
+    these takes it there (vrcompositor's `sync_fence` leak is fixed: PR #4, display-event fences from a pool):
     - The headset slowing down over time: 64-71 fps at the start, 55 fps 90 minutes later, ~380 MB available, swap
       in use, load ~14.
   - Black flashes (user, 2026-11-12): vrlink logs no decoder reset outside the session's start; not found yet.
@@ -171,8 +165,7 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   - Start of a session: the headset stalls for seconds (Monado's re-projection too), the system swaps ~150-250 MB
     as vrlink and vrcompositor allocate (it was ~700 MB before the copies shared their memory). Lock Monado's (and
     the tracking's) memory, and find what else allocates then.
-  Also: vrcompositor leaks a sync_fence fd for each vrlink frame (~70 a second, limit 524288: ~2 h of session; they
-  do not come through vkImportSemaphoreFdKHR). The PC's overlays show only when the PC's SteamVR started after
+  Also: the PC's overlays show only when the PC's SteamVR started after
   vrlink; stopping a session from the headset (`StopStreamingSession`) does nothing and vrlink hangs on its way out.
   With the USB cable in, vrlink and the PC send the stream over the USB network too (each datagram on each link: about
   a core on the headset, 2026-11-12). Hiding usb0 from vrlink (getifaddrs, and dropping what it sends there) made it
