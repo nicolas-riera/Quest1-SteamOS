@@ -121,6 +121,12 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   the proximity sensor wakes the headset while worn, the fan and power LED stay on.
 - Restart from Steam: with the OS started by `fastboot boot` it restarts into Android; test it once the OS is
   flashed (user), then drop the sshd `pam_systemd` workaround in `device/holo-perf.sh` if it works.
+- Charging while off (user, 2026-11-16): plugged in while off, the headset boots into a charging-only mode (the
+  bootloader starts the boot image in charger mode: `androidboot.mode=charger` on the command line, Meta's OS then
+  shows its battery screen and charges). Once SteamOS is flashed, that boot would start the whole of SteamOS. The
+  initramfs has to see charger mode and do what Meta's OS does instead, ideally with Meta's own charger from the
+  stock image (its charger binary / healthd, screen off or the battery animation, power button to boot), rather than
+  our own.
 
 ## System
 
