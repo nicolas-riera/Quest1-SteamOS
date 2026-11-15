@@ -612,8 +612,13 @@ vrlink writes its own log, `~/.local/share/Steam/logs/vrlink.txt` (the PC's side
         with their own pose; not kept.
       - The shim's texture handles are `fd << 32 | vrcompositor's pid`, the fd vrcompositor got for each of vrlink's
         buffers; it duplicates and closes it, so that number names nothing later.
-    - Left (docs/todo.md): what makes a long-running system bad. vrcompositor leaks a `sync_fence` fd every frame and
-      slows down (64-71 -> 55 fps in 90 minutes, swap in use).
+    - Left (docs/todo.md): what makes a long-running system bad. vrcompositor leaked a `sync_fence` fd every frame and
+      slows down (64-71 -> 55 fps in 90 minutes, swap in use). The leak is fixed (PR #4, merged 2026-11-15):
+      vrcompositor's vblank thread registers display events with fences it waits on at once, gets a timeout as the
+      layer has not signalled them yet, and never destroys them, while each fence the layer submits holds a
+      descriptor; such fences now come from a pool of 16 the layer reuses (quest1_display.c, `evnopool` in
+      /tmp/quest1-layer turns it off). Tested on main: 13-16 `sync_fence` descriptors for 7 minutes with the pool,
+      ~58 more a second without, the same frame rate.
     - 2026-11-13 evening (user, on a fresh system: "ça tremble toujours"). The bench widened, all clean: both eyes
       (the same error, no disparity between them); a 4 cm sideways sine (vrcompositor re-projects the stream with
       vrlink's depth, in step with the world marker, < 0.5 px off); 190°/s (a smooth 3.4 ms lag in the wide views, the
