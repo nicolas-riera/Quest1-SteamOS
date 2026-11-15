@@ -145,11 +145,13 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   - Trembling (user, 2026-11-13 night: a fast vibration as the head turns, and at each heartbeat while still; a Quest
     3 on the same PC has none). vrcompositor corrects the stream's picture for the pose the PC rendered it with only
     as far as that pose changes slowly (docs/streaming.md item 13, 2026-11-13 night): the noise of the PC's ~90 ms
-    prediction shows as it is. Interim: the angular velocity vrlink gets is low-passed (40 ms). Next: find where
-    vrcompositor takes the stream frame's pose and what it pairs with which picture: most likely the per-frame 2800-byte
-    copy into its 2816-byte uniform buffer, from staging mapped with `vkMapMemory2` (`vrc-trace-layer.patch`); the table test is `pose-knobs-vrlink.patch`'s `/tmp/q1-posesine` (the stream marker at 0 px for
-    any frequency once right). Also position: vrlink submits no depth, so a position error of the PC's prediction is
-    not corrected at all.
+    prediction shows as it is. Interim: the angular velocity vrlink gets is low-passed (40 ms). The test now:
+    `tools/headset-dev/stepsnap.py` (2026-11-15: the frame shown 12-22 ms after a step of the PC's pose is off by the
+    whole step, 37 of 39). Next: tell apart a picture that lags its own pose (the layer can find the horizon in each
+    NV12 frame and compare it with that frame's submitted pitch) from vrcompositor pairing a picture with another
+    submit's pose; find where its re-projection takes the pose (not its 2800-byte uniforms; next suspect the
+    distortion mesh's vertex data in the 256 MB ring). Also position: vrlink submits no depth, so a position error of
+    the PC's prediction is not corrected at all.
   - On a system that had run for hours, the stream was 16.6 px rms off the world in Monado's output (2.5-3 px fresh).
     Follow it over a long run (`mjit.py` every few minutes, with vrcompositor's fps, fds and memory) to find which of
     these takes it there:

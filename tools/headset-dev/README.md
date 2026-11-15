@@ -47,6 +47,10 @@ Stream picture placement (docs/streaming.md, "Measuring where the stream's frame
   PC side, a world-locked overlay of the PC's SteamVR (another pattern), 1.5 m ahead of the head as the PC sees it,
   DOWN_M (0.85) below and SIDE_M (0.5) to the right: the PC draws it into the stream, next to q1marker 0.85. Stop it
   with Stop-Process (its process is `python3.13.exe`); a running one makes the next fail (CreateOverlay 17).
+- `stepsnap.py N STEP_DEG X,Y...` (as steamos on the headset, with `pose-knobs-vrlink.patch` and `shift` in
+  /tmp/q1vr): the pose sent to the PC stepped back and forth (`AXIS=pitch` for pitch), a snapshot 0-40 ms after each
+  step reached vrlink's submits, each region's shift against a still reference: a picture placed right stays at 0 px.
+  Regions on the PC's scene only (a horizon for pitch), not on an overlay (docs/streaming.md item 13, 2026-11-15).
 - `pose-knobs-vrlink.patch` (test only, `git apply` to the shim, never commit it applied): files (as steamos) that
   change the head pose vrlink gives the PC: `/tmp/q1-posoff` "X Y Z" cm, `/tmp/q1-poseoff` "YAW PITCH" degrees,
   `/tmp/q1-posenoise` "DEG" (a random yaw at each read, or with `/tmp/q1-posesine` "HZ" a yaw sine), `/tmp/q1-angoff`

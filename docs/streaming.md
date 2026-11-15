@@ -658,6 +658,26 @@ vrlink writes its own log, `~/.local/share/Steam/logs/vrlink.txt` (the PC's side
         `vkMapMemory` (`vkMapMemory2` presumably, hooked by the patch but not yet run). Next: read those copies'
         data under the sine; the field that follows it, and which submit's pose it holds at each frame, tells what
         vrcompositor pairs with which picture.
+      - 2026-11-15, the test that shows the trembling (`tools/headset-dev/stepsnap.py`): the headset still, the pose
+        sent to the PC stepped by 1.5° of pitch back and forth, each step waited for in vrlink's submits, then a
+        snapshot 0-40 ms later; the horizon of the PC's scene measured. 12-22 ms after a step, 37 of 39 snapshots were
+        18 px off, the whole step; none after 25 ms. So the frame shown after each change of the pose goes out with
+        the picture of one submit and the pose of another (or the PC's picture lags its own pose there: not told apart
+        yet). With a pose that changes at every frame, as on a head, that is every frame: the vibration. ±1° of random
+        yaw shook the scene's floor by 7.7-9.6 px rms the same way. Pitfalls met: regions on an overlay measure
+        nothing (the headset's dashboard, which `quest1-frame restart` opens, and the PC's overlays stay at 0 px); a
+        frame vrcompositor shows again when vrlink stops looks like a live one; vrlink's process is `vrlinkrunthread`
+        in `ps` once it runs.
+      - The 2800-byte uniforms (their host copy mapped by the layer itself: vrcompositor maps it in no way the layer
+        sees): per eye, at floats 44 and 156, the eye's pose (vrlink's submitted head pose moved by ±IPD/2,
+        column-major), the same again, then its inverse twice; the 400-byte ones hold the headset's eye poses. The
+        copy is recorded at the end of each frame's commands, after its distortion, and holds vrlink's last submit
+        before it. But that pose does not place the stream: written by the layer with 3° of pitch added
+        (`vkCmdUpdateBuffer` before the distortion), it moved nothing. Where the re-projection takes its pose is still
+        open; next suspect, the per-frame vertex data in the 256 MB ring (the distortion mesh, 13821 indices an eye).
+        The pairing of that uniform pose with the picture (frame N's picture, frame N-1's copy) is exact, and drawing
+        vrlink's last frame breaks it, but for the same reason that says nothing of the picture on screen; drawing
+        vrlink's last frame was not measured with `stepsnap.py` (vrcompositor crashed on the test build).
 
 Plan:
 0. ~~Capture vrlink's own output~~ done (above).
