@@ -667,22 +667,38 @@ vrlink writes its own log, `~/.local/share/Steam/logs/vrlink.txt` (the PC's side
         sent to the PC stepped by 1.5° of pitch back and forth, each step waited for in vrlink's submits, then a
         snapshot 0-40 ms later; the horizon of the PC's scene measured. 12-22 ms after a step, 37 of 39 snapshots were
         18 px off, the whole step; none after 25 ms. So the frame shown after each change of the pose goes out with
-        the picture of one submit and the pose of another (or the PC's picture lags its own pose there: not told apart
-        yet). With a pose that changes at every frame, as on a head, that is every frame: the vibration. ±1° of random
+        the picture of one submit and the pose of another (cause and fix below). With a pose that changes at every
+        frame, as on a head, that is every frame: the vibration. ±1° of random
         yaw shook the scene's floor by 7.7-9.6 px rms the same way. Pitfalls met: regions on an overlay measure
         nothing (the headset's dashboard, which `quest1-frame restart` opens, and the PC's overlays stay at 0 px); a
         frame vrcompositor shows again when vrlink stops looks like a live one; vrlink's process is `vrlinkrunthread`
         in `ps` once it runs.
-      - The 2800-byte uniforms (their host copy mapped by the layer itself: vrcompositor maps it in no way the layer
+      - The 2800-byte uniforms (their host memory mapped by the layer itself: vrcompositor maps it in no way the layer
         sees): per eye, at floats 44 and 156, the eye's pose (vrlink's submitted head pose moved by ±IPD/2,
-        column-major), the same again, then its inverse twice; the 400-byte ones hold the headset's eye poses. The
-        copy is recorded at the end of each frame's commands, after its distortion, and holds vrlink's last submit
-        before it. But that pose does not place the stream: written by the layer with 3° of pitch added
-        (`vkCmdUpdateBuffer` before the distortion), it moved nothing. Where the re-projection takes its pose is still
-        open; next suspect, the per-frame vertex data in the 256 MB ring (the distortion mesh, 13821 indices an eye).
-        The pairing of that uniform pose with the picture (frame N's picture, frame N-1's copy) is exact, and drawing
-        vrlink's last frame breaks it, but for the same reason that says nothing of the picture on screen; drawing
-        vrlink's last frame was not measured with `stepsnap.py` (vrcompositor crashed on the test build).
+        column-major), the same again, then its inverse twice; the 400-byte ones hold the headset's eye poses. Their
+        copy into a device buffer, at the end of each frame's commands, is not what the distortion reads: a pose
+        turned by 3° written there moved nothing, while the same written into the host memory moved the stream by
+        3° (36 px), even with that copy replaced.
+      - The cause (2026-11-16): vrcompositor writes the stream's pose into that host memory at the start of each
+        frame, before it takes vrlink's frame (1409 of 1411 frames: the same bytes there and at the end of the
+        recording), and its distortion reads it there, through a uniform buffer in that memory, when the GPU runs
+        the frame: one buffer for every frame, no double buffering. The GPU runs a frame well after vrcompositor
+        recorded it (~12 of 14 ms busy) and vrcompositor has often written the next frame's pose by then, so the
+        frame after each change of the pose went out with the next pose. vrlink's frames are right: in vrlink each
+        decoded picture's horizon moves at the same submit as its pose, at every step (a test probe in the shim).
+      - The fix (quest1_modifier.c "The stream frame's pose", quest1_rpmerge.c `qsp_bind`): when vrcompositor binds a
+        descriptor set that reads a uniform buffer in that memory (2 a frame, one an eye), the layer binds a copy of
+        the set whose descriptor reads a snapshot of it taken there, in the command buffer's own staging (the
+        `ub_*` arenas, kept until the command buffer is begun again). The memory is found as the source of
+        vrcompositor's 2800-byte copy. `stepsnap.py`, pitch steps of 1.5°: the frames shown 0-25 ms after a step,
+        0 of 19 and 0 of 14 off with it, 16 of 17 off by the whole step without it (`nostreampose` in
+        /tmp/quest1-layer); later ones 0 of 41 and 1 of 46 (a 60 px miss, the search's edge). The frame rate is the
+        same either way (55-57 fps with the stream). It needs the render pass merge (quest1_rpmerge.c, on unless
+        `nomerge`) for its descriptor pool. Things tried first that did not do it, kept in case: giving the device
+        copy the picture's pose; drawing the picture whose pose the host memory held when the copy was recorded;
+        recording that copy as a `vkCmdUpdateBuffer` of what the memory held then (all no change, since the device
+        copy is not read). Drawing vrlink's last frame instead of the one vrcompositor took makes it worse (the
+        layer's choice comes before vrcompositor's pose).
 
 Plan:
 0. ~~Capture vrlink's own output~~ done (above).

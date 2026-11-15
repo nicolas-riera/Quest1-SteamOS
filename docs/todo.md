@@ -143,15 +143,11 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - Steam Link VR (docs/streaming.md, section 2): a new picture each frame and a sharp centre now (user, 2026-11-12:
   "c'est net"), but it trembles, flashes black now and then and runs below 72 fps.
   - Trembling (user, 2026-11-13 night: a fast vibration as the head turns, and at each heartbeat while still; a Quest
-    3 on the same PC has none). vrcompositor corrects the stream's picture for the pose the PC rendered it with only
-    as far as that pose changes slowly (docs/streaming.md item 13, 2026-11-13 night): the noise of the PC's ~90 ms
-    prediction shows as it is. Interim: the angular velocity vrlink gets is low-passed (40 ms). The test now:
-    `tools/headset-dev/stepsnap.py` (2026-11-15: the frame shown 12-22 ms after a step of the PC's pose is off by the
-    whole step, 37 of 39). Next: tell apart a picture that lags its own pose (the layer can find the horizon in each
-    NV12 frame and compare it with that frame's submitted pitch) from vrcompositor pairing a picture with another
-    submit's pose; find where its re-projection takes the pose (not its 2800-byte uniforms; next suspect the
-    distortion mesh's vertex data in the 256 MB ring). Also position: vrlink submits no depth, so a position error of
-    the PC's prediction is not corrected at all.
+    3 on the same PC has none). Found and fixed on the bench (docs/streaming.md item 13, 2026-11-16: vrcompositor's
+    distortion read the stream's pose from host memory it rewrote for the next frame; each frame now reads a
+    snapshot, `stepsnap.py` 0 frames off against 16 of 17). Left: the user's worn check (blind A/B with
+    `nostreampose`); then whether the 40 ms low-pass of the angular velocity vrlink gets (an interim) still helps.
+    Also position: vrlink submits no depth, so a position error of the PC's prediction is not corrected at all.
   - On a system that had run for hours, the stream was 16.6 px rms off the world in Monado's output (2.5-3 px fresh).
     Follow it over a long run (`mjit.py` every few minutes, with vrcompositor's fps, fds and memory) to find which of
     these takes it there (vrcompositor's `sync_fence` leak is fixed: PR #4, display-event fences from a pool):

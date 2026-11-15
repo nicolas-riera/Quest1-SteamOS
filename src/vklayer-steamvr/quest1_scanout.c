@@ -1661,6 +1661,7 @@ static VKAPI_ATTR void VKAPI_CALL qs_CmdBindDescriptorSets(VkCommandBuffer cb, V
 		LOG("trace: cb %p BindDescriptorSets %u..%u\n", (void *)cb, first, first + n);
 	next(cb, bp, pl, first, n, sets, nd, dyn);
 	rm_bind(cb, bp, pl, first, n, sets, nd);
+	qsp_bind(cb, bp, pl, first, n, sets, nd); // (the stream's pose, quest1_modifier.c)
 }
 
 static VKAPI_ATTR void VKAPI_CALL qs_CmdPushConstants(VkCommandBuffer cb, VkPipelineLayout pl, VkShaderStageFlags st,

@@ -799,6 +799,124 @@ static bool rm_redirect(struct rm_cb *c, unsigned i)
 	return true;
 }
 
+static bool qsp_host(VkDeviceMemory *mem, const uint8_t **map); // quest1_modifier.c
+static void qsp_count(bool copied);
+static bool u32_buf_mem(VkBuffer b, uint64_t *mem, uint64_t *off); // quest1_compat.c
+
+//! vkCmdBindDescriptorSets (graphics), after the app's: a set that reads a uniform buffer in the memory vrcompositor
+//! writes the stream's pose into is bound again as a copy that reads a snapshot of it, taken now, in the command
+//! buffer's staging (quest1_modifier.c: "The stream frame's pose").
+static void qsp_bind(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipelineLayout pl, uint32_t first, uint32_t n,
+                     const VkDescriptorSet *sets, uint32_t nd)
+{
+	VkDeviceMemory hm;
+	const uint8_t *map;
+	if (bp != VK_PIPELINE_BIND_POINT_GRAPHICS || !qsp_host(&hm, &map))
+		return;
+	struct rm_cb *c = rm_get(cb);
+	if (!c)
+		return;
+	RM_NEXT(PFN_vkCmdBindDescriptorSets, CmdBindDescriptorSets)
+	RM_NEXT(PFN_vkAllocateDescriptorSets, AllocateDescriptorSets)
+	RM_NEXT(PFN_vkUpdateDescriptorSets, UpdateDescriptorSets)
+	RM_NEXT(PFN_vkCreateDescriptorPool, CreateDescriptorPool)
+	for (uint32_t i = 0; i < n; i++) {
+		struct rm_set e;
+		struct rm_layout l;
+		bool known = false;
+		pthread_mutex_lock(&rm_lock);
+		const struct rm_set *pe = rm_set_find(sets[i], false);
+		const struct rm_layout *ql = pe && !pe->bad ? rm_layout_find(pe->l) : NULL;
+		if (ql) {
+			e = *pe;
+			l = *ql;
+			known = true;
+		}
+		pthread_mutex_unlock(&rm_lock);
+		if (!known)
+			continue;
+		uint32_t hit[RM_SET_BUFS], nhit = 0;
+		VkDeviceSize at[RM_SET_BUFS], size[RM_SET_BUFS];
+		for (uint32_t k = 0; k < e.nbuf; k++) {
+			uint64_t m, o;
+			if (e.buf[k].type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER && u32_buf_mem(e.buf[k].b, &m, &o) &&
+			    m == (uint64_t)hm) {
+				VkDeviceSize sz = e.buf[k].range;
+				if (sz == VK_WHOLE_SIZE) { // the rest of the buffer
+					pthread_mutex_lock(&rm_lock);
+					const struct rm_buf *r = rm_buf_find(e.buf[k].b);
+					sz = r && r->size > e.buf[k].off ? r->size - e.buf[k].off : 0;
+					pthread_mutex_unlock(&rm_lock);
+				}
+				hit[nhit] = k;
+				size[nhit] = sz;
+				at[nhit++] = o + e.buf[k].off;
+			}
+		}
+		if (!nhit)
+			continue;
+		const char *why = nd ? "dynamic offsets" : NULL;
+		for (uint32_t h = 0; h < nhit && !why; h++)
+			if (!size[h] || size[h] > 65536) // (ub_alloc's chunk)
+				why = "its size";
+		bool ok = !why;
+		if (ok && !c->pool) {
+			VkDescriptorPoolSize sizes[11];
+			for (unsigned t = 0; t < 11; t++)
+				sizes[t] = (VkDescriptorPoolSize){(VkDescriptorType)t, 1024};
+			VkDescriptorPoolCreateInfo pci = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, NULL, 0, 256, 11, sizes};
+			if (CreateDescriptorPool(c->d->handle, &pci, NULL, &c->pool) != VK_SUCCESS)
+				c->pool = VK_NULL_HANDLE;
+			ok = c->pool != VK_NULL_HANDLE;
+			why = ok ? NULL : "no descriptor pool";
+		}
+		VkDescriptorSet copy = VK_NULL_HANDLE;
+		if (ok) {
+			VkDescriptorSetAllocateInfo ai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, NULL, c->pool, 1, &e.l};
+			ok = AllocateDescriptorSets(c->d->handle, &ai, &copy) == VK_SUCCESS;
+			why = ok ? NULL : "the descriptor pool is full";
+		}
+		VkCopyDescriptorSet cp[32];
+		uint32_t ncp = 0;
+		for (uint32_t k = 0; ok && k < l.n; k++) {
+			if (l.b[k].count == 0)
+				continue;
+			if ((unsigned)l.b[k].type > VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT || ncp == 32) {
+				ok = false;
+				why = "its layout";
+				break;
+			}
+			cp[ncp++] = (VkCopyDescriptorSet){VK_STRUCTURE_TYPE_COPY_DESCRIPTOR_SET, NULL, sets[i], l.b[k].binding, 0,
+			                                  copy, l.b[k].binding, 0, l.b[k].count};
+		}
+		VkWriteDescriptorSet wr[RM_SET_BUFS];
+		VkDescriptorBufferInfo bi[RM_SET_BUFS];
+		for (uint32_t h = 0; ok && h < nhit; h++) {
+			VkDeviceSize sz = size[h], soff;
+			VkBuffer sb;
+			void *p;
+			if (!ub_alloc(c->d, cb, sz, &sb, &soff, &p)) {
+				ok = false;
+				why = "no staging";
+				break;
+			}
+			memcpy(p, map + at[h], sz); // the pose vrcompositor wrote for the frame it is recording
+			bi[h] = (VkDescriptorBufferInfo){sb, soff, sz};
+			wr[h] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, copy, e.buf[hit[h]].binding,
+			                               e.buf[hit[h]].elem, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, NULL, &bi[h], NULL};
+		}
+		if (ok) {
+			UpdateDescriptorSets(c->d->handle, 0, NULL, ncp, cp); // copies first: writes are applied before copies
+			UpdateDescriptorSets(c->d->handle, nhit, wr, 0, NULL);
+			CmdBindDescriptorSets(cb, bp, pl, first + i, 1, &copy, 0, NULL);
+		}
+		static _Atomic int told;
+		if (!ok && !atomic_exchange(&told, 1))
+			LOG("stream: a descriptor set reading the stream's pose cannot be copied (%s)\n", why ? why : "?");
+		qsp_count(ok);
+	}
+}
+
 //! Before a draw: inside a merged pass with absorbed updates, the bound sets that read them are redirected.
 static void rm_draw(VkCommandBuffer cb)
 {

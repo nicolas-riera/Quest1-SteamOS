@@ -51,6 +51,9 @@ Stream picture placement (docs/streaming.md, "Measuring where the stream's frame
   /tmp/q1vr): the pose sent to the PC stepped back and forth (`AXIS=pitch` for pitch), a snapshot 0-40 ms after each
   step reached vrlink's submits, each region's shift against a still reference: a picture placed right stays at 0 px.
   Regions on the PC's scene only (a horizon for pitch), not on an overlay (docs/streaming.md item 13, 2026-11-15).
+  The layer's fix (2026-11-16) is A/B'd with `nostreampose` in /tmp/quest1-layer.
+- `vrlink-horizon-probe.patch` (test only, to the shim): per vrlink submit, the decoded picture's horizon rows next to
+  the submitted pose's pitch: tells whether the PC's picture follows its own pose (it does).
 - `pose-knobs-vrlink.patch` (test only, `git apply` to the shim, never commit it applied): files (as steamos) that
   change the head pose vrlink gives the PC: `/tmp/q1-posoff` "X Y Z" cm, `/tmp/q1-poseoff` "YAW PITCH" degrees,
   `/tmp/q1-posenoise` "DEG" (a random yaw at each read, or with `/tmp/q1-posesine` "HZ" a yaw sine), `/tmp/q1-angoff`

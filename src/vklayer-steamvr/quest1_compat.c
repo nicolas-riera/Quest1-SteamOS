@@ -1496,6 +1496,21 @@ static unsigned u32_buf_next;
 #define U32_MAPS 1024
 static struct { uint64_t mem; char *ptr; uint64_t off; } u32_maps[U32_MAPS];
 
+//! The memory buffer b is bound to and where in it (quest1_rpmerge.c: qsp_bind), false if not known.
+static bool u32_buf_mem(VkBuffer b, uint64_t *mem, uint64_t *off)
+{
+	bool found = false;
+	pthread_mutex_lock(&u32_lock);
+	for (unsigned i = 0; i < U32_BUFS && !found; i++)
+		if (u32_bufs[i].buf == (uint64_t)b) {
+			*mem = u32_bufs[i].mem;
+			*off = u32_bufs[i].off;
+			found = true;
+		}
+	pthread_mutex_unlock(&u32_lock);
+	return found;
+}
+
 static bool u32_shaped(const uint16_t *w, size_t n)
 {
 	if (n < 6)
@@ -1788,7 +1803,13 @@ static VKAPI_ATTR void VKAPI_CALL CmdCopyBuffer(VkCommandBuffer cb, VkBuffer src
 	for (uint32_t k = 0; k < n; k++)
 		u32_note((uint64_t)dst, r[k].dstOffset,
 		         sp && r[k].size % 4 == 0 && u32_shaped((const uint16_t *)(sp + r[k].srcOffset), r[k].size / 2));
+	uint64_t smem = 0;
+	for (unsigned i = 0; i < U32_BUFS && n == 1 && r[0].size == QSP_BYTES && !smem; i++)
+		if (u32_bufs[i].buf == (uint64_t)src)
+			smem = u32_bufs[i].mem;
 	pthread_mutex_unlock(&u32_lock);
+	if (smem) // the stream's pose (quest1_modifier.c)
+		qsp_note_copy(device_of(cb)->handle, (VkDeviceMemory)smem, r[0].size);
 	device_of(cb)->CmdCopyBuffer(cb, src, dst, n, r);
 }
 
@@ -1882,6 +1903,7 @@ static VKAPI_ATTR void VKAPI_CALL UnmapMemory(VkDevice device, VkDeviceMemory m)
 static VKAPI_ATTR void VKAPI_CALL FreeMemory(VkDevice device, VkDeviceMemory m, const VkAllocationCallbacks *alloc)
 {
 	u32_map(m, NULL, 0);
+	qsp_free_memory(m); // (quest1_modifier.c)
 	device_of(device)->FreeMemory(device, m, alloc);
 	qnv_free_memory(m); // exported NV12 memory: our gralloc buffer
 }

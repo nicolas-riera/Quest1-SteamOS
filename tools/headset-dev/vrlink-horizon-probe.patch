@@ -1,0 +1,95 @@
+# Test-only probe for the shim (src/v4l2shim; never commit it applied), with or without pose-knobs-vrlink.patch:
+# /tmp/q1-hzlog (as steamos) -> /tmp/q1hz.txt, one line per vrlink submit: its CLOCK_MONOTONIC time, the frame
+# buffer, the submitted pose's pitch, and in two columns of each quarter of the decoded atlas (its four views) the row
+# of the strongest bright-over-dark edge (a horizon) with its contrast. With pitch steps of the pose sent to the PC
+# (/tmp/q1-poseoff "0 1.5"), the rows move at the same submit as the pitch when the PC's picture is right
+# (docs/streaming.md item 13, 2026-11-16: they did at every step).
+--- a/src/v4l2shim/quest1_vdec.c
++++ b/src/v4l2shim/quest1_vdec.c
+@@ -1392,6 +1392,18 @@
+ 	b->fd = own;
+ 	b->map = map;
+ 	b->size = (size_t)len;
++	{ // TEMP horizon probe
++		extern uint8_t *q1hz_map[32];
++		extern int q1hz_fd[32];
++		extern unsigned q1hz_stride, q1hz_w, q1hz_h;
++		if (i < 32) {
++			q1hz_map[i] = map;
++			q1hz_fd[i] = own;
++		}
++		q1hz_stride = e->stride;
++		q1hz_w = e->cw;
++		q1hz_h = e->ch;
++	}
+ 	e->cap_cfd[i] = fd;
+ 	return 0;
+ }
+--- a/src/v4l2shim/quest1_vrlink.c
++++ b/src/v4l2shim/quest1_vrlink.c
+@@ -333,11 +333,65 @@
+ 	__atomic_store_n(&v->seq, (seq | 1) + 1, __ATOMIC_RELEASE);
+ }
+ 
++
++// TEMP horizon probe: /tmp/q1-hzlog -> /tmp/q1hz.txt, per submit: time, buffer, pitch of the pose, the strongest
++// bright-over-dark edge row in two columns of each quarter of the atlas (its four views)
++#include <linux/dma-buf.h>
++#include <sys/ioctl.h>
++uint8_t *q1hz_map[32];
++int q1hz_fd[32];
++unsigned q1hz_stride, q1hz_w, q1hz_h;
++static void q1hz_probe(uint64_t now, int32_t index, const void *eye_l)
++{
++	static uint64_t chk;
++	static FILE *f;
++	if (now - chk > 300000000ull) {
++		chk = now;
++		bool on = access("/tmp/q1-hzlog", F_OK) == 0;
++		if (on && !f)
++			f = fopen("/tmp/q1hz.txt", "w");
++		else if (!on && f) {
++			fclose(f);
++			f = NULL;
++		}
++	}
++	if (!f || index < 0 || index >= 32 || !q1hz_map[index] || !q1hz_stride)
++		return;
++	const uint8_t *m = q1hz_map[index];
++	struct dma_buf_sync sy = {DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ};
++	ioctl(q1hz_fd[index], DMA_BUF_IOCTL_SYNC, &sy);
++	float mt[12];
++	memcpy(mt, (const char *)eye_l + 16, sizeof(mt));
++	fprintf(f, "%llu buf %d pitch %.4f rows", (unsigned long long)now, index, asinf(-mt[6]) * 57.29578f);
++	unsigned w = q1hz_w, h = q1hz_h, st = q1hz_stride;
++	for (unsigned q = 0; q < 8; q++) {
++		unsigned x0 = q & 1 ? w * 3 / 4 : w / 4, r0 = (q / 2) * (h / 4), r1 = r0 + h / 4;
++		int best = -1, bg = 0;
++		for (unsigned r = r0 + 2; r + 2 < r1; r++) {
++			int g = (int)m[(size_t)(r - 2) * st + x0] - (int)m[(size_t)(r + 2) * st + x0];
++			if (g > bg) {
++				bg = g;
++				best = (int)r;
++			}
++		}
++		fprintf(f, " %d:%d", best, bg);
++	}
++	fputs("\n", f);
++	fflush(f);
++	sy.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ;
++	ioctl(q1hz_fd[index], DMA_BUF_IOCTL_SYNC, &sy);
++}
++
+ static uint32_t submit_set(void *self, int32_t index, uint32_t count, const uint64_t *handles, const void *eye_l,
+                            const void *eye_r, const void *bounds_l, const void *bounds_r, uint32_t flags,
+                            double seconds)
+ {
+ 	uint64_t set[SET_MAX];
++	if (handles && eye_l && count) { // TEMP horizon probe
++		struct timespec ts0;
++		clock_gettime(CLOCK_MONOTONIC, &ts0);
++		q1hz_probe((uint64_t)ts0.tv_sec * 1000000000ull + (uint64_t)ts0.tv_nsec, index, eye_l);
++	}
+ 	if (handles && index > 0 && (uint32_t)index < count && count <= SET_MAX) {
+ 		memcpy(set, handles, count * sizeof(set[0]));
+ 		set[0] = handles[index];
