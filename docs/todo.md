@@ -112,6 +112,7 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - A setting in the VR settings' Oculus Quest category, on by default: ignore the Oculus and Menu buttons while the
   controller moves (they are easy to press by mistake on Touch controllers; Meta's OS and the Rift S, same controllers,
   do the same).
+- Steam's compatibility rating defaults to SteamOS's rating instead of the Steam Frame's (user, 2026-11-15).
 
 ## Power
 
