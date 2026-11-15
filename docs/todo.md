@@ -126,6 +126,8 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 
 - SteamOS and SteamVR updates must keep working without undoing our changes.
 - Slim the install: drop what this headset never uses (other controllers' render models, etc.).
+- Valve's `steamos-log-submitter` (uploads logs to Valve, ~34 MB of RAM): check whether it runs on the headset and
+  what it sends; the Quest 2 port masks it.
 - The telemetry HAL's loop (docs/performance.md, 2026-11-11 heat): once an event cannot go to ovrstub's
   TelemetryService it retries with no pause (a core at 100 %, ~50000 log lines/s, fakelogd at 90 %). Stopping the HAL
   froze the tracking: make the stand-in accept the events, or find what it fails on.
@@ -205,7 +207,9 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 
 - Light overclocks within what other MSM8998 devices run stable (GPU, CPU), watching temperatures.
 - Hand tracking.
-- x86 games (FEX, Proton): very low priority.
+- x86 games (FEX, Proton): very low priority. Ruby / RPG Maker games (mkxp, OneShot) close at once on ARM64 Proton
+  (the Steam Frame too): github.com/URFAVF3MBOY/quest2-steamos (code reuse allowed, credit it) puts the 17 bytes of
+  x86 `_isatty` code Ruby looks for back into Proton's `ucrtbase.dll` on a game's first start (its docs/PROTON.md).
 - Other controllers: Windows Mixed Reality, Quest 2 (github.com/Juspertinry/q2ctrl-module).
 - Quest 3 controllers (Touch Plus): github.com/Noculus-VR/TouchPlus-on-Quest-1 (user, 2026-11-13) pairs them with the
   Quest 1 by patching `libsyncboss.so` (no MCU or firmware change). Not finished: wait until it is, then see what our
