@@ -694,7 +694,8 @@ vrlink writes its own log, `~/.local/share/Steam/logs/vrlink.txt` (the PC's side
         0 of 19 and 0 of 14 off with it, 16 of 17 off by the whole step without it (`nostreampose` in
         /tmp/quest1-layer); later ones 0 of 41 and 1 of 46 (a 60 px miss, the search's edge). The frame rate is the
         same either way (55-57 fps with the stream). It needs the render pass merge (quest1_rpmerge.c, on unless
-        `nomerge`) for its descriptor pool. Things tried first that did not do it, kept in case: giving the device
+        `nomerge`) for its descriptor pool. The user, blind A/B worn the same night: without it "ça tremble
+        toujours", with it "c'est mille fois mieux, ça ne tremble plus du tout". Things tried first that did not do it, kept in case: giving the device
         copy the picture's pose; drawing the picture whose pose the host memory held when the copy was recorded;
         recording that copy as a `vkCmdUpdateBuffer` of what the memory held then (all no change, since the device
         copy is not read). Drawing vrlink's last frame instead of the one vrcompositor took makes it worse (the

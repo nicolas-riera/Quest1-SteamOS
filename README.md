@@ -62,8 +62,10 @@ from Valve's servers and from Meta's last Quest 1 update image.
 - **Passthrough.** Each eye sees a composite of its bottom and top camera, but the depth is a fixed sphere,
   so near objects (controllers, hands) are not at their true distance: a stereo depth mesh is being tuned.
 - **Sleep.** Suspend to RAM loses Meta's tracking and the sound on resume.
-- **Streaming** from a PC: VR streaming (Steam Link VR) is next. In the 2D stream, a change of the
-  PC window's size stops the decoder, and the sound stutters.
+- **Streaming** from a PC: Steam Link VR shows the PC's VR stream in the headset, decoded in hardware,
+  steady as the head moves (the trembling is fixed, 2026-11-16); left are black flashes while the headset
+  is loaded (the dashboard open), a latency still a bit high, and below 72 fps. In the 2D stream, a change
+  of the PC window's size stops the decoder, and the sound stutters. See [docs/streaming.md](docs/streaming.md).
 - **x86 games** (FEX, Proton).
 - **The installer** (see above): downloads and the image build work end to end; flashing the
   built image is to do.

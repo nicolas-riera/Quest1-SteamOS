@@ -140,14 +140,15 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 
 ## Streaming
 
-- Steam Link VR (docs/streaming.md, section 2): a new picture each frame and a sharp centre now (user, 2026-11-12:
-  "c'est net"), but it trembles, flashes black now and then and runs below 72 fps.
-  - Trembling (user, 2026-11-13 night: a fast vibration as the head turns, and at each heartbeat while still; a Quest
-    3 on the same PC has none). Found and fixed on the bench (docs/streaming.md item 13, 2026-11-16: vrcompositor's
-    distortion read the stream's pose from host memory it rewrote for the next frame; each frame now reads a
-    snapshot, `stepsnap.py` 0 frames off against 16 of 17). Left: the user's worn check (blind A/B with
-    `nostreampose`); then whether the 40 ms low-pass of the angular velocity vrlink gets (an interim) still helps.
-    Also position: vrlink submits no depth, so a position error of the PC's prediction is not corrected at all.
+- Steam Link VR (docs/streaming.md, section 2): a new picture each frame, a sharp centre (user, 2026-11-12: "c'est
+  net") and no trembling any more (2026-11-16, blind A/B worn: "ça ne tremble plus du tout"), but it flashes black
+  when the headset is loaded (the dashboard open), its latency is still a bit high (user, 2026-11-16) and it runs
+  below 72 fps.
+  - Latency: measure it (the head's pose to the picture's pose on screen) and find where it goes: the PC's ~90 ms
+    prediction says how far ahead it must guess.
+  - Now that the stream's pose is right, check whether the 40 ms low-pass of the angular velocity vrlink gets (an
+    interim against the trembling, 2026-11-13) still helps or only adds swim (blind A/B worn).
+  - Position: vrlink submits no depth, so a position error of the PC's prediction is not corrected at all.
   - On a system that had run for hours, the stream was 16.6 px rms off the world in Monado's output (2.5-3 px fresh).
     Follow it over a long run (`mjit.py` every few minutes, with vrcompositor's fps, fds and memory) to find which of
     these takes it there (vrcompositor's `sync_fence` leak is fixed: PR #4, display-event fences from a pool):
