@@ -306,6 +306,16 @@ exit 0
 EOF
 chmod 755 /usr/local/sbin/q1-shmclean
 
+# Steam as a Steam Frame (user, 2026-11-16: "frame mode"): steamclient.so takes the device for a Frame (gaming
+# device type 5001: the library's compatibility ratings are the Frame's, `steam_frame_compat_category`) only when
+# /proc/device-tree/compatible starts with "qcom" (ours: "qcom,apq8998-mtp") and /proc/device-tree/model starts with
+# "SM8650" (the Frame's SoC; steamclient.so 0x1799e80, a prefix test at 0x1738580). On anything else it is 541,
+# "SteamOS on other hardware", and the library shows SteamOS's ratings. steam.service sees this model in place of the
+# real one ("vs1 pvt b (SDC)"); nothing else on the system does. Checked by calling that function in a test process
+# (2026-11-16): 541 with the real model or a model merely containing "SM8650", 5001 with this one.
+mkdir -p /usr/share/quest1
+printf 'SM8650 (Oculus Quest vs1 as a Steam Frame)\0' > /usr/share/quest1/steam-dt-model
+
 # No system update from Steam (user, 2026-11-16): Steam's settings update the OS (and on a Frame its firmware), which
 # here would be Valve's image for other hardware. Steam's helpers (absent on Holo) answer "no update":
 # steamos-update's 7 is "up to date"; the branch is stable and stays so. Steam's own client updates are not affected.
@@ -343,6 +353,8 @@ Environment=DISPLAY=:1 HOME=/home/steamos USER=steamos XDG_RUNTIME_DIR=/run/user
 # without it every Flatpak failed ("Failed to get portal proxy": flatpak looks for a bus with dbus-launch)
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
 ExecStartPre=+/usr/bin/install -d -o steamos -g steamos -m 700 /run/user/1000
+# a Steam Frame's device-tree model for Steam alone (above)
+BindReadOnlyPaths=/usr/share/quest1/steam-dt-model:/sys/firmware/devicetree/base/model
 # Steam's VR UI (SteamVR overlays from the webhelper's browser process, steam-q1 above). Steam's xcomposite composer
 # is kept (QUEST1_STEAM_CEF_ARGS empty). The browser's OpenGL is Mesa llvmpipe: vrclient must not see its
 # GL_EXT_memory_object/semaphore (llvmpipe can't import the Adreno's memory), so it takes its CPU fallback.

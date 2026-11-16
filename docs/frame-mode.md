@@ -41,9 +41,18 @@ lists what is left to do).
     tracking was lost (head spinning), the sound gone, the proximity sensor kept waking the headset
     while worn (SyncBoss "wakeup received", irq 271), and the fan and power LED stayed on.
     syncboss_spi.c (Meta's kernel) eats PROX_ON until a PROX_OFF when suspended while worn.
+- Steam's hardware type is the Frame's since 2026-11-16 (user: "frame mode"): `eGamingDeviceType` 5001 in
+  `SteamClient.System.GetSystemInfo()`, so the library shows the Frame's compatibility ratings
+  (`steam_frame_compat_category`). steamclient.so (0x1799e80) reads /proc/device-tree/compatible and model and
+  gives 5001 when the first starts with "qcom" and the second with "SM8650" (a prefix test, 0x1738580: a model
+  merely containing "SM8650" still gave 541, "SteamOS on other hardware", checked by calling that function in a
+  test process). steam.service alone sees the model "SM8650 (Oculus Quest vs1 as a Steam Frame)" bound over the
+  device tree's (`BindReadOnlyPaths`, device/holo-steam-session.sh); OS updates from Steam's settings are stubbed
+  there too. 5001 also switches other Frame paths in steamclient.so (its system update and hardware ones): watch
+  Steam's log for Frame hardware calls that fail here.
 - Steam's own startup movie (each Steam start, also after a SteamVR restart) is SteamOS's: Steam
   picks it from its hardware type (5001 = Frame, read from /proc/device-tree: the Frame's DT says
-  qcom,sm8650-deckard), not from -steamframe. The boot animation (q1splash) plays the Frame's, and its last
+  qcom,sm8650-deckard), not from -steamframe; to check now that the type is 5001. The boot animation (q1splash) plays the Frame's, and its last
   frame (the Steam logo) stays on the panels until SteamVR's first one (`/run/quest1-splash-hold`: Monado takes
   the panels over when vrcompositor's layer connects; q1splash blanks them itself after 60 s). Monado's own frames
   at its start (black) used to replace it. While the headset is not worn before that, Monado asks q1splash to turn

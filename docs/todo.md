@@ -153,14 +153,12 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - Ignoring the Oculus and Menu buttons while the controller moves (2026-11-16, driver_quest1
   `ignoreSystemWhileMoving`, docs/controllers-native.md): check worn that a press during a swing is ignored, a
   deliberate one is not, the toggle shows in the VR settings' Oculus Quest category, and tune the thresholds.
-- Steam's compatibility rating defaults to SteamOS's rating instead of the Steam Frame's (user, 2026-11-15). Found
-  2026-11-16: the library picks the Frame's rating (`steam_frame_compat_category`) only when the client's gaming
-  device type is 5001 (steamui sp.js; Deck 544, Machine 546); ours is 541 (SteamOS on unknown hardware). steamclient.so
-  gives 5001 when `/proc/device-tree/compatible` has "qcom" and `/proc/device-tree/model` has "SM8650"; ours reads
-  "vs1 pvt b (SDC)". `-steamframe` plays no part. Tried 2026-11-16 (user: Frame mode, with Steam's updates off): a
-  model with "SM8650" bound over the device tree's model for steam.service alone reached Steam, but it still
-  reported 541: an earlier test in that function (steamclient.so 0x1799ed0, before the files are read) takes the
-  fallback first; read it next. Steam's OS updates are off now (steamos-update stub, holo-steam-session.sh).
+- Frame mode (docs/frame-mode.md, 2026-11-16: device type 5001): the user to check that the library shows the Frame's
+  compatibility ratings and that nothing else in Steam broke (its settings' System and update pages, the startup
+  movie).
+- Steam crashes (SEGV, its webhelpers SIGBUS) when vrlink is killed during a session (2026-11-16 21:58 and 22:24, a
+  test killing it by PID after the stream's stop did nothing). Not seen in normal use; vrlink's exit hang makes it
+  more likely.
 - The stream layer's variant D (wide views read from the NV12 frame, only the insets copied: -0.5..1.3 ms of GPU,
   streambench) was installed 2026-11-16 and the headset stopped answering minutes later (ping only, rebooted; no
   pstore record): not committed. Retry with the hang watch on (journal kept) before keeping it.
