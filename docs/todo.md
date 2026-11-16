@@ -101,8 +101,8 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - Passthrough sometimes goes black and comes back with its fade-in, as if turned off and on at once (user,
   2026-11-10, with desktop mode and a stream open: the CPU was saturated). q1-ptprovider logged no disable and
   vrcompositor no roomview restart then: catch it with `PT_DUMP=1` (record states once a second) while it happens.
-- q1-ptprovider composites the cameras on the CPU (~25 % of a core while passthrough shows, a third of it the
-  memcpy of each composite into the shared image): do it on the GPU.
+- q1-ptprovider takes 20-21 % of a core while passthrough shows (2026-11-16, after the composite's NEON rewrite:
+  docs/passthrough.md): the composite itself is ~2 ms an eye a camera frame; profile the rest (`perf top -p`).
 - The camera test in SteamVR's camera settings (passthrough) does not work (user, 2026-11-11).
 - Camera power-up race at some boots (trackingservice "Timeout: (power: SLEEP) => (power: STANDBY)", 3DoF
   only), and udev helpers hanging ~3 min at the same boots (2026-11-08: `libinput-device-group` on event0 and

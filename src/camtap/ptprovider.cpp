@@ -33,6 +33,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <arm_neon.h>
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -246,38 +248,47 @@ static Calib VirtualCamera(const Calib &bottom)
 	return v;
 }
 
-//! A bilinear sample of a raw camera image (stride kW): its 2x2's top-left pixel and the four weights (sum 256).
-struct Tap
+//! The frame image's RGBA8 pixel (R = Cr, G = Y', B = Cb, A) of a gray: neutral chroma, Y' in the green byte.
+static const uint32_t kGrayBase = 0xff000000u | 128u << 16 | 128u;
+static inline uint32_t GrayPixel(uint8_t y) { return kGrayBase | (uint32_t)y << 8; }
+
+//! Bilinear samples of a raw camera image (stride kW), one per pixel, as separate arrays (what the NEON code loads
+//! eight at a time): the 2x2's top-left pixel and the weights of the other three (the top left one's is 256 minus
+//! them; the sum is 256, each 0..255).
+struct Taps
 {
-	uint32_t off;
-	uint8_t w[4]; // (x, y), (x + 1, y), (x, y + 1), (x + 1, y + 1); w[0] is 256 - the others, may wrap to 0 for 256
-	uint16_t w0;
-	uint16_t pad;
+	std::vector<uint32_t> off;
+	std::vector<uint8_t> w[3]; // (x + 1, y), (x, y + 1), (x + 1, y + 1)
+	size_t size() const { return off.size(); }
+	void Push(uint32_t o, const uint8_t ww[3])
+	{
+		off.push_back(o), w[0].push_back(ww[0]), w[1].push_back(ww[1]), w[2].push_back(ww[2]);
+	}
 };
-struct OneTap
+//! One eye's composite as runs of the raster (no per-pixel branch, no output index in the tables): the pixels of a run
+//! come from the bottom camera only, the top only, both, or none (black), and their taps are consumed in order from
+//! the tables of that kind.
+struct Run
 {
-	uint32_t out;
-	Tap t;
+	enum Kind : uint32_t { None, Bottom, Top, Both };
+	uint32_t first, n;
+	Kind kind;
 };
-struct TwoTaps
-{
-	uint32_t out;
-	Tap b, t;
-	uint16_t wTop; // the top camera's share, 0..256
-	uint16_t pad;
-};
-//! One eye's composite, as three lists (no per-pixel branch): pixels from the bottom camera only, the top only, both.
 struct Composite
 {
-	std::vector<OneTap> bottom, top;
-	std::vector<TwoTaps> both;
-	size_t empty = 0; //!< pixels in the window that no camera sees (black)
+	std::vector<Run> runs;
+	Taps bottom, top;          //!< the pixels from one camera
+	Taps bothB, bothT;         //!< the blended ones: the bottom camera's samples, the top camera's
+	std::vector<uint8_t> wTop; //!< and the top camera's share of each, 1..255 of 256
+	size_t empty = 0;          //!< pixels in the window that no camera sees (black)
 };
 
-static inline int Sample(const uint8_t *img, const Tap &t)
+//! A tap's value, 0..255.
+static inline int Sample(const uint8_t *img, const Taps &t, size_t i)
 {
-	const uint8_t *p = img + t.off;
-	return (p[0] * t.w0 + p[1] * t.w[1] + p[kW] * t.w[2] + p[kW + 1] * t.w[3] + 128) >> 8;
+	const uint8_t *p = img + t.off[i];
+	int p0 = p[0]; // p0 * (256 - w1 - w2 - w3) + p1 * w1 + ... with three multiplies
+	return (p0 * 256 + t.w[0][i] * (p[1] - p0) + t.w[1][i] * (p[kW] - p0) + t.w[2][i] * (p[kW + 1] - p0) + 128) >> 8;
 }
 
 /*
@@ -290,97 +301,240 @@ static inline int Sample(const uint8_t *img, const Tap &t)
  * over the band where both see it. The bottom camera's part does not depend on the depth (the virtual camera sits at its
  * centre); the top camera's does, through its ~6 cm offset. The top camera's gain follows the bottom one's over the shared
  * band (the two expose separately). Cost (composite_bench, big core): 8.6 ms an eye with one table entry per pixel and
- * a branch per pixel at f = 266, 2026-11-08 morning; now see docs/passthrough.md.
+ * a branch per pixel at f = 266, 2026-11-08 morning; 2.7 ms (2026-11-16, 1.9 ms best case) with the three lists and a
+ * scalar render; then 2.0 ms (1.5 best case) as below: runs of the raster in place of an output index per tap, 7-byte
+ * taps in separate arrays, NEON for the weighting and the sRGB lookup, straight into the shared image (no copy), and
+ * prefetches, because the loop waits on DRAM (IPC 0.4-0.5), not on arithmetic. See docs/passthrough.md.
  */
 static Composite BuildComposite(const Calib &v, const Calib cam[2])
 {
 	Composite out;
 	const double feather = 40; // px from a camera's image edge over which its weight rises
 	const double deg = 180 / M_PI;
-	for (int y = 0; y < kH; y++)
-		for (int x = 0; x < kW; x++) {
-			double u = (x - v.cx) / v.f, w = (y - v.cy) / v.f, th = sqrt(u * u + w * w);
-			double dc[3] = {th > 1e-9 ? sin(th) * u / th : 0, th > 1e-9 ? sin(th) * w / th : 0, cos(th)};
-			double d[3], o[3] = {v.m[3], v.m[7], v.m[11]};
-			for (int r = 0; r < 3; r++)
-				d[r] = v.m[r * 4] * dc[0] + v.m[r * 4 + 1] * dc[1] + v.m[r * 4 + 2] * dc[2];
-			if (fabs(atan2(d[0], -d[2])) * deg > kMaxAzDeg || fabs(asin(std::max(-1.0, std::min(1.0, d[1])))) * deg > kMaxElDeg ||
-			    th > M_PI / 2)
-				continue; // never on the panels: stays black
-			// |o + s d| = R, s > 0
-			double bb = o[0] * d[0] + o[1] * d[1] + o[2] * d[2], cc = o[0] * o[0] + o[1] * o[1] + o[2] * o[2] - kSphereM * kSphereM;
-			double sdist = -bb + sqrt(std::max(0.0, bb * bb - cc));
-			double P[3] = {o[0] + sdist * d[0], o[1] + sdist * d[1], o[2] + sdist * d[2]};
-			Tap tap[2];
-			bool have[2] = {false, false};
-			double wgt[2] = {0, 0};
-			for (int c = 0; c < 2; c++) {
-				const Calib &k = cam[c];
-				double q[3] = {P[0] - k.m[3], P[1] - k.m[7], P[2] - k.m[11]}, dcam[3], px, py;
-				for (int i = 0; i < 3; i++) // DeviceFromCamera^T
-					dcam[i] = k.m[i] * q[0] + k.m[4 + i] * q[1] + k.m[8 + i] * q[2];
-				if (dcam[2] <= 0 || !Project62(k, dcam, px, py))
-					continue;
-				double sx = px - 0.5, sy = py - 0.5; // pixel centres at integers
-				if (sx < 0 || sy < 0 || sx >= kW - 1 || sy >= kH - 1)
-					continue;
-				int ix = (int)sx, iy = (int)sy;
-				double fx = sx - ix, fy = sy - iy;
-				int w1 = (int)std::lround(fx * (1 - fy) * 256), w2 = (int)std::lround((1 - fx) * fy * 256),
-				    w3 = (int)std::lround(fx * fy * 256);
-				w3 = std::min(w3, 256 - w1 - w2); // the roundings may sum past 256
-				tap[c].off = (uint32_t)(iy * kW + ix);
-				tap[c].w0 = (uint16_t)(256 - w1 - w2 - w3);
-				tap[c].w[0] = 0, tap[c].w[1] = (uint8_t)w1, tap[c].w[2] = (uint8_t)w2, tap[c].w[3] = (uint8_t)w3;
-				tap[c].pad = 0;
-				have[c] = true;
-				wgt[c] = std::min(1.0, std::min({sx, sy, kW - 1 - sx, kH - 1 - sy}) / feather);
-			}
-			const uint32_t i = (uint32_t)(y * kW + x);
-			if (have[0] && have[1]) {
-				int wTop = (int)std::lround(256 * wgt[1] * (1 - wgt[0]) / std::max(1e-6, wgt[1] * (1 - wgt[0]) + wgt[0]));
-				if (wTop <= 0)
-					out.bottom.push_back({i, tap[0]});
-				else if (wTop >= 256)
-					out.top.push_back({i, tap[1]});
+	auto pixel = [&](int x, int y) -> Run::Kind {
+		double u = (x - v.cx) / v.f, w = (y - v.cy) / v.f, th = sqrt(u * u + w * w);
+		double dc[3] = {th > 1e-9 ? sin(th) * u / th : 0, th > 1e-9 ? sin(th) * w / th : 0, cos(th)};
+		double d[3], o[3] = {v.m[3], v.m[7], v.m[11]};
+		for (int r = 0; r < 3; r++)
+			d[r] = v.m[r * 4] * dc[0] + v.m[r * 4 + 1] * dc[1] + v.m[r * 4 + 2] * dc[2];
+		if (fabs(atan2(d[0], -d[2])) * deg > kMaxAzDeg || fabs(asin(std::max(-1.0, std::min(1.0, d[1])))) * deg > kMaxElDeg ||
+		    th > M_PI / 2)
+			return Run::None; // never on the panels: stays black
+		// |o + s d| = R, s > 0
+		double bb = o[0] * d[0] + o[1] * d[1] + o[2] * d[2], cc = o[0] * o[0] + o[1] * o[1] + o[2] * o[2] - kSphereM * kSphereM;
+		double sdist = -bb + sqrt(std::max(0.0, bb * bb - cc));
+		double P[3] = {o[0] + sdist * d[0], o[1] + sdist * d[1], o[2] + sdist * d[2]};
+		uint32_t tOff[2] = {0, 0};
+		uint8_t tw[2][3] = {{0, 0, 0}, {0, 0, 0}};
+		bool have[2] = {false, false};
+		double wgt[2] = {0, 0};
+		for (int c = 0; c < 2; c++) {
+			const Calib &k = cam[c];
+			double q[3] = {P[0] - k.m[3], P[1] - k.m[7], P[2] - k.m[11]}, dcam[3], px, py;
+			for (int i = 0; i < 3; i++) // DeviceFromCamera^T
+				dcam[i] = k.m[i] * q[0] + k.m[4 + i] * q[1] + k.m[8 + i] * q[2];
+			if (dcam[2] <= 0 || !Project62(k, dcam, px, py))
+				continue;
+			double sx = px - 0.5, sy = py - 0.5; // pixel centres at integers
+			if (sx < 0 || sy < 0 || sx >= kW - 1 || sy >= kH - 1)
+				continue;
+			int ix = (int)sx, iy = (int)sy;
+			double fx = sx - ix, fy = sy - iy;
+			int w1 = (int)std::lround(fx * (1 - fy) * 256), w2 = (int)std::lround((1 - fx) * fy * 256),
+			    w3 = (int)std::lround(fx * fy * 256);
+			w3 = std::max(0, std::min(w3, 256 - w1 - w2)); // the roundings may sum past 256
+			if (w1 == 256 || w2 == 256 || w3 == 256) { // all of it on one pixel, and the weights are bytes (256 wrapped to 0,
+				// a black pixel, in the first version): move the 2x2 onto that pixel, if its other three are still in the
+				// image, else 255 on it and 1 on the corner (a 1 LSB difference at most)
+				const int mx = w1 == 256 || w3 == 256, my = w2 == 256 || w3 == 256;
+				if ((iy + my) * kW + ix + mx + kW + 1 < kW * kH)
+					ix += mx, iy += my, w1 = w2 = w3 = 0;
 				else
-					out.both.push_back({i, tap[0], tap[1], (uint16_t)wTop, 0});
-			} else if (have[0])
-				out.bottom.push_back({i, tap[0]});
-			else if (have[1])
-				out.top.push_back({i, tap[1]});
-			else
-				out.empty++;
+					w1 = w1 == 256 ? 255 : 0, w2 = w2 == 256 ? 255 : 0, w3 = w3 == 256 ? 255 : 0;
+			}
+			tOff[c] = (uint32_t)(iy * kW + ix);
+			tw[c][0] = (uint8_t)w1, tw[c][1] = (uint8_t)w2, tw[c][2] = (uint8_t)w3;
+			have[c] = true;
+			wgt[c] = std::min(1.0, std::min({sx, sy, kW - 1 - sx, kH - 1 - sy}) / feather);
 		}
+		if (have[0] && have[1]) {
+			int wTop = (int)std::lround(256 * wgt[1] * (1 - wgt[0]) / std::max(1e-6, wgt[1] * (1 - wgt[0]) + wgt[0]));
+				if (wTop <= 0)
+				return out.bottom.Push(tOff[0], tw[0]), Run::Bottom;
+			if (wTop >= 256)
+				return out.top.Push(tOff[1], tw[1]), Run::Top;
+			out.bothB.Push(tOff[0], tw[0]), out.bothT.Push(tOff[1], tw[1]), out.wTop.push_back((uint8_t)wTop);
+			return Run::Both;
+		}
+		if (have[0])
+			return out.bottom.Push(tOff[0], tw[0]), Run::Bottom;
+		if (have[1])
+			return out.top.Push(tOff[1], tw[1]), Run::Top;
+		out.empty++;
+		return Run::None;
+	};
+	for (uint32_t i = 0; i < (uint32_t)kW * kH; i++) {
+		Run::Kind k = pixel(i % kW, i / kW);
+		if (out.runs.empty() || out.runs.back().kind != k)
+			out.runs.push_back({i, 0, k});
+		out.runs.back().n++;
+	}
 	return out;
 }
 
-//! One eye's composite image from its bottom and top camera (stride kW); topGain (8.8 fixed point) scales the top camera.
-//! Only the pixels some camera sees are written: `out` (ordinary memory, copied to the shared image in one pass: scattered
-//! writes there are slow) keeps the black it was filled with everywhere else.
-static void RenderComposite(const Composite &cp, const uint8_t *bottom, const uint8_t *top, int topGain,
-                            const uint32_t grayPx[256], uint32_t *out, double &sumB, double &sumT, int &n)
+#define Q1_INLINE __attribute__((always_inline))
+
+//! Eight samples at once: the four pixels of each 2x2 come in as two 16-bit loads straight into vector lanes, the
+//! weighting is 16-bit arithmetic (the sum is below 65536, so the wrap-around of the negative differences cancels).
+static inline Q1_INLINE uint8x8_t Sample8(const uint8_t *img, const Taps &t, size_t i)
 {
-	sumB = sumT = 0, n = 0;
-	for (const OneTap &e : cp.bottom)
-		out[e.out] = grayPx[Sample(bottom, e.t)];
-	if (!top) { // no top image: the bottom camera where it sees, black elsewhere
-		for (const OneTap &e : cp.top)
-			out[e.out] = grayPx[0];
-		for (const TwoTaps &e : cp.both)
-			out[e.out] = grayPx[Sample(bottom, e.b)];
-		return;
+	const uint32_t *off = t.off.data() + i;
+	// DRAM is the bottleneck (the tables and the camera frame are not in cache), so fetch ahead: the tables 256 bytes on,
+	// and the camera pixels of the taps 32 and 39 on (the 2x2s of a row are neighbours: two lines of each row)
+	__builtin_prefetch(off + 64);
+	__builtin_prefetch(&t.w[0][i] + 128), __builtin_prefetch(&t.w[1][i] + 128), __builtin_prefetch(&t.w[2][i] + 128);
+	if (i + 40 <= t.off.size())
+		for (int k = 32; k < 40; k += 7)
+			__builtin_prefetch(img + off[k]), __builtin_prefetch(img + off[k] + kW);
+	// four short chains of lane loads (one long chain would serialise them): rows y and y + 1, pixels 0-3 and 4-7
+	uint16x4_t a0 = vdup_n_u16(0), a1 = a0, b0 = a0, b1 = a0;
+#define Q1_GATHER(A, B, L, K) \
+	{ \
+		const uint8_t *p = img + off[K]; \
+		A = vld1_lane_u16((const uint16_t *)p, A, L); \
+		B = vld1_lane_u16((const uint16_t *)(p + kW), B, L); \
 	}
-	for (const OneTap &e : cp.top)
-		out[e.out] = grayPx[std::min(255, (Sample(top, e.t) * topGain) >> 8)];
+	Q1_GATHER(a0, b0, 0, 0) Q1_GATHER(a1, b1, 0, 4) Q1_GATHER(a0, b0, 1, 1) Q1_GATHER(a1, b1, 1, 5)
+	Q1_GATHER(a0, b0, 2, 2) Q1_GATHER(a1, b1, 2, 6) Q1_GATHER(a0, b0, 3, 3) Q1_GATHER(a1, b1, 3, 7)
+#undef Q1_GATHER
+	uint16x8_t a = vcombine_u16(a0, a1), b = vcombine_u16(b0, b1);
+	uint8x8_t p0 = vmovn_u16(a), p1 = vshrn_n_u16(a, 8), p2 = vmovn_u16(b), p3 = vshrn_n_u16(b, 8);
+	uint16x8_t acc = vaddq_u16(vshll_n_u8(p0, 8), vdupq_n_u16(128));
+	acc = vmlaq_u16(acc, vsubl_u8(p1, p0), vmovl_u8(vld1_u8(&t.w[0][i])));
+	acc = vmlaq_u16(acc, vsubl_u8(p2, p0), vmovl_u8(vld1_u8(&t.w[1][i])));
+	acc = vmlaq_u16(acc, vsubl_u8(p3, p0), vmovl_u8(vld1_u8(&t.w[2][i])));
+	return vshrn_n_u16(acc, 8);
+}
+
+//! min(255, v * gain >> 8) for eight values (gain up to 1024).
+static inline Q1_INLINE uint8x8_t Gain8(uint8x8_t v, int gain)
+{
+	uint16x8_t w = vmovl_u8(v);
+	return vqmovn_u16(vcombine_u16(vshrn_n_u32(vmull_n_u16(vget_low_u16(w), (uint16_t)gain), 8),
+	                               vshrn_n_u32(vmull_n_u16(vget_high_u16(w), (uint16_t)gain), 8)));
+}
+
+//! The sensor value -> Y' table in 16 registers (tbl looks up 64 entries, tbx the next ones).
+struct SrgbTable
+{
+	uint8x16x4_t t[4];
+	explicit SrgbTable(const uint8_t y[256])
+	{
+		for (int k = 0; k < 4; k++)
+			t[k] = vld1q_u8_x4(y + 64 * k);
+	}
+	inline uint8x16_t operator()(uint8x16_t v) const
+	{
+		uint8x16_t r = vqtbl4q_u8(t[0], v);
+		r = vqtbx4q_u8(r, t[1], vsubq_u8(v, vdupq_n_u8(64)));
+		r = vqtbx4q_u8(r, t[2], vsubq_u8(v, vdupq_n_u8(128)));
+		return vqtbx4q_u8(r, t[3], vsubq_u8(v, vdupq_n_u8(192)));
+	}
+};
+//! Sixteen gray pixels from their Y' (B, G, R, A bytes interleaved by one store).
+static inline void Store16(uint32_t *o, uint8x16_t y)
+{
+	uint8x16x4_t px = {{vdupq_n_u8(kGrayBase & 255), y, vdupq_n_u8(kGrayBase >> 16 & 255), vdupq_n_u8(kGrayBase >> 24)}};
+	vst4q_u8((uint8_t *)o, px);
+}
+static inline void Store8(uint32_t *o, uint8x8_t y)
+{
+	uint8x8x4_t px = {{vdup_n_u8(kGrayBase & 255), y, vdup_n_u8(kGrayBase >> 16 & 255), vdup_n_u8(kGrayBase >> 24)}};
+	vst4_u8((uint8_t *)o, px);
+}
+
+//! One eye's composite image from its bottom and top camera (stride kW); topGain (8.8 fixed point) scales the top camera;
+//! toSrgb maps a sensor value to the image's Y'. Written in raster order, every pixel (black where no camera sees),
+//! straight into `out`: sequential stores, which the shared image's mapping takes at full speed (the first version's
+//! scattered ones were slow there: it rendered to ordinary memory and copied that over).
+static void RenderComposite(const Composite &cp, const uint8_t *bottom, const uint8_t *top, int topGain,
+                            const uint8_t toSrgb[256], uint32_t *out, double &sumB, double &sumT, int &n)
+{
+	const SrgbTable lut(toSrgb);
+	const uint32_t black = GrayPixel(toSrgb[0]);
 	long sb = 0, st = 0;
-	for (size_t k = 0; k < cp.both.size(); k++) {
-		const TwoTaps &e = cp.both[k];
-		int vb = Sample(bottom, e.b), vt = Sample(top, e.t);
-		if ((k & 7) == 0)
-			sb += vb, st += vt, n++;
-		vt = std::min(255, (vt * topGain) >> 8);
-		out[e.out] = grayPx[(vb * (256 - e.wTop) + vt * e.wTop + 128) >> 8];
+	size_t kb = 0, kt = 0, kw = 0; // next entry of each table
+	n = 0;
+	auto fillBlack = [&](uint32_t *o, size_t cnt) {
+		size_t i = 0;
+		for (const uint32x4_t b4 = vdupq_n_u32(black); i + 16 <= cnt; i += 16)
+			vst1q_u32_x4(o + i, (uint32x4x4_t{{b4, b4, b4, b4}}));
+		for (; i < cnt; i++)
+			o[i] = black;
+	};
+	// a run's pixels in blocks of 16 (the table lookup is the same work for 8 or 16), then 8, then one by one:
+	// value8(i) is eight pixels' sensor value from entry i on, value1(i) one's (the same arithmetic)
+	auto blocks = [&](uint32_t *o, size_t cnt, auto value8, auto value1) Q1_INLINE {
+		size_t i = 0;
+		for (; i + 16 <= cnt; i += 16)
+			Store16(o + i, lut(vcombine_u8(value8(i), value8(i + 8))));
+		if (i + 8 <= cnt) {
+			uint8x16_t v = vcombine_u8(value8(i), vdup_n_u8(0));
+			Store8(o + i, vget_low_u8(lut(v)));
+			i += 8;
+		}
+		for (; i < cnt; i++)
+			o[i] = GrayPixel(toSrgb[value1(i)]);
+	};
+	for (const Run &r : cp.runs) {
+		uint32_t *o = out + r.first;
+		const size_t cnt = r.n;
+		switch (r.kind) {
+		case Run::None:
+			fillBlack(o, cnt);
+			break;
+		case Run::Bottom:
+			blocks(o, cnt, [&](size_t i) Q1_INLINE { return Sample8(bottom, cp.bottom, kb + i); },
+			       [&](size_t i) Q1_INLINE { return Sample(bottom, cp.bottom, kb + i); });
+			kb += cnt;
+			break;
+		case Run::Top:
+			if (!top) // no top image: black where only it sees
+				fillBlack(o, cnt);
+			else
+				blocks(o, cnt, [&](size_t i) Q1_INLINE { return Gain8(Sample8(top, cp.top, kt + i), topGain); },
+				       [&](size_t i) Q1_INLINE { return std::min(255, (Sample(top, cp.top, kt + i) * topGain) >> 8); });
+			kt += cnt;
+			break;
+		case Run::Both:
+			if (!top) // no top image: the bottom camera
+				blocks(o, cnt, [&](size_t i) Q1_INLINE { return Sample8(bottom, cp.bothB, kw + i); },
+				       [&](size_t i) Q1_INLINE { return Sample(bottom, cp.bothB, kw + i); });
+			else
+				blocks(
+				    o, cnt,
+				    [&](size_t i) Q1_INLINE {
+					    uint8x8_t vb = Sample8(bottom, cp.bothB, kw + i), vt = Sample8(top, cp.bothT, kw + i);
+					    // the brightness match samples every 8th blended pixel (sums before the gain): one lane of eight
+					    uint8_t tb[8], tt[8];
+					    vst1_u8(tb, vb), vst1_u8(tt, vt);
+					    size_t j = (8 - ((kw + i) & 7)) & 7;
+					    sb += tb[j], st += tt[j], n++;
+					    uint8x8_t wt = vld1_u8(&cp.wTop[kw + i]);
+					    uint16x8_t m = vmull_u8(vb, vsub_u8(vdup_n_u8(0), wt)); // 256 - wTop is -wTop mod 256: 1..255
+					    m = vmlal_u8(m, Gain8(vt, topGain), wt);
+					    return vshrn_n_u16(vaddq_u16(m, vdupq_n_u16(128)), 8);
+				    },
+				    [&](size_t i) Q1_INLINE {
+					    int vb = Sample(bottom, cp.bothB, kw + i), vt = Sample(top, cp.bothT, kw + i), wt = cp.wTop[kw + i];
+					    if (((kw + i) & 7) == 0)
+						    sb += vb, st += vt, n++;
+					    vt = std::min(255, (vt * topGain) >> 8);
+					    return (vb * (256 - wt) + vt * wt + 128) >> 8;
+				    });
+			kw += cnt;
+			break;
+		}
 	}
 	sumB = (double)sb, sumT = (double)st;
 }
@@ -541,7 +695,7 @@ int main()
 			lut[c] = BuildComposite(calib[c], pair);
 			printf("ptprovider: eye %d: composite of cameras %d and %d, f %.1f: %zu pixels from the bottom one, %zu from the top "
 			       "one, %zu blended, %zu seen by neither\n",
-			       c, c ? 2 : 0, c ? 3 : 1, calib[c].f, lut[c].bottom.size(), lut[c].top.size(), lut[c].both.size(),
+			       c, c ? 2 : 0, c ? 3 : 1, calib[c].f, lut[c].bottom.size(), lut[c].top.size(), lut[c].wTop.size(),
 			       lut[c].empty);
 		}
 	std::vector<uint8_t> gridLuma[2], gridRed[2];
@@ -557,7 +711,7 @@ int main()
 	}
 	uint32_t grayPx[256]; // the frame image's RGBA8 pixel (R = Cr, G = Y', B = Cb, A) for each sensor value: neutral chroma
 	for (int v = 0; v < 256; v++)
-		grayPx[v] = 0xff000000u | 128u << 16 | (uint32_t)toSrgb[v] << 8 | 128u;
+		grayPx[v] = GrayPixel(toSrgb[v]);
 	for (int c = 0; c < 2; c++)
 		printf("ptprovider: camera %d %s: f %.1f centre %.1f %.1f, fitted KB %.4f %.4f %.4f %.4f\n", c ? 2 : 0,
 		       calib[c].ok ? "calibrated" : "NOT calibrated (defaults)", calib[c].f, calib[c].cx, calib[c].cy, calib[c].kb[0],
@@ -657,9 +811,6 @@ int main()
 	int64_t lastTake = 0;       // when the compositor last took a frame of ours
 	int64_t stallSince = 0, lastStallLog = 0;
 	auto Rec = [&](int c, int k) { return (uint32_t *)(b + kRec0 + c * kCamStride + k * kRecStride); };
-	// each eye's composite in ordinary memory (black where no camera sees, written once)
-	std::vector<uint32_t> compImg[2] = {std::vector<uint32_t>((size_t)kW * kH, grayPx[0]),
-	                                    std::vector<uint32_t>((size_t)kW * kH, grayPx[0])};
 	const int64_t period = 1000000000LL / hz;
 	int64_t next = NowNs();
 	while (!g_quit) {
@@ -807,8 +958,7 @@ int main()
 						if (useComp[c] && sb == kW && (!top || stt == sb)) {
 							double sumB, sumT;
 							int n;
-							RenderComposite(lut[c], src, top, topGain[c], grayPx, compImg[c].data(), sumB, sumT, n);
-							memcpy(im.map, compImg[c].data(), (size_t)kW * kH * 4);
+							RenderComposite(lut[c], src, top, topGain[c], toSrgb, (uint32_t *)im.map, sumB, sumT, n);
 							if (n > 200 && sumT > n * 4.0) { // follow the bottom camera's brightness, slowly
 								int want = (int)std::lround(256.0 * sumB / sumT);
 								want = std::max(128, std::min(1024, want));

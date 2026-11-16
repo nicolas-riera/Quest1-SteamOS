@@ -442,6 +442,23 @@ over the ~30,000 pixels where both see it (40 px feather from each image's edge)
 one's over that band. The bottom camera's part is independent of the depth (the virtual camera sits at its centre); the top
 one's carries its ~6 cm parallax. `PT_COMPOSITE=0` gives the bottom cameras alone.
 
+Cost of the composite (2026-11-16; `composite_bench`, pinned to a big core, real camera frames, the headset busy with a
+stream). The first tables (one entry per pixel, a branch each) cost 8.6 ms an eye; three lists (bottom only, top only,
+both) and a copy into the shared image: 2.7 ms of CPU an eye (6.2 M cycles, 4.05 M instructions; 1.9 ms when the machine
+is quiet). Now 2.0 ms (4.6 M cycles, 2.4 M instructions; 1.5 ms quiet), about 25 % less, with the same output: the tables
+are runs of the raster (a run is a stretch of pixels of one kind: bottom, top, both, none) and taps in separate arrays
+(4 bytes of offset, 3 of weights; the output index is implicit), so the image is written in order, directly into the shared
+image (no 1.2 MB copy; a sequential write is what that mapping is good at), eight samples at a time with NEON (the 2x2's
+two rows come in as 16-bit loads into vector lanes, the weights in 16-bit arithmetic, the sRGB table as `tbl`/`tbx`,
+one `st4` per eight pixels) and software prefetches of the tables and of the camera pixels, because the loop is DRAM
+bound (IPC 0.4-0.5; the camera frame was just written, the tables are 1.2 MB and the output 1.2 MB). What did not help:
+a scalar gather through the stack, one long chain of lane loads (four short ones are slightly better), prefetching the
+output, skipping the black pixels (the half of the image no camera sees). Output check: bit-identical to the previous
+version on real and random frames, with the top camera, without it, and with a gain of 300, except one pixel of one eye
+(379, 412 of the right eye): its bilinear weights were exactly 256 on one pixel, which a byte wrapped to 0, so that
+pixel was black; it now shows the sample. Live, the whole service with passthrough on (A/B of the two binaries, 20 s
+each, twice): 23-24 % of a core before, 20-21 % after; the rest of its time is not the composite.
+
 ## Depth from our own stereo (2026-11-08)
 
 Meta's engine (mrsystemservice) is not used after all: its RuntimeIPC server only grants its passthrough and depth

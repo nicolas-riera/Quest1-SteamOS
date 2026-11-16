@@ -1,5 +1,6 @@
 // Times ptprovider's composite (RenderComposite) on synthetic images with the real calibration: numbers only.
 // Build: see build_probe.sh. Run on the headset: composite_bench [frames=300]   (taskset to pick a core)
+// The timings are noisy while the headset runs anything else (the loop waits on DRAM): minimum and median are printed.
 #define main ptprovider_main
 #include "ptprovider.cpp"
 #undef main
@@ -12,9 +13,9 @@ int main(int argc, char **argv)
 		fprintf(stderr, "no calibration\n");
 		return 1;
 	}
-	uint32_t grayPx[256];
+	uint8_t toSrgb[256];
 	for (int v = 0; v < 256; v++)
-		grayPx[v] = 0xff000000u | 128u << 16 | (uint32_t)v << 8 | 128u;
+		toSrgb[v] = (uint8_t)v;
 	std::vector<uint8_t> bottom((size_t)kW * kH), top((size_t)kW * kH);
 	for (size_t i = 0; i < bottom.size(); i++)
 		bottom[i] = (uint8_t)(i * 7 + (i >> 9)), top[i] = (uint8_t)(i * 13 + (i >> 8));
@@ -23,14 +24,18 @@ int main(int argc, char **argv)
 		const Calib v = VirtualCamera(bottomCal[c]);
 		const Calib pair[2] = {bottomCal[c], topCal[c]};
 		const Composite cp = BuildComposite(v, pair);
-		double t0 = NowNs();
+		std::vector<double> ms;
 		double sumB, sumT;
 		int n;
-		for (int f = 0; f < frames; f++)
-			RenderComposite(cp, bottom.data(), top.data(), 256, grayPx, out.data(), sumB, sumT, n);
-		double ms = (NowNs() - t0) / 1e6 / frames;
-		printf("eye %d: %.2f ms per image (f %.1f; %zu px from the bottom camera, %zu from the top, %zu blended, %zu empty)\n",
-		       c, ms, v.f, cp.bottom.size(), cp.top.size(), cp.both.size(), cp.empty);
+		for (int f = 0; f < frames; f++) {
+			double t0 = NowNs();
+			RenderComposite(cp, bottom.data(), top.data(), 256, toSrgb, out.data(), sumB, sumT, n);
+			ms.push_back((NowNs() - t0) / 1e6);
+		}
+		std::sort(ms.begin(), ms.end());
+		printf("eye %d: %.2f ms per image, best %.2f (f %.1f; %zu px from the bottom camera, %zu from the top, %zu blended, "
+		       "%zu empty; %zu runs)\n",
+		       c, ms[ms.size() / 2], ms[0], v.f, cp.bottom.size(), cp.top.size(), cp.wTop.size(), cp.empty, cp.runs.size());
 	}
 	return 0;
 }
