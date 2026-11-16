@@ -150,3 +150,30 @@ server ~0.5 ms; Xvfb is at ~30 % at 60 fps.
   (and `ANGLE_FEATURE_OVERRIDES_DISABLED=supportsExtendedDynamicState` for the ANGLE test).
   cefsimple: `steamrtarm64/cefsimple --no-sandbox --disable-gpu-sandbox
   --gpu-launcher=/usr/local/bin/steam-webhelper-gpu --user-data-dir=/tmp/cefs --url=…` on `:2`.
+
+## The browser process on ANGLE (2026-11-16, tried, not shipped)
+
+What the browser process does with Steam's VR pages (read in steamwebhelper, arm64): an SDL3 desktop OpenGL 4.3 context
+on a hidden 1x1 window (GLX: host libglvnd, Mesa llvmpipe; Xvfb has no DRI3), one RGBA8 texture per overlay
+(`glTexImage2D` with no pixels), and per CEF paint a `glTexSubImage2D` of the whole BGRA frame (the dirty rect is not
+used, no PBO), then `IVROverlay::SetOverlayTexture` with that OpenGL texture. No setting picks another way;
+`SetOverlayRaw` takes ~200 px at most. vrclient, in that process, shares an OpenGL texture with vrcompositor through
+`GL_EXT_memory_object_fd`; steam.service hides those from llvmpipe, so it takes its fallback: a blit and a
+`glGetTexImage` into shared memory, on llvmpipe's threads. Mesa's zink is no way out: no GLX visual on Xvfb, and on
+EGL its screen fails on this Vulkan 1.1.128 driver with no message (after our shim's `VK_EXT_debug_utils`, which the
+blob refuses, is hidden).
+
+Tried: the browser process (steamwebhelper without `--type=`) given the stream client's ANGLE libEGL.so.1/libGL.so.1
+(`quest1_streamclient.c`), in a directory of its own (the stream client's fake libdrm.so.2 breaks libcef:
+"undefined symbol: drmPrimeHandleToFD"), with `SDL_VIDEO_FORCE_EGL=1`, its RGBA textures made `GL_BGRA_EXT` (OpenGL ES
+refuses BGRA pixels into RGBA storage) and ANGLE's `disableFlippingBlitWithCommand` (vrclient's copy into the shared
+texture is upside down, and the blob's flipped `vkCmdBlitImage` left the panel flat grey). Then "Loaded GL 3.1", no
+llvmpipe thread, the panel right (colours and orientation checked with test boxes). With a small box animating on the
+main page for 20 s: the browser 20 % of a core before, 8-13 % after; vrcompositor at 71.6-71.9 fps instead of
+61-66 (its CPU upload of the shared memory is gone). vrclient's semaphore still fails ("Failed to get cross-process
+semaphore FD -1000072003", glFinish instead), as in the stream client. But ~5 minutes in, vrcompositor's context hung
+the GPU (`gpu fault ctx 3`, "GPU hang detected", right after a "Wait for global ctx=5 ... error=-110" on a context
+being destroyed; VK_ERROR_DEVICE_LOST, SteamVR restarted): the only GPU hang of that boot. Not shipped. Suspects: a
+shared texture freed or replaced by vrclient (overlay reallocation) while vrcompositor still read it, with no
+semaphore between them. The patch is not in the repo; the pieces above are what it needs.
+

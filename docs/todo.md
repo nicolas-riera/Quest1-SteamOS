@@ -90,7 +90,9 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - Steam's VR overlay copy runs on llvmpipe (user, 2026-11-10: the CPU at ~100 % when the pointer moves over a Steam
   page): the pages render on the Adreno (webhelper GPU process, ANGLE Vulkan), but Steam's browser process copies
   each frame for the VR overlay with GLX on Mesa llvmpipe (`webhelper_vr.txt` "Loaded GL 4.5", docs/steam-gpu.md
-  "Known issues"). Move that copy to the GPU.
+  "Known issues"). Move that copy to the GPU. Tried 2026-11-16 (docs/steam-gpu.md "The browser process on ANGLE"):
+  it works and pays (browser 20 -> 8-13 % of a core, vrcompositor 72 instead of 61-66 fps while a page animates),
+  but vrcompositor hung the GPU 5 minutes in (the only GPU hang of that boot): find why before shipping it.
 - SteamVR's global render resolution slider: remove it as on the Steam Frame, later (user, 2026-11-09), without the
   side effects found so far (docs/frame-mode.md).
 
