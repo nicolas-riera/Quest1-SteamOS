@@ -306,6 +306,28 @@ exit 0
 EOF
 chmod 755 /usr/local/sbin/q1-shmclean
 
+# No system update from Steam (user, 2026-11-16): Steam's settings update the OS (and on a Frame its firmware), which
+# here would be Valve's image for other hardware. Steam's helpers (absent on Holo) answer "no update":
+# steamos-update's 7 is "up to date"; the branch is stable and stays so. Steam's own client updates are not affected.
+mkdir -p /usr/bin/steamos-polkit-helpers
+cat > /usr/bin/steamos-polkit-helpers/steamos-update <<'EOF'
+#!/bin/sh
+# Quest 1 (holo-steam-session.sh): no OS update from Steam's settings
+echo "steamos-update: this system is updated from its own image, not by Steam"
+exit 7
+EOF
+cat > /usr/bin/steamos-polkit-helpers/steamos-select-branch <<'EOF'
+#!/bin/sh
+# Quest 1 (holo-steam-session.sh): one branch, no change
+case "$1" in
+-c | -l) echo stable ;;
+esac
+exit 0
+EOF
+chmod 755 /usr/bin/steamos-polkit-helpers/steamos-update /usr/bin/steamos-polkit-helpers/steamos-select-branch
+ln -sfn /usr/bin/steamos-polkit-helpers/steamos-update /usr/local/bin/steamos-update
+ln -sfn /usr/bin/steamos-polkit-helpers/steamos-select-branch /usr/local/bin/steamos-select-branch
+
 cat > /etc/systemd/system/steam.service <<'EOF'
 [Unit]
 Description=Steam client (arm64, Big Picture)
