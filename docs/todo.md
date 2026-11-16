@@ -3,6 +3,34 @@
 Only what is left to do, roughly by priority. Done work leaves this list: it is described in the other docs
 (`docs/*.md`) and in the commit log.
 
+## Found by the user on 2026-11-16 evening (first)
+
+- Storage: Steam shows 2.3 GB free of ~24 GB with nothing installed from Steam. The system is one 24 GB image
+  (`/userdata/steamos/holo.img` on loop0, 91 % used; `/userdata` itself has 21 GB free, and a 4 GB swap file next to the
+  image). Nothing large was written in the last two days (no runaway writer); what fills it: `/root` 5.2 GB (dev
+  leftovers on this headset: `.debug` 1.3 GB from perf, a Monado build 1.5 GB, `sf` 0.7 GB, `tmp`), `/var/lib/flatpak`
+  2.3 GB (the user's apps), `/var/cache/pacman` 1.2 GB (package cache), Steam 4 GB. To do: clean the package cache in
+  the image build and keep it clean (paccache / `CleanMethod`), size the image from the partition (or grow it on first
+  boot), and check what grows over a day of use (`du` before/after).
+- Microphone dead system-wide (Audacity, Steam Link VR): after the 2026-11-16 19:13 boot both `quest1-mic` and
+  `quest1-mic-aec` record pure silence (RMS 0, 2 s each), so the capture itself is dead, not the echo canceller.
+  Check the mixer path (`Mic Switch` etc., docs/audio.md "Mixer setup") at this boot, whether the echo-cancel module
+  holding the mic (it was set as default source by hand at 18:50) changes it, and the PCM (S16_LE mono 48 kHz, MMAP).
+- Since Audacity was installed (a user app, not for the image), the sound is much lower-pitched (user). The sink is
+  still 48 kHz S16 stereo (`hw_params`): check PipeWire's clock (`pw-metadata -n settings`, `clock.force-rate`) and
+  what Audacity changed (ALSA config in the user's home, `~/.asoundrc`, its own device choice). Audacity also lists
+  30+ audio devices (ALSA's plugin list): hide what is not usable.
+- Steam Link VR controllers (worn, 1a38621): A, B and grip work; the sticks do nothing (position and click), the
+  triggers move the stick up on the 3D model (and do nothing in SteamVR's button test), X and Y do nothing. So the
+  binding file (src/steamvr-quest1/quest1/resources/input/quest1_touch_vrlink_bindings.json) maps the wrong inputs:
+  read the legacy layout vrlink expects (docs/streaming.md item 14) again.
+- Steam Link VR: still black flashes (fewer), and sometimes a flash brings a trembling that goes away once the
+  headset's load drops (seen with desktop mode and Dolphin open).
+- A whole-system freeze (SSH too; ping fine): desktop mode open with Discover searching, headset on the forehead, then
+  put on: SteamVR froze first (Monado still ran), then everything. Same symptom at 18:43 right after a stack restart
+  and a stream start. Not reproduced since; a capture to the PC (dmesg -w and a 10 s snapshot of memory, load, top
+  and D-state tasks over the USB link) catches the next one: keep one running during tests.
+
 - Performance (docs/performance.md): GPU-bound, ~12.4 of 13.9 ms a frame. Levers left, all visible, so the user
   decides: achromatic distortion (vrcompositor's distortion pass is ~2 ms per eye), a lighter environment than Aurora
   (~4 ms; passthrough itself is cheaper), simpler controller models (~2 ms), the 4x MSAA of the dashboard layer.
