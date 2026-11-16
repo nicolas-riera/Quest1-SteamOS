@@ -6,7 +6,8 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - Performance (docs/performance.md): GPU-bound, ~12.4 of 13.9 ms a frame. Levers left, all visible, so the user
   decides: achromatic distortion (vrcompositor's distortion pass is ~2 ms per eye), a lighter environment than Aurora
   (~4 ms; passthrough itself is cheaper), simpler controller models (~2 ms), the 4x MSAA of the dashboard layer.
-  Also: the LSE emulation kernel (`build/perf/boot-native-holo-lse.img`, built 2026-11-08) to boot and measure;
+  Also: the LSE emulation kernel (`build/perf/boot-native-holo-lse.img`, built 2026-11-08) to boot and measure (the
+  running kernel traps ~150,000 LSE atomics a second with SteamVR up, 2026-11-16: ~12-24 % of a core; needs USB);
   Meta's tracking threads starving when worn (Android pins syncboss to CPUs 0-3); memory (~500 MB available after
   boot; kswapd and loop0 busy while Steam is used).
 - Passthrough depth, so near things (the controllers, the hands) sit where they are: our own stereo
@@ -78,7 +79,9 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   screen at ~37 fps).
 - Activating passthrough freezes the view (the only freeze left in Steam's VR UI, user 2026-11-12): vrcompositor
   stalls ~0.3 s (2026-11-09 16:44:02, CTrackedCamera "Late initialization"): find what it builds then (pipelines?
-  camera textures?) and do it at start.
+  camera textures?) and do it at start. Not reproduced on the table (2026-11-16, first activation after a SteamVR
+  start through the system layer's mailbox, `set_camera_roomview_enabled`): 71.6-71.9 fps, no late commit. Check it
+  worn with the dashboard's button (Steam's UI may be what stalls then).
 - Steam's VR UI frame rate (user, 2026-11-12: SteamVR itself is very fluid, Steam is "usable" but needs more
   performance): ~10 fps while a page animates, any damage size. The GPU is the limit now (100 % busy):
   ~24 ms of GPU per Steam frame in the gaps vrcompositor leaves, for the full composite of the 1920x1080 page, its
