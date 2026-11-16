@@ -18,6 +18,10 @@ the tsens zones at 74-85 C (0.1 C units, e.g. 848), load average 13-15, and thre
   pause: one thread at 100 %, ~50000 log lines/s, and fakelogd at ~90 % of a core reading and dropping them.
   Stopping the HAL is not a fix: a minute later the tracking froze in the headset (user) while something waited for
   IDeviceTelemetry in a loop ("Waited one second for ...IDeviceTelemetry/default"). Open (docs/todo.md).
+  Checked 2026-11-16: no loop on a fresh boot; ovrstub logs one oneway `TelemetryService` code 1 (528 bytes) at start
+  and accepts it, so the loop needs ovrstub to be gone (restart) while the HAL runs; unconfirmed, see docs/todo.md.
+- **steamos-log-submitter** (Valve's log uploader) is not installed in this Holo rootfs; `device/native-setup.sh`
+  masks its units anyway (privacy, RAM) so a package update cannot bring it back.
 - **Fan.** Meta's driver (drivers/platform/oculus/vs1-board.c) polls the zones every second and sets cooling level 1
   (120 of 255) with the screen on, level 2 (255) once a zone reaches its trip (85.0 C for the tsens zones), and its
   1 C hysteresis was not even used (the state followed the current temperature only). With the screen off it stopped

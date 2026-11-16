@@ -143,11 +143,13 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 
 - SteamOS and SteamVR updates must keep working without undoing our changes.
 - Slim the install: drop what this headset never uses (other controllers' render models, etc.).
-- Valve's `steamos-log-submitter` (uploads logs to Valve, ~34 MB of RAM): check whether it runs on the headset and
-  what it sends; the Quest 2 port masks it.
 - The telemetry HAL's loop (docs/performance.md, 2026-11-11 heat): once an event cannot go to ovrstub's
   TelemetryService it retries with no pause (a core at 100 %, ~50000 log lines/s, fakelogd at 90 %). Stopping the HAL
   froze the tracking: make the stand-in accept the events, or find what it fails on.
+  Status 2026-11-16: not looping now (HAL at 0 % since boot); ovrstub already accepts the oneway code 1 (528 bytes) it
+  gets and frees the buffer, so the failing send is not a refusal. Suspect: ovrstub down or restarted while the HAL
+  holds its TelemetryService handle (dead object, never fetched again). Next: restart ovrstub on a test boot and
+  watch the HAL; if it loops, make the HAL unit `PartOf=android-ovrstub.service` (restart together, tracking waits).
 - Storage hang: twice on 2026-11-12 (and earlier) the headset stopped answering (ping fine, sshd's banner timing out,
   a build or a test running); only a reboot helped, and the journal is not kept. Keep the journal (or pstore), then
   read q1-hangwatch's D-state stacks.

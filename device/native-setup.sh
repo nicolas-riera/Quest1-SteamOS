@@ -76,6 +76,10 @@ systemctl mask systemd-firstboot.service
 # getgrouplist hang forever. Nothing here needs them (users are in /etc/passwd; nsresourced needs BPF LSM anyway):
 # masked, clients get "connection refused" at once and go on.
 systemctl mask systemd-nsresourced.socket systemd-nsresourced.service systemd-userdbd.socket systemd-userdbd.service
+# Valve's log uploader (steamos-log-submitter) sends logs and crash data to Valve's servers; this is not a Valve device
+# (privacy) and it costs ~34 MB of RAM on a headset that has little. The Holo rootfs here does not ship it today; the
+# mask keeps it off if a SteamOS package update brings it in (the Quest 2 port masks it too).
+systemctl mask steamos-log-submitter.service steamos-log-submitter.timer
 # don't let NetworkManager (if any) fight networkd over usb0
 systemctl disable NetworkManager.service 2>/dev/null || true
 
