@@ -126,7 +126,13 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - Ignoring the Oculus and Menu buttons while the controller moves (2026-11-16, driver_quest1
   `ignoreSystemWhileMoving`, docs/controllers-native.md): check worn that a press during a swing is ignored, a
   deliberate one is not, the toggle shows in the VR settings' Oculus Quest category, and tune the thresholds.
-- Steam's compatibility rating defaults to SteamOS's rating instead of the Steam Frame's (user, 2026-11-15).
+- Steam's compatibility rating defaults to SteamOS's rating instead of the Steam Frame's (user, 2026-11-15). Found
+  2026-11-16: the library picks the Frame's rating (`steam_frame_compat_category`) only when the client's gaming
+  device type is 5001 (steamui sp.js; Deck 544, Machine 546); ours is 541 (SteamOS on unknown hardware). steamclient.so
+  gives 5001 when `/proc/device-tree/compatible` has "qcom" and `/proc/device-tree/model` has "SM8650"; ours reads
+  "vs1 pvt b (SDC)". `-steamframe` plays no part. A model string with "SM8650" bound over `/proc/device-tree/model`
+  in steam.service only (`BindReadOnlyPaths=`) would do it, but 5001 also switches ~13 other Frame paths in
+  steamclient.so (its system update and hardware ones): the user's call before trying.
 
 ## Power
 
