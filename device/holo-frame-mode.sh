@@ -195,6 +195,8 @@ ExecStart=/usr/local/bin/steamvr-q1 vrserver --keepalive
 # vrcompositor, vrwebhelpers etc. are vrserver's children: stopping the unit stops all of SteamVR
 KillMode=control-group
 TimeoutStopSec=15
+# Valve's shared memory left behind by SteamVR's processes (q1-shmclean, holo-steam-session.sh)
+ExecStopPost=-+/usr/local/sbin/q1-shmclean
 # vrserver also quits (exit 0) when Steam shuts down or crashes; Steam comes back by itself, SteamVR
 # must too or the headset stays black (2026-11-02, a stream that crashed Steam)
 Restart=always

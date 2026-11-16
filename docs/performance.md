@@ -3,6 +3,17 @@
 Where the frame time goes and what was tried. Current numbers and the direct scanout path:
 docs/direct-scanout.md; Steam's UI: docs/steam-gpu.md.
 
+## 2026-11-16: Valve's shared memory left behind at each restart
+
+Steam and SteamVR share memory through files in `/dev/shm` (`u1000-Shm_*`: IPC blocks, and a pair of 25 MiB buffers
+for Steam's VR overlay at each Steam start). When their processes exit or restart, the files stay: after a day of
+tests with 58 restarts of the stack, 381 files, 1.7 GB of tmpfs, of which 136 files (1.45 GB) mapped or open by no
+process. The kernel had pushed them to zram (1.7 GB of swap "used", 72 MB of real memory: mostly pages of one value),
+but kswapd has to compress them there first, and until then they take RAM. `q1-shmclean` (device/holo-steam-session.sh)
+runs when `steam.service` or `quest1-steamvr.service` stops and removes the segments no process maps or holds open,
+older than a minute. Run once by hand: swap 1.67 GB -> 0.41 GB, available memory 474 -> 657 MB, SteamVR unaffected
+(71.7 fps).
+
 ## 2026-11-11: heat: CPUs at top clock, the telemetry HAL in a loop, a fan with two speeds
 
 The headset got very hot and the fan jumped to full now and then (user). Measured with Steam Link VR streaming:

@@ -286,6 +286,26 @@ Restart=on-failure
 WantedBy=multi-user.target
 EOF
 
+# Valve's shared memory segments (/dev/shm/u1000-Shm_*, Steam's and SteamVR's IPC and Steam's 25 MiB VR overlay
+# buffers) outlive the processes that made them when those exit or restart: 2026-11-16, 58 restarts of the stack left
+# ~150 orphans, 1.5 GB of tmpfs (mostly pushed to zram, but kswapd has to get them there first). Run when Steam or
+# SteamVR stops: remove the segments no process maps or holds open any more (older than a minute, so one being
+# created and not yet mapped is left alone).
+mkdir -p /usr/local/sbin
+cat > /usr/local/sbin/q1-shmclean <<'EOF'
+#!/bin/sh
+used=$(mktemp) all=$(mktemp)
+trap 'rm -f "$used" "$all"' EXIT
+{ cat /proc/[0-9]*/maps 2>/dev/null | awk '$6 ~ /^\/dev\/shm\/u[0-9]+-Shm_/ {print $6}'
+  ls -l /proc/[0-9]*/fd 2>/dev/null | awk '$NF ~ /^\/dev\/shm\/u[0-9]+-Shm_/ {print $NF}'; } | sort -u > "$used"
+find /dev/shm -maxdepth 1 -type f -name 'u[0-9]*-Shm_*' -mmin +1 | sort > "$all"
+n=0
+for f in $(comm -23 "$all" "$used"); do rm -f "$f" && n=$((n + 1)); done
+[ "$n" -gt 0 ] && echo "q1-shmclean: removed $n orphaned segments"
+exit 0
+EOF
+chmod 755 /usr/local/sbin/q1-shmclean
+
 cat > /etc/systemd/system/steam.service <<'EOF'
 [Unit]
 Description=Steam client (arm64, Big Picture)
@@ -322,6 +342,8 @@ RestartSec=5
 # reporter tries to upload the dump with the network already down and held power off and restart
 # for 30 s (2026-11-03)
 TimeoutStopSec=8
+# Valve's shared memory left behind by Steam's processes (q1-shmclean above)
+ExecStopPost=-+/usr/local/sbin/q1-shmclean
 
 [Install]
 WantedBy=multi-user.target
