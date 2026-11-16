@@ -406,6 +406,16 @@ lists what is left to do).
   webhelper, q1desktop, every game) is backed on first CPU touch (kernel/kgsl-lazy.patch). Next: zram
   with zstd/lz4 instead of lzo, Steam's webhelper ring (fully used: its CPU-drawn pages), the dashboard's
   and Steam's CEF processes.
+  2026-11-16: Steam's webhelper ring no longer fills up. The webhelper writes each frame of its VR pages into
+  the ring and goes all the way round it ("Ring Buffer Wrapped!" in `vrclient_steamwebhelper.txt`, every ~4 s
+  while a page animates), so on first touch alone all 256 MB ended up backed for a few 8 MB frames in flight.
+  Now, when a run of 16 pages needs memory, the kernel takes the run 3/8 of the ring behind it (96 MB back,
+  more than ten frames, long consumed by the GPU): the GPU's pagetable points it at the scratch page again, the
+  CPU mapping is zapped, and its pages move to the new run (no allocation, no zeroing). Only for lazy
+  allocations of 128 MB and more, mapped once. Pages get their memory 16 at a time, one GPU pagetable update
+  per run. Measured with a page animating in the open dashboard: the ring's resident size (its `/dev/kgsl-3d0`
+  mapping in smaps) 112 MB instead of 256, KGSL's `page_alloc` flat at 508-524 MB over 40 wraps, the pages
+  drawn right (snapshot), no KGSL fault in the kernel log.
 - vrcompositor, head still, panels on (2026-11-02): 22-28 fps in the morning, 36 with Monado's "early"
   ack, 45 with the layer's present waits returning at once. The limit is GPU time: the kgsl trace
   (adreno_cmdbatch_retired start/retire ticks) shows vrcompositor's one batch per frame running

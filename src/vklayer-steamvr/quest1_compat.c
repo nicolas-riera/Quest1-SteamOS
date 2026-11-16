@@ -1916,7 +1916,9 @@ static VKAPI_ATTR void VKAPI_CALL FreeMemory(VkDevice device, VkDeviceMemory m, 
  * which uploads its CPU-drawn pages through it, fills it. A large allocation made from vrclient.so or
  * vrcompositor (the ring is their only one of 64 MB or more) asks the kernel to back it page by page at the
  * first CPU touch (kernel/kgsl-lazy.patch, IOCTL_KGSL_LAZY_NEXT): the ring is written by the CPU before the
- * GPU reads it. Without that kernel patch the ioctl fails and nothing changes.
+ * GPU reads it. Steam's webhelper goes all the way round the ring: the kernel moves the pages 3/8 of the ring
+ * behind the write position (96 MB of 256, long consumed by the GPU) to where it writes next, so the ring stays
+ * backed by about that much instead of filling up. Without that kernel patch the ioctl fails and nothing changes.
  */
 #define LAZY_MIN_SIZE (64ull << 20)
 
