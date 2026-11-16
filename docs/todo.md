@@ -25,6 +25,10 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   and D-state tasks over the USB link) catches the next one: keep one running during tests. The capture of
   19:13-19:25 (desktop mode, Discover, Dolphin, no freeze): available memory down to 256 MB, swap-out up to 2165
   pages/s, load 17-20, Discover and Dolphin each in D >5 s waiting on pages: memory pressure is the first suspect.
+  Measured 2026-11-16 22:42 (stream running, nobody wearing it): the desktop alone takes ~0.75 GB (MemAvailable 0.48
+  -> 0.29 GB, +0.4 GB in zram) and the load goes 11 -> 18 while it starts; Baloo, Discover's notifier, ibus and
+  kaccess are now off (holo-desktop.sh, ~0.1 GB). Next if it freezes again: what else to trim (plasmashell 0.3 GB, the
+  Steam webhelpers 0.65 GB), or stop the desktop's apps first under pressure (no PSI on 4.4: a MemAvailable watch).
 
 - Performance (docs/performance.md): GPU-bound, ~12.4 of 13.9 ms a frame. Levers left, all visible, so the user
   decides: achromatic distortion (vrcompositor's distortion pass is ~2 ms per eye), a lighter environment than Aurora
