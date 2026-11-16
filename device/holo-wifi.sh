@@ -31,3 +31,53 @@ networkctl reload
 systemctl enable NetworkManager.service
 # no 30 s boot stall when no Wi-Fi network is around
 systemctl disable NetworkManager-wait-online.service
+
+# Wi-Fi power saving only while little goes through (user, 2026-11-12): the chip sleeps between beacons when idle
+# (battery), and stays awake while a stream or a download runs, where its wake-ups would delay packets. q1-wifipower
+# looks at wlan0's byte counters every 2 s: power saving off above 1 MB/s, back on after 30 s below 128 kB/s. It sets
+# the state again every 30 s, since a reconnection gives the driver's default (on) back.
+mkdir -p /usr/local/sbin
+cat > /usr/local/sbin/q1-wifipower <<'EOF2'
+#!/bin/sh
+D=wlan0 S=/sys/class/net/wlan0/statistics
+want=on cur= calm=0 tick=0 last=
+bytes() { echo $(( $(cat $S/rx_bytes 2>/dev/null || echo 0) + $(cat $S/tx_bytes 2>/dev/null || echo 0) )); }
+while :; do
+	now=$(bytes)
+	if [ -n "$last" ] && [ "$now" -ge "$last" ]; then
+		rate=$(( (now - last) / 2 ))
+		if [ $rate -gt 1048576 ]; then
+			want=off calm=0
+		elif [ $rate -lt 131072 ]; then
+			calm=$((calm + 2))
+			[ $calm -ge 30 ] && want=on
+		else
+			calm=0
+		fi
+	fi
+	last=$now
+	tick=$((tick + 2))
+	if [ "$want" != "$cur" ] || [ $tick -ge 30 ]; then
+		[ -d /sys/class/net/$D ] && iw dev $D set power_save $want 2>/dev/null &&
+			{ [ "$want" != "$cur" ] && echo "q1-wifipower: power saving $want"; cur=$want; }
+		tick=0
+	fi
+	sleep 2
+done
+EOF2
+chmod 755 /usr/local/sbin/q1-wifipower
+cat > /etc/systemd/system/q1-wifipower.service <<'EOF2'
+[Unit]
+Description=Wi-Fi power saving only while the link is quiet (q1-wifipower)
+After=NetworkManager.service
+
+[Service]
+ExecStart=/usr/local/sbin/q1-wifipower
+Restart=always
+RestartSec=10
+Nice=10
+
+[Install]
+WantedBy=multi-user.target
+EOF2
+systemctl enable q1-wifipower.service

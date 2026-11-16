@@ -211,8 +211,6 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   start the firmware session itself first); Chromium decodes with VA-API only (Arch's build has no V4L2 decoder): a
   VA-API driver on top, or another build. The user's target (2026-11-10): the stream at 72 fps next to the dashboard
   and overlays, so everything on the hardware path and no CPU copy of the frames.
-- Wi-Fi power saving: off only while a lot of data goes through (a stream, a download), back on once it calms
-  down (user, 2026-11-12). Today it is on at each boot; it was not the cause of the streams' problems.
 
 ## Hardware
 

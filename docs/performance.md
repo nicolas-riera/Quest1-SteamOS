@@ -14,6 +14,13 @@ runs when `steam.service` or `quest1-steamvr.service` stops and removes the segm
 older than a minute. Run once by hand: swap 1.67 GB -> 0.41 GB, available memory 474 -> 657 MB, SteamVR unaffected
 (71.7 fps).
 
+## 2026-11-16: Wi-Fi power saving only while the link is quiet
+
+The user (2026-11-12): power saving off only while a lot of data goes through (a stream, a download), back on once
+it calms down. `q1-wifipower` (device/holo-wifi.sh) reads wlan0's byte counters every 2 s: off above 1 MB/s, on again
+after 30 s below 128 kB/s, set again every 30 s (a reconnection brings the driver's default back). Checked: 150 MB
+sent over SSH turned it off within 2 s, and it came back on ~45 s after the transfer.
+
 ## 2026-11-11: heat: CPUs at top clock, the telemetry HAL in a loop, a fan with two speeds
 
 The headset got very hot and the fan jumped to full now and then (user). Measured with Steam Link VR streaming:
