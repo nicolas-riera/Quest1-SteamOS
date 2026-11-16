@@ -74,9 +74,6 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   headset's) does, AUO's stays at 72. So the setting shows 90 only on a panel known to work, and only once the kernel
   reports the rate, with a fall back to 72 if not.
 - Per-panel lens decenter and roll from the calibration (`*_screen_offset.json`), once Meta's convention is known.
-- Scene mode (`/etc/quest1-warp-lens` 2, docs/performance.md) as the default in the image: the user checked it in
-  the headset (2026-11-12). It also takes away the 4x MSAA system layer's ~25 ms a frame of mode 0 (Steam's loading
-  screen at ~37 fps).
 - Activating passthrough freezes the view (the only freeze left in Steam's VR UI, user 2026-11-12): vrcompositor
   stalls ~0.3 s (2026-11-09 16:44:02, CTrackedCamera "Late initialization"): find what it builds then (pipelines?
   camera textures?) and do it at start. Not reproduced on the table (2026-11-16, first activation after a SteamVR

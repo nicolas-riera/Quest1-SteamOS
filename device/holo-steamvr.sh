@@ -210,10 +210,12 @@ Q1EOF
 chmod 755 "$ROOT/usr/local/bin/quest1-chaperone-default"
 # display defaults read by steamvr-q1 and quest1-frame-settings, kept if already set:
 # direct scanout on (vrcompositor's output goes straight to the panels), its orientation flags (driver_quest1
-# DirectFlip), and vrcompositor (not Monado's warp) doing the lens distortion
+# DirectFlip), and scene mode (2): vrcompositor's eyes go straight to Monado, whose warp does the lens distortion and
+# its chromatic aberration (docs/performance.md "scene mode"; checked worn by the user 2026-11-12; mode 0's 4x MSAA
+# system layer cost ~25 ms a frame on Steam's loading screen)
 [ -f "$ROOT/etc/quest1-direct-scanout" ] || echo 1 > "$ROOT/etc/quest1-direct-scanout"
 [ -f "$ROOT/etc/quest1-direct-flip" ] || echo 19 > "$ROOT/etc/quest1-direct-flip"
-[ -f "$ROOT/etc/quest1-warp-lens" ] || echo 0 > "$ROOT/etc/quest1-warp-lens"
+[ -f "$ROOT/etc/quest1-warp-lens" ] || echo 2 > "$ROOT/etc/quest1-warp-lens"
 # the right controller's render model, with the Oculus logo on its Oculus button instead of the menu glyph
 # (src/steamvr-quest1/mkrendermodel.py, made from this SteamVR's own models; driver_quest1 uses it when present)
 M=$(dirname "$0")/../src/steamvr-quest1/mkrendermodel.py

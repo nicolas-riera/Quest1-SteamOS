@@ -298,6 +298,8 @@ frame trace of a quiet dashboard shows 218 presents for 217 vblanks.
 
 ## 2026-11-08 (evening): scene mode, the eyes render straight into Monado's buffers (`/etc/quest1-warp-lens` 2)
 
+The image's default since 2026-11-16 (device/holo-steamvr.sh; the user checked it worn on 2026-11-12).
+
 vrcompositor's distortion pass resampled each 1500x1664 eye render into a 1440x1600 panel image (~2 ms an eye, all
 memory traffic: as much as an identity copy), which Monado's warp then resampled again. In scene mode the layer
 gives the eye's render passes a twin framebuffer whose colour attachment is the eye's gralloc buffer (an sRGB view;
