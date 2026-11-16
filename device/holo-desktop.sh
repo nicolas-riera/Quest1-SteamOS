@@ -32,15 +32,21 @@ done
 
 # Memory: the desktop starts on top of SteamVR and Steam (3.8 GB of RAM, ~0.5 GB available with a stream running).
 # Starting it took MemAvailable from 1.1 GB to 0.23 GB, kswapd to 66 % and the load to 20 (2026-11-16 19:22, the user
-# saw the stream flash and tremble, and the whole headset froze once with Discover open). Two background services the
-# headset does without: Baloo's file indexer (it reads the whole home, Steam's 4 GB included, into its database) and
-# Discover's update notifier (it refreshes the repositories' metadata in the background; the system is updated from
-# images, apps from Discover when opened). Plasma's search and Dolphin still find files by name without the index.
+# saw the stream flash and tremble, and the whole headset froze once with Discover open). Measured with a stream
+# running (2026-11-16 22:42): the desktop takes ~0.75 GB (plasmashell 0.3 GB), the load goes from ~11 to 18 while it
+# starts and settles at ~13. Background services the headset does without: Baloo's file indexer (it reads the whole
+# home, Steam's 4 GB included), Discover's update notifier (it refreshes the repositories' metadata in the background;
+# the system is updated from images, apps from Discover when opened), ibus (input methods for Chinese, Japanese,
+# Korean...: ~80 MB with its panel; typing goes through the SteamVR keyboard) and kaccess (keyboard accessibility,
+# 40 MB). Plasma's search and Dolphin still find files by name without the index. To get one back: delete its file in
+# ~/.config/autostart.
 kwriteconfig6 --file /etc/xdg/baloofilerc --group "Basic Settings" --key "Indexing-Enabled" false
 install -d -o 1000 -g 1000 /home/steamos/.config/autostart
-printf '[Desktop Entry]\nType=Application\nName=Discover update notifier (off: holo-desktop.sh)\nHidden=true\n' \
-	> /home/steamos/.config/autostart/org.kde.discover.notifier.desktop
-chown 1000:1000 /home/steamos/.config/autostart/org.kde.discover.notifier.desktop
+for a in org.kde.discover.notifier ibus kaccess; do
+	printf '[Desktop Entry]\nType=Application\nName=%s (off: holo-desktop.sh)\nHidden=true\n' $a \
+		> /home/steamos/.config/autostart/$a.desktop
+	chown 1000:1000 /home/steamos/.config/autostart/$a.desktop
+done
 
 # Flatpak apps (Chromium from Steam's "Install Chromium", Discover installs): flatpak's bwrap options
 # --disable-userns/--assert-userns-disabled need /proc/sys/user/max_user_namespaces (Linux 4.9+), so every app
