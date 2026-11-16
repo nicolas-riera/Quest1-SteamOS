@@ -30,6 +30,18 @@ for u in flatpak-system-helper packagekit; do
 	printf '[Service]\nNice=10\nIOSchedulingClass=idle\n' > /etc/systemd/system/$u.service.d/quest1-background.conf
 done
 
+# Memory: the desktop starts on top of SteamVR and Steam (3.8 GB of RAM, ~0.5 GB available with a stream running).
+# Starting it took MemAvailable from 1.1 GB to 0.23 GB, kswapd to 66 % and the load to 20 (2026-11-16 19:22, the user
+# saw the stream flash and tremble, and the whole headset froze once with Discover open). Two background services the
+# headset does without: Baloo's file indexer (it reads the whole home, Steam's 4 GB included, into its database) and
+# Discover's update notifier (it refreshes the repositories' metadata in the background; the system is updated from
+# images, apps from Discover when opened). Plasma's search and Dolphin still find files by name without the index.
+kwriteconfig6 --file /etc/xdg/baloofilerc --group "Basic Settings" --key "Indexing-Enabled" false
+install -d -o 1000 -g 1000 /home/steamos/.config/autostart
+printf '[Desktop Entry]\nType=Application\nName=Discover update notifier (off: holo-desktop.sh)\nHidden=true\n' \
+	> /home/steamos/.config/autostart/org.kde.discover.notifier.desktop
+chown 1000:1000 /home/steamos/.config/autostart/org.kde.discover.notifier.desktop
+
 # Flatpak apps (Chromium from Steam's "Install Chromium", Discover installs): flatpak's bwrap options
 # --disable-userns/--assert-userns-disabled need /proc/sys/user/max_user_namespaces (Linux 4.9+), so every app
 # failed to start. quest1-bwrap drops them; FLATPAK_BWRAP points flatpak at it for system services (Steam, and the
