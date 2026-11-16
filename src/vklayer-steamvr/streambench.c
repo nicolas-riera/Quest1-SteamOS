@@ -11,9 +11,11 @@
 //   A  the layer before 2026-11-16: full-image blits, 3 levels    B  blits over the two inset views' rows only
 //   C  B, level 2 skipped when the inset lod < 1 (the layer since)   N  no mips (lower bound)
 //   RA/RB/RC  A/B/C with one fragment pass per level (bands for B/C)
+//   D  C with the copy pass over the inset rows only and the output reading the wide views from the NV12 image
+//      (streambench_inset_nv12.frag); with 2+ variants the output's patches are compared with the first variant's
 //   <v>o  any of them with the output as one render pass per eye band instead of one over the whole image
 // Build (headset): glslangValidator -V -o nv12_copy.vert.spv nv12_copy.vert; same for nv12_copy.frag, nv12_inset.frag,
-//   streambench_tex.frag (-> streambench_tex.frag.spv); gcc -O2 -o streambench streambench.c -ldl
+//   streambench_tex.frag, streambench_inset_nv12.frag (-> <name>.spv); gcc -O2 -o streambench streambench.c -ldl
 // Run:   LD_LIBRARY_PATH=/usr/local/lib/quest1-vk:/opt/hybris/lib LD_PRELOAD=/opt/hybris/lib/libbionictls.so ./streambench A B C
 // Timestamps include the GPU's other users (vrcompositor, Monado): look at the minimum and the median.
 #define VK_NO_PROTOTYPES
@@ -42,7 +44,7 @@
 	F(vkCreateDescriptorPool) F(vkAllocateDescriptorSets) F(vkUpdateDescriptorSets) F(vkCreateSampler) \
 	F(vkCreateSamplerYcbcrConversion) F(vkCmdBeginRenderPass) F(vkCmdEndRenderPass) F(vkCmdBindPipeline) \
 	F(vkCmdBindDescriptorSets) F(vkCmdSetViewport) F(vkCmdSetScissor) F(vkCmdDraw) F(vkCmdBlitImage) \
-	F(vkCmdPipelineBarrier) F(vkCmdPushConstants) F(vkCmdCopyBufferToImage) F(vkCreateBuffer) \
+	F(vkCmdPipelineBarrier) F(vkCmdPushConstants) F(vkCmdCopyBufferToImage) F(vkCmdCopyImageToBuffer) F(vkCreateBuffer) \
 	F(vkGetBufferMemoryRequirements) F(vkBindBufferMemory) F(vkMapMemory) F(vkGetAndroidHardwareBufferPropertiesANDROID)
 #define F(n) static PFN_##n n;
 FNS DFNS
@@ -173,9 +175,31 @@ static int ahb_load(void)
 	return ahb.allocate && ahb.describe && ahb.lock && ahb.unlock;
 }
 
+enum { SRCW = 1024, SRCH = 4096, OW = 1536, OH = 6144, TW = 1500, TH = 1664, LEVELS = 3 };
+static int tri(int x, int period, int amp) // triangle wave 0..amp
+{
+	x %= period;
+	return (x < period / 2 ? x : period - x) * 2 * amp / period;
+}
+
+// noise gradient; SB_SMOOTH=1: smooth content instead (triangle waves, a few levels of noise), NV12 with stride SRCW
 static void fill(uint8_t *p, size_t n)
 {
 	uint32_t s = 12345;
+	if (getenv("SB_SMOOTH") && n >= (size_t)SRCW * SRCH * 3 / 2) {
+		for (int y = 0; y < SRCH; y++)
+			for (int x = 0; x < SRCW; x++) {
+				s = s * 1664525u + 1013904223u;
+				p[(size_t)y * SRCW + x] = (uint8_t)(20 + tri(x + 2 * y, 300, 200) + ((s >> 24) & 3));
+			}
+		for (int y = 0; y < SRCH / 2; y++)
+			for (int x = 0; x < SRCW / 2; x++) {
+				uint8_t *c = p + (size_t)SRCW * SRCH + (size_t)y * SRCW + 2 * x;
+				c[0] = (uint8_t)(80 + tri(3 * x + y, 400, 90)); // Cb
+				c[1] = (uint8_t)(80 + tri(x + 2 * y, 500, 90)); // Cr
+			}
+		return;
+	}
 	for (size_t i = 0; i < n; i++) {
 		s = s * 1664525u + 1013904223u;
 		p[i] = (uint8_t)(((i >> 5) & 0xff) + ((s >> 24) & 0x3f)); // gradient with noise
@@ -184,11 +208,11 @@ static void fill(uint8_t *p, size_t n)
 
 struct qcp_inset { float place[4], view[4], lod; };
 
-enum { SRCW = 1024, SRCH = 4096, OW = 1536, OH = 6144, TW = 1500, TH = 1664, LEVELS = 3 };
 
 static VkRenderPass rp;
-static VkPipeline pipe_copy, pipe_inset, pipe_tex;
-static VkPipelineLayout pl_copy, pl_inset, pl_tex;
+static VkPipeline pipe_copy, pipe_inset, pipe_inset2, pipe_tex;
+static VkPipelineLayout pl_copy, pl_inset, pl_inset2, pl_tex;
+static VkDescriptorSet set_all2;
 static VkImage rgba, out_img;
 static VkFramebuffer fb_lv[LEVELS], fb_out, fb_tgt[2];
 static VkDescriptorSet set_copy, set_all, set_lv[2], set_out;
@@ -198,10 +222,11 @@ static const float wide[2][4] = {{0, 0.25f, 1, 0.5f}, {0, 0.75f, 1, 1}};
 static const float place[2][4] = {{0.4f, 0.329f, 0.780f, 0.415f}, {0.2197f, 0.829f, 0.5996f, 0.915f}};
 static float lod;
 
-struct var { const char *name; int mip; int skip2; int band_out; };
+struct var { const char *name; int mip; int skip2; int band_out; int direct; };
 // mip: -1 none, 0 blits full, 1 blits inset rows, 2 passes full, 3 passes inset rows
+// direct: the copy pass renders the inset rows only, the output reads the wide views from the NV12 image
 static const struct var vars[] = {
-    {"A", 0, 0, 0}, {"B", 1, 0, 0}, {"C", 1, 1, 0}, {"N", -1, 0, 0},
+    {"A", 0, 0, 0}, {"B", 1, 0, 0}, {"C", 1, 1, 0}, {"D", 1, 1, 0, 1}, {"N", -1, 0, 0},
     {"RA", 2, 0, 0}, {"RB", 3, 0, 0}, {"RC", 3, 1, 0},
     {"Ao", 0, 0, 1}, {"Bo", 1, 0, 1}, {"Co", 1, 1, 1}, {"No", -1, 0, 1}, {"RCo", 3, 1, 1},
 };
@@ -224,10 +249,13 @@ static void bar(VkCommandBuffer cb, VkImageMemoryBarrier *b, uint32_t n, VkPipel
 	vkCmdPipelineBarrier(cb, s, d, 0, 0, NULL, 0, NULL, n, b);
 }
 
-static void rows_of(int e, uint32_t h, int *y0, int *y1) // the inset view's rows at height h
+// each inset view's rows of the frame, with the layer's margin (qcp_record's `band`): on a multiple of the smallest level's rows
+static void band_of(int e, int *y0, int *y1)
 {
-	*y0 = (int)((wide[e][1] - (wide[e][3] - wide[e][1])) * (float)h + 0.5f);
-	*y1 = (int)(wide[e][1] * (float)h + 0.5f);
+	const int align = 1 << (LEVELS - 1);
+	int a = (int)((wide[e][1] - (wide[e][3] - wide[e][1])) * SRCH) - 2 * align, b = (int)(wide[e][1] * SRCH) + 2 * align;
+	*y0 = a < 0 ? 0 : a / align * align;
+	*y1 = b > SRCH ? SRCH : (b + align - 1) / align * align;
 }
 
 static void record(VkCommandBuffer cb, const struct var *v)
@@ -238,12 +266,20 @@ static void record(VkCommandBuffer cb, const struct var *v)
 	vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, qpool, 0);
 	// 1. copy
 	VkRect2D full = {{0, 0}, {SRCW, SRCH}};
-	begin_rp(cb, fb_lv[0], full);
-	vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe_copy);
-	set_vp(cb, SRCW, SRCH, full);
-	vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pl_copy, 0, 1, &set_copy, 0, NULL);
-	vkCmdDraw(cb, 3, 1, 0, 0);
-	vkCmdEndRenderPass(cb);
+	for (int e = 0; e < (v->direct ? 2 : 1); e++) {
+		VkRect2D a = full;
+		if (v->direct) {
+			int y0, y1;
+			band_of(e, &y0, &y1);
+			a = (VkRect2D){{0, y0}, {SRCW, (uint32_t)(y1 - y0)}};
+		}
+		begin_rp(cb, fb_lv[0], a);
+		vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe_copy);
+		set_vp(cb, SRCW, SRCH, a);
+		vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pl_copy, 0, 1, &set_copy, 0, NULL);
+		vkCmdDraw(cb, 3, 1, 0, 0);
+		vkCmdEndRenderPass(cb);
+	}
 	vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, qpool, 1);
 	// 2. mips
 	uint32_t nlev = v->skip2 ? 2 : LEVELS;
@@ -268,9 +304,9 @@ static void record(VkCommandBuffer cb, const struct var *v)
 			if (v->mip == 1) {
 				n = 2;
 				for (int e = 0; e < 2; e++) {
-					int a0, a1, d0, d1;
-					rows_of(e, (uint32_t)h, &a0, &a1);
-					rows_of(e, (uint32_t)h / 2, &d0, &d1);
+					int b0, b1;
+					band_of(e, &b0, &b1);
+					int a0 = b0 >> (l - 1), a1 = b1 >> (l - 1), d0 = b0 >> l, d1 = b1 >> l;
 					r[e] = (VkImageBlit){{VK_IMAGE_ASPECT_COLOR_BIT, l - 1, 0, 1}, {{0, a0, 0}, {w, a1, 1}},
 					                     {VK_IMAGE_ASPECT_COLOR_BIT, l, 0, 1}, {{0, d0, 0}, {w / 2, d1, 1}}};
 				}
@@ -297,7 +333,9 @@ static void record(VkCommandBuffer cb, const struct var *v)
 			} else {
 				for (int e = 0; e < 2; e++) {
 					int y0, y1;
-					rows_of(e, h, &y0, &y1);
+					band_of(e, &y0, &y1);
+					y0 >>= l;
+					y1 >>= l;
 					VkRect2D a = {{0, y0}, {w, (uint32_t)(y1 - y0)}};
 					begin_rp(cb, fb_lv[l], a);
 					vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe_tex);
@@ -337,12 +375,14 @@ static void record(VkCommandBuffer cb, const struct var *v)
 	for (int e = 0; e < 2; e++) {
 		if (v->band_out)
 			begin_rp(cb, fb_out, rows[e]);
+		VkPipelineLayout pl = v->direct ? pl_inset2 : pl_inset;
 		if (!e || v->band_out) {
-			vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe_inset);
-			vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pl_inset, 0, 1, &set_all, 0, NULL);
+			vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, v->direct ? pipe_inset2 : pipe_inset);
+			vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pl, 0, 1, v->direct ? &set_all2 : &set_all, 0,
+			                        NULL);
 		}
 		set_vp(cb, OW, OH, rows[e]);
-		vkCmdPushConstants(cb, pl_inset, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc[e]), &pc[e]);
+		vkCmdPushConstants(cb, pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc[e]), &pc[e]);
 		vkCmdDraw(cb, 3, 1, 0, 0);
 		if (v->band_out)
 			vkCmdEndRenderPass(cb);
@@ -598,6 +638,13 @@ int main(int argc, char **argv)
 	VkPushConstantRange pr3 = {VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16};
 	VkPipelineLayoutCreateInfo plc3 = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, 1, &dsl2, 1, &pr3};
 	CK(vkCreatePipelineLayout(dev, &plc3, NULL, &pl_tex));
+	// variant D's output pass: the RGBA copy's levels (binding 0) and the NV12 frame (binding 1)
+	VkDescriptorSetLayoutBinding lb3[2] = {lb, {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, &samp_y}};
+	VkDescriptorSetLayoutCreateInfo dlc3 = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, NULL, 0, 2, lb3};
+	VkDescriptorSetLayout dsl3;
+	CK(vkCreateDescriptorSetLayout(dev, &dlc3, NULL, &dsl3));
+	VkPipelineLayoutCreateInfo plc4 = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, 1, &dsl3, 1, &pr};
+	CK(vkCreatePipelineLayout(dev, &plc4, NULL, &pl_inset2));
 
 	VkAttachmentDescription att = {0, VK_FORMAT_R8G8B8A8_UNORM, VK_SAMPLE_COUNT_1_BIT, VK_ATTACHMENT_LOAD_OP_DONT_CARE,
 	                               VK_ATTACHMENT_STORE_OP_STORE, VK_ATTACHMENT_LOAD_OP_DONT_CARE,
@@ -656,6 +703,9 @@ int main(int argc, char **argv)
 	st[1].module = fs_tex;
 	gp.layout = pl_tex;
 	CK(vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &gp, NULL, &pipe_tex));
+	st[1].module = shader("streambench_inset_nv12.frag.spv");
+	gp.layout = pl_inset2;
+	CK(vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &gp, NULL, &pipe_inset2));
 
 	// --- images
 	rgba = rgba_image(SRCW, SRCH, LEVELS);
@@ -690,6 +740,12 @@ int main(int argc, char **argv)
 		wr[i] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, sets[i], 0, 0, 1,
 		                               VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &ii[i]};
 	vkUpdateDescriptorSets(dev, 5, wr, 0, NULL);
+	dai.pSetLayouts = &dsl3;
+	CK(vkAllocateDescriptorSets(dev, &dai, &set_all2));
+	VkWriteDescriptorSet wr2[2] = {
+	    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, set_all2, 0, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &ii[1]},
+	    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, set_all2, 1, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &ii[0]}};
+	vkUpdateDescriptorSets(dev, 2, wr2, 0, NULL);
 
 	// the AHB image is used in GENERAL, as the layer's descriptor says (nothing transitions the decoder's frames)
 	// the inset's level as the layer computes it
@@ -769,6 +825,58 @@ int main(int argc, char **argv)
 			printf(" %6.3f (%5.3f)", a[iters / 2], a[0]);
 		}
 		printf("\n");
+	}
+	if (nv > 1) {
+		// the picture: 64x64 patches of the output, each variant against the first (max abs difference per channel, 0-255)
+		enum { P = 64, NP = 6 };
+		const struct { const char *what; int x, y; } patch[NP] = {
+		    {"eye0 wide", 100, 1700}, {"eye1 wide", 100, 4800}, {"eye0 inset", 800, 2250},
+		    {"eye1 inset", 500, 5300}, {"eye0 inset edge", 640, 2040}, {"eye1 inset edge", 1000, 5110}};
+		VkBufferCreateInfo bc = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, NULL, 0, (size_t)NP * P * P * 4,
+		                         VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+		VkBuffer buf;
+		CK(vkCreateBuffer(dev, &bc, NULL, &buf));
+		VkMemoryRequirements req;
+		vkGetBufferMemoryRequirements(dev, buf, &req);
+		VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, req.size,
+		                           memtype(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+		                                                           VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)};
+		VkDeviceMemory bm;
+		CK(vkAllocateMemory(dev, &ai, NULL, &bm));
+		CK(vkBindBufferMemory(dev, buf, bm, 0));
+		uint8_t *map;
+		CK(vkMapMemory(dev, bm, 0, VK_WHOLE_SIZE, 0, (void **)&map));
+		VkCommandBuffer rb;
+		CK(vkAllocateCommandBuffers(dev, &cbi, &rb));
+		VkBufferImageCopy cr[NP];
+		for (int k = 0; k < NP; k++)
+			cr[k] = (VkBufferImageCopy){(VkDeviceSize)k * P * P * 4, 0, 0, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+			                            {patch[k].x, patch[k].y, 0}, {P, P, 1}};
+		VkCommandBufferBeginInfo rbi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+		CK(vkBeginCommandBuffer(rb, &rbi));
+		vkCmdCopyImageToBuffer(rb, out_img, VK_IMAGE_LAYOUT_GENERAL, buf, NP, cr);
+		CK(vkEndCommandBuffer(rb));
+		static uint8_t keep[16][NP * P * P * 4];
+		for (int i = 0; i < nv; i++) {
+			VkSubmitInfo si[2] = {{VK_STRUCTURE_TYPE_SUBMIT_INFO, NULL, 0, NULL, NULL, 1, &cbs_v[i]},
+			                      {VK_STRUCTURE_TYPE_SUBMIT_INFO, NULL, 0, NULL, NULL, 1, &rb}};
+			CK(vkQueueSubmit(q, 2, si, VK_NULL_HANDLE));
+			CK(vkQueueWaitIdle(q));
+			memcpy(keep[i], map, sizeof(keep[i]));
+		}
+		for (int i = 1; i < nv; i++) {
+			printf("max abs diff %s vs %s (R G B):", sel[i]->name, sel[0]->name);
+			for (int k = 0; k < NP; k++) {
+				int mx[3] = {0, 0, 0};
+				for (int p = 0; p < P * P; p++)
+					for (int c = 0; c < 3; c++) {
+						int d = abs((int)keep[i][(size_t)(k * P * P + p) * 4 + c] - (int)keep[0][(size_t)(k * P * P + p) * 4 + c]);
+						mx[c] = d > mx[c] ? d : mx[c];
+					}
+				printf("\n  %-16s %3d %3d %3d", patch[k].what, mx[0], mx[1], mx[2]);
+			}
+			printf("\n");
+		}
 	}
 	return 0;
 }
