@@ -16,6 +16,7 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   `quest1-mic-aec` record pure silence (RMS 0, 2 s each), so the capture itself is dead, not the echo canceller.
   Check the mixer path (`Mic Switch` etc., docs/audio.md "Mixer setup") at this boot, whether the echo-cancel module
   holding the mic (it was set as default source by hand at 18:50) changes it, and the PCM (S16_LE mono 48 kHz, MMAP).
+  Lead: q1-hangwatch caught PipeWire blocked >5 s in `afe_apr_send_pkt` (the ADSP's audio front end) at 19:22:42.
 - Since Audacity was installed (a user app, not for the image), the sound is much lower-pitched (user). The sink is
   still 48 kHz S16 stereo (`hw_params`): check PipeWire's clock (`pw-metadata -n settings`, `clock.force-rate`) and
   what Audacity changed (ALSA config in the user's home, `~/.asoundrc`, its own device choice). Audacity also lists
@@ -29,7 +30,9 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - A whole-system freeze (SSH too; ping fine): desktop mode open with Discover searching, headset on the forehead, then
   put on: SteamVR froze first (Monado still ran), then everything. Same symptom at 18:43 right after a stack restart
   and a stream start. Not reproduced since; a capture to the PC (dmesg -w and a 10 s snapshot of memory, load, top
-  and D-state tasks over the USB link) catches the next one: keep one running during tests.
+  and D-state tasks over the USB link) catches the next one: keep one running during tests. The capture of
+  19:13-19:25 (desktop mode, Discover, Dolphin, no freeze): available memory down to 256 MB, swap-out up to 2165
+  pages/s, load 17-20, Discover and Dolphin each in D >5 s waiting on pages: memory pressure is the first suspect.
 
 - Performance (docs/performance.md): GPU-bound, ~12.4 of 13.9 ms a frame. Levers left, all visible, so the user
   decides: achromatic distortion (vrcompositor's distortion pass is ~2 ms per eye), a lighter environment than Aurora
