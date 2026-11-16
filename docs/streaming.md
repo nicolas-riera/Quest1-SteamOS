@@ -266,7 +266,7 @@ as far as its renderer and the shared texture without a session.
 
 ### 2026-11-11: the picture shows, decoded by venus
 
-The user saw the PC's game in the headset (theater mode, sound): "ça fonctionne". Performance is "ok" while nothing
+The user saw the PC's game in the headset (theater mode, sound): "it works". Performance is "ok" while nothing
 else runs on the headset and drops as soon as something else does. What it took, in the order the problems came:
 
 - **A DRM display in name only** (`src/v4l2shim/quest1_streamdrm.c`, the client's `libdrm.so.2` in
@@ -309,7 +309,7 @@ Vulkan/OpenGL semaphore is refused (glFinish).
 
 ### 2026-11-11: the frames reach the GPU with no copy
 
-The user: performance "pas mal" now, where it used to fall apart as soon as anything else ran. The client takes its
+The user: performance "not bad" now, where it used to fall apart as soon as anything else ran. The client takes its
 own zero-copy path (`CEGLFrames`): per decoder buffer, one SDL NV12 texture whose two OpenGL textures each get an EGL
 image of one plane of the dma-buf (`EGL_LINUX_DMA_BUF_EXT`, `DRM_FORMAT_R8` for Y and `DRM_FORMAT_GR88` for UV, fd,
 offset, pitch), with `glEGLImageTargetTexture2DOES`, and SDL's NV12 shader samples them. Pieces:
@@ -508,7 +508,7 @@ vrlink writes its own log, `~/.local/share/Steam/logs/vrlink.txt` (the PC's side
      and venus's frame of packet 300 is bit-exact against FFmpeg's (luma MSE 0). The compression blocks the user sees
      are in what the PC encodes: ~75 Mbit/s of video for four 1024x1024 views at 72 fps (P-frames of 120-130 KB when
      the head moves, 4-10 KB still; the I-frame 73 KB), the rest of the ~108 Mbit/s on the wire is vrlink's FEC.
-10. **A new picture each frame** (2026-11-12; user: "clairement plus fluide"). The headset showed only vrlink's buffer 0,
+10. **A new picture each frame** (2026-11-12; user: "clearly smoother"). The headset showed only vrlink's buffer 0,
     as the decoder wrote over it every 9 frames: a few pictures a second, each late. vrlink itself was fine: it picks a new
     decoded frame every 1/72 s (read in its memory without stopping it: its last shown frame stays ~2 behind the newest).
     It submits each frame as a texture set (`IVRClientInternal_XXX` slot 40): the 16 frame buffers it shared, and the index
@@ -521,8 +521,8 @@ vrlink writes its own log, `~/.local/share/Steam/logs/vrlink.txt` (the PC's side
     - The "1.65 s" lead of the night before was gdb's doing: its breakpoints stop vrlink, frames pile up, and only then do
       they all fall more than 1 s in the past. Frame IDs, the PC clock offset and the timing are fine without it.
     - Each NV12 import does show its own buffer (`test_modifier` checks a second frame next to the first now).
-11. **The sharp centre** (2026-11-12; user: "c'est net"). The centre broke up into blocks as soon as a controller moved
-    ("art abstrait"), the edges much less. The decode was not it: 40 frames that venus decoded while the user moved a
+11. **The sharp centre** (2026-11-12; user: "it's sharp"). The centre broke up into blocks as soon as a controller moved
+    ("abstract art"), the edges much less. The decode was not it: 40 frames that venus decoded while the user moved a
     controller (1440 frames of a session, recorded at the decoder's input) match FFmpeg's decode of the same packets
     (PSNR ~53.5 dB in every view, the 10-to-8-bit rounding), no packet missing. vrcompositor showed only the wide views
     (a snapshot of its eye buffers), whose centre the PC codes with few bits, as the inset is to cover it.
@@ -541,7 +541,7 @@ vrlink writes its own log, `~/.local/share/Steam/logs/vrlink.txt` (the PC's side
       vrlink shares 16 frame buffers, and 16 copies of 16 MB each were made as the session started: the headset swapped
       ~700 MB within seconds and stalled (Monado's re-projection too). ~150-250 MB now; vrcompositor's GPU memory went
       from 666 to 397 MB.
-12. **The head's pose for the PC** (2026-11-12; user: "ça tremble BEAUCOUP moins", the PC's VR view too). The PC's
+12. **The head's pose for the PC** (2026-11-12; user: "it trembles A LOT less", the PC's VR view too). The PC's
     own VR view shook far more than the head. driver_quest1 changes the HMD pose only when vrcompositor presents, with
     no velocity (so that vrcompositor renders with exactly the pose the layer gives Monado, docs/steamvr-port.md): the
     PC saw a pose that stood still, then jumped, at uneven times (10-27 ms apart during a head turn, logged on the PC
@@ -565,8 +565,8 @@ vrlink writes its own log, `~/.local/share/Steam/logs/vrlink.txt` (the PC's side
       submits them, and vrcompositor shows them ~60 ms after; 40 ms more of prediction (closer, by the logs) changed
       nothing the user could see.
 13. **Measuring where the stream's frames land** (2026-11-12/13; open, docs/todo.md). The user: the stream jumps
-    ("des à-coups") at every head movement, even a tiny one, never while still; the whole picture, near or far; depth
-    feels wrong while turning ("j'ai presque l'impression de loucher"); SteamVR's HUD overlays (IPD, volume) jump in
+    ("jerks") at every head movement, even a tiny one, never while still; the whole picture, near or far; depth
+    feels wrong while turning ("it almost feels like I'm going cross-eyed"); SteamVR's HUD overlays (IPD, volume) jump in
     exactly the same way, while the dashboard and the chaperone are steady. A Quest 3 on the same PC (same overlays)
     has none of it: the cause is on this headset.
     - Method (tools/headset-dev/README.md): the headset lies still with its panels on (`QUEST1_IGNORE_PROX=1`),
@@ -619,7 +619,7 @@ vrlink writes its own log, `~/.local/share/Steam/logs/vrlink.txt` (the PC's side
       descriptor; such fences now come from a pool of 16 the layer reuses (quest1_display.c, `evnopool` in
       /tmp/quest1-layer turns it off). Tested on main: 13-16 `sync_fence` descriptors for 7 minutes with the pool,
       ~58 more a second without, the same frame rate.
-    - 2026-11-13 evening (user, on a fresh system: "ça tremble toujours"). The bench widened, all clean: both eyes
+    - 2026-11-13 evening (user, on a fresh system: "it still trembles"). The bench widened, all clean: both eyes
       (the same error, no disparity between them); a 4 cm sideways sine (vrcompositor re-projects the stream with
       vrlink's depth, in step with the world marker, < 0.5 px off); 190°/s (a smooth 3.4 ms lag in the wide views, the
       same with vrlink stopped: vrcompositor's own re-projection, not the stream); and the user's recorded head
@@ -694,8 +694,8 @@ vrlink writes its own log, `~/.local/share/Steam/logs/vrlink.txt` (the PC's side
         0 of 19 and 0 of 14 off with it, 16 of 17 off by the whole step without it (`nostreampose` in
         /tmp/quest1-layer); later ones 0 of 41 and 1 of 46 (a 60 px miss, the search's edge). The frame rate is the
         same either way (55-57 fps with the stream). It needs the render pass merge (quest1_rpmerge.c, on unless
-        `nomerge`) for its descriptor pool. The user, blind A/B worn the same night: without it "ça tremble
-        toujours", with it "c'est mille fois mieux, ça ne tremble plus du tout". Things tried first that did not do it, kept in case: giving the device
+        `nomerge`) for its descriptor pool. The user, blind A/B worn the same night: without it "it still
+        trembles", with it "it's a thousand times better, it doesn't tremble at all any more". Things tried first that did not do it, kept in case: giving the device
         copy the picture's pose; drawing the picture whose pose the host memory held when the copy was recorded;
         recording that copy as a `vkCmdUpdateBuffer` of what the memory held then (all no change, since the device
         copy is not read). Drawing vrlink's last frame instead of the one vrcompositor took makes it worse (the

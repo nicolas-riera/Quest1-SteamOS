@@ -388,12 +388,12 @@ lists what is left to do).
   moving the head (Monado's warp). Next: the LSE trap path (do_undefinstr takes a global spinlock per trap and
   emulate_atomic does two exclusive loops: ~18 % of vrcompositor's render thread), the passthrough mesh pass
   (~1.4 ms per eye), the controller models.
-- 2026-11-07: worn it was 37-46 fps (user: "un peu mieux"): ~18 ms of GPU with the controllers in view, each of
+- 2026-11-07: worn it was 37-46 fps (user: "a bit better"): ~18 ms of GPU with the controllers in view, each of
   their parts in a render pass of its own. vrcompositor now renders straight to memory (RenderMode=Direct, SteamVR
   only): 14.1 -> 9.3 ms a frame on the table, 72 fps with the dashboard. To measure worn again. The controller
   models stay as they are (user: no visible change); the ovrstub log flood (~850 kernel log lines a second with the
   controllers on) is gone.
-- Memory (user, 2026-11-05: "faut bien gérer ce problème de saturation"): right after boot, with
+- Memory (user, 2026-11-05: "this saturation problem has to be handled properly"): right after boot, with
   SteamVR up, only ~500 MB is available and ~550 MB is already swapped (zram). Per process (Pss + swap
   + KGSL): Steam's webhelpers ~1.65 GB (two of them with 270 + 185 MB of GPU memory), vrcompositor
   ~610 MB (470 MB GPU), vrwebhelper (dashboard) ~560 MB (274 MB GPU), steam ~130 MB; KGSL total

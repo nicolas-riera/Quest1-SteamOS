@@ -29,16 +29,17 @@ from Valve's servers and from Meta's last Quest 1 update image.
 
 | Part | State |
 | --- | --- |
-| Boot | Linux 4.4 (Meta's kernel with backports for systemd 258), then SteamOS Holo with systemd as PID 1. No Android |
+| Boot | Linux 4.4 (Meta's kernel with backports for systemd 258), then SteamOS Holo with systemd as PID 1, behind the Steam Frame's boot animation. No Android |
 | Steam Frame mode | Steam and SteamVR start in the Steam Frame's mode: Steam recognises the headset as a Steam Frame and its VR UI is the main panel |
-| Display | Both panels at 72 Hz with Meta's lens distortion model and chromatic correction, a zero-copy path to the display controller, and a 72 Hz rotational re-projection in [Monado](https://monado.freedesktop.org/) |
+| Display | Both panels at 72 Hz with Meta's lens distortion model and chromatic correction, a zero-copy path to the display controller, and a 72 Hz rotational re-projection in [Monado](https://monado.freedesktop.org/). SteamVR's head-locked HUD (volume, IPD) is drawn apart from the re-projection, so it stays steady |
 | Brightness | SteamVR's own brightness setting (dashboard and Steam's quick menu), applied in the display controller with the panels' factory calibration so both eyes match |
 | SteamVR settings | An "Oculus Quest" page in SteamVR's settings, with a button that clears the spatial anchor map |
 | Head tracking | 6DoF with Meta's own tracking service, run natively from the headset's partitions |
 | Controllers | Touch controllers with Meta's tracking (6DoF, with Meta's prediction), buttons, triggers, grips, sticks and vibration |
 | IPD | The physical IPD slider is read live and sets SteamVR's eye separation |
 | Audio | Speakers and microphone through PipeWire, with the volume buttons |
-| Sensors | The proximity sensor turns the panels off when the headset is removed. The fan keeps running |
+| Sensors | The proximity sensor turns the panels off when the headset is removed |
+| Heat | The CPUs scale their clock with the load, and the fan's speed follows the temperature (it never stops while the system runs) |
 | Playspace | The Steam Frame's room setup: floor height and drawing the boundary |
 | Passthrough | The Steam Frame's room view with the tracking cameras: 3D view, tint colour, double click on the Steam or Oculus button to toggle it |
 | Power | Power button to Steam (sleep, power menu), shutdown and restart from Steam, battery levels, power LED |
@@ -49,6 +50,7 @@ from Valve's servers and from Meta's last Quest 1 update image.
 | Desktop mode | The Steam Frame's desktop (nested KDE Plasma with Dolphin, Konsole, Discover...) from Steam's "+" menu, shown as a SteamVR overlay with the laser, scroll and keyboard. See [docs/desktop.md](docs/desktop.md) |
 | Video decode | The headset's hardware video decoder (venus) for H.264 and HEVC, through V4L2: FFmpeg and VLC with `q1-hwdec <program>` |
 | Steam Link (2D) | A PC game streamed to the headset in Steam's 2D stream, decoded in hardware, with the decoded frames going to the GPU without a copy (about 17% of a CPU core at 1080p60). See [docs/streaming.md](docs/streaming.md) |
+| Steam Link VR | The PC's VR games streamed to the headset, decoded in hardware, with a new picture every frame, a sharp centre, and a picture that stays steady as the head moves. Still below 72 fps, see below and [docs/streaming.md](docs/streaming.md) |
 | Spectator | Steam's "share your view" stream of the headset, encoded in hardware at about 35 fps |
 
 ## Work in progress
@@ -62,10 +64,15 @@ from Valve's servers and from Meta's last Quest 1 update image.
 - **Passthrough.** Each eye sees a composite of its bottom and top camera, but the depth is a fixed sphere,
   so near objects (controllers, hands) are not at their true distance: a stereo depth mesh is being tuned.
 - **Sleep.** Suspend to RAM loses Meta's tracking and the sound on resume.
-- **Streaming** from a PC: Steam Link VR shows the PC's VR stream in the headset, decoded in hardware,
-  steady as the head moves (the trembling is fixed, 2026-11-16); left are black flashes while the headset
-  is loaded (the dashboard open), a latency still a bit high, and below 72 fps. In the 2D stream, a change
-  of the PC window's size stops the decoder, and the sound stutters. See [docs/streaming.md](docs/streaming.md).
+- **Streaming** from a PC. Steam Link VR no longer trembles (fixed 2026-11-16). What is left:
+  - black flashes while the headset is loaded (the dashboard open);
+  - a latency still a bit high;
+  - a frame rate below 72 fps.
+
+  In the 2D stream, resizing the PC's window stops the decoder, and the sound stutters. See
+  [docs/streaming.md](docs/streaming.md).
+- **Charging while off.** Once SteamOS is flashed, plugging in a headset that is off must show a charging
+  screen, as Meta's system does, instead of starting the whole system.
 - **x86 games** (FEX, Proton).
 - **The installer** (see above): downloads and the image build work end to end; flashing the
   built image is to do.
@@ -90,7 +97,7 @@ the headset they are used from its own partitions, mounted read-only.
 
 | Path | Contents |
 | --- | --- |
-| `kernel/` | The kernel patches (`quest1-kernel.patch`, `loop-no-discard-on-ext4.patch`, `cgroup-events-frozen.patch`) on top of Meta's published source, the config additions and the LSE atomics emulation |
+| `kernel/` | The kernel patches on top of Meta's published source (`quest1-kernel.patch` with the backports, plus Bluetooth, the fan curve, SteamVR's GPU upload rings allocated on first use, and smaller fixes), the config additions and the LSE atomics emulation |
 | `initrd/` | The initramfs: `init`, a display test, a reboot helper |
 | `device/` | Install scripts run on the headset: Android blobs, HALs, Wi-Fi, Monado, Steam session, SteamVR edits, passthrough, audio, power, identity, memory tuning |
 | `installer/` | The PC installer: sources, download step, build and flash plan |
@@ -125,11 +132,14 @@ the headset they are used from its own partitions, mounted read-only.
 | [Tracking IPC](docs/tracking-ipc.md) | Talking to Meta's tracking service |
 | [Passthrough](docs/passthrough.md) | The Steam Frame's room view from the Quest's tracking cameras |
 | [Playspace](docs/boundary.md) | Floor, playspace and boundary, and Meta's map persistence |
+| [Streaming](docs/streaming.md) | The hardware video decoder, Steam Link (2D and VR), the spectator stream, and how the stream's trembling was found and fixed |
+| [Desktop mode](docs/desktop.md) | The Steam Frame's desktop as a SteamVR overlay, and the Remote Play spectator |
+| [Bluetooth](docs/bluetooth.md) | The WCN3990's Bluetooth with BlueZ |
 | [Installer](installer/README.md) | Download, build and flash from a PC |
 | [Performance](docs/performance.md) | Where the frame time goes, what was measured and tried |
 | [To do](docs/todo.md) | What is left to do (done work moves to the pages above) |
 | [SteamOS image](docs/rootfs-build.md) | What the system image holds, and the plan to build and install it reproducibly |
-| [Phase 0](docs/phase0-recon.md) | First survey of the headset (in French) |
+| [Phase 0](docs/phase0-recon.md) | First survey of the headset |
 
 ## Building
 

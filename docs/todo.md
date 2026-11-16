@@ -146,8 +146,8 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 
 ## Streaming
 
-- Steam Link VR (docs/streaming.md, section 2): a new picture each frame, a sharp centre (user, 2026-11-12: "c'est
-  net") and no trembling any more (2026-11-16, blind A/B worn: "ça ne tremble plus du tout"), but it flashes black
+- Steam Link VR (docs/streaming.md, section 2): a new picture each frame, a sharp centre (user, 2026-11-12: "it's
+  sharp") and no trembling any more (2026-11-16, blind A/B worn: "it doesn't tremble at all any more"), but it flashes black
   when the headset is loaded (the dashboard open), its latency is still a bit high (user, 2026-11-16) and it runs
   below 72 fps.
   - Latency: measure it (the head's pose to the picture's pose on screen) and find where it goes: the PC's ~90 ms
@@ -176,8 +176,8 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - Steam Link from a PC, 2D (docs/streaming.md, section 1): it works well (user, 2026-11-12); more performance is
   welcome: the kernel emulates atomic instructions for Steam's programs (`emulate_atomic` in the profiles), the
   Vulkan/OpenGL semaphore is refused (glFinish fallback).
-- Hardware video decoding for the whole system (user, 2026-11-09: "décodage vidéo matériel system wide, dont
-  Chromium"). FFmpeg's `*_v4l2m2m` decoders and VLC use venus (`q1-hwdec`, docs/streaming.md "The decoder"). Left:
+- Hardware video decoding for the whole system (user, 2026-11-09: "hardware video decoding system wide, Chromium
+  included"). FFmpeg's `*_v4l2m2m` decoders and VLC use venus (`q1-hwdec`, docs/streaming.md "The decoder"). Left:
   GStreamer's v4l2 decoders (they fall back by themselves, but set CAPTURE up after SOURCE_CHANGE: the library must
   start the firmware session itself first); Chromium decodes with VA-API only (Arch's build has no V4L2 decoder): a
   VA-API driver on top, or another build. The user's target (2026-11-10): the stream at 72 fps next to the dashboard

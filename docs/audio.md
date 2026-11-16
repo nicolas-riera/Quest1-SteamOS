@@ -330,4 +330,4 @@ lists what is left to do).
 - 2026-11-05: crackling still there, coming and going (user). Memory pressure is constant now (see
   Performance): check the link with it first.
 - A short click is heard each time Steam starts, even with the startup movie silenced (user, 2026-11-05:
-  "on n'est pas censé entendre ça"). Find its source: the audio device being opened (pop), or a Steam UI sound.
+  "we're not supposed to hear that"). Find its source: the audio device being opened (pop), or a Steam UI sound.

@@ -220,8 +220,8 @@ the buffer they cover; Monado's warp draws them over the re-projected frame with
 to the mesh cells that cover that part.
 
 The lens correction is per colour channel (each channel of the frame is read at its own place), so the HUD is too:
-blended with one alpha (the green channel's) its edges came out red and blue (user, 2026-11-13: "des bords
-rouge/bleu"). Monado draws each head-locked part with the frame in one pass now (`q1_warp_hudc_*`): per channel, the
+blended with one alpha (the green channel's) its edges came out red and blue (user, 2026-11-13: "red/blue
+edges"). Monado draws each head-locked part with the frame in one pass now (`q1_warp_hudc_*`): per channel, the
 HUD read at that channel's place with its own alpha, over the frame read at that channel's place.
 
 Measured with one test for every case (tools/headset-dev: a fake head yaw in Monado's head pose, with its angular
