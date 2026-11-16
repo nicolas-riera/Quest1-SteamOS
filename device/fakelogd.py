@@ -34,9 +34,15 @@ BURST, WINDOW = 20, 10.0
 window = {}  # tag -> [window start, lines printed, lines dropped]
 
 MAPLOG = '/var/log/quest1-map.log'  # shared with q1anchord
-MAPLOG_MAX = 256 * 1024
+MAPLOG_MAX = 1024 * 1024  # with the .1 copy about a week of map events (256 KB covered 3 days)
+# The engine's map life: contexts, map tracking, relocalization, saving (VegaMapSaver, "Submaps in Vio have changed"),
+# why a map is not sent or built ("Rejecting map", "Skipping map building"), evictions, anchors. q1anchord reads
+# these lines to tell driver_quest1 whether the room can be shown (docs/boundary.md).
 map_re = re.compile(r'Map Context|map context|[Mm]ap tracking|promoted|demoted|[Rr]elocaliz|MapDB|placeAnchor|'
-                    r'persistAnchor|loadMap|removeAllMaps|Anchor(Import|Export)')
+                    r'persistAnchor|loadMap|removeAllMaps|Anchor(Import|Export)|[Mm]ap ?[Ss]aver|Rejecting map|'
+                    r'Skipping map building|Evicting|Submaps in Vio|[Pp]ose difference|Localization took|'
+                    r'isRelocalizing|NoTracking|All submaps|Active map exists|no longer in the map|'
+                    r'Cannot find .* anchor|Removing LRU|Saving current active map')
 
 
 def maplog(line):

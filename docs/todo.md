@@ -21,12 +21,18 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 
 ## Tracking
 
-- The room comes back a bit off at the first put-on after a boot: the engine relocalizes in the saved map, logs "All
-  submaps have bad map tracking" seconds later, evicts the context and starts over, so the saved map (2 submaps, from
-  one spot) never grows (docs/boundary.md "The room after a boot"). Next (user: "as on Android, no constant
-  delocalization"): clear the map with the user and walk the room before setting the playspace again; persist only
-  once the room is covered, then again while tracking is good. See also whether a starved trackingservice makes it
-  worse (2026-11-10: "the tracking sneezed and I flew off" with all 8 cores busy).
+- The room comes back a bit off at the first put-on after a boot (docs/boundary.md "The room after a boot"): the saved
+  map has 2 submaps from one spot, so away from it the engine tracks by odometry and snaps back at the next
+  relocalization. Next (user: "as on Android, no constant delocalization"): clear the map with the user, walk the room
+  (setup page: guide the user to walk the edges ~1 min before "Set up"), then set the playspace; q1anchord now
+  persists only in good tracking. Left: re-persist/grow the map after the boundary is committed and the user moved;
+  a second map when relocalization fails (Meta persists a new anchor in the new context, one map per room; check that
+  mapdb keeps both and the tracker cost); locate the anchor itself (registerAnchor, shared memory) instead of the
+  current map uuid as the truth that the room is valid.
+- Worn test of the map state (2026-11-16, docs/boundary.md "Map state and the room"): the chaperone must hide during
+  relocalizing/lost/bad and come back in place; check that vrcompositor's chaperone follows the collisionBounds alpha
+  setting live (not verified without the headset worn), the Meta-like UX (black/passthrough while relocalizing) if
+  hiding the walls is not enough, and tune BAD_WINDOW/BAD_COUNT (q1anchord) and kBadHideS (driver).
 - The playspace is not where it was drawn (user, 2026-11-12: a new boundary, the headset off and on, no longer in
   place, "the space anchors work really badly"; again on 2026-11-13 after a reboot), and the engine opens new
   submaps instead of finding the saved ones (user). The boundary shifts mostly after a reset of the tracking, e.g.

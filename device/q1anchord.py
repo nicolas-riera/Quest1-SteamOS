@@ -8,13 +8,19 @@
 #    /vision/insideout/mapdb; the map uuid is saved in /data/misc/tracking/world-map.uuid
 #  * after a restart the engine loads that map and relocalizes by itself (current map uuid = saved one)
 #  * writes /run/q1track/frame-state for driver_quest1 (chaperone_frame.cpp):
-#      static  the world frame is the persisted one (or no map is saved yet): use it as is
-#      anchor  a map is saved but the current one is another (relocalization failed): the driver
-#              anchors the raw space on the head at put-on instead. Only until the saved map has been
-#              found once in this run: after that, another current map is the engine's temporary one
-#              after a tracking loss, and switching to "anchor" re-anchored the room on the head (the
-#              whole room turned and moved) and again when the engine found the saved map back. It stays
-#              "static" then: the engine snaps back into the saved frame when it relocalizes.
+#      static  the saved map was seen as the current one in this engine session (or no map is saved yet): the
+#              world frame is the persisted one, use it as is. It stays static after a tracking loss: another
+#              current map is then the engine's temporary one, and switching to "anchor" re-anchored the room
+#              on the head (the whole room turned and moved) and again when the saved map came back; the
+#              engine snaps back into the saved frame when it relocalizes (map-state hides the room meanwhile).
+#      unknown a map is saved but this engine session has not shown it as the current one yet (relocalization
+#              normally takes 1-3 s). Never `static` on q1anchord's start alone.
+#      anchor  a map is saved but not found after ~2 minutes worn (relocalization failed): the driver
+#              anchors the raw space on the head at put-on instead.
+#  * writes /run/q1track/map-state for driver_quest1: unknown | relocalizing | tracking | bad | lost, from the
+#    engine's map events (the lines fakelogd copies to /var/log/quest1-map.log) and the current map uuid. The
+#    driver shows the playspace only in `tracking` (and `bad` for a few seconds), like Guardian, which hides the
+#    boundary while the headset relocalizes or has lost tracking. The file is rewritten every 3 s.
 #  * `touch /tmp/quest1-clear-map` (SteamVR settings, Oculus Quest page: "Clear") forgets everything: removeAllMaps,
 #    saved uuids deleted. "Clear playspace" only resets the boundary (vrserver writes a default 1x1 m one, the map stays).
 #  * each time the user saves a playspace (vrserver rewrites chaperone_info.vrchap) the map is saved at once: persisted
@@ -41,6 +47,7 @@ SVC = ['unshare', '-m', 'sh', '-c',
 MAPUUID = '/data/misc/tracking/world-map.uuid'
 ANCHORUUID = '/data/misc/tracking/world-anchor.uuid'
 STATE = '/run/q1track/frame-state'
+MAPSTATE = '/run/q1track/map-state'
 CLEAR = '/tmp/quest1-clear-map'
 PANELS_OFF = '/tmp/quest1-panels-off'
 CHAP = '/home/steamos/.local/share/Steam/config/chaperone_info.vrchap'
@@ -51,6 +58,12 @@ BACKUP_QUIET = 60.0  # mapdb unchanged this long before it is copied
 BACKUP_QUIET_SAVED = 5.0  # the same just after the user saved a playspace
 SAVED_URGENT = 120.0  # how long after a playspace save the quick saving applies
 EMPTY_LOST = 30.0  # mapdb empty this long: the map is gone
+UNFOUND_WORN = 120.0  # worn this long without the saved map becoming current: relocalization failed, anchor on the head
+BAD_WINDOW = 10.0  # "bad" while bad-tracking lines of weight BAD_COUNT came within this (an "all submaps" one counts more)
+BAD_COUNT = 3
+PERSIST_QUIET = 20.0  # tracking state and no bad map tracking this long before a map is persisted
+SAVED_URGENT_PERSIST = 300.0  # how long after a playspace save a persist may wait for a good tracking moment
+MAPDB_STAT_EVERY = 60.0
 
 
 MAPLOG = '/var/log/quest1-map.log'  # shared with fakelogd (the engine's map events), outlives the boot
@@ -189,14 +202,93 @@ def persist():
     return True
 
 
+class Engine:
+    """What the engine's map events (quest1-map.log, written by fakelogd) say about tracking in this session."""
+
+    def __init__(self):
+        self.reset()
+        self.f, self.ino = None, None
+        try:
+            st = os.stat(MAPLOG)
+            self.f, self.ino = open(MAPLOG), st.st_ino
+            self.f.seek(0, os.SEEK_END)  # only what comes from now on: older lines belong to older sessions
+        except OSError:
+            pass
+
+    def reset(self):  # a new engine process (trackingservice restart): nothing is known yet
+        self.reloc = False  # relocalizing into a saved map (isRelocalizing)
+        self.lost = False  # map tracking lost ("Switching from Tracking to NoTracking")
+        self.bad = []  # (time, weight) of bad map tracking lines
+        self.last_bad = 0.0
+        self.good_since = None  # since when the state has been `tracking`
+
+    def feed(self, now):
+        try:
+            st = os.stat(MAPLOG)
+            if self.f is None or st.st_ino != self.ino:  # first creation, or rotated by fakelogd
+                if self.f:
+                    self.f.close()
+                self.f, self.ino = open(MAPLOG), st.st_ino
+            data = self.f.read()
+        except OSError:
+            return
+        for line in data.splitlines():
+            if 'q1anchord:' not in line:
+                self.event(line, now)
+
+    def event(self, line, now):
+        if 'Bad map tracking' in line or 'All submaps have bad map tracking' in line:
+            m = re.search(r'Throttled count=(\d+)', line)
+            w = 1 + (int(m.group(1)) if m else 0)
+            if 'All submaps' in line:
+                w += BAD_COUNT
+            self.bad.append((now, w))
+            self.last_bad = now
+        elif 'Initializing a new Map Context' in line or 'isRelocalizing transitions false -> true' in line or \
+                'Set isRelocalizing true' in line:
+            self.reloc = True
+        elif 'isRelocalizing transitions true -> false' in line or 'Relocalization + ViT succeeded' in line or \
+                'Switching Map Context' in line:
+            self.reloc = False
+            self.lost = False
+        elif 'Gained map tracking' in line or 'Starting map tracking on map' in line:
+            self.lost = False
+        elif 'Map tracking lost' in line or 'to NoTracking' in line:
+            self.lost = True
+
+    def is_bad(self, now):
+        self.bad = [b for b in self.bad if now - b[0] < BAD_WINDOW]
+        return sum(w for _, w in self.bad) >= BAD_COUNT
+
+
+def engine_pid():
+    r = subprocess.run(['pidof', 'trackingservice'], capture_output=True, text=True)
+    return r.stdout.split()[0] if r.returncode == 0 and r.stdout.split() else ''
+
+
+def mapdb_stats():  # file count and bytes only, never contents
+    n = b = 0
+    for root, _, files in os.walk(MAPDB):
+        for f in files:
+            try:
+                b += os.stat(os.path.join(root, f)).st_size
+                n += 1
+            except OSError:
+                pass
+    return n, b
+
+
 def main():
     worn_since = None
     chap_seen = chap_mtime()
     urgent_until = 0.0  # a playspace was just saved: save the map quickly until then
+    urgent_persist = 0.0  # ... and persist it at the first good tracking moment until then
     last = ''
     sig, sig_since, backed = None, 0.0, None
     found, lost_logged = '', ''  # the saved map was the current one in this run; the map logged as temporary
     empty_since = None  # since when mapdb has been empty
+    eng, pid = Engine(), engine_pid()
+    mstate, last_mstate, unfound_worn, last_stat, last_t, last_cur = 'unknown', '', 0.0, 0.0, time.time(), ''
     while True:
         try:
             if os.path.exists(CLEAR):
@@ -206,10 +298,17 @@ def main():
                 # persisted it 3 s after (2026-11-12), when it held a few views from one spot
                 worn_since = None
             now = time.time()
+            p = engine_pid()
+            if p != pid:  # trackingservice restarted: a new session, the saved map has to be found again
+                pid, found, lost_logged, unfound_worn = p, '', '', 0.0
+                eng.reset()
+                log('q1anchord: tracking engine restarted: the saved map has to be found again')
+            eng.feed(now)
             m = chap_mtime()
             if m is not None and m != chap_seen:
                 log('q1anchord: playspace saved by SteamVR: saving the map now')
                 urgent_until = now + SAVED_URGENT
+                urgent_persist = now + SAVED_URGENT_PERSIST
                 backed = None  # copy mapdb again even if unchanged since the last copy
             chap_seen = m
             urgent = now < urgent_until
@@ -234,13 +333,47 @@ def main():
                     backed = s
             if saved and cur == saved:
                 found = saved
-            if saved and cur and cur != saved and found != saved:
+            worn = not os.path.exists(PANELS_OFF)
+            if saved and cur and cur != saved and found != saved and worn:
+                unfound_worn += now - last_t
+            if not saved or found == saved:
+                state = 'static'  # nothing to relocalize in, or the saved map was the current one in this session
+            elif unfound_worn > UNFOUND_WORN:
                 state = 'anchor'
             else:
-                state = 'static'
+                state = 'unknown'
             if saved and cur and cur != saved and found == saved and lost_logged != cur:
-                log('q1anchord: current map %s is not the saved one (tracking lost?): staying static' % cur)
+                log('q1anchord: current map %s is not the saved one (tracking lost?): frame stays static' % cur[:8])
                 lost_logged = cur
+            # map state: whether the engine's frame can be trusted right now
+            if not cur:
+                mstate = 'unknown'
+            elif saved and cur != saved:
+                mstate = 'lost' if eng.lost else 'relocalizing'
+            else:
+                if saved and last_cur != saved:
+                    eng.reloc = False  # the saved map just became the current one
+                if eng.lost:
+                    mstate = 'lost'
+                elif eng.reloc and saved:  # with no saved map the engine's reloc flag means nothing
+                    mstate = 'relocalizing'
+                elif eng.is_bad(now):
+                    mstate = 'bad'
+                else:
+                    mstate = 'tracking'
+            last_cur = cur
+            eng.good_since = (eng.good_since or now) if mstate == 'tracking' else None
+            if mstate != last_mstate:
+                write_atomic(MAPSTATE, mstate)
+                log('q1anchord: map state %s (current map %s, saved %s)' % (mstate, cur[:8] or '-', saved[:8] or '-'))
+                last_mstate = mstate
+            else:
+                os.utime(MAPSTATE)  # the driver ignores a state that is no longer refreshed (q1anchord dead)
+            if now - last_stat > MAPDB_STAT_EVERY:
+                last_stat = now
+                n, b = mapdb_stats()
+                log('q1anchord: mapdb %d files, %d bytes' % (n, b))
+            last_t = now
             if state != last:
                 write_atomic(STATE, state)
                 log('q1anchord: frame state %s (current map %s, saved %s)' % (state, cur or '-', saved or '-'))
@@ -249,7 +382,13 @@ def main():
                 worn_since = worn_since or now
             else:
                 worn_since = None
-            if not saved and cur and (urgent or (worn_since and now - worn_since > WORN_BEFORE_PERSIST)):
+            # A map is persisted only after tracking has been good for a while: one saved while tracking failed holds a
+            # drifted frame (2026-11-12) and the room drawn in it is wrong after every boot. Never when a map is
+            # already saved (the engine keeps it up to date itself).
+            good = mstate == 'tracking' and eng.good_since and now - eng.good_since > PERSIST_QUIET and \
+                now - eng.last_bad > PERSIST_QUIET
+            if not saved and cur and good and (now < urgent_persist or
+                                               (worn_since and now - worn_since > WORN_BEFORE_PERSIST)):
                 persist()
         except Exception as e:  # keep running
             log('q1anchord: %r' % (e,))

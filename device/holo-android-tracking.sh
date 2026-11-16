@@ -248,7 +248,7 @@ TemporaryFileSystem=/data/local/tmp" \
 Wants=android-trackingservice.service
 After=android-trackingservice.service
 PartOf=android-sensors-hal.service"
-	# q1anchord: persists Meta's map (spatial anchor) and tells driver_quest1 whether its frame is the persisted one
+	# q1anchord: persists Meta's map (spatial anchor) and tells driver_quest1 whether its frame is the persisted one (frame-state) and whether the room can be shown (map-state)
 	unit q1anchord "q1anchord (persisted tracking map, /run/q1track/frame-state)" root "" /usr/local/sbin/q1anchord "$W
 Wants=android-trackingservice.service
 After=android-trackingservice.service

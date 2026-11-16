@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <mutex>
@@ -20,10 +21,88 @@ double offSinceS = 0;    //!< when it was taken off (0 = worn)
 double yaw = 0;          //!< raw yaw correction: raw = Ry(yaw) * local + t
 double t[3] = {0, 0, 0};
 bool sixDof = false;
-bool useStatic = false;  //!< /run/q1track/frame-state says "static": Meta's world frame is the persisted map's
+bool useStatic = false;  //!< /run/q1track/frame-state says "static" or "unknown": use Meta's world frame as is
 double stateCheckS = 0;
+bool roomShown = true;   //!< the chaperone is visible (collisionBounds alpha as the user has it)
+bool restoredAlpha = false;
+double badSinceS = 0;    //!< since when map-state has said "bad" (0 = not)
 
 constexpr double kReanchorOffS = 20.0;
+constexpr double kBadHideS = 4.0;     //!< "bad" map tracking hides the room only after this long (it comes in short bursts)
+constexpr double kStateStaleS = 15.0; //!< q1anchord rewrites map-state every 3 s: older = q1anchord is not running
+
+// SteamVR draws the chaperone (the boundary walls) from collisionBounds settings. To hide it while Meta's frame can't
+// be trusted its alpha is set to 0 and the user's value is kept in a setting of ours, so that a vrserver that dies
+// while the room is hidden does not leave the walls invisible for good: the next start restores it.
+const char *kBounds = "collisionBounds", *kAlpha = "CollisionBoundsColorGammaA";
+const char *kOurs = "driver_quest1", *kSaved = "chaperoneAlphaSaved";
+
+void Log(const char *msg)
+{
+	if (vr::VRDriverLog())
+		vr::VRDriverLog()->Log(msg);
+}
+
+void RestoreAlphaOnce()
+{
+	if (restoredAlpha || !vr::VRSettings())
+		return;
+	restoredAlpha = true;
+	vr::EVRSettingsError err = vr::VRSettingsError_None;
+	int saved = vr::VRSettings()->GetInt32(kOurs, kSaved, &err);
+	if (err == vr::VRSettingsError_None && saved >= 0) {
+		vr::VRSettings()->SetInt32(kBounds, kAlpha, saved, &err);
+		vr::VRSettings()->SetInt32(kOurs, kSaved, -1, &err);
+		Log("quest1: chaperone alpha restored after an interrupted hide\n");
+	}
+}
+
+void ShowRoom(bool show)
+{
+	if (show == roomShown || !vr::VRSettings())
+		return;
+	vr::EVRSettingsError err = vr::VRSettingsError_None;
+	if (!show) {
+		int cur = vr::VRSettings()->GetInt32(kBounds, kAlpha, &err);
+		if (err != vr::VRSettingsError_None)
+			cur = 153; // SteamVR's default
+		vr::VRSettings()->SetInt32(kOurs, kSaved, cur, &err);
+		vr::VRSettings()->SetInt32(kBounds, kAlpha, 0, &err);
+	} else {
+		int saved = vr::VRSettings()->GetInt32(kOurs, kSaved, &err);
+		if (err == vr::VRSettingsError_None && saved >= 0)
+			vr::VRSettings()->SetInt32(kBounds, kAlpha, saved, &err);
+		vr::VRSettings()->SetInt32(kOurs, kSaved, -1, &err);
+	}
+	roomShown = show;
+	Log(show ? "quest1: chaperone shown (map tracking good)\n" : "quest1: chaperone hidden (map not tracking)\n");
+}
+
+//! "tracking" (or no q1anchord at all, or a stale file: nothing known, keep the old behaviour) shows the room.
+bool MapTrusted(double now)
+{
+	char buf[16] = {};
+	struct stat st;
+	FILE *f = fopen("/run/q1track/map-state", "r");
+	if (f) {
+		size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+		(void)n;
+		fclose(f);
+	}
+	if (!buf[0] || stat("/run/q1track/map-state", &st) != 0 || time(nullptr) - st.st_mtime > kStateStaleS)
+		return true;
+	if (strncmp(buf, "tracking", 8) == 0) {
+		badSinceS = 0;
+		return true;
+	}
+	if (strncmp(buf, "bad", 3) == 0) {
+		if (badSinceS == 0)
+			badSinceS = now;
+		return now - badSinceS < kBadHideS;
+	}
+	badSinceS = 0;
+	return false; // unknown, relocalizing, lost
+}
 
 double Now()
 {
@@ -32,13 +111,17 @@ double Now()
 	return ts.tv_sec + ts.tv_nsec * 1e-9;
 }
 
-//! q1anchord (device/q1anchord.py) writes "static" while the world frame is the persisted map's (or no map is
-//! saved yet), "anchor" when a map is saved but the current session could not relocalize in it.
+//! q1anchord (device/q1anchord.py) writes frame-state "static" once the saved map was the current one in this engine
+//! session (or no map is saved yet), "unknown" until then, "anchor" when a map is saved but a worn wait of two
+//! minutes found no relocalization. Meta's frame is used as is in static and unknown (no head anchoring: it would
+//! put the room on the head at a moment the frame is not the saved one); map-state decides if the room is shown.
 void CheckState(double now)
 {
 	if (now - stateCheckS < 1.0)
 		return;
 	stateCheckS = now;
+	RestoreAlphaOnce();
+	ShowRoom(MapTrusted(now));
 	char buf[16] = {};
 	FILE *f = fopen("/run/q1track/frame-state", "r");
 	if (f) {
@@ -46,7 +129,7 @@ void CheckState(double now)
 		(void)n;
 		fclose(f);
 	}
-	bool st = strncmp(buf, "static", 6) == 0;
+	bool st = strncmp(buf, "static", 6) == 0 || strncmp(buf, "unknown", 7) == 0;
 	if (st != useStatic) {
 		useStatic = st;
 		anchored = false; // leaving the static frame: anchor again at the next valid worn pose

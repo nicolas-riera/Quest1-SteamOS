@@ -151,6 +151,37 @@ AnchorUuid = 16 bytes in text order; Parcelables are preceded by an int32 non-nu
   aid_inet group: firstboot.sh). Found that morning: no chaperone file at all (the playspace had not been set up again
   after the map loss of 2026-11-07), which alone explains the missing chaperone.
 
+## Map state and the room (2026-11-16)
+
+Analysis (Meta's Guardian, libguardian/libtrackingengines strings): Meta hides the boundary while the engine relocalizes or
+has lost tracking (relocalizingEvent, lostTrackingEvent: passthrough or black with a spinner), persists on the user's
+commit of a boundary and not on a timer, and keeps one map per room. We drew the saved room in whatever frame the engine
+was in: in the new world frame of a fresh context (1-2 s after boot or wake, the engine's frame then jumps back at the
+relocalization) and while map tracking was bad. Now:
+
+- `fakelogd` copies more engine events to `/var/log/quest1-map.log` (1 MB then `.1`, about a week): map saver, "Rejecting
+  map", "Skipping map building", evicting, promoted, relocalization, pose difference, isRelocalizing, "All submaps".
+  q1anchord logs `mapdb N files, B bytes` once a minute (counts only).
+- q1anchord follows those lines (from its start, plus `trackingservice`'s pid: a new engine process starts a new session)
+  and writes `/run/q1track/map-state`, rewritten every 3 s: `unknown` (no current map), `relocalizing` (a saved map exists
+  and is not the current one, or isRelocalizing), `lost` ("Map tracking lost ... NoTracking" until the tracker restarts
+  or relocalizes), `bad` (bad-map-tracking lines of weight 3 within 10 s; "All submaps have bad map tracking" counts 3,
+  throttled lines count their `Throttled count`), else `tracking`.
+- `frame-state` is `static` only once the saved map was the current one in this engine session (or no map is saved);
+  until then `unknown`, and `anchor` (head anchoring) only after 2 minutes worn without finding it. It was `static` from
+  q1anchord's start before, with no evidence, and `anchor` at once when the temporary context was current.
+- driver_quest1 (`chaperone_frame.cpp`) reads both. `unknown` and `static` use Meta's frame as is (never head anchoring).
+  Unless map-state is `tracking` (or `bad` for under 4 s, or the file is missing or older than 15 s) the chaperone is hidden
+  by setting `collisionBounds/CollisionBoundsColorGammaA` to 0; the user's value is kept in `driver_quest1/chaperoneAlphaSaved`
+  and put back when the state returns (or at the next driver start if vrserver died while hidden). The playspace
+  itself is not changed: it reappears where it was saved. Tested without wearing: writing map-state by hand and by
+  synthetic engine lines (q1anchord: bad, lost, relocalizing, tracking in turn), vrserver.txt "chaperone hidden/shown", and the
+  alpha in steamvr.vrsettings (0 while hidden, back after). Not tested: that the compositor really stops drawing the walls
+  live, and the real relocalization after a tracking restart (worn test, docs/todo.md).
+- Persist policy: a map is persisted only when none is saved, and then only when map-state has been `tracking` for 20 s
+  with no bad map tracking in that time, either 45 s worn or after a playspace save (waits up to 5 min for a good
+  moment). Before: 45 s worn regardless, or at once at a playspace save, however tracking was doing.
+
 Not yet verified: relocalization after a real reboot with the headset worn and moved around the room; whether the
 persisted map keeps growing (mapdb rewritten) while used.
 
