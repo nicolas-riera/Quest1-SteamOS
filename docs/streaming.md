@@ -725,8 +725,11 @@ Valve's default 200): ~75 Mbit/s of video, ~130 KB a frame, which the encoder fi
 blocks). The PC draws its overlays and desktop windows into those same views, so outside the inset a desktop window
 gets ~10 px/deg (text needs ~29). Levers, all PC settings: the bitrate (150-180, the link carries ~200 Mbit/s), a larger
 inset (`preferredFoveatedAngle` +16..22: ~15 px/deg over 64-70°, no decode cost), the PC's sharpening
-(`driver_vrlink/useSharpening`, CAS before encoding); a non-foveated stream (`foveationMode` 1, two views of
-1344-1472) is an experiment.
+(`driver_vrlink/useSharpening`, CAS before encoding). The view size has a hard cap in driver_vrlink by the PC's NVIDIA
+generation (read through NvAPI, 0x1809fad80): below Pascal 832, Pascal and Volta 1024, Turing 1280, Ampere and later
+1344, applied after every setting (which the driver then rewrites with the capped value). On this PC (Pascal) a
+non-foveated stream (`foveationMode` 1) is two views of 1024: fewer pixels than today's four. Tried 2026-11-16 at the
+user's request: 1024 whatever the keys; the bitrate raised to 160 Mbit/s.
 
 ### The distortion shader (2026-11-16, read in vrcompositor)
 

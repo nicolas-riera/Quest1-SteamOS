@@ -168,9 +168,10 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
     (`vrcmd --pollcontrollers` on the PC), and which PC input the left X/Y land on (vrlink sends the Frame's left
     controller as a d-pad: dpad_down/dpad_right).
   - Picture quality (user, 2026-11-16: "a bit pixelated/blurry", the PC's desktop view unreadable): the PC alone sizes
-    the stream (docs/streaming.md "Picture quality"). Levers, all PC SteamVR settings, so the user's call: the bitrate
-    (`driver_vrlink/targetBandwidth` 110 -> 150-180), a larger sharp centre (`steamvr/preferredFoveatedAngle` +16..22),
-    the PC's sharpening (`driver_vrlink/useSharpening`).
+    the stream (docs/streaming.md "Picture quality"), and caps each view by its GPU's generation (this PC's Pascal:
+    1024; Turing 1280, Ampere and later 1344; no setting lifts it). The bitrate is now 160 (`driver_vrlink/
+    targetBandwidth`, was 110; no cost on the headset). Left for the user to judge worn: a larger sharp centre
+    (`steamvr/preferredFoveatedAngle`, see the frame rate below) and the PC's sharpening (`driver_vrlink/useSharpening`).
   - Latency: measure it (the head's pose to the picture's pose on screen) and find where it goes: the PC's ~90 ms
     prediction says how far ahead it must guess.
   - Now that the stream's pose is right, check whether the 40 ms low-pass of the angular velocity vrlink gets (an
@@ -183,7 +184,12 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
       in use, load ~14.
   - Black flashes (user, 2026-11-12): vrlink logs no decoder reset outside the session's start; not seen on the table
     (2026-11-16: 60 snapshots with the dashboard open, no black frame): catch them worn.
-  - GPU: vrcompositor takes ~11.6 ms a frame with the stream (the GPU ~100 % busy). `enableSimplifiedShaders` (off; the
+  - GPU (user, 2026-11-16: a stable 72 fps with margin, for PCs that send views above 1024): vrcompositor takes
+    8-15 ms of GPU a frame with the stream depending on the session, ~12 typically (kgsl trace: one batch a frame), so
+    there is no margin. Not the layer's inset blend (off: the same), not memory fragmentation (compaction before a
+    restart: the same), not Steam's webhelper (idle then). Sessions with the PC's inset widened
+    (`preferredFoveatedAngle` +16) ran at 55-57 fps, +8 at 62-66, 0 at 66-72: unexplained. Next: a per-pass GPU profile
+    during a stream (`/tmp/quest1-gputime` is not used while streaming: the user's call). `enableSimplifiedShaders` (off; the
     shader choice needs it, docs/streaming.md "The distortion shader") saves 2.2 ms, but the stream's colours come out
     washed (the simplified shaders take its texture as linear): an sRGB view of the copy fixes the colours but, made
     mutable, costs ~9 ms (45 fps). Next: copies in an sRGB format of their own, the copy shaders writing linear.
