@@ -701,6 +701,45 @@ vrlink writes its own log, `~/.local/share/Steam/logs/vrlink.txt` (the PC's side
         copy is not read). Drawing vrlink's last frame instead of the one vrcompositor took makes it worse (the
         layer's choice comes before vrcompositor's pose).
 
+14. **Controller buttons** (2026-11-16). vrlink forwards a controller's buttons and axes to the PC only if the
+    controller's type reads `frame_controller` (vrlink.bin 0x563b0: each frame it reads Prop_ControllerType_String into
+    a 1024-byte buffer, else "Unsupported Prop_ControllerType_String"), from the legacy controller state, sent under the
+    Frame's input paths in the layout of its Frame legacy binding (right: a, b, x, y, menu; left: dpad_down/right/left/up,
+    view; both: thumbstick, grip, bumper, trigger, system). The identity it sends the PC reads the same property into 128
+    bytes. So the shim answers `frame_controller` to the 1024-byte read only, and the driver selects a `vrlink.client`
+    binding of ours (`quest1_touch_vrlink_bindings.json`) that puts each Touch control on its Frame counterpart's slot.
+    SteamVR ignores a driver's per-app default binding when the app's manifest has bindings for other controllers
+    (vrlink's Knuckles one was converted instead): the driver saves the choice as the bindings UI does, in
+    steamvr.vrsettings `vrlink.client/oculus_touch_250820_CurrentURL_legacy` (the key ends with the binding's category,
+    `_legacy` for an app without actions; vrserver builds it at 0x230600). vrlink finds the controllers through
+    `GetTrackedDeviceIndexForControllerRole`: asleep controllers give -1 and nothing is sent.
+
+### Picture quality (2026-11-16, read in driver_vrlink and the PC's settings)
+
+The PC alone sizes the stream: an atlas of four square views (each eye's wide view and inset), `streamFormatWidth`
+1024 because the PC's `driver_vrlink/automaticStreamFormatWidth` is false (automatic would give the Frame profile's
+1280: beyond what venus decodes at 72 Hz, ~1088-1152). The headset's properties only set the game's render size. The
+inset covers an inner field of 45-48° plus `steamvr/preferredFoveatedAngle` (default 0, 30-90): ~21 px/deg there,
+~10 px/deg in the wide view (the panels: ~15). The bitrate is `driver_vrlink/targetBandwidth` 110 (automatic off;
+Valve's default 200): ~75 Mbit/s of video, ~130 KB a frame, which the encoder fills as soon as the head moves (the
+blocks). The PC draws its overlays and desktop windows into those same views, so outside the inset a desktop window
+gets ~10 px/deg (text needs ~29). Levers, all PC settings: the bitrate (150-180, the link carries ~200 Mbit/s), a larger
+inset (`preferredFoveatedAngle` +16..22: ~15 px/deg over 64-70°, no decode cost), the PC's sharpening
+(`driver_vrlink/useSharpening`, CAS before encoding); a non-foveated stream (`foveationMode` 1, two views of
+1344-1472) is an experiment.
+
+### The distortion shader (2026-11-16, read in vrcompositor)
+
+vrcompositor picks its distortion shader per frame in `CGraphicsDevice::DrawScene` (0x7ab08): the achromatic ones
+(`distort_ps_achromatic`, `_layered` with overlays in the pass, `_se2` that blends a stream's inset, "spatial encoding
+2") only if `steamvr/enableSimplifiedShaders` is on (with `enableAchromaticDistortion` also on; both read once at
+start, so a live change does nothing). `enableAchromaticDistortion` alone only changes how the distortion textures are
+built. With the stream and the dashboard: ~11.6 ms of GPU a frame with the setting off, 9.3 ms on; but on, the stream
+looks washed out: the simplified shaders take its texture as linear and encode it again. An sRGB view of the layer's
+copy gives the right colours, but the copies made mutable for it cost ~9 ms (45 fps, compression lost?). `_se2` would
+also need vrcompositor to see a spatial encoding of 2 for vrlink's submits (not found) and its own YUV input (R=Cr,
+G=Y, B=Cb).
+
 Plan:
 0. ~~Capture vrlink's own output~~ done (above).
 1. ~~`/dev/video-dec0` and a decode test~~ done (`vrdevice_path`, items 5 and 6).

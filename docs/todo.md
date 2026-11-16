@@ -159,8 +159,16 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 
 - Steam Link VR (docs/streaming.md, section 2): a new picture each frame, a sharp centre (user, 2026-11-12: "it's
   sharp") and no trembling any more (2026-11-16, blind A/B worn: "it doesn't tremble at all any more"), but it flashes black
-  when the headset is loaded (the dashboard open), its latency is still a bit high (user, 2026-11-16) and it runs
-  below 72 fps.
+  when the headset is loaded (the dashboard open) and its latency is still a bit high (user, 2026-11-16). On the table
+  (2026-11-16, after the CPU split, device/holo-cpuset.sh) it runs at ~71 fps with the dashboard open or not: check worn.
+  - Controller buttons to the PC (1a38621): vrlink now accepts the controllers and reads our binding, but it found no
+    controller then (they were asleep): check worn that each button, stick, trigger and grip reaches the PC's game
+    (`vrcmd --pollcontrollers` on the PC), and which PC input the left X/Y land on (vrlink sends the Frame's left
+    controller as a d-pad: dpad_down/dpad_right).
+  - Picture quality (user, 2026-11-16: "a bit pixelated/blurry", the PC's desktop view unreadable): the PC alone sizes
+    the stream (docs/streaming.md "Picture quality"). Levers, all PC SteamVR settings, so the user's call: the bitrate
+    (`driver_vrlink/targetBandwidth` 110 -> 150-180), a larger sharp centre (`steamvr/preferredFoveatedAngle` +16..22),
+    the PC's sharpening (`driver_vrlink/useSharpening`).
   - Latency: measure it (the head's pose to the picture's pose on screen) and find where it goes: the PC's ~90 ms
     prediction says how far ahead it must guess.
   - Now that the stream's pose is right, check whether the 40 ms low-pass of the angular velocity vrlink gets (an
@@ -171,14 +179,16 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
     these takes it there (vrcompositor's `sync_fence` leak is fixed: PR #4, display-event fences from a pool):
     - The headset slowing down over time: 64-71 fps at the start, 55 fps 90 minutes later, ~380 MB available, swap
       in use, load ~14.
-  - Black flashes (user, 2026-11-12): vrlink logs no decoder reset outside the session's start; not found yet.
-  - Frame rate: the layer's inset pass costs ~2.5 ms of GPU (58-60 fps against ~69 with the dashboard open).
-    vrcompositor has the Frame's own way, free: `distort_ps_achromatic_se2` blends the inset in its distortion pass,
-    but here it draws with `distort_ps_layered` (chromatic, overlays in the pass), with `enableAchromaticDistortion`
-    true in steamvr.vrsettings. Find what picks the shader (its settings block reads achromatic off at run time).
-  - Start of a session: the headset stalls for seconds (Monado's re-projection too), the system swaps ~150-250 MB
-    as vrlink and vrcompositor allocate (it was ~700 MB before the copies shared their memory). Lock Monado's (and
-    the tracking's) memory, and find what else allocates then.
+  - Black flashes (user, 2026-11-12): vrlink logs no decoder reset outside the session's start; not seen on the table
+    (2026-11-16: 60 snapshots with the dashboard open, no black frame): catch them worn.
+  - GPU: vrcompositor takes ~11.6 ms a frame with the stream (the GPU ~100 % busy). `enableSimplifiedShaders` (off; the
+    shader choice needs it, docs/streaming.md "The distortion shader") saves 2.2 ms, but the stream's colours come out
+    washed (the simplified shaders take its texture as linear): an sRGB view of the copy fixes the colours but, made
+    mutable, costs ~9 ms (45 fps). Next: copies in an sRGB format of their own, the copy shaders writing linear.
+  - Start of a session: vrcompositor at 22-45 fps for 2-4 s (Monado's re-projection holds the head steady: 0 late),
+    ~250 MB swapped (2026-11-16): vrcompositor +232 MB (ION +174, KGSL +58), vrlink's frame buffers, the decoder's
+    references, and vrlink's first decoder always reset (two rounds of 16 imports). Freeing memory as vrlink starts did
+    not help. Find what else allocates and whether the first decoder's reset can be avoided.
   Also: the PC's overlays show only when the PC's SteamVR started after
   vrlink; stopping a session from the headset (`StopStreamingSession`) does nothing and vrlink hangs on its way out.
   With the USB cable in, vrlink and the PC send the stream over the USB network too (each datagram on each link: about
