@@ -25,7 +25,7 @@ SteamOS, SteamVR, Steam and Meta's tracking software belong to Valve and Meta. N
 are in this repository or in its releases: the installer downloads them on your own machine,
 from Valve's servers and from Meta's last Quest 1 update image.
 
-![q1bootgif](/docs/q1bootgif.gif)
+<img src="/docs/q1bootgif.gif" width="215" alt="q1bootgif">
 
 ## What works
 
