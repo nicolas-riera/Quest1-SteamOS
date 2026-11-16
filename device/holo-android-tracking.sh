@@ -101,7 +101,7 @@ PY
 	# device nodes, as Android's ueventd.rc sets them (devtmpfs resets them each boot)
 	chmod 0666 /dev/ashmem
 	# Android cpuset groups: libosutils moveToCpuSet() writes thread ids to /dev/cpuset/<group>/tasks and
-	# aborts trackingservice when the file is missing. Plain RAM files (no pinning; the units set CPUAffinity).
+	# aborts trackingservice when the file is missing. Plain RAM files (no pinning; q1-cpuset pins the units).
 	# Same idea as the Quest 2 port (github.com/URFAVF3MBOY/quest2-steamos, tracking-kit), own implementation.
 	for g in tracking object_tracking mrsystem foreground background top-app system-background restricted camera-daemon; do
 		mkdir -p $R/cpuset/$g; : > $R/cpuset/$g/tasks; chmod 0666 $R/cpuset/$g/tasks
@@ -155,6 +155,9 @@ BindReadOnlyPaths=/persist $R/__properties__:/dev/__properties__
 BindPaths=$R/calibration:/persist/calibration
 BindPaths=$R/cpuset:/dev/cpuset
 ExecStart=$5
+# CPUs: no CPUAffinity= here. holo-cpuset.sh keeps these units in the "tracking" cpuset (CPUs 0-3, everything else
+# is on 4-7) and a unit born in the "rest" set would fail to start with a mask outside it; this moves it at once
+ExecStartPost=-+/usr/local/sbin/q1-cpuset quick
 Restart=on-failure
 RestartSec=2
 # Android init gives services 32768+ fds (trackingservice needs >1024: EMFILE otherwise)
@@ -210,8 +213,7 @@ BindReadOnlyPaths=$R/powerhint.json:/system/vendor/etc/powerhint.json" \
 		"InaccessiblePaths=-/system/vendor/firmware/lcon_archive.bin -/system/vendor/firmware/lcon-downgrade.bin
 ExecStartPre=/usr/local/sbin/holo-android-tracking sb-free
 # never re-grab SyncBoss automatically
-Restart=no
-CPUAffinity=0-3" \
+Restart=no" \
 		/system/vendor/bin/hw/vendor.oculus.hardware.sensors@1.0-service "$W"
 	# everything below needs the sensors HAL (ICameraProvider etc.): bound to it, so they can
 	# only run while it runs, and stop with it (Android: "onrestart restart ...")
@@ -230,7 +232,6 @@ SupplementaryGroups=aid_inet render
 AmbientCapabilities=CAP_SYS_NICE
 IOSchedulingClass=realtime
 IOSchedulingPriority=4
-CPUAffinity=0-3
 InaccessiblePaths=-/system/vendor/firmware/lcon_archive.bin -/system/vendor/firmware/lcon-downgrade.bin" \
 		/system/bin/trackingservice "$W android-settingsserver.service android-vrfocus.service android-iad.service android-telemetry-hal.service android-power-hal.service android-ashmemd.service
 Wants=android-settingsserver.service android-vrfocus.service android-iad.service android-telemetry-hal.service android-power-hal.service android-ashmemd.service

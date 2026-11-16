@@ -92,6 +92,7 @@ sh holo-steam-session.sh install
 sh holo-frame-mode.sh install
 sh holo-passthrough.sh install
 sh holo-perf.sh
+sh holo-cpuset.sh
 sh holo-battery.sh install
 sh holo-bluetooth.sh install
 sh holo-desktop.sh install

@@ -37,8 +37,9 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
     logging "Map tracking did not run" up to once a second, "Bad map tracking" 30-50 times a minute, falling to 3DoF,
     and while it tracks two contexts it skips map building. With everything else moved to CPUs 4-7 (a live
     `taskset`, lost at each restart): 0-1 "Bad map tracking" a minute worn, no new context at a put-on, and the
-    boundary was in place after that put-on. Make it permanent (an `AllowedCPUs`/`CPUAffinity` for everything but the
-    `android-*` units: Steam's own 2-6 pinning of its webhelpers must not bring them back to 2-3), then test the
+    boundary was in place after that put-on. Made permanent 2026-11-16 (device/holo-cpuset.sh: a cpuset v1
+    `tracking` 0-3 for the `android-*` units, `rest` 4-7 for all else, Steam's 2-6 pinning is cut to 4-6; q1trackd and
+    q1anchord stay in `rest`); still to do: validate after a reboot and worn ("Bad map tracking" a minute), then test the
     playspace over several sessions and reboots.
   - The playspace drawn at 21:40 was drawn while the tracking was failing (the frame may have slid under it).
 - Meta's tracking runs from boot, worn or not (trackingservice IOTcam ~50 % of a core, CtrllrCam ~11 %,
