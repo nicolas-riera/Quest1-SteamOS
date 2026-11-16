@@ -200,6 +200,11 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
     ~250 MB swapped (2026-11-16): vrcompositor +232 MB (ION +174, KGSL +58), vrlink's frame buffers, the decoder's
     references, and vrlink's first decoder always reset (two rounds of 16 imports). Freeing memory as vrlink starts did
     not help. Find what else allocates and whether the first decoder's reset can be avoided.
+    Timeline of a start (2026-11-16, vrlink.txt): the session at 0 s, the PC's first packet 11.8 s later (the PC's
+    side), then ~3.5 s of decoder resets: one at once at the first SOURCE_CHANGE (CheckStuck's "last progress" is
+    from the decoder made 11 s before), two "Received frame outside of backtrack window" (the first frames arrive
+    later than vrlink's pose history), one more CheckStuck; stable after that. With the orphaned /dev/shm segments
+    gone (q1-shmclean), one 5 s window at 49 fps, then 70-72.
   Also: the PC's overlays show only when the PC's SteamVR started after
   vrlink; stopping a session from the headset (`StopStreamingSession`) does nothing and vrlink hangs on its way out.
   With the USB cable in, vrlink and the PC send the stream over the USB network too (each datagram on each link: about
