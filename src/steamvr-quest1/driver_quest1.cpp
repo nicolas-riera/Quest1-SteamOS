@@ -2094,8 +2094,10 @@ private:
 
 	//! SteamVR takes the oculus_touch controller type's dashboard bindings from its own Oculus driver, so the
 	//! default_bindings of our input profile are never used: no right Oculus button, no double click for the
-	//! camera view, none of the Frame's grip actions. Select ours as the bindings UI would (it saves this key),
-	//! unless the user picked another.
+	//! camera view, none of the Frame's grip actions. Steam Link VR (vrlink.client) gets vrlink's own Knuckles
+	//! binding the same way, whose legacy layout is not the Frame's one vrlink reads (no buttons for the PC, see
+	//! src/v4l2shim/quest1_vrlink.c). Select ours as the bindings UI would (it saves these keys), unless the user
+	//! picked another.
 	static void SelectDashboardBindings()
 	{
 		Dl_info info{};
@@ -2108,15 +2110,24 @@ private:
 				return;
 			root.resize(slash);
 		}
-		const std::string url = "file://" + root + "/resources/input/quest1_touch_vrcompositor_bindings.json";
-		const char *section = "openvr.component.vrcompositor", *key = "oculus_touch_250820_CurrentURL_steamvrinput";
-		char cur[1024] = "";
-		EVRSettingsError err = VRSettingsError_None;
-		VRSettings()->GetString(section, key, cur, sizeof(cur), &err);
-		if (url == cur || (cur[0] && !strstr(cur, "/drivers/oculus/")))
-			return;
-		VRSettings()->SetString(section, key, url.c_str(), &err);
-		Log("quest1: dashboard bindings: %s (%d)\n", url.c_str(), (int)err);
+		static const struct {
+			const char *app, *key, *file, *theirs; // theirs: a choice of SteamVR's own we replace
+		} apps[] = {
+		    // the key ends with the binding's category: steamvrinput for an app with actions, legacy for one without
+		    {"openvr.component.vrcompositor", "oculus_touch_250820_CurrentURL_steamvrinput",
+		     "quest1_touch_vrcompositor_bindings.json", "/drivers/oculus/"},
+		    {"vrlink.client", "oculus_touch_250820_CurrentURL_legacy", "quest1_touch_vrlink_bindings.json", "/tools/vrlink/"},
+		};
+		for (const auto &a : apps) {
+			const std::string url = "file://" + root + "/resources/input/" + a.file;
+			char cur[1024] = "";
+			EVRSettingsError err = VRSettingsError_None;
+			VRSettings()->GetString(a.app, a.key, cur, sizeof(cur), &err);
+			if (url == cur || (cur[0] && !strstr(cur, a.theirs)))
+				continue;
+			VRSettings()->SetString(a.app, a.key, url.c_str(), &err);
+			Log("quest1: %s bindings: %s (%d)\n", a.app, url.c_str(), (int)err);
+		}
 	}
 
 	XrBackend xr;

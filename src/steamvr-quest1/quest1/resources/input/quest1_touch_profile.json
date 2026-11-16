@@ -95,6 +95,10 @@
 		{
 			"app_key": "openvr.component.vrcompositor",
 			"binding_url": "quest1_touch_vrcompositor_bindings.json"
+		},
+		{
+			"app_key": "vrlink.client",
+			"binding_url": "quest1_touch_vrlink_bindings.json"
 		}
 	]
 }

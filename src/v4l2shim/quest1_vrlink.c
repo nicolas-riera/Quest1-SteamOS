@@ -92,9 +92,26 @@ static int role_of(void *self, uint32_t dev)
 	return roles[dev] - 1;
 }
 
+// vrlink forwards a controller's buttons and axes to the PC only for the Frame's controllers: each frame it reads
+// the hand's Prop_ControllerType_String into a 1024-byte buffer, and anything but "frame_controller" stops there
+// ("Unsupported Prop_ControllerType_String", vrlink.bin 0x563b0). It then reads the legacy controller state and
+// sends each bit and axis under the Frame's input paths, in the layout of its Frame legacy binding. The identity it
+// sends to the PC reads the same property into 128 bytes, and must stay "oculus_touch" (the PC's SteamVR then gives
+// games the Touch controllers). So only that 1024-byte read is told "frame_controller"; the Touch controls reach
+// the Frame's legacy layout through vrlink.client's binding in our driver (quest1_touch_vrlink_bindings.json).
+#define INPUT_TYPE_BUF 1024
+
 static uint32_t string_prop(void *self, uint32_t dev, int prop, char *buf, uint32_t size, int *err)
 {
 	int role = role_of(self, dev);
+	if (prop == 7000 && size == INPUT_TYPE_BUF && (role == LEFT || role == RIGHT)) {
+		static const char ft[] = "frame_controller";
+		if (err)
+			*err = buf ? 0 : 3;
+		if (buf)
+			memcpy(buf, ft, sizeof(ft));
+		return sizeof(ft);
+	}
 	for (unsigned i = 0; role != OTHER && i < sizeof(idents) / sizeof(idents[0]); i++) {
 		if (idents[i].prop != prop)
 			continue;
