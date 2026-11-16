@@ -5,13 +5,15 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 
 ## Found by the user on 2026-11-16 evening (first)
 
-- Storage: Steam shows 2.3 GB free of ~24 GB with nothing installed from Steam. The system is one 24 GB image
-  (`/userdata/steamos/holo.img` on loop0, 91 % used; `/userdata` itself has 21 GB free, and a 4 GB swap file next to the
-  image). Nothing large was written in the last two days (no runaway writer); what fills it: `/root` 5.2 GB (dev
-  leftovers on this headset: `.debug` 1.3 GB from perf, a Monado build 1.5 GB, `sf` 0.7 GB, `tmp`), `/var/lib/flatpak`
-  2.3 GB (the user's apps), `/var/cache/pacman` 1.2 GB (package cache), Steam 4 GB. To do: clean the package cache in
-  the image build and keep it clean (paccache / `CleanMethod`), size the image from the partition (or grow it on first
-  boot), and check what grows over a day of use (`du` before/after).
+- Storage (development headset): Steam shows 2.3 GB free of ~24 GB with nothing installed from Steam. That headset
+  runs the development layout, one fixed 24 GB image (`/userdata/steamos/holo.img` on loop0, 91 % used; `/userdata`
+  has 21 GB free); the installer's image already takes the whole partition. Nothing large was written in the last two
+  days (no runaway writer). What fills it: `/root` 5.2 GB of development leftovers on that headset only (`.debug`
+  1.3 GB of perf symbols, 15 old monado-service copies 1.3 GB, `tmp` 0.3 GB, the Monado tree 1.5 GB, `sf` 0.7 GB),
+  `/var/cache/pacman` 1.2 GB (now emptied after each pacman transaction: install-image.sh's hook), `/var/lib/flatpak`
+  2.3 GB (the user's apps), Steam 4 GB, `/usr` 5.3 GB. To do: with the user's go, delete `.debug`, the monado-service
+  copies, `tmp`, `stream-crash-*` and the package cache there (~4 GB); grow that image (or not) as the user prefers;
+  check what grows over a day of use (`du` before/after).
 - Microphone dead system-wide (Audacity, Steam Link VR): after the 2026-11-16 19:13 boot both `quest1-mic` and
   `quest1-mic-aec` record pure silence (RMS 0, 2 s each), so the capture itself is dead, not the echo canceller.
   Check the mixer path (`Mic Switch` etc., docs/audio.md "Mixer setup") at this boot, whether the echo-cancel module

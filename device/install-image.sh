@@ -77,6 +77,21 @@ Restart=always
 WantedBy=multi-user.target
 EOF
 systemctl enable holo-android-blobs.service fakelogd.service
+# pacman keeps every package it downloads (1.2 GB on the development headset after a few installs, 2026-11-16):
+# here the system is updated from images, not from that cache, so it is emptied after each transaction
+mkdir -p /etc/pacman.d/hooks
+cat > /etc/pacman.d/hooks/zz-quest1-clean-cache.hook <<'EOF'
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = *
+
+[Action]
+Description = Removing the downloaded packages (Quest 1: little storage, install-image.sh)
+When = PostTransaction
+Exec = /usr/bin/find /var/cache/pacman/pkg -maxdepth 1 -type f ( -name *.pkg.tar* -o -name *.sig ) -delete
+EOF
 
 # --- our scripts, in dependency order ------------------------------------------------------------------------
 cd "$D"
