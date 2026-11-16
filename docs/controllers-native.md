@@ -315,4 +315,9 @@ angle between the poses, 90° expected) and saved to `~steamos/.config/quest1-co
 (loaded at every start). `echo reset > /tmp/quest1-ctrl-cal` returns to the default. Knobs:
 `/tmp/quest1-ctrl` = `<default pitch deg> <velocities 0|1> <debug 0|1>` (debug logs the IMU up
 vector, aim heading/pitch and positions once a second). Debug: `echo "left system" >
-/tmp/quest1-ctrl-press` holds a component (`system`, `a`, `b`, `trigger`) for 150 ms.
+/tmp/quest1-ctrl-press` holds a control for 150 ms; the full form is `<left|right> <control> [value] [hold s]
+[delay s]`, controls `system`, `a`/`x`, `b`/`y`, `trigger`, `grip`, `stick` (its click), `stick-x`, `stick-y` (value -1..1),
+`thumbrest`, and the touches `a-touch`/`x-touch`, `b-touch`/`y-touch`, `trigger-touch`, `grip-touch`, `stick-touch`,
+`system-touch`. From the file's write to the press's end the hand counts as connected, held still below and in front of
+the head when its controller sleeps, so the buttons can be tested with no one wearing the headset (Steam Link VR's:
+`tools/headset-dev/vrlink-buttons.py`).

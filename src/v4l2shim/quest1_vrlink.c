@@ -94,11 +94,10 @@ static int role_of(void *self, uint32_t dev)
 
 // vrlink forwards a controller's buttons and axes to the PC only for the Frame's controllers: each frame it reads
 // the hand's Prop_ControllerType_String into a 1024-byte buffer, and anything but "frame_controller" stops there
-// ("Unsupported Prop_ControllerType_String", vrlink.bin 0x563b0). It then reads the legacy controller state and
-// sends each bit and axis under the Frame's input paths, in the layout of its Frame legacy binding. The identity it
-// sends to the PC reads the same property into 128 bytes, and must stay "oculus_touch" (the PC's SteamVR then gives
-// games the Touch controllers). So only that 1024-byte read is told "frame_controller"; the Touch controls reach
-// the Frame's legacy layout through vrlink.client's binding in our driver (quest1_touch_vrlink_bindings.json).
+// ("Unsupported Prop_ControllerType_String", vrlink.bin 0x563b0). It then reads each control by its Frame path
+// (input_path() below). The identity it sends to the PC reads the same property into 128 bytes, and must stay
+// "oculus_touch" (the PC's SteamVR then gives games the Touch controllers). So only that 1024-byte read is told
+// "frame_controller".
 #define INPUT_TYPE_BUF 1024
 
 static uint32_t string_prop(void *self, uint32_t dev, int prop, char *buf, uint32_t size, int *err)
@@ -137,22 +136,12 @@ static uint32_t array_prop(void *self, uint32_t dev, int prop, uint32_t tag, voi
 	return n;
 }
 
-static void patch(void *sys)
+// Copies an object's vtable into copy (2 + NSLOTS words: offset to top and type info, which RTTI reads, then the
+// methods; the class behind an interface has more methods than the interface, so the copy goes on to the end of the
+// mapping or NSLOTS) and returns the copy's methods, or NULL when the vtable does not have more than min_slots.
+static void **copy_vtable(void *obj, void **copy, size_t min_slots)
 {
-	void ***obj = sys;
-	if (*obj == vtable)
-		return;
-	void **vt = *obj;
-	get_string_t s = (get_string_t)vt[SLOT_STRING];
-	// the slot is the string getter: the HMD's model comes back (anything else and nothing is changed)
-	char model[128] = "";
-	int err = -1;
-	uint32_t n = s(sys, 0, 1001, model, sizeof(model), &err);
-	if (err != 0 || n < 2 || n > sizeof(model) || strlen(model) + 1 != n) {
-		fprintf(stderr, "quest1_v4l2: vrlink: IVRSystem not as expected (%u, error %d): identity left alone\n", n, err);
-		return;
-	}
-	// how far the vtable's mapping goes
+	void **vt = *(void ***)obj;
 	uintptr_t start = 0, end = 0, a = (uintptr_t)vt;
 	FILE *maps = fopen("/proc/self/maps", "r");
 	char line[512];
@@ -169,11 +158,31 @@ static void patch(void *sys)
 	size_t slots = end ? (end - a) / sizeof(void *) : 0;
 	if (slots > NSLOTS)
 		slots = NSLOTS;
-	if (slots <= SLOT_STRING || a < start + 2 * sizeof(void *)) {
+	if (slots <= min_slots || a < start + 2 * sizeof(void *))
+		return NULL;
+	memcpy(copy, vt - 2, (2 + slots) * sizeof(void *));
+	return copy + 2;
+}
+
+static void patch(void *sys)
+{
+	void ***obj = sys;
+	if (*obj == vtable)
+		return;
+	void **vt = *obj;
+	get_string_t s = (get_string_t)vt[SLOT_STRING];
+	// the slot is the string getter: the HMD's model comes back (anything else and nothing is changed)
+	char model[128] = "";
+	int err = -1;
+	uint32_t n = s(sys, 0, 1001, model, sizeof(model), &err);
+	if (err != 0 || n < 2 || n > sizeof(model) || strlen(model) + 1 != n) {
+		fprintf(stderr, "quest1_v4l2: vrlink: IVRSystem not as expected (%u, error %d): identity left alone\n", n, err);
+		return;
+	}
+	if (!copy_vtable(sys, vtable_copy, SLOT_STRING)) {
 		fprintf(stderr, "quest1_v4l2: vrlink: IVRSystem's vtable not found in the mappings: identity left alone\n");
 		return;
 	}
-	memcpy(vtable_copy, vt - 2, (2 + slots) * sizeof(void *));
 	real_string = s;
 	real_array = (get_array_t)vt[SLOT_ARRAY];
 	vtable[SLOT_STRING] = (void *)string_prop;
@@ -181,6 +190,69 @@ static void patch(void *sys)
 	*obj = vtable;
 	fprintf(stderr, "quest1_v4l2: vrlink: identity of a \"Deckard (Oculus Quest)\" with Quest 1 Touch controllers "
 	        "(SteamVR shows %s)\n", model);
+}
+
+// vrlink reads a controller's controls by their paths (IVRPaths: StringToHandle once, then ReadPathBatch each frame;
+// vrlink.bin 0x54a18 for the buttons, 0x55840 for the axes): the Frame controller's, right a, b, x, y, menu, left
+// dpad_down, dpad_right, dpad_left, dpad_up, view, both thumbstick, grip, bumper, trigger, system, thumbrest. It sends
+// them to the PC in slots, in that order, and the PC's driver_vrlink fills the controller it shows games from the
+// same slots: for our "oculus_touch" identity, in the Touch's own order (Windows driver_vrlink.dll 0x180a16385;
+// 0x180a16dcb for the Frame's). Each path vrlink asks for is replaced here by our Touch control that the PC reads
+// from that slot (2026-11-16: before this, Frame names did not exist on our controllers and the trigger, in the
+// Frame's trigger slot, moved the stick on the PC). Paths not listed (bumper, thumbstick click, menu...) fill slots
+// the PC's Touch does not read, and are left as they are.
+static const struct
+{
+	const char *frame, *touch;
+} input_paths[] = {
+    // buttons: a, b (right) and x, y (left); the left menu button; the stick's click
+    {"/user/hand/right/input/a/click", "/user/hand/right/input/a/click"},
+    {"/user/hand/right/input/b/click", "/user/hand/right/input/b/click"},
+    {"/user/hand/right/input/y/click", "/user/hand/right/input/joystick/click"},
+    {"/user/hand/left/input/dpad_down/click", "/user/hand/left/input/x/click"},
+    {"/user/hand/left/input/dpad_right/click", "/user/hand/left/input/y/click"},
+    {"/user/hand/left/input/dpad_left/click", "/user/hand/left/input/system/click"},
+    {"/user/hand/left/input/dpad_up/click", "/user/hand/left/input/joystick/click"},
+    // touches: the buttons', the trigger's, the stick's, the thumb rest's
+    {"/user/hand/right/input/a/touch", "/user/hand/right/input/a/touch"},
+    {"/user/hand/right/input/b/touch", "/user/hand/right/input/b/touch"},
+    {"/user/hand/right/input/x/touch", "/user/hand/right/input/trigger/touch"},
+    {"/user/hand/right/input/y/touch", "/user/hand/right/input/joystick/touch"},
+    {"/user/hand/right/input/menu/touch", "/user/hand/right/input/thumbrest/touch"},
+    {"/user/hand/left/input/dpad_down/touch", "/user/hand/left/input/x/touch"},
+    {"/user/hand/left/input/dpad_right/touch", "/user/hand/left/input/y/touch"},
+    {"/user/hand/left/input/dpad_left/touch", "/user/hand/left/input/trigger/touch"},
+    {"/user/hand/left/input/dpad_up/touch", "/user/hand/left/input/joystick/touch"},
+    {"/user/hand/left/input/view/touch", "/user/hand/left/input/thumbrest/touch"},
+    // axes: the Frame's stick x, stick y and trigger slots are the Touch's trigger, stick x and stick y
+    {"/user/hand/right/input/thumbstick/x", "/user/hand/right/input/trigger/value"},
+    {"/user/hand/right/input/thumbstick/y", "/user/hand/right/input/joystick/x"},
+    {"/user/hand/right/input/trigger/value", "/user/hand/right/input/joystick/y"},
+    {"/user/hand/left/input/thumbstick/x", "/user/hand/left/input/trigger/value"},
+    {"/user/hand/left/input/thumbstick/y", "/user/hand/left/input/joystick/x"},
+    {"/user/hand/left/input/trigger/value", "/user/hand/left/input/joystick/y"},
+};
+
+// IVRPaths_002's StringToHandle, counted in its vtable (openvr.h: ReadPathBatch, WritePathBatch, StringToHandle)
+enum { SLOT_PATH_HANDLE = 2 };
+typedef int (*path_handle_t)(void *self, uint64_t *handle, const char *path);
+static path_handle_t real_path_handle;
+static void *paths_vtable_copy[2 + NSLOTS];
+
+static int input_path(void *self, uint64_t *handle, const char *path)
+{
+	for (unsigned i = 0; path && i < sizeof(input_paths) / sizeof(input_paths[0]); i++)
+		if (!strcmp(path, input_paths[i].frame)) {
+			int r = real_path_handle(self, handle, input_paths[i].touch);
+			// vrlink asks again for some paths every frame: logged once each
+			static bool logged[sizeof(input_paths) / sizeof(input_paths[0])];
+			if (!logged[i]) {
+				logged[i] = true;
+				fprintf(stderr, "quest1_v4l2: vrlink: %s read from %s (error %d)\n", path, input_paths[i].touch, r);
+			}
+			return r;
+		}
+	return real_path_handle(self, handle, path);
 }
 
 // vrlink makes its network and decoding threads SCHED_FIFO 80 (as on the Frame). Steam's processes may only go up to
@@ -494,37 +566,37 @@ static uint64_t raw_pose(void *self, uint32_t dev, void *out)
 static void patch_client(void *client)
 {
 	void ***obj = client;
-	void **copy = client_vtable_copy + 2;
-	if (*obj == copy)
+	if (*obj == client_vtable_copy + 2)
 		return;
 	void **vt = *obj;
-	uintptr_t start = 0, end = 0, a = (uintptr_t)vt;
-	FILE *maps = fopen("/proc/self/maps", "r");
-	char line[512];
-	while (maps && fgets(line, sizeof(line), maps)) {
-		unsigned long lo, hi;
-		if (sscanf(line, "%lx-%lx", &lo, &hi) == 2 && a >= lo && a < hi) {
-			start = lo;
-			end = hi;
-			break;
-		}
-	}
-	if (maps)
-		fclose(maps);
-	size_t slots = end ? (end - a) / sizeof(void *) : 0;
-	if (slots > NSLOTS)
-		slots = NSLOTS;
-	if (slots <= SLOT_SUBMIT_SET || a < start + 2 * sizeof(void *)) {
+	void **copy = copy_vtable(client, client_vtable_copy, SLOT_SUBMIT_SET);
+	if (!copy) {
 		fprintf(stderr, "quest1_v4l2: vrlink: IVRClientInternal's vtable not found in the mappings: frames left alone\n");
 		return;
 	}
-	memcpy(client_vtable_copy, vt - 2, (2 + slots) * sizeof(void *));
 	real_submit_set = (submit_set_t)vt[SLOT_SUBMIT_SET];
 	copy[SLOT_SUBMIT_SET] = (void *)submit_set;
 	real_raw_pose = (raw_pose_t)vt[SLOT_RAW_POSE];
 	copy[SLOT_RAW_POSE] = (void *)raw_pose;
 	*obj = copy;
 	fprintf(stderr, "quest1_v4l2: vrlink: each frame goes first in its texture set; the head's pose from driver_quest1\n");
+}
+
+static void patch_paths(void *paths)
+{
+	void ***obj = paths;
+	if (*obj == paths_vtable_copy + 2)
+		return;
+	void **vt = *obj;
+	void **copy = copy_vtable(paths, paths_vtable_copy, SLOT_PATH_HANDLE);
+	if (!copy) {
+		fprintf(stderr, "quest1_v4l2: vrlink: IVRPaths's vtable not found in the mappings: controls left alone\n");
+		return;
+	}
+	real_path_handle = (path_handle_t)vt[SLOT_PATH_HANDLE];
+	copy[SLOT_PATH_HANDLE] = (void *)input_path;
+	*obj = copy;
+	fprintf(stderr, "quest1_v4l2: vrlink: the Frame controller's controls read from the Touch's\n");
 }
 
 EXPORT void *VR_GetGenericInterface(const char *version, int *err)
@@ -539,12 +611,14 @@ EXPORT void *VR_GetGenericInterface(const char *version, int *err)
 	}
 	void *p = real(version, err);
 	static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
-	if (p && version && is_vrlink() && (!strcmp(version, "IVRSystem_026") || !strcmp(version, "IVRClientInternal_XXX"))) {
+	if (p && version && is_vrlink()) {
 		pthread_mutex_lock(&lock);
-		if (version[3] == 'S')
+		if (!strcmp(version, "IVRSystem_026"))
 			patch(p);
-		else
+		else if (!strcmp(version, "IVRClientInternal_XXX"))
 			patch_client(p);
+		else if (!strcmp(version, "IVRPaths_002"))
+			patch_paths(p);
 		pthread_mutex_unlock(&lock);
 	}
 	return p;

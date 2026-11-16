@@ -5,7 +5,7 @@
 	"category": "legacy",
 	"controller_type": "oculus_touch",
 	"name": "Quest 1 Touch: Steam Link VR",
-	"description": "Steam Link VR (vrlink) reads the Frame controller's legacy layout and sends each slot under the Frame's input paths: each Touch control goes to the slot of its Frame counterpart (src/v4l2shim/quest1_vrlink.c)",
+	"description": "Steam Link VR (vrlink) reads the controls by their paths (src/v4l2shim/quest1_vrlink.c) but sends nothing without a legacy controller state (GetControllerState): this binding gives it one, in the Frame legacy layout of Valve's vrlink_legacy_bindings_frame_controller.json",
 	"options": { "mirror_actions": false },
 	"simulated_actions": [],
 	"bindings": {

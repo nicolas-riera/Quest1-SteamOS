@@ -708,16 +708,34 @@ vrlink writes its own log, `~/.local/share/Steam/logs/vrlink.txt` (the PC's side
 
 14. **Controller buttons** (2026-11-16). vrlink forwards a controller's buttons and axes to the PC only if the
     controller's type reads `frame_controller` (vrlink.bin 0x563b0: each frame it reads Prop_ControllerType_String into
-    a 1024-byte buffer, else "Unsupported Prop_ControllerType_String"), from the legacy controller state, sent under the
-    Frame's input paths in the layout of its Frame legacy binding (right: a, b, x, y, menu; left: dpad_down/right/left/up,
-    view; both: thumbstick, grip, bumper, trigger, system). The identity it sends the PC reads the same property into 128
-    bytes. So the shim answers `frame_controller` to the 1024-byte read only, and the driver selects a `vrlink.client`
-    binding of ours (`quest1_touch_vrlink_bindings.json`) that puts each Touch control on its Frame counterpart's slot.
-    SteamVR ignores a driver's per-app default binding when the app's manifest has bindings for other controllers
-    (vrlink's Knuckles one was converted instead): the driver saves the choice as the bindings UI does, in
-    steamvr.vrsettings `vrlink.client/oculus_touch_250820_CurrentURL_legacy` (the key ends with the binding's category,
-    `_legacy` for an app without actions; vrserver builds it at 0x230600). vrlink finds the controllers through
+    a 1024-byte buffer, else "Unsupported Prop_ControllerType_String"). The identity it sends the PC reads the same
+    property into 128 bytes. So the shim answers `frame_controller` to the 1024-byte read only. vrlink then needs the
+    hand's legacy controller state (GetControllerState must succeed, nothing is sent otherwise): the driver selects a
+    `vrlink.client` legacy binding of ours (`quest1_touch_vrlink_bindings.json`, the Frame's legacy layout). SteamVR
+    ignores a driver's per-app default binding when the app's manifest has bindings for other controllers (vrlink's
+    Knuckles one was converted instead): the driver saves the choice as the bindings UI does, in steamvr.vrsettings
+    `vrlink.client/oculus_touch_250820_CurrentURL_legacy` (the key ends with the binding's category, `_legacy` for an
+    app without actions; vrserver builds it at 0x230600). vrlink finds the controllers through
     `GetTrackedDeviceIndexForControllerRole`: asleep controllers give -1 and nothing is sent.
+
+    The values themselves do not come from that state: vrlink reads each control by its Frame path through IVRPaths
+    (StringToHandle once, then ReadPathBatch each frame; 0x54a18 buttons, 0x55840 axes): right a, b, x, y, menu; left
+    dpad_down, dpad_right, dpad_left, dpad_up, view; both thumbstick, grip, bumper, trigger, system, thumbrest. It sends
+    them in slots in that order, and the PC's driver_vrlink fills the controller games get from the same slots in the
+    order of the identity's type (Windows driver_vrlink.dll: 0x180a16385 for `oculus_touch`, 0x180a16dcb for
+    `frame_controller`). The two orders differ: the Frame's stick x, stick y and trigger slots are the Touch's trigger,
+    stick x and stick y; its y and dpad_up slots the Touch's stick click; its x and dpad_left touch slots the Touch's
+    trigger touch. Seen by the user (2026-11-16, worn): the sticks did nothing (our controllers have no `thumbstick`
+    path), X and Y did nothing (no `dpad_*`), and the trigger moved the stick up on the PC's controller model (the
+    Frame's trigger slot). Fixed in the shim: vrlink's `IVRPaths_002` gets a StringToHandle that answers each Frame
+    path with our Touch control the PC reads from that slot (`input_paths` in quest1_vrlink.c).
+
+    Test (no one needs to wear the headset; the controllers can sleep): `tools/headset-dev/vrlink-buttons.py`, run on
+    the PC during a session, presses each Touch control through driver_quest1's simulated press
+    (docs/controllers-native.md) and checks the PC's render model of the controller (the component that moves or turns
+    touched/pressed: what games get). 2026-11-16: all 24 as expected (A, B, X, Y, menu, triggers and grips with
+    their touches, sticks on both axes, stick clicks and touches; the right Oculus button stays on the headset). The
+    model draws no touch for A, B, X and Y, so those four touches are read from the slot layout only.
 
 ### Picture quality (2026-11-16, read in driver_vrlink and the PC's settings)
 

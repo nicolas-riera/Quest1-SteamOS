@@ -322,7 +322,7 @@ public:
 	void Set(Comp c, float v)
 	{
 		if (c == forced)
-			v = 1;
+			v = forcedValue;
 		if (!activated || last[c] == v)
 			return;
 		last[c] = v;
@@ -344,7 +344,8 @@ public:
 
 	const bool left;
 	std::atomic<bool> activated{false};
-	int forced = -1; //!< debug: a Comp held at 1 (simulated press), update thread only
+	int forced = -1; //!< debug: a Comp held at forcedValue (simulated press), update thread only
+	float forcedValue = 1;
 	uint32_t id = k_unTrackedDeviceIndexInvalid;
 	PropertyContainerHandle_t container = k_ulInvalidPropertyContainer;
 	VRInputComponentHandle_t haptic = k_ulInvalidInputComponentHandle;
@@ -402,11 +403,14 @@ struct State
 	std::atomic<float> velocities{0.5f};
 	std::atomic<bool> debug{false};
 	time_t calMtime = 0;
-	// debug: a simulated button press from /tmp/quest1-ctrl-press ("<left|right> <system|a|b|trigger>")
+	// debug: a simulated press from /tmp/quest1-ctrl-press, "<left|right> <control> [value] [hold s] [delay s]"
+	// (docs/controllers-native.md): the hand also counts as connected from the file's write to the press's end, so
+	// a sleeping controller can be tested (Steam Link VR's buttons: tools/vrlink-buttons-test.py)
 	time_t pressMtime = 0;
 	int pressHand = -1;
 	Comp pressComp = C_SYSTEM_CLICK;
-	double pressUntil = 0;
+	float pressValue = 1;
+	double pressFrom = 0, pressUntil = 0;
 	void PollPress();
 
 	void Loop();
@@ -604,21 +608,54 @@ void State::PollPress()
 	pressMtime = st.st_mtime;
 	if (first && time(nullptr) - st.st_mtime > 5)
 		return;
-	char side[16] = "", what[16] = "";
+	char side[16] = "", what[24] = "";
+	float value = 1, hold = 0.15f, delay = 0;
 	FILE *f = fopen("/tmp/quest1-ctrl-press", "r");
 	if (!f)
 		return;
-	int n = fscanf(f, "%15s %15s", side, what);
+	int n = fscanf(f, "%15s %23s %f %f %f", side, what, &value, &hold, &delay);
 	fclose(f);
-	if (n != 2)
+	if (n < 2)
 		return;
+	// a and b are the right hand's primary and secondary buttons, x and y the left's
+	static const struct
+	{
+		const char *name;
+		Comp c;
+	} names[] = {{"system", C_SYSTEM_CLICK},
+	             {"system-touch", C_SYSTEM_TOUCH},
+	             {"a", C_PRIMARY_CLICK},
+	             {"x", C_PRIMARY_CLICK},
+	             {"a-touch", C_PRIMARY_TOUCH},
+	             {"x-touch", C_PRIMARY_TOUCH},
+	             {"b", C_SECONDARY_CLICK},
+	             {"y", C_SECONDARY_CLICK},
+	             {"b-touch", C_SECONDARY_TOUCH},
+	             {"y-touch", C_SECONDARY_TOUCH},
+	             {"trigger", C_TRIGGER_VALUE},
+	             {"trigger-touch", C_TRIGGER_TOUCH},
+	             {"grip", C_GRIP_VALUE},
+	             {"grip-touch", C_GRIP_TOUCH},
+	             {"stick-x", C_STICK_X},
+	             {"stick-y", C_STICK_Y},
+	             {"stick", C_STICK_CLICK},
+	             {"stick-touch", C_STICK_TOUCH},
+	             {"thumbrest", C_THUMBREST_TOUCH}};
+	int c = -1;
+	for (const auto &e : names)
+		if (!strcmp(what, e.name))
+			c = e.c;
+	if (c < 0) {
+		CLog("quest1: simulated press: unknown control \"%s\"\n", what);
+		return;
+	}
 	pressHand = !strcmp(side, "right") ? 1 : 0;
-	pressComp = !strcmp(what, "a")         ? C_PRIMARY_CLICK
-	            : !strcmp(what, "b")       ? C_SECONDARY_CLICK
-	            : !strcmp(what, "trigger") ? C_TRIGGER_VALUE
-	                                       : C_SYSTEM_CLICK;
-	pressUntil = MonoSeconds() + 0.15;
-	CLog("quest1: simulated press: %s %s\n", pressHand ? "right" : "left", what);
+	pressComp = (Comp)c;
+	pressValue = value;
+	pressFrom = MonoSeconds() + std::max(0.f, delay);
+	pressUntil = pressFrom + std::max(0.f, hold);
+	CLog("quest1: simulated press: %s %s = %.2f for %.2f s in %.2f s\n", pressHand ? "right" : "left", what, value,
+	     hold, delay);
 }
 
 void State::ReadKnobs()
@@ -680,7 +717,8 @@ void State::UpdateHand(int h, double now, const XrPosef &headPose, bool headVali
 		XrActionStateFloat s{XR_TYPE_ACTION_STATE_FLOAT};
 		return XR_SUCCEEDED(cxrGetActionStateFloat(xr.session, &gi, &s)) && s.isActive ? s.currentState : 0.f;
 	};
-	d->forced = pressHand == h && now < pressUntil ? (int)pressComp : -1;
+	d->forced = pressHand == h && now >= pressFrom && now < pressUntil ? (int)pressComp : -1;
+	d->forcedValue = pressValue;
 	// each hand's own button (left Menu, right Oculus) is its "system": both are bound in our dashboard bindings
 	float system = boolean(ACT_SYSTEM);
 	if (system > 0 && !hd.systemWasDown)
@@ -876,6 +914,13 @@ void State::UpdateHand(int h, double now, const XrPosef &headPose, bool headVali
 				     loc.pose.position.x, loc.pose.position.y, loc.pose.position.z);
 			}
 		}
+	} else if (pressHand == h && now < pressUntil) {
+		// a simulated press on a sleeping controller: held still below and in front of the head
+		p.vecPosition[0] = headPose.position.x + (h ? 0.2 : -0.2);
+		p.vecPosition[1] = headPose.position.y - 0.3;
+		p.vecPosition[2] = headPose.position.z - 0.4;
+		p.poseIsValid = true;
+		p.result = TrackingResult_Running_OK;
 	} else {
 		p.poseIsValid = false;
 		p.result = TrackingResult_Running_OutOfRange;
@@ -883,7 +928,7 @@ void State::UpdateHand(int h, double now, const XrPosef &headPose, bool headVali
 	}
 	p.willDriftInYaw = !MetaTracking();
 	// asleep controllers stop reporting: show them as off after a second without a pose
-	p.deviceIsConnected = now - hd.lastValid < 1.0;
+	p.deviceIsConnected = now - hd.lastValid < 1.0 || (pressHand == h && now < pressUntil);
 	if (valid != hd.wasValid)
 		CLog("quest1: %s controller %s\n", d->left ? "left" : "right", valid ? "tracking" : "lost");
 	hd.wasValid = valid;

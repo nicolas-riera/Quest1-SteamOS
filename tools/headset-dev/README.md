@@ -78,3 +78,6 @@ Stream picture placement (docs/streaming.md, "Measuring where the stream's frame
   recorded head instead (seconds since its start last on each line). Compare regions close to each other: under pitch
   and roll, distant ones move apart even when right. Snapshots show where frames land, not when: a frame shown a
   vsync late is right in them; check Monado's `late commit` count for that.
+- `vrlink-buttons.py [CONTROL ...]` (on the PC, `python -P`, during a Steam Link VR session, ssh to the headset):
+  presses each Touch control with driver_quest1's simulated press and checks what the PC's SteamVR draws of the
+  controller (its render model components); exits 1 on a mismatch (docs/streaming.md item 14).

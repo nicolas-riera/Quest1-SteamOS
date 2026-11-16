@@ -21,10 +21,6 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   still 48 kHz S16 stereo (`hw_params`): check PipeWire's clock (`pw-metadata -n settings`, `clock.force-rate`) and
   what Audacity changed (ALSA config in the user's home, `~/.asoundrc`, its own device choice). Audacity also lists
   30+ audio devices (ALSA's plugin list): hide what is not usable.
-- Steam Link VR controllers (worn, 1a38621): A, B and grip work; the sticks do nothing (position and click), the
-  triggers move the stick up on the 3D model (and do nothing in SteamVR's button test), X and Y do nothing. So the
-  binding file (src/steamvr-quest1/quest1/resources/input/quest1_touch_vrlink_bindings.json) maps the wrong inputs:
-  read the legacy layout vrlink expects (docs/streaming.md item 14) again.
 - Steam Link VR: still black flashes (fewer), and sometimes a flash brings a trembling that goes away once the
   headset's load drops (seen with desktop mode and Dolphin open).
 - A whole-system freeze (SSH too; ping fine): desktop mode open with Discover searching, headset on the forehead, then
