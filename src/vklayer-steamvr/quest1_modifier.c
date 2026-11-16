@@ -1522,27 +1522,72 @@ static void qcp_record(VkCommandBuffer cb, int k)
 	sets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, qcs.pl, 0, 1, &c.set, 0, NULL);
 	draw(cb, 3, 1, 0, 0);
 	end(cb);
+	// The insets' places (vrlink, quest1_views.h) and the level each is read at in the output (its texels per output
+	// pixel), before the levels are made: only what the inset pass reads is made.
+	struct q1_views views;
+	bool insets = qcp_views(&views);
+	float lod[2] = {0, 0}, iv[2][4];
+	for (int e = 0; insets && e < 2; e++) {
+		const float *w = views.wide[e], *r = views.inset[e];
+		// the inset is the view above its wide view, as large
+		iv[e][0] = w[0], iv[e][1] = w[1] - (w[3] - w[1]), iv[e][2] = w[2], iv[e][3] = w[1];
+		float sx = (iv[e][2] - iv[e][0]) * c.w / ((r[2] - r[0]) * c.ow),
+		      sy = (iv[e][3] - iv[e][1]) * c.h / ((r[3] - r[1]) * c.oh);
+		lod[e] = qcp_log2(sx > sy ? sx : sy);
+	}
 	// The smaller levels: Steam Link's foveated insets (a narrow field at 1024x1024) come out ~1.8 times smaller in
-	// the output; read at one level, their detail would alias.
+	// the output; read at one level, their detail would alias. Only the insets are read at those levels (the wide
+	// views at the copy's own), and a level only if the inset's level reaches it (textureLod reads the two around
+	// it): over the inset rows only and without the unread level, 0.57 ms of GPU a frame instead of 1.47 (median,
+	// src/vklayer-steamvr/streambench.c, 2026-11-16).
+	uint32_t levels = 1;
+	for (int e = 0; insets && e < 2; e++) {
+		uint32_t need = (uint32_t)lod[e] + 2; // levels floor(lod) and floor(lod) + 1
+		if (need > levels)
+			levels = need;
+	}
+	if (levels > QCP_LEVELS)
+		levels = QCP_LEVELS;
 	VkImageMemoryBarrier b = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
 	                          VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
 	                          VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, c.img,
 	                          {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
-	VkImageMemoryBarrier bl[2] = {b, b};
-	bl[1].srcAccessMask = 0;
-	bl[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-	bl[1].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	bl[1].subresourceRange.baseMipLevel = 1;
-	bl[1].subresourceRange.levelCount = QCP_LEVELS - 1;
-	barrier(cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 2, bl);
-	for (uint32_t l = 1; l < QCP_LEVELS; l++) {
-		int32_t w = (int32_t)(c.w >> (l - 1)), h = (int32_t)(c.h >> (l - 1));
-		VkImageBlit r = {{VK_IMAGE_ASPECT_COLOR_BIT, l - 1, 0, 1}, {{0, 0, 0}, {w, h, 1}},
-		                 {VK_IMAGE_ASPECT_COLOR_BIT, l, 0, 1}, {{0, 0, 0}, {w / 2, h / 2, 1}}};
-		blit(cb, c.img, VK_IMAGE_LAYOUT_GENERAL, c.img, VK_IMAGE_LAYOUT_GENERAL, 1, &r, VK_FILTER_LINEAR);
+	if (levels > 1) {
+		VkImageMemoryBarrier bl[2] = {b, b};
+		bl[1].srcAccessMask = 0;
+		bl[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		bl[1].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		bl[1].subresourceRange.baseMipLevel = 1;
+		bl[1].subresourceRange.levelCount = QCP_LEVELS - 1;
+		barrier(cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL,
+		        2, bl);
+	}
+	// each inset's rows, with a margin (the filter's taps stay inside: the blend is gone 1 % from the inset's edge),
+	// on a multiple of the smallest level's rows
+	const int32_t align = 1 << (QCP_LEVELS - 1);
+	int32_t band[2][2];
+	for (int e = 0; e < 2; e++) {
+		int32_t y0 = insets ? (int32_t)(iv[e][1] * c.h) - 2 * align : 0, y1 = insets ? (int32_t)(iv[e][3] * c.h) + 2 * align : 0;
+		y0 = y0 < 0 ? 0 : y0 / align * align;
+		y1 = y1 > (int32_t)c.h ? (int32_t)c.h : (y1 + align - 1) / align * align;
+		band[e][0] = y0, band[e][1] = y1;
+	}
+	for (uint32_t l = 1; l < levels; l++) {
+		int32_t w = (int32_t)(c.w >> (l - 1));
+		VkImageBlit r[2];
+		uint32_t n = 0;
+		for (int e = 0; e < 2; e++) {
+			int32_t y0 = band[e][0] >> (l - 1), y1 = band[e][1] >> (l - 1);
+			if (y1 <= y0)
+				continue;
+			r[n++] = (VkImageBlit){{VK_IMAGE_ASPECT_COLOR_BIT, l - 1, 0, 1}, {{0, y0, 0}, {w, y1, 1}},
+			                       {VK_IMAGE_ASPECT_COLOR_BIT, l, 0, 1}, {{0, y0 / 2, 0}, {w / 2, y1 / 2, 1}}};
+		}
+		if (n)
+			blit(cb, c.img, VK_IMAGE_LAYOUT_GENERAL, c.img, VK_IMAGE_LAYOUT_GENERAL, n, r, VK_FILTER_LINEAR);
 		b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 		b.subresourceRange.baseMipLevel = l;
-		if (l + 1 < QCP_LEVELS)
+		if (l + 1 < levels)
 			barrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &b);
 	}
 	// before vrcompositor reads it: level 0 by the copy pass, the others by the blits
@@ -1553,8 +1598,6 @@ static void qcp_record(VkCommandBuffer cb, int k)
 	barrier(cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
 	        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &b);
 	// What vrcompositor reads: each eye's half of the atlas, its inset blended into its wide view (nv12_inset.frag)
-	struct q1_views views;
-	bool insets = qcp_views(&views);
 	VkRect2D out = {{0, 0}, {c.ow, c.oh}};
 	VkRenderPassBeginInfo bo = {VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, NULL, qcs.rp, c.out_fb, out, 0, NULL};
 	begin(cb, &bo, VK_SUBPASS_CONTENTS_INLINE);
@@ -1566,14 +1609,10 @@ static void qcp_record(VkCommandBuffer cb, int k)
 		struct qcp_inset pc = {{0}};
 		VkRect2D half = {{0, (int32_t)(e * c.oh / 2)}, {c.ow, c.oh / 2}};
 		if (insets) {
-			const float *w = views.wide[e], *r = views.inset[e];
-			memcpy(pc.place, r, sizeof(pc.place));
-			// the inset is the view above its wide view, as large
-			float iv[4] = {w[0], w[1] - (w[3] - w[1]), w[2], w[1]};
-			memcpy(pc.view, iv, sizeof(pc.view));
-			// its texels per output pixel: the level that fits
-			float sx = (iv[2] - iv[0]) * c.w / ((r[2] - r[0]) * c.ow), sy = (iv[3] - iv[1]) * c.h / ((r[3] - r[1]) * c.oh);
-			pc.lod = qcp_log2(sx > sy ? sx : sy);
+			const float *w = views.wide[e];
+			memcpy(pc.place, views.inset[e], sizeof(pc.place));
+			memcpy(pc.view, iv[e], sizeof(pc.view));
+			pc.lod = lod[e];
 			// vrcompositor reads the wide view only (and a row around it, filtering)
 			int32_t y0 = (int32_t)(w[1] * c.oh) - 2, y1 = (int32_t)(w[3] * c.oh + 0.5f) + 2;
 			half.offset.y = y0 < 0 ? 0 : y0;

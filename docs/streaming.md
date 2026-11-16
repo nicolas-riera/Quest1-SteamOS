@@ -537,6 +537,11 @@ vrlink writes its own log, `~/.local/share/Steam/logs/vrlink.txt` (the PC's side
       are 1500x1664 for a 1024x1024 wide view) where each wide view gets its inset blended in, read at the level of
       the copy that fits its ~1.8 times reduction, with the edge of Valve's shader (`nv12_inset.frag`). It costs ~2.5 ms
       of GPU a frame: 58-60 fps against ~69 without it, 71 without any copy (dashboard open, panels forced on).
+      Timed alone (`src/vklayer-steamvr/streambench.c`, 2026-11-16, median of 200 with SteamVR running): the copy
+      1.63 ms, its smaller levels 1.47, the output 2.97. The smaller levels are read for the insets only, and only
+      the two the inset's level falls between (~0.96 here: levels 0 and 1): made over the insets' rows only and
+      without the unread level, 0.57 ms, so ~0.9 ms of GPU less a stream frame, the same picture. A fragment pass
+      per level instead of the blits, or the output as one pass per eye band: no gain.
     - The copies (and outputs) of one size share one memory: each frame copies only the frame vrcompositor then reads.
       vrlink shares 16 frame buffers, and 16 copies of 16 MB each were made as the session started: the headset swapped
       ~700 MB within seconds and stalled (Monado's re-projection too). ~150-250 MB now; vrcompositor's GPU memory went
