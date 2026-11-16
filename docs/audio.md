@@ -311,6 +311,35 @@ is still there (docs/todo.md).
 
 Restarting PipeWire cuts Steam's audio until Steam restarts (it does not reconnect to the PulseAudio server).
 
+## 2026-11-16: echo cancellation and noise suppression
+
+The user: the built-in microphone picks up everything, the speakers' sound and the fan's noise.
+`holo-audio install|ucm` now also writes `/etc/pipewire/pipewire.conf.d/51-quest1-mic-aec.conf`: PipeWire 1.4.9's
+`libpipewire-module-echo-cancel` with the WebRTC backend (`spa-0.2/aec/libspa-aec-webrtc`, both installed already).
+
+- **Topology.** `monitor.mode = true`: the module creates no sink; it captures `quest1-mic` and takes
+  `quest1-output`'s monitor as the echo reference (checked with `pw-link -l`), so game audio still goes straight to
+  `quest1-output`, no latency added. It offers the source `quest1-mic-aec` ("Microphone (echo cancelled)"), 1 channel,
+  `priority.session = 2200` (above `quest1-mic`'s 2100). The capture side is `node.passive`: nothing runs until an
+  application records from it.
+- **Settings.** WebRTC echo canceller and noise suppression (default on); AGC (`webrtc.gain_control`) off, extended
+  filter off (it made no measurable CPU difference).
+- **Default source.** WirePlumber keeps the last default it was given (`~/.local/state/wireplumber/default-nodes`,
+  `default.configured.audio.source`) and prefers it to priorities: on the headset it was `quest1-mic`, so with the
+  module loaded at runtime the default stayed the raw mic. `holo-audio` rewrites that line to `quest1-mic-aec` (works
+  while WirePlumber is stopped, i.e. at image build; a fresh image has no such file and the priority decides).
+- **Measured live** (module loaded in a separate `pw-cli -m` process, PipeWire not restarted; unloaded afterwards, the
+  running system is as before). The source exists, records frames (3-5 s capture, RMS ~125 on 16-bit, nothing
+  played; the recording was deleted on the headset). CPU: with nothing recording, 0 (PipeWire ~1.1 % of a core, as
+  before); while an application records from the processed source, about 15 % of one core (13-17 % over 10 s runs,
+  1.5 % of it PipeWire's own process, the rest the module's data loop) with or without AGC, extended filter and noise
+  suppression: the echo canceller itself dominates. Only while the mic is used (Steam voice chat, a recording).
+- **Not tested here** (no test sound may be played without the user): how well the echo is removed, and what the noise
+  suppression does to the voice.
+- **To judge by ear:** echo of the speakers in a recording or a voice call; fan noise; voice quality; if too quiet,
+  `webrtc.gain_control = true` in the drop-in. The default switch to the new source takes effect at the next
+  PipeWire/WirePlumber restart (rerun `holo-audio install`, or `wpctl set-default` its id once).
+
 ## Notes moved from the to-do list (2026-11-08): Audio
 
 History of measurements, fixes and open points as they were written in docs/todo.md (the to-do list now only

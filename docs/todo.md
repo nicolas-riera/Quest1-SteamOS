@@ -17,8 +17,9 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   closes between sounds (docs/audio.md), so find what Steam does at its start: a sound of its own, or a stream it
   opens and closes.
 - Microphone: noise suppression and echo cancellation (user, 2026-11-12: it picks up everything, from the speakers'
-  sound to the fan's noise). E.g. PipeWire's echo-cancel module (WebRTC) between the speakers and the mic, as the
-  default source.
+  sound to the fan's noise). Built 2026-11-16 (docs/audio.md: WebRTC echo-cancel source `quest1-mic-aec`, default
+  source, ~15 % of a core while the mic is used); left: the user's listening test (echo, fan noise, voice quality,
+  AGC on or off) after the image's next PipeWire restart.
 
 ## Tracking
 

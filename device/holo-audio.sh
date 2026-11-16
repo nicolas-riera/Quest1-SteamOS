@@ -393,6 +393,47 @@ context.objects = [
   }
 ]
 EOF
+	# Echo cancellation + noise suppression for the microphone (2026-11-16): the mic picked up the speakers
+	# and the fan. PipeWire's echo-cancel module (WebRTC) taps quest1-output's monitor as the echo reference
+	# (monitor.mode: no echo-cancel sink, so game audio goes straight to quest1-output, no added latency) and
+	# offers quest1-mic-aec, which WirePlumber prefers as default source (priority above quest1-mic's 2100)
+	# so Steam voice, SteamVR and apps use it. It only processes while something records from it
+	# (node.passive). WebRTC's noise suppression is on by default; AGC (gain_control) is off: it pumps the
+	# fan's noise up between words, turn it on if the voice is too quiet.
+	cat > /etc/pipewire/pipewire.conf.d/51-quest1-mic-aec.conf <<'EOF'
+# Quest 1 (holo-audio.sh): echo cancellation and noise suppression for quest1-mic
+context.modules = [
+  { name = libpipewire-module-echo-cancel
+    flags = [ nofail ]
+    args = {
+      library.name = aec/libspa-aec-webrtc
+      monitor.mode = true
+      node.latency = 1024/48000
+      capture.props = {
+        node.name = "quest1-mic-aec-capture"
+        target.object = "quest1-mic"
+        node.passive = true
+      }
+      source.props = {
+        node.name = "quest1-mic-aec"
+        node.description = "Microphone (echo cancelled)"
+        media.class = Audio/Source
+        priority.session = 2200
+      }
+      aec.args = {
+        webrtc.gain_control = false
+        webrtc.extended_filter = false
+      }
+    }
+  }
+]
+EOF
+	# WirePlumber remembers the default source it was last given (default-nodes) and prefers it to
+	# the priorities: point a remembered quest1-mic at the processed source (only effective while
+	# WirePlumber is stopped, e.g. when the image is built; a running one rewrites the file)
+	for f in /home/steamos/.local/state/wireplumber/default-nodes; do
+		[ -f "$f" ] && sed -i 's/^default.configured.audio.source=quest1-mic$/default.configured.audio.source=quest1-mic-aec/' "$f"
+	done
 	# no rtkit on Holo: let the user's PipeWire raise its own data threads to real time
 	# (module-rt), or vrcompositor's CPU load makes it underrun. Applies from the next login.
 	mkdir -p /etc/systemd/system/user@.service.d
