@@ -57,7 +57,14 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 
 ## Display
 
-- 90 Hz mode, selectable from the refresh rate setting (low priority). Base: github.com/TheCez/quest1-90hz-orangefox.
+- 90 Hz mode, selectable from the refresh rate setting (low priority). Base: github.com/TheCez/quest1-90hz-orangefox,
+  and a Reddit write-up (r/OculusQuest "I got a Quest 1 running at a real 90 Hz", Juspertinry's boot image and module):
+  only the device tree changes on Meta's kernel (`qcom,mdss-dsi-panel-framerate`, `max-refresh-rate` and the timing
+  bytes scaled ~1.67x); the check that it really runs at 90 is the panel clock against the DSI bit clock
+  (`pclk0_clk_src` rate = `dynamic_bitclk` / 6, 133.0056 MHz at 90), after a short blank to resync it. **Not every
+  panel takes it**: Samsung's (`qcom,mdss_dsi_sdc_lightman_video` in `mdss_mdp.panel` on the command line, the dev
+  headset's) does, AUO's stays at 72. So the setting shows 90 only on a panel known to work, and only once the kernel
+  reports the rate, with a fall back to 72 if not.
 - Per-panel lens decenter and roll from the calibration (`*_screen_offset.json`), once Meta's convention is known.
 - Scene mode (`/etc/quest1-warp-lens` 2, docs/performance.md) as the default in the image: the user checked it in
   the headset (2026-11-12). It also takes away the 4x MSAA system layer's ~25 ms a frame of mode 0 (Steam's loading
@@ -72,9 +79,6 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   avoid the readback: frames from the GPU process to vrcompositor without the CPU (CEF OSR has no shared texture
   path in Steam on Linux: only CChromePainterSharedBuffer). A lower device scale is visible (user's call). Not
   RenderMode=Direct for Steam: it froze the headset (2026-11-08). Must leave room for streaming later (user).
-- Steam's vrclient transfer ring: 256 MB, backed on first touch (kgsl-lazy), but Steam's webhelper cycles through it
-  ("Ring Buffer Wrapped!") so all of it ends up pinned for a few 8 MB frames in flight. Drop the pages far behind the
-  write position (kernel/kgsl-lazy.patch: unmap them and point the GPU back at the scratch page): ~200 MB.
 - Steam's VR overlay copy runs on llvmpipe (user, 2026-11-10: the CPU at ~100 % when the pointer moves over a Steam
   page): the pages render on the Adreno (webhelper GPU process, ANGLE Vulkan), but Steam's browser process copies
   each frame for the VR overlay with GLX on Mesa llvmpipe (`webhelper_vr.txt` "Loaded GL 4.5", docs/steam-gpu.md
