@@ -123,9 +123,9 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - SteamVR restarted alone (Steam kept running) breaks Steam's VR UI: steamwebhelper's GPU process takes GPU page faults when
   vrcompositor stops (2026-11-11 17:50 and 17:51, two restarts) and the dashboard then shows its lower half empty and loses
   its bottom bar (restarting Steam brought it back, user). SteamVR alone should restart cleanly.
-- A setting in the VR settings' Oculus Quest category, on by default: ignore the Oculus and Menu buttons while the
-  controller moves (they are easy to press by mistake on Touch controllers; Meta's OS and the Rift S, same controllers,
-  do the same).
+- Ignoring the Oculus and Menu buttons while the controller moves (2026-11-16, driver_quest1
+  `ignoreSystemWhileMoving`, docs/controllers-native.md): check worn that a press during a swing is ignored, a
+  deliberate one is not, the toggle shows in the VR settings' Oculus Quest category, and tune the thresholds.
 - Steam's compatibility rating defaults to SteamOS's rating instead of the Steam Frame's (user, 2026-11-15).
 
 ## Power

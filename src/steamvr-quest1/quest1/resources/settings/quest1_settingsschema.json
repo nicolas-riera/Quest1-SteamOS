@@ -4,6 +4,12 @@
 	"driver": "quest1",
 	"values": [
 		{
+			"name": "/settings/driver_quest1/ignoreSystemWhileMoving",
+			"control": "toggle",
+			"label": "Ignore Oculus and Menu buttons while moving",
+			"text": "A press of the Oculus or Menu button that begins while the controller swings or moves fast is ignored: on Touch controllers they are easy to press by mistake."
+		},
+		{
 			"name": "/settings/driver_quest1/clearSpatialAnchors",
 			"control": "button",
 			"value": true,

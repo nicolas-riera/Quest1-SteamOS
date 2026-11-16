@@ -293,6 +293,15 @@ SteamVR controllers:
   in the dashboard bar (it hides the UPower system battery while VR runs) and the controllers in
   the quick access device list (in the bar only when at 25 % or less).
 
+### The Oculus and Menu buttons while the controller moves (2026-11-16)
+
+They sit where the thumb lands when a Touch controller is swung, and get pressed by mistake (user, 2026-11-12; Meta's
+OS and the Rift S ignore them then). driver_quest1 (controllers.cpp, `IgnoreSystemWhileMoving`) ignores a press of a
+hand's system button (left Menu, right Oculus) that begins while the controller turns faster than 2.5 rad/s (~145
+deg/s) or, tracked, moves faster than 0.8 m/s, or within 0.15 s of it, until the button is released (the hold to
+recenter included). The setting `driver_quest1/ignoreSystemWhileMoving` (default on) is the toggle "Ignore Oculus and
+Menu buttons while moving" in the VR settings' Oculus Quest category. Thresholds not yet tuned worn.
+
 ### Calibrating the IMU mounting (two static poses, both hands at once)
 
 ```

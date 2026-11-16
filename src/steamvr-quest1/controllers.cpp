@@ -369,6 +369,9 @@ struct Hand
 	bool aligned = false;
 	double systemDownSince = 0;
 	bool recenteredThisHold = false;
+	double movingUntil = 0;     //!< the controller moved fast until then (IgnoreSystemWhileMoving)
+	bool systemIgnored = false; //!< this press of the system button is ignored (it began while moving)
+	bool systemWasDown = false;
 	double lastValid = -10;
 	bool wasValid = false;
 	//! Meta mode: the cameras have tracked it since the head's position was last lost (else it is searching)
@@ -640,6 +643,27 @@ void State::ReadKnobs()
 //! Hold the system button (menu / Oculus) this long to point the controller where the head looks.
 constexpr double kRecenterHold = 1.2; // Monado recenters the IMU heading at 1 s, this comes after
 
+//! The Oculus and Menu buttons sit where the thumb lands when the controller is swung, and get pressed by mistake
+//! (user, 2026-11-12; Meta's OS and the Rift S, same controllers, ignore them then). A press that begins while the
+//! controller turns or moves fast, or within kMovingHoldS of it, is ignored until the button is released. Setting
+//! driver_quest1/ignoreSystemWhileMoving (VR settings, "Oculus Quest"), on by default.
+constexpr double kMovingAngular = 2.5; // rad/s (~145 deg/s): a swing, not a deliberate press
+constexpr double kMovingLinear = 0.8;  // m/s
+constexpr double kMovingHoldS = 0.15;
+
+static bool IgnoreSystemWhileMoving(double now)
+{
+	static double readAt = -10;
+	static bool on = true;
+	if (now - readAt > 1.0) {
+		readAt = now;
+		EVRSettingsError err = VRSettingsError_None;
+		bool v = VRSettings() ? VRSettings()->GetBool("driver_quest1", "ignoreSystemWhileMoving", &err) : true;
+		on = err == VRSettingsError_None ? v : true;
+	}
+	return on;
+}
+
 void State::UpdateHand(int h, double now, const XrPosef &headPose, bool headValid, bool headTracked)
 {
 	TouchController *d = dev[h];
@@ -659,6 +683,13 @@ void State::UpdateHand(int h, double now, const XrPosef &headPose, bool headVali
 	d->forced = pressHand == h && now < pressUntil ? (int)pressComp : -1;
 	// each hand's own button (left Menu, right Oculus) is its "system": both are bound in our dashboard bindings
 	float system = boolean(ACT_SYSTEM);
+	if (system > 0 && !hd.systemWasDown)
+		hd.systemIgnored = now < hd.movingUntil && IgnoreSystemWhileMoving(now);
+	hd.systemWasDown = system > 0;
+	if (system == 0)
+		hd.systemIgnored = false;
+	else if (hd.systemIgnored)
+		system = 0;
 	d->Set(C_SYSTEM_CLICK, system);
 	d->Set(C_PRIMARY_CLICK, boolean(ACT_PRIMARY));
 	d->Set(C_PRIMARY_TOUCH, boolean(ACT_PRIMARY_TOUCH));
@@ -791,6 +822,19 @@ void State::UpdateHand(int h, double now, const XrPosef &headPose, bool headVali
 		p.vecDriverFromHeadTranslation[0] = dfh.t.x;
 		p.vecDriverFromHeadTranslation[1] = dfh.t.y;
 		p.vecDriverFromHeadTranslation[2] = dfh.t.z;
+		{ // for IgnoreSystemWhileMoving
+			bool fast = false;
+			if (vel.velocityFlags & XR_SPACE_VELOCITY_ANGULAR_VALID_BIT) {
+				const XrVector3f &w = vel.angularVelocity;
+				fast = w.x * w.x + w.y * w.y + w.z * w.z > kMovingAngular * kMovingAngular;
+			}
+			if (havePos && (vel.velocityFlags & XR_SPACE_VELOCITY_LINEAR_VALID_BIT)) {
+				const XrVector3f &v = vel.linearVelocity;
+				fast = fast || v.x * v.x + v.y * v.y + v.z * v.z > kMovingLinear * kMovingLinear;
+			}
+			if (fast)
+				hd.movingUntil = now + kMovingHoldS;
+		}
 		const float vs = velocities;
 		if (vs > 0 && (vel.velocityFlags & XR_SPACE_VELOCITY_ANGULAR_VALID_BIT)) {
 			Vec w = Rotate(hd.yaw, {vel.angularVelocity.x, vel.angularVelocity.y, vel.angularVelocity.z});
