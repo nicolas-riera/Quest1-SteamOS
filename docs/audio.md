@@ -340,6 +340,25 @@ The user: the built-in microphone picks up everything, the speakers' sound and t
   `webrtc.gain_control = true` in the drop-in. The default switch to the new source takes effect at the next
   PipeWire/WirePlumber restart (rerun `holo-audio install`, or `wpctl set-default` its id once).
 
+## 2026-11-16 (evening): an application opening the card's other PCMs broke the microphone
+
+The user installed Audacity (a Flatpak, the user's own app) and found no working microphone in it, 30+ audio devices
+listed, then no microphone anywhere (Steam Link VR included), and the sound lower-pitched. The kernel log of that boot
+(captured to the PC): at 19:21:55 Audacity's PortAudio opened the card's PCMs one by one to list them (`msm_pcm_open`
+on MultiMedia, hostless and proxy ports), the ADSP answered `ADSP_EFAILED` (ASM), `ADSP_EBADPARAM` (AFE memory unmap),
+and from 19:23 every capture start failed: `__afe_port_start: AFE enable for port 0x1001 failed -61` (PRI_MI2S_TX,
+the microphone's port), `ADSP_ENEEDMORE`, `q6asm_open_read failed`. Both `quest1-mic` and `quest1-mic-aec` then gave
+pure silence (RMS 0) until the next boot, and PipeWire was seen blocked in `afe_apr_send_pkt`. The card has ~40 PCMs
+(MultiMedia2..25, hostless, AFE proxy, Listen, compress offload) and nothing here uses any but hw:0,0 (MultiMedia1,
+PipeWire's sink and source).
+
+`holo-audio install|ucm` now writes `/etc/udev/rules.d/72-quest1-sound.rules`: every PCM of card 0 other than
+`pcmC0D0*`, and the compress devices, are root's only (mode 0600, no `uaccess`). An application then sees only
+hw:0,0 (held by PipeWire) and PipeWire's own devices (ALSA's default, PulseAudio). Checked on the headset: `arecord -D
+hw:0,1` as steamos gets "Permission denied"; PipeWire's output stays RUNNING and the microphone records (RMS ~24 in a
+quiet room, nothing played). The lower pitch the user heard came in the same incident; after the reboot both PCMs and
+PipeWire run at 48 kHz (`hw_params`, `clock.rate`), and the MI2S ports' rate controls read `KHZ_48`: to confirm by ear.
+
 ## Notes moved from the to-do list (2026-11-08): Audio
 
 History of measurements, fixes and open points as they were written in docs/todo.md (the to-do list now only

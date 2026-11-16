@@ -14,15 +14,9 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   2.3 GB (the user's apps), Steam 4 GB, `/usr` 5.3 GB. To do: with the user's go, delete `.debug`, the monado-service
   copies, `tmp`, `stream-crash-*` and the package cache there (~4 GB); grow that image (or not) as the user prefers;
   check what grows over a day of use (`du` before/after).
-- Microphone dead system-wide (Audacity, Steam Link VR): after the 2026-11-16 19:13 boot both `quest1-mic` and
-  `quest1-mic-aec` record pure silence (RMS 0, 2 s each), so the capture itself is dead, not the echo canceller.
-  Check the mixer path (`Mic Switch` etc., docs/audio.md "Mixer setup") at this boot, whether the echo-cancel module
-  holding the mic (it was set as default source by hand at 18:50) changes it, and the PCM (S16_LE mono 48 kHz, MMAP).
-  Lead: q1-hangwatch caught PipeWire blocked >5 s in `afe_apr_send_pkt` (the ADSP's audio front end) at 19:22:42.
-- Since Audacity was installed (a user app, not for the image), the sound is much lower-pitched (user). The sink is
-  still 48 kHz S16 stereo (`hw_params`): check PipeWire's clock (`pw-metadata -n settings`, `clock.force-rate`) and
-  what Audacity changed (ALSA config in the user's home, `~/.asoundrc`, its own device choice). Audacity also lists
-  30+ audio devices (ALSA's plugin list): hide what is not usable.
+- Audio after the Audacity incident (docs/audio.md, 2026-11-16 evening; other PCMs now closed to applications): the
+  user to confirm by ear that the pitch is normal again and that the microphone works in Steam Link VR and Audacity
+  (its "default" or PulseAudio device).
 - Steam Link VR: still black flashes (fewer), and sometimes a flash brings a trembling that goes away once the
   headset's load drops (seen with desktop mode and Dolphin open).
 - A whole-system freeze (SSH too; ping fine): desktop mode open with Discover searching, headset on the forehead, then

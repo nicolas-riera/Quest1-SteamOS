@@ -445,6 +445,23 @@ EOF
 	systemctl daemon-reload
 }
 
+# Only PipeWire's PCM (hw:0,0, MultiMedia1) stays open to users. The card has ~40 other PCMs (MultiMedia2..25,
+# hostless and proxy ports, Listen, compress offload) that nothing here uses, and opening them breaks the ADSP: an
+# application listing the devices (Audacity's PortAudio opens each, 2026-11-16 19:21) got ADSP_EFAILED, AFE memory
+# unmap and ADSP_ENEEDMORE errors on them, after which the microphone's AFE port (0x1001) no longer started
+# ("AFE enable for port 0x1001 failed") and every capture was silent until a reboot. Applications reach the card
+# through PipeWire (ALSA's default, PulseAudio).
+install_pcm_access() {
+	cat > /etc/udev/rules.d/72-quest1-sound.rules <<'EOF'
+# Quest 1 (holo-audio.sh): the card's PCMs other than hw:0,0 (PipeWire's) are root's only: opening them breaks the ADSP
+SUBSYSTEM=="sound", KERNEL=="pcmC0D[1-9]*|comprC0D*", OWNER="root", GROUP="root", MODE="0600", TAG-="uaccess"
+EOF
+	if [ -d /run/udev ]; then
+		udevadm control --reload
+		udevadm trigger --subsystem-match=sound
+	fi
+}
+
 enable_boot() {
 	systemctl enable holo-audio.service
 	echo "holo-audio: the ADSP now boots at every boot (holo-audio.service)"
@@ -457,6 +474,7 @@ do_install() {
 	chmod 755 /usr/local/sbin/holo-audio
 	install_ucm
 	install_pipewire_nodes
+	install_pcm_access
 	# Not enabled here: booting the ADSP is enabled with `holo-audio enable` once a manual
 	# `holo-audio start` worked. WirePlumber picks the card up whenever it appears (udev).
 	cat > /etc/systemd/system/holo-audio.service <<'EOF'
@@ -485,7 +503,7 @@ start | status) "$1" ;;
 enable) enable_boot ;;
 output) output "$2" ;;
 install) do_install ;;
-ucm) install_ucm; install_pipewire_nodes ;;
+ucm) install_ucm; install_pipewire_nodes; install_pcm_access ;;
 volkeys) install_volkeys ;;
 *) echo "usage: $0 install | start | enable | status | output speaker|headphones | ucm | volkeys"; exit 1 ;;
 esac
