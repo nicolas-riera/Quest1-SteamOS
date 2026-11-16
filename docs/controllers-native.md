@@ -320,4 +320,5 @@ vector, aim heading/pitch and positions once a second). Debug: `echo "left syste
 `thumbrest`, and the touches `a-touch`/`x-touch`, `b-touch`/`y-touch`, `trigger-touch`, `grip-touch`, `stick-touch`,
 `system-touch`. From the file's write to the press's end the hand counts as connected, held still below and in front of
 the head when its controller sleeps, so the buttons can be tested with no one wearing the headset (Steam Link VR's:
-`tools/headset-dev/vrlink-buttons.py`).
+`tools/headset-dev/vrlink-buttons.py`). One line each; a line `<left|right> connected <s>` keeps that hand connected
+for that long (0 ends it), across later presses.

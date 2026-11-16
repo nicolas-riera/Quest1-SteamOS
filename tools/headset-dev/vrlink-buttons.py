@@ -26,7 +26,6 @@ TESTS = [
     ("right", "grip", "button_grip", "moved"),
     ("right", "stick-x", "thumbstick", "moved"), ("right", "stick-y", "thumbstick", "moved"),
     ("right", "stick", "thumbstick", "P"), ("right", "stick-touch", "thumbstick", "T"),
-    ("right", "system", None, None),
     ("left", "x", "button_x", "P"), ("left", "x-touch", "button_x", "-"),
     ("left", "y", "button_y", "P"), ("left", "y-touch", "button_y", "-"),
     ("left", "system", "button_enter", "P"),
@@ -34,8 +33,9 @@ TESTS = [
     ("left", "grip", "button_grip", "moved"),
     ("left", "stick-x", "thumbstick", "moved"), ("left", "stick-y", "thumbstick", "moved"),
     ("left", "stick", "thumbstick", "P"), ("left", "stick-touch", "thumbstick", "T"),
+    ("right", "system", None, None),  # last: it opens the SteamVR dashboard (closed again at the end)
 ]
-DELAY, HOLD = 4.0, 2.0  # the controller shows up on the PC first (a new one takes ~3 s), then the press
+DELAY, HOLD = 1.5, 1.5  # both controllers stay connected for the whole run ("connected" below)
 
 dll = C.CDLL(OPENVR)
 dll.VR_InitInternal2.restype = C.c_uint32
@@ -130,10 +130,36 @@ def run(hand, control):
             if time.time() - t0 < DELAY - 0.3:
                 rest = s  # the last sample before the press
         time.sleep(0.02)
-    time.sleep(1.5)  # the controller drops off the PC before the next test
+    time.sleep(0.5)
     return rest is not None, seen
 
 
+# SteamVR keeps the controllers for its dashboard while it is open (vrlink's GetControllerState fails, nothing reaches
+# the PC): closed first as a player would, with the right controller's system button. Whether it is open is read from
+# vrlink's log (the "system flags" it sends the PC: 1 1 1 open, 0 0 0 closed), not asked from SteamVR: a new OpenVR
+# client (vrdash) opens the dashboard again. Both controllers stay connected for the whole run, as when held.
+def dashboard_open():
+    out = subprocess.run(["ssh", HOST, "grep VTE_DRIVER_SYSTEM_FLAGS /home/steamos/.local/share/Steam/logs/vrlink.txt"
+                          " | tail -1"], capture_output=True, text=True).stdout
+    return not out.strip().endswith("0 0 0")
+
+
+def press_file(text):
+    subprocess.run(["ssh", HOST, f"printf '{text}' > /tmp/quest1-ctrl-press"], check=True)
+
+
+def close_dashboard():
+    if dashboard_open():
+        press_file("right system 1 0.2 0.5\n")
+        time.sleep(3)
+    return not dashboard_open()
+
+
+press_file("left connected 1800\nright connected 1800\n")
+time.sleep(5)  # both on the PC (a new controller takes ~3 s)
+if not close_dashboard():
+    press_file("left connected 0\nright connected 0\n")
+    sys.exit("the SteamVR dashboard stays open: nothing would reach the PC")
 wanted = [t for t in TESTS if len(sys.argv) < 2 or f"{t[0]} {t[1]}" in sys.argv[1:]]
 failed = 0
 for hand, control, comp, how in wanted:
@@ -150,6 +176,8 @@ for hand, control, comp, how in wanted:
     failed += not ok
     print(f"{'ok  ' if ok else 'FAIL'} {hand:5} {control:14} -> {got}" +
           ("" if ok else f"   (expected {comp} {how})" if comp else "   (expected nothing)"), flush=True)
+close_dashboard()
+press_file("left connected 0\nright connected 0\n")
 dll.VR_ShutdownInternal()
 print(f"{len(wanted) - failed}/{len(wanted)} as expected")
 sys.exit(1 if failed else 0)

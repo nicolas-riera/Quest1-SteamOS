@@ -735,7 +735,12 @@ vrlink writes its own log, `~/.local/share/Steam/logs/vrlink.txt` (the PC's side
     (docs/controllers-native.md) and checks the PC's render model of the controller (the component that moves or turns
     touched/pressed: what games get). 2026-11-16: all 24 as expected (A, B, X, Y, menu, triggers and grips with
     their touches, sticks on both axes, stick clicks and touches; the right Oculus button stays on the headset). The
-    model draws no touch for A, B, X and Y, so those four touches are read from the slot layout only.
+    model draws no touch for A, B, X and Y, so those four touches are read from the slot layout only. Again 24/24 with
+    Steam in Frame mode (device type 5001, docs/frame-mode.md). While SteamVR's dashboard is open on the headset it
+    keeps the controllers: vrlink's GetControllerState fails and nothing reaches the PC (as on any SteamVR headset;
+    closing it with the system button gives them back). vrlink tells the PC the dashboard's state
+    (`VTE_DRIVER_SYSTEM_FLAGS` 1 1 1 open, 0 0 0 closed, in its log); the test reads it there, because a new OpenVR
+    client (vrdash) connecting opened the dashboard again within a second (2026-11-16).
 
 ### Picture quality (2026-11-16, read in driver_vrlink and the PC's settings)
 

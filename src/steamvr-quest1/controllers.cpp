@@ -403,14 +403,17 @@ struct State
 	std::atomic<float> velocities{0.5f};
 	std::atomic<bool> debug{false};
 	time_t calMtime = 0;
-	// debug: a simulated press from /tmp/quest1-ctrl-press, "<left|right> <control> [value] [hold s] [delay s]"
-	// (docs/controllers-native.md): the hand also counts as connected from the file's write to the press's end, so
-	// a sleeping controller can be tested (Steam Link VR's buttons: tools/vrlink-buttons-test.py)
-	time_t pressMtime = 0;
+	// debug: simulated presses from /tmp/quest1-ctrl-press, one per line: "<left|right> <control> [value] [hold s]
+	// [delay s]", or "<left|right> connected <s>" (docs/controllers-native.md). The hand counts as connected from the
+	// file's write to the press's end (or for the given time), so a sleeping controller can be tested (Steam Link VR's
+	// buttons: tools/headset-dev/vrlink-buttons.py)
+	struct timespec pressMtime = {};
 	int pressHand = -1;
 	Comp pressComp = C_SYSTEM_CLICK;
 	float pressValue = 1;
 	double pressFrom = 0, pressUntil = 0;
+	double connectedUntil[2] = {0, 0};
+	bool Simulated(int h, double now) const { return (pressHand == h && now < pressUntil) || now < connectedUntil[h]; }
 	void PollPress();
 
 	void Loop();
@@ -602,20 +605,15 @@ void State::PollCalibration()
 void State::PollPress()
 {
 	struct stat st;
-	if (stat("/tmp/quest1-ctrl-press", &st) != 0 || st.st_mtime == pressMtime)
+	if (stat("/tmp/quest1-ctrl-press", &st) != 0 ||
+	    (st.st_mtim.tv_sec == pressMtime.tv_sec && st.st_mtim.tv_nsec == pressMtime.tv_nsec))
 		return;
-	bool first = pressMtime == 0;
-	pressMtime = st.st_mtime;
+	bool first = pressMtime.tv_sec == 0;
+	pressMtime = st.st_mtim;
 	if (first && time(nullptr) - st.st_mtime > 5)
 		return;
-	char side[16] = "", what[24] = "";
-	float value = 1, hold = 0.15f, delay = 0;
 	FILE *f = fopen("/tmp/quest1-ctrl-press", "r");
 	if (!f)
-		return;
-	int n = fscanf(f, "%15s %23s %f %f %f", side, what, &value, &hold, &delay);
-	fclose(f);
-	if (n < 2)
 		return;
 	// a and b are the right hand's primary and secondary buttons, x and y the left's
 	static const struct
@@ -641,21 +639,37 @@ void State::PollPress()
 	             {"stick", C_STICK_CLICK},
 	             {"stick-touch", C_STICK_TOUCH},
 	             {"thumbrest", C_THUMBREST_TOUCH}};
-	int c = -1;
-	for (const auto &e : names)
-		if (!strcmp(what, e.name))
-			c = e.c;
-	if (c < 0) {
-		CLog("quest1: simulated press: unknown control \"%s\"\n", what);
-		return;
+	char line[128];
+	while (fgets(line, sizeof(line), f)) {
+		char side[16] = "", what[24] = "";
+		float value = 1, hold = 0.15f, delay = 0;
+		if (sscanf(line, "%15s %23s %f %f %f", side, what, &value, &hold, &delay) < 2)
+			continue;
+		int h = !strcmp(side, "right") ? 1 : 0;
+		double now = MonoSeconds();
+		if (!strcmp(what, "connected")) {
+			// the hand kept connected that long (value: seconds; 0 ends it)
+			connectedUntil[h] = now + std::max(0.f, value);
+			CLog("quest1: simulated %s controller connected for %.0f s\n", h ? "right" : "left", value);
+			continue;
+		}
+		int c = -1;
+		for (const auto &e : names)
+			if (!strcmp(what, e.name))
+				c = e.c;
+		if (c < 0) {
+			CLog("quest1: simulated press: unknown control \"%s\"\n", what);
+			continue;
+		}
+		pressHand = h;
+		pressComp = (Comp)c;
+		pressValue = value;
+		pressFrom = now + std::max(0.f, delay);
+		pressUntil = pressFrom + std::max(0.f, hold);
+		CLog("quest1: simulated press: %s %s = %.2f for %.2f s in %.2f s\n", h ? "right" : "left", what, value, hold,
+		     delay);
 	}
-	pressHand = !strcmp(side, "right") ? 1 : 0;
-	pressComp = (Comp)c;
-	pressValue = value;
-	pressFrom = MonoSeconds() + std::max(0.f, delay);
-	pressUntil = pressFrom + std::max(0.f, hold);
-	CLog("quest1: simulated press: %s %s = %.2f for %.2f s in %.2f s\n", pressHand ? "right" : "left", what, value,
-	     hold, delay);
+	fclose(f);
 }
 
 void State::ReadKnobs()
@@ -914,7 +928,7 @@ void State::UpdateHand(int h, double now, const XrPosef &headPose, bool headVali
 				     loc.pose.position.x, loc.pose.position.y, loc.pose.position.z);
 			}
 		}
-	} else if (pressHand == h && now < pressUntil) {
+	} else if (Simulated(h, now)) {
 		// a simulated press on a sleeping controller: held still below and in front of the head
 		p.vecPosition[0] = headPose.position.x + (h ? 0.2 : -0.2);
 		p.vecPosition[1] = headPose.position.y - 0.3;
@@ -928,7 +942,7 @@ void State::UpdateHand(int h, double now, const XrPosef &headPose, bool headVali
 	}
 	p.willDriftInYaw = !MetaTracking();
 	// asleep controllers stop reporting: show them as off after a second without a pose
-	p.deviceIsConnected = now - hd.lastValid < 1.0 || (pressHand == h && now < pressUntil);
+	p.deviceIsConnected = now - hd.lastValid < 1.0 || Simulated(h, now);
 	if (valid != hd.wasValid)
 		CLog("quest1: %s controller %s\n", d->left ? "left" : "right", valid ? "tracking" : "lost");
 	hd.wasValid = valid;
