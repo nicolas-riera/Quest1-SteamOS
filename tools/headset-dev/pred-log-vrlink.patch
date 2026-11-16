@@ -1,0 +1,81 @@
+# Test-only patch (never commit it applied): /tmp/q1-predlog logs each vrlink submit's pose (/tmp/q1pred-sub.txt)
+# and the head's true pose (/tmp/q1pred-head.txt); /tmp/q1-angtau MS low-passes the angular rate again for an A/B.
+# Analysis: tools/headset-dev/predfit.py (tools/headset-dev/README.md).
+--- a/src/v4l2shim/quest1_vrlink.c
++++ b/src/v4l2shim/quest1_vrlink.c
+@@ -448,6 +448,28 @@
+ 	else if (!eye_l && !eye_r && !count && last_picture && now - last_picture < 200000000ull) {
+ 		return 0; // VRCompositorError_None
+ 	}
++	{ // test only (pred-log-vrlink.patch): /tmp/q1-predlog: each submit's pose to /tmp/q1pred-sub.txt
++		static uint64_t chk;
++		static FILE *lf;
++		if (now - chk > 300000000ull) {
++			chk = now;
++			if (access("/tmp/q1-predlog", F_OK) == 0) {
++				if (!lf)
++					lf = fopen("/tmp/q1pred-sub.txt", "w");
++			} else if (lf) {
++				fclose(lf);
++				lf = NULL;
++			}
++		}
++		if (lf && eye_l) {
++			float m[12];
++			memcpy(m, (const char *)eye_l + 16, sizeof(m));
++			fprintf(lf, "%llu", (unsigned long long)now);
++			for (int i = 0; i < 12; i++)
++				fprintf(lf, " %.6f", m[i]);
++			fprintf(lf, "\n");
++		}
++	}
+ 	return real_submit_set(self, index, count, handles, eye_l, eye_r, bounds_l, bounds_r, flags, seconds);
+ }
+ 
+@@ -551,6 +573,46 @@
+ 		// 2026-11-17). On the user's recorded head (85 s, 92 ms ahead) the low-pass made the prediction error 4.6 deg
+ 		// rms against 2.9 without, for 10 % less frame-to-frame shake (docs/streaming.md item 15).
+ 		memcpy(o + RAW_ANGULAR, p.ang, sizeof(p.ang));
++		{ // test only (pred-log-vrlink.patch): /tmp/q1-angtau MS low-passes the angular velocity again (A/B)
++			static uint64_t chk, last;
++			static double tau, sm[3];
++			if (now - chk > 300000000ull) {
++				chk = now;
++				FILE *f = fopen("/tmp/q1-angtau", "r");
++				if (!f || fscanf(f, "%lf", &tau) != 1)
++					tau = 0;
++				if (f)
++					fclose(f);
++			}
++			double dt = last ? (double)(now - last) * 1e-9 : 0;
++			last = now;
++			double k = tau > 0 && dt > 0 && dt < 0.1 ? 1 - exp(-dt / (tau * 1e-3)) : 1;
++			for (int i = 0; i < 3; i++)
++				sm[i] += k * (p.ang[i] - sm[i]);
++			if (tau > 0)
++				memcpy(o + RAW_ANGULAR, sm, sizeof(sm));
++		}
++		{ // test only (pred-log-vrlink.patch): the head's pose as the driver gave it, to /tmp/q1pred-head.txt
++			static uint64_t chk;
++			static int64_t lastt;
++			static FILE *lf;
++			if (now - chk > 300000000ull) {
++				chk = now;
++				if (access("/tmp/q1-predlog", F_OK) == 0) {
++					if (!lf)
++						lf = fopen("/tmp/q1pred-head.txt", "w");
++				} else if (lf) {
++					fclose(lf);
++					lf = NULL;
++				}
++			}
++			if (lf && p.time_ns != lastt) {
++				lastt = p.time_ns;
++				fprintf(lf, "%lld %lld %.7f %.7f %.7f %.7f %.5f %.5f %.5f %.5f %.5f %.5f\n", (long long)p.time_ns,
++				        (long long)lead, p.q[0], p.q[1], p.q[2], p.q[3], p.pos[0], p.pos[1], p.pos[2], p.ang[0], p.ang[1],
++				        p.ang[2]);
++			}
++		}
+ 	}
+ 	pthread_mutex_unlock(&lock);
+ 	return r;

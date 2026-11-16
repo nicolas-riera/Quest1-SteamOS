@@ -60,6 +60,12 @@ Stream picture placement (docs/streaming.md, "Measuring where the stream's frame
   "X Y Z" deg/s, `/tmp/q1-veloff` "X Y Z" cm/s; and `/tmp/q1-labellog`: each submit's pose to `/tmp/q1lab.txt`. With
   pcmarker next to q1marker, the headset still: a pose that is right in the headset shows the PC's marker at 0 px
   for any change of the pose the PC renders with (docs/streaming.md item 13, 2026-11-13 night).
+- `pred-log-vrlink.patch` (test only, to the shim) and `predfit.py TAG...` (on the PC): with `/tmp/q1-predlog`, each
+  vrlink submit's pose and the head's true pose are logged (`/tmp/q1pred-sub.txt`, `/tmp/q1pred-head.txt`, renamed
+  `sub-TAG.txt` / `head-TAG.txt`); predfit gives how many ms after its submit each frame's pose matches the head, and
+  the error at the display. With `replay-head-monado.patch` (`/tmp/q1-replay` 1; write 0 then 1 to restart the
+  recording, so that runs compare the same motion) no one needs to wear the headset. `/tmp/q1-angtau MS` puts a
+  low-pass of the rate back for an A/B (docs/streaming.md item 15).
 - `vrc-trace-layer.patch` (test only, to the layer, never commit it applied): traces of vrcompositor's descriptors,
   buffer bindings, uniform updates and buffer copies (with the copied data), and a lock-in on its mapped memory, to
   find where it keeps the stream frame's pose (its header has the trigger files).

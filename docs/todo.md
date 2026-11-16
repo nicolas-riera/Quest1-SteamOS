@@ -212,8 +212,8 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
     (`steamvr/preferredFoveatedAngle`, see the frame rate below) and the PC's sharpening (`driver_vrlink/useSharpening`).
   - Latency: measure it (the head's pose to the picture's pose on screen) and find where it goes: the PC's ~90 ms
     prediction says how far ahead it must guess.
-  - Now that the stream's pose is right, check whether the 40 ms low-pass of the angular velocity vrlink gets (an
-    interim against the trembling, 2026-11-13) still helps or only adds swim (blind A/B worn).
+  - The PC's prediction no longer overshoots from a delayed rate (the low-pass is gone, docs/streaming.md item 15):
+    the user to confirm worn that the black edges and the avatar's head no longer bounce.
   - Position: vrlink submits no depth, so a position error of the PC's prediction is not corrected at all.
   - On a system that had run for hours, the stream was 16.6 px rms off the world in Monado's output (2.5-3 px fresh).
     Follow it over a long run (`mjit.py` every few minutes, with vrcompositor's fps, fds and memory) to find which of

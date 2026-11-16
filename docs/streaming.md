@@ -650,8 +650,8 @@ vrlink writes its own log, `~/.local/share/Steam/logs/vrlink.txt` (the PC's side
         constants or `vkCmdUpdateBuffer` (the stream's pose is in neither: mapped memory).
       - On a smooth motion the PC's prediction is right and nothing shows (the earlier benches). Worn, the PC predicts
         ~90 ms ahead (5.9° of picture for a 60°/s rate) from the angular velocity: its noise and the heartbeat's jolts
-        make the pose rendered with change from frame to frame, and that shows. So the shim low-passes the angular
-        velocity it gives vrlink (40 ms; user, blind A/B worn: less than none, 20 or 100 ms). Offline on the user's
+        make the pose rendered with change from frame to frame, and that shows. So the shim low-passed the angular
+        velocity it gives vrlink (40 ms; user, blind A/B worn: less than none, 20 or 100 ms; removed 2026-11-17, item 15). Offline on the user's
         recorded head (Meta's poses, the PC's prediction simulated): the shake above ~10 Hz falls as the filter gets
         slower (0.34° rms raw, 0.30° at 40 ms, 0.28° at 100 ms) while the error that follows the head's turns grows
         (the stream swims): a trade-off only, an adaptive (one-euro) filter barely better.
@@ -741,6 +741,26 @@ vrlink writes its own log, `~/.local/share/Steam/logs/vrlink.txt` (the PC's side
     closing it with the system button gives them back). vrlink tells the PC the dashboard's state
     (`VTE_DRIVER_SYSTEM_FLAGS` 1 1 1 open, 0 0 0 closed, in its log); the test reads it there, because a new OpenVR
     client (vrdash) connecting opened the dashboard again within a second (2026-11-16).
+
+15. **The PC's prediction "bounced"** (user, 2026-11-17: on a sharp turn the black edges and the user's own avatar
+    head in VRChat visibly overshoot and come back; the controllers a little too). The shim's 40 ms low-pass of the
+    angular velocity (item 13, 2026-11-13) was the cause: the PC predicts ~90 ms ahead, and a delayed rate keeps the
+    prediction going after the head stops (and short when it starts). It was there because vrcompositor did not
+    correct fast changes of the frame's pose; since 1efbd78 it corrects them exactly, so the rate goes as measured.
+    - Bench, no one wearing the headset (`tools/headset-dev/pred-log-vrlink.patch` in the shim,
+      `replay-head-monado.patch` in Monado, the panels on): the user's recorded head (85 s) replayed at Monado's input
+      during a stream, each submitted frame's pose against the head's true pose after the submit (`predfit.py`; a
+      constant rotation between the two spaces fitted out). Same 84 s of the recording each (2026-11-17):
+
+      | angular rate | frames match the head at | error at submit+30 ms (rms / moving / p99) |
+      |---|---|---|
+      | as measured | submit + 20 ms | 2.53 / 3.66 / 8.8 deg |
+      | low-passed 40 ms | submit + 10 ms | 3.93 / 5.73 / 13.2 deg |
+
+      A frame is shown ~25-30 ms after its submit (vrcompositor takes it at its next frame, ~7 ms on average, and
+      predicts ~21 ms to the panels): the PC's prediction now lands within ~10 ms of that. Offline on the same
+      recording, the frame-to-frame shake grows by ~10 % without the low-pass; the headset corrects it.
+    - Left: the rest is the latency itself (the error grows ~0.6 deg rms per 10 ms of horizon): docs/todo.md.
 
 ### Picture quality (2026-11-16, read in driver_vrlink and the PC's settings)
 
