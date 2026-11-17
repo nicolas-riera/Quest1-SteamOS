@@ -105,7 +105,6 @@ PORT = {
         "renderSystemLayerInDistortPass": False,  # True (the Steam Frame's): vrcompositor crashes at start (2026-11-08)
         "useFacetRenderer": False,
         "depthReprojectionMesh": False,
-        "enableSimplifiedShaders": False,
         "showMirrorView": False,
         "enableHomeApp": False,
     },
@@ -135,6 +134,10 @@ def main():
     except OSError:
         monado_lens = False
     d["steamvr"]["enableAchromaticDistortion"] = monado_lens
+    # and its simplified shaders (the achromatic ones, which need the setting above): 0.8 ms of GPU a frame less with
+    # a stream (11.8 -> 11.0, 2026-11-17). They take the eye texture as linear light: the layer then gives them the
+    # stream as an sRGB image (quest1_modifier.c, qcp_srgb_out), the colours unchanged (docs/streaming.md)
+    d["steamvr"]["enableSimplifiedShaders"] = monado_lens
     # safe mode after a crash (same as /root/vrunsafe.py)
     s = d.setdefault("steamvr", {})
     s["enableSafeMode"] = False

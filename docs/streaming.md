@@ -805,6 +805,15 @@ copy gives the right colours, but the copies made mutable for it cost ~9 ms (45 
 also need vrcompositor to see a spatial encoding of 2 for vrlink's submits (not found) and its own YUV input (R=Cr,
 G=Y, B=Cb).
 
+2026-11-17: on. The layer's output for vrcompositor (the wide views with their insets) is now an sRGB image of its own
+when `enableSimplifiedShaders` is on (read from steamvr.vrsettings once, as vrcompositor does): `nv12_inset.frag`
+writes linear light (`LINEAR_OUT`, a specialization constant), the sampler decodes it, the simplified shaders see what
+they expect. Not mutable (no UBWC lost). `holo-frame-mode.sh` sets the setting with `enableAchromaticDistortion`
+(Monado does the lens and its chromatic aberration; vrcompositor's pass is a copy). Measured with a stream and the
+dashboard open, panels on: vrcompositor 11.8 -> 11.0 ms of GPU a frame (`vrgpu.sh`, three 2 s windows each), Monado's
+warp 2.8 ms either way; colours of the stream and of the dashboard the same within 0.3/255 in vrcompositor's output
+(snapshots, region means). The 2.2 ms of 2026-11-16 was not found again.
+
 Plan:
 0. ~~Capture vrlink's own output~~ done (above).
 1. ~~`/dev/video-dec0` and a decode test~~ done (`vrdevice_path`, items 5 and 6).

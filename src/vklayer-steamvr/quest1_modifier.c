@@ -907,6 +907,7 @@ static struct
 	VkDescriptorSetLayout dsl2;
 	VkPipelineLayout pl2;
 	VkPipeline pipe2;
+	VkRenderPass rp_out; //!< the output's render pass: qcs.rp, or its sRGB twin (qcp_srgb_out)
 	VkDescriptorPool pool;
 	struct
 	{
@@ -934,6 +935,41 @@ static float qcp_log2(float x)
 		e += 1.0f;
 	}
 	return x < 1.0f ? 0.0f : e + (x - 1.0f) * (1.4427f - 0.4427f * (x - 1.0f));
+}
+
+//! Whether vrcompositor takes the stream's frame as linear: with `steamvr/enableSimplifiedShaders` it draws through
+//! its simplified (achromatic) distortion shaders, which sample the eye texture as linear light and encode it for
+//! the display (2.2 ms of GPU a frame less than the full ones, docs/streaming.md "The distortion shader"); an RGBA8
+//! output holding the stream's sRGB values then came out washed out. So the output is then an sRGB image, written
+//! as linear light by nv12_inset.frag (LINEAR_OUT) and decoded by the sampler as vrcompositor reads it. Its own
+//! format, not a view of another (mutable images lose UBWC compression: ~9 ms a frame, 2026-11-16). vrcompositor
+//! reads the setting once at its start, as this is read once.
+static bool qcp_srgb_out(void)
+{
+	static int v = -1;
+	if (v >= 0)
+		return v;
+	v = 0;
+	const char *home = getenv("HOME");
+	char path[512];
+	snprintf(path, sizeof(path), "%s/.local/share/Steam/config/steamvr.vrsettings", home ? home : "");
+	FILE *f = fopen(path, "r");
+	if (!f)
+		return v;
+	static char buf[65536];
+	size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+	fclose(f);
+	buf[n] = 0;
+	const char *k = strstr(buf, "\"enableSimplifiedShaders\"");
+	if (k) {
+		k += strlen("\"enableSimplifiedShaders\"");
+		while (*k == ' ' || *k == '\t' || *k == ':')
+			k++;
+		v = strncmp(k, "true", 4) == 0;
+	}
+	LOG("dma-buf: Steam Link VR frames for vrcompositor's %s shaders: %s output\n", v ? "simplified" : "full",
+	    v ? "sRGB" : "RGBA8");
+	return v;
 }
 
 //! nv12_inset.frag's push constants
@@ -1051,6 +1087,11 @@ static bool qcs_init(struct device *d, VkDevice device)
 	VkRenderPassCreateInfo rc = {VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, NULL, 0, 1, &att, 1, &sub, 2, dep};
 	if (r == VK_SUCCESS)
 		r = d->CreateRenderPass(device, &rc, NULL, &qcs.rp);
+	qcs.rp_out = qcs.rp;
+	if (r == VK_SUCCESS && qcp_srgb_out()) {
+		att.format = VK_FORMAT_R8G8B8A8_SRGB;
+		r = d->CreateRenderPass(device, &rc, NULL, &qcs.rp_out);
+	}
 	PFN_vkCreateShaderModule csm = (PFN_vkCreateShaderModule)d->gdpa(device, "vkCreateShaderModule");
 	PFN_vkDestroyShaderModule dsm = (PFN_vkDestroyShaderModule)d->gdpa(device, "vkDestroyShaderModule");
 	VkShaderModule vs = VK_NULL_HANDLE, fs = VK_NULL_HANDLE;
@@ -1120,7 +1161,12 @@ static bool qcs_init(struct device *d, VkDevice device)
 	if (r == VK_SUCCESS)
 		r = csm(device, &mi, NULL, &fs);
 	st[1].module = fs;
+	VkBool32 linear_out = qcp_srgb_out();
+	VkSpecializationMapEntry se = {0, 0, sizeof(linear_out)};
+	VkSpecializationInfo si = {1, &se, sizeof(linear_out), &linear_out};
+	st[1].pSpecializationInfo = &si;
 	gp.layout = qcs.pl2;
+	gp.renderPass = qcs.rp_out;
 	if (r == VK_SUCCESS)
 		r = d->CreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gp, NULL, &qcs.pipe2);
 	if (vs)
@@ -1153,12 +1199,12 @@ static int qcp_find(VkImage nv12)
 }
 
 //! Call with qcs.lock held: an RGBA8 image bound to the shared memory of its size (one per size: see above).
-static VkResult qcp_image(struct device *d, VkDevice device, uint32_t w, uint32_t h, uint32_t levels, VkImage *img,
-                          int *mem)
+static VkResult qcp_image(struct device *d, VkDevice device, uint32_t w, uint32_t h, uint32_t levels, VkFormat format,
+                          VkImage *img, int *mem)
 {
 	VkImageCreateInfo ic = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
 	ic.imageType = VK_IMAGE_TYPE_2D;
-	ic.format = VK_FORMAT_R8G8B8A8_UNORM;
+	ic.format = format;
 	ic.extent = (VkExtent3D){w, h, 1};
 	ic.mipLevels = levels;
 	ic.arrayLayers = 1;
@@ -1239,12 +1285,13 @@ static VkResult qcp_out_get(struct device *d, VkDevice device, struct qnv_copy *
 	VkImageView view = VK_NULL_HANDLE;
 	VkFramebuffer fb = VK_NULL_HANDLE;
 	int mem = -1;
-	VkResult r = qcp_image(d, device, c->ow, c->oh, 1, &img, &mem);
+	const VkFormat format = qcp_srgb_out() ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
+	VkResult r = qcp_image(d, device, c->ow, c->oh, 1, format, &img, &mem);
 	VkImageViewCreateInfo vc = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, NULL, 0, img, VK_IMAGE_VIEW_TYPE_2D,
-	                            VK_FORMAT_R8G8B8A8_UNORM, {0}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+	                            format, {0}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
 	if (r == VK_SUCCESS)
 		r = d->CreateImageView(device, &vc, NULL, &view);
-	VkFramebufferCreateInfo fc = {VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, NULL, 0, qcs.rp, 1, &view, c->ow, c->oh, 1};
+	VkFramebufferCreateInfo fc = {VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, NULL, 0, qcs.rp_out, 1, &view, c->ow, c->oh, 1};
 	if (r == VK_SUCCESS)
 		r = ((PFN_vkCreateFramebuffer)d->gdpa(device, "vkCreateFramebuffer"))(device, &fc, NULL, &fb);
 	if (r != VK_SUCCESS) {
@@ -1324,7 +1371,7 @@ static int qcp_get(struct device *d, VkDevice device, int n)
 	struct qnv_copy c = {.nv12 = qnv[n].image, .mem = -1, .w = qnv[n].w, .h = qnv[n].h};
 	c.ow = c.w * 3 / 2;
 	c.oh = c.h * 3 / 2;
-	VkResult r = qcp_image(d, device, c.w, c.h, QCP_LEVELS, &c.img, &c.mem);
+	VkResult r = qcp_image(d, device, c.w, c.h, QCP_LEVELS, VK_FORMAT_R8G8B8A8_UNORM, &c.img, &c.mem);
 	if (r == VK_SUCCESS)
 		r = qcp_out_get(d, device, &c);
 	VkSamplerYcbcrConversionInfo cinfo = {VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_INFO, NULL, qcs.conv};
@@ -1599,7 +1646,7 @@ static void qcp_record(VkCommandBuffer cb, int k)
 	        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &b);
 	// What vrcompositor reads: each eye's half of the atlas, its inset blended into its wide view (nv12_inset.frag)
 	VkRect2D out = {{0, 0}, {c.ow, c.oh}};
-	VkRenderPassBeginInfo bo = {VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, NULL, qcs.rp, c.out_fb, out, 0, NULL};
+	VkRenderPassBeginInfo bo = {VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, NULL, qcs.rp_out, c.out_fb, out, 0, NULL};
 	begin(cb, &bo, VK_SUBPASS_CONTENTS_INLINE);
 	bind(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, qcs.pipe2);
 	VkViewport vo = {0, 0, (float)c.ow, (float)c.oh, 0, 1};
@@ -1783,7 +1830,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateImageView(VkDevice device, const VkI
 		pthread_mutex_lock(&qcs.lock);
 		c.image = qcp[k].out;
 		pthread_mutex_unlock(&qcs.lock);
-		c.format = VK_FORMAT_R8G8B8A8_UNORM;
+		c.format = qcp_srgb_out() ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
 		c.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 		c.components = (VkComponentMapping){0};
 		return next(device, &c, alloc, out);

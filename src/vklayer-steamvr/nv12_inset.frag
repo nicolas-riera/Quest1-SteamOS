@@ -10,6 +10,8 @@ layout(push_constant) uniform Inset
 	vec4 view;  // the inset's own view in the atlas
 	float lod;  // its level here
 } pc;
+// quest1_modifier.c's qcp_srgb_out: the output is an sRGB image and takes linear light (the copy holds sRGB values)
+layout(constant_id = 0) const bool LINEAR_OUT = false;
 layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 color;
 void main()
@@ -22,5 +24,7 @@ void main()
 		if (w > 0.0)
 			c = mix(c, textureLod(frame, mix(pc.view.xy, pc.view.zw, t), pc.lod).rgb, w);
 	}
+	if (LINEAR_OUT)
+		c = mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), c));
 	color = vec4(c, 1.0);
 }
