@@ -309,3 +309,9 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - While the headset's install system (the small Linux that builds the image on the headset) is building, the
   power LED blinks white <-> purple.
 - Dual boot with a boot selector in the headset (very low priority).
+
+## Hand tracking (branch hand-tracking, docs/hand-tracking.md)
+- Worn test of Meta's hands: `echo auto > /etc/quest1-hands`, then check tracked status values, the hand's pose space, the retargeted skeleton, pinch gestures (system / dashboard trigger).
+- Deploy the `android-q1handsd` unit in the image (holo-android-tracking setup, build-native) and merge the branch.
+- Menu icon near the palm (overlay) and a joint overlay; the vrlink hand path (probably controller inputs only).
+
