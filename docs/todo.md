@@ -140,6 +140,9 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - Passthrough sometimes goes black and comes back with its fade-in, as if turned off and on at once (user,
   2026-11-10, with desktop mode and a stream open: the CPU was saturated). q1-ptprovider logged no disable and
   vrcompositor no roomview restart then: catch it with `PT_DUMP=1` (record states once a second) while it happens.
+- Turning the head fast sideways shows black at the edges, at best in one eye only (user, 2026-11-17): the
+  reprojected camera picture leaves areas no camera covers for that eye. Fill them, either by stretching the edge
+  pixels or by reprojecting the other camera's view into that eye.
 - q1-ptprovider takes 20-21 % of a core while passthrough shows (2026-11-16, after the composite's NEON rewrite:
   docs/passthrough.md): the composite itself is ~2 ms an eye a camera frame; profile the rest (`perf top -p`).
 - The camera test in SteamVR's camera settings works (the four cameras, docs/passthrough.md "The camera test") but
