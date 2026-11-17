@@ -20,9 +20,9 @@
     "url": "https://steamdeck-images.steamos.cloud/recovery/steamframe-oobe-repair-20260922.5153644-0.3.0.img.bz2",
     "sha256": "3a4a077f1b1f40688ab3279affcb56776bd97c54db1573e7c65fc52a97106676"
   },
-  "frame_source": "recovery",
+  "frame_source": "ota",
   "steam_frame_ota": {
-    "comment": "The other source of the same files, up to date and smaller (~3.7 GB instead of 7): Valve's public Steam Frame update server. It has no full image: a RAUC bundle (a squashfs holding the casync index of the rootfs) and a chunk store; the build rebuilds the 10 GiB rootfs from the chunks and checks it against rootfs_sha256. Used when \"frame_source\" is \"ota\" (default \"recovery\": steam_frame above).",
+    "comment": "The other source of the same files, up to date and smaller (~3.7 GB instead of 7): Valve's public Steam Frame update server. It has no full image: a RAUC bundle (a squashfs holding the casync index of the rootfs) and a chunk store; the build rebuilds the 10 GiB rootfs from the chunks and checks it against rootfs_sha256. Used when \"frame_source\" is \"ota\" (the default since the move to SteamVR 2.19.3; \"recovery\" selects steam_frame above, SteamVR 2.17.10).",
     "base": "https://steamdeck-images.steamos.cloud/vr/",
     "buildid": "20261113.6134720",
     "version": "0.5.9",

@@ -22,6 +22,15 @@ python3 - "$R" <<'PY'
 import json, os, sys
 R = sys.argv[1]
 
+# The Frame's own HMD driver (drivers/cv: driver_cv, XRService, libArcturusPerception, DSP firmware, ~150 MB) is
+# useless here (our driver_quest1 is the HMD) and fatal from SteamVR 2.19 on: vrcompositor dlopens
+# libArcturusPerception.so from it for its motion estimator, whose platform check aborts off the Frame's SoCs
+# ("Expecting only to run on either SM8650 or SM8250"). Without the directory the load just fails, as in 2.17.
+if os.path.isdir(os.path.join(R, "drivers", "cv")):
+    import shutil
+    shutil.rmtree(os.path.join(R, "drivers", "cv"))
+    print("removed: drivers/cv (the Frame's HMD driver)")
+
 def edit(rel, marker, steps):
     """steps: (anchor line, 'before'|'after'|'replace', text). Skipped when marker is already in the file."""
     p = os.path.join(R, rel)
