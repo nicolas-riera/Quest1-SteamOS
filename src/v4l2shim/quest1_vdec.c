@@ -267,12 +267,15 @@ struct q1dec *q1dec_find(int fd)
 // reconfiguration, and the kernel's copy then gives an error instead of a crash (which would take Steam down with
 // vrlink; process_vm_readv cannot read these mappings at all: EFAULT). The decoder itself stays allocated while
 // `lock` is held (q1dec_forget takes it first).
-bool q1dec_client_frame_luma(unsigned index, unsigned mean[4], unsigned *peak)
+bool q1dec_client_frame_sample(unsigned index, unsigned mean[4], unsigned *peak, unsigned chroma[2])
 {
-	enum { ROWS = 8, COLS = 16 };
-	static uint8_t px[4][ROWS][COLS];
+	enum { ROWS = 8, COLS = 16, UVROWS = 4, UVCOLS = 8 };
+	static struct {
+		uint8_t y[4][ROWS][COLS];
+		uint8_t uv[4][UVROWS][UVCOLS][2]; // NV12: U then V, at half the size, after stride x scan bytes of Y
+	} px;
 	static int pipefd[2] = {-1, -1};
-	struct iovec remote[4 * ROWS * COLS];
+	struct iovec remote[4 * ROWS * COLS + 4 * UVROWS * UVCOLS];
 	bool ok = false;
 	pthread_mutex_lock(&lock);
 	if (pipefd[0] < 0 && pipe2(pipefd, O_CLOEXEC | O_NONBLOCK) < 0) {
@@ -297,12 +300,23 @@ bool q1dec_client_frame_luma(unsigned index, unsigned mean[4], unsigned *peak)
 					remote[n].iov_base = b->map + off;
 					remote[n++].iov_len = 1;
 				}
+		for (unsigned q = 0; q < 4; q++)
+			for (unsigned r = 0; r < UVROWS; r++)
+				for (unsigned c = 0; c < UVCOLS; c++) {
+					size_t row = (q * (e->ch / 4) + (2 * r + 1) * (e->ch / 4) / (2 * UVROWS)) / 2;
+					size_t off = (size_t)e->stride * e->scan + row * e->stride +
+					             (((2 * c + 1) * e->cw / (2 * UVCOLS)) & ~1u);
+					if (off + 2 > b->size)
+						off = 0;
+					remote[n].iov_base = b->map + off;
+					remote[n++].iov_len = 2;
+				}
 		struct dma_buf_sync sy = {DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ};
 		syscall(SYS_ioctl, b->fd, DMA_BUF_IOCTL_SYNC, &sy);
 		ssize_t got = writev(pipefd[1], remote, (int)n);
 		ok = got == (ssize_t)sizeof(px);
 		while (got > 0) { // empty the pipe whatever came
-			ssize_t r = read(pipefd[0], px, sizeof(px));
+			ssize_t r = read(pipefd[0], &px, sizeof(px));
 			if (r <= 0)
 				break;
 			got -= r;
@@ -318,12 +332,21 @@ bool q1dec_client_frame_luma(unsigned index, unsigned mean[4], unsigned *peak)
 		unsigned sum = 0;
 		for (unsigned r = 0; r < ROWS; r++)
 			for (unsigned c = 0; c < COLS; c++) {
-				sum += px[q][r][c];
-				if (px[q][r][c] > *peak)
-					*peak = px[q][r][c];
+				sum += px.y[q][r][c];
+				if (px.y[q][r][c] > *peak)
+					*peak = px.y[q][r][c];
 			}
 		mean[q] = sum / (ROWS * COLS);
 	}
+	unsigned su = 0, sv = 0;
+	for (unsigned q = 0; q < 4; q++)
+		for (unsigned r = 0; r < UVROWS; r++)
+			for (unsigned c = 0; c < UVCOLS; c++) {
+				su += px.uv[q][r][c][0];
+				sv += px.uv[q][r][c][1];
+			}
+	chroma[0] = su / (4 * UVROWS * UVCOLS);
+	chroma[1] = sv / (4 * UVROWS * UVCOLS);
 	return true;
 }
 

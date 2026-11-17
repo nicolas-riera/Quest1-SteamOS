@@ -775,6 +775,12 @@ vrlink writes its own log, `~/.local/share/Steam/logs/vrlink.txt` (the PC's side
       shape of the sharp inset, the grid around it, black between): vrlink forwards no skybox to the headset (no such
       code in either side's binaries), so the PC's compositor drew it into the inset only. Not reproduced with the
       PC's default environment (both views drawn). Open (docs/todo.md).
+    - Worn the same day (VRChat): runs of 19-69 black pictures as VRChat started on the PC (its own black screens),
+      single ones later. The probe also logs pictures with no chroma (green); the green stream the user saw that day
+      was vrcompositor's simplified shader instead (holo-frame-mode.sh, "The distortion shader" below).
+    - Multilink: with the headset on the PC's USB cable (usb0, the development link) vrlink receives the whole stream on
+      both links, 141 Mbit/s over USB and 145 over Wi-Fi, ~0.5 core of receive threads and USB interrupt work. Kept:
+      the user wants Valve's multilink as it is.
 
 ### Picture quality (2026-11-16, read in driver_vrlink and the PC's settings)
 
@@ -813,6 +819,12 @@ they expect. Not mutable (no UBWC lost). `holo-frame-mode.sh` sets the setting w
 dashboard open, panels on: vrcompositor 11.8 -> 11.0 ms of GPU a frame (`vrgpu.sh`, three 2 s windows each), Monado's
 warp 2.8 ms either way; colours of the stream and of the dashboard the same within 0.3/255 in vrcompositor's output
 (snapshots, region means). The 2.2 ms of 2026-11-16 was not found again.
+
+Off again the same day: worn, the whole stream turned green whenever the headset drew nothing over it (no chaperone,
+dashboard closed; user). With no overlay in the pass vrcompositor draws the stream with its plain achromatic shader,
+which the layer does not replace (it replaces `distort_ps_layered` only), and that shader read the frame wrongly. The
+snapshots above were all taken with overlays in the pass. The layer's sRGB output stays, unused while the setting is
+off; to try again, replace the plain achromatic shader too and test with every overlay hidden.
 
 Plan:
 0. ~~Capture vrlink's own output~~ done (above).

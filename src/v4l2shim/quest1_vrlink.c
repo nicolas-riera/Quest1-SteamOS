@@ -426,9 +426,9 @@ static void publish_views(const void *const eye[2], const void *const bounds[2],
 // What the user sees as a black flash, logged (journal, "quest1_v4l2: vrlink:") with the time of day, so that a flash
 // seen worn can be matched: no new picture from vrlink for more than 100 ms (vrcompositor shows the last one again,
 // re-projected: a freeze, not black), an empty submit passed on (no picture for 200 ms: vrcompositor draws no stream),
-// and a black picture (the whole decoded atlas black: the PC sent black). A run of black pictures is one
-// line, with its length. Nothing of it was seen on the table under load (2026-11-17: desktop mode, 500 MB taken,
-// load 19): the cause must show worn.
+// a black picture (the whole decoded atlas black: the PC sent black) and a green one (no chroma). A run of black or
+// green pictures is one line, with its length. Nothing of it was seen on the table under load (2026-11-17: desktop
+// mode, 500 MB taken, load 19). Worn the same day: runs of 19-69 black pictures as VRChat started (its own black).
 static void flash_log(const char *fmt, ...)
 {
 	struct timespec rt;
@@ -447,7 +447,7 @@ static void flash_log(const char *fmt, ...)
 static void flash_watch(int32_t index, bool picture, bool passed_empty, uint64_t now)
 {
 	static uint64_t last_picture, gap_logged;
-	static unsigned black_run, black_total, empty_run, gaps_unlogged;
+	static unsigned black_run, black_total, empty_run, gaps_unlogged, green_run;
 	if (passed_empty) {
 		if (!empty_run++) {
 			if (last_picture)
@@ -476,8 +476,20 @@ static void flash_watch(int32_t index, bool picture, bool passed_empty, uint64_t
 	}
 	last_picture = now;
 	// black: every sample at most 24 (video black is 16; Aurora, a dark scene, has means of 29-53 and bright stars)
-	unsigned m[4], peak;
-	bool black = index >= 0 && q1dec_client_frame_luma((unsigned)index, m, &peak) && peak <= 24;
+	unsigned m[4], peak, uv[2];
+	bool sampled = index >= 0 && q1dec_client_frame_sample((unsigned)index, m, &peak, uv);
+	bool black = sampled && peak <= 24;
+	// green: what a picture with no chroma (U and V near 0 instead of 128 for grey) looks like, the mean chroma of the
+	// whole atlas far below grey on both axes. (The green stream of 2026-11-17 was vrcompositor's simplified shader,
+	// holo-frame-mode.sh; this tells a decoder or PC fault from the headset's drawing.)
+	bool green = sampled && uv[0] < 80 && uv[1] < 80;
+	if (green) {
+		if (!green_run++)
+			flash_log("green picture (no chroma): U %u V %u, luma %u %u %u %u", uv[0], uv[1], m[0], m[1], m[2], m[3]);
+	} else if (green_run) {
+		flash_log("green pictures ended after %u", green_run);
+		green_run = 0;
+	}
 	if (black) {
 		if (!black_run++)
 			flash_log("black picture from the PC");
