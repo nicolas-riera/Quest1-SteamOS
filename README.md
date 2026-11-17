@@ -1,7 +1,6 @@
 # SteamOS on the Oculus Quest
 
-[![Status: experimental](https://img.shields.io/badge/status-experimental-orange)](#work-in-progress)
-[![Device: Oculus Quest 1](https://img.shields.io/badge/device-Oculus%20Quest%201-1c1e20)](#what-works)
+[![Device: Oculus Quest](https://img.shields.io/badge/device-Oculus%20Quest-1c1e20)](#what-works)
 [![SteamOS Holo arm64](https://img.shields.io/badge/SteamOS-Holo%20arm64-1a9fff?logo=steam&logoColor=white)](docs/rootfs-build.md)
 [![SteamVR on the headset](https://img.shields.io/badge/SteamVR-on%20the%20headset-1a9fff?logo=steam&logoColor=white)](docs/steamvr-port.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)

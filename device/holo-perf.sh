@@ -144,7 +144,7 @@ EOF
 mkdir -p /etc/systemd/system/system.slice.d
 printf '[Slice]\nMemoryLow=8G\n' >/etc/systemd/system/system.slice.d/quest1-memory.conf
 for u in quest1-steamvr:700M quest1-frame-dashboard:400M monado:150M android-trackingservice:150M \
-	android-sensors-hal:64M android-q1trackd:32M android-ovrstub:16M q1-ptprovider:64M q1-camoverlay:64M; do
+	android-sensors-hal:64M android-q1trackd:32M android-ovrstub:16M q1-ptprovider:64M q1-camoverlay:64M q1-perfhud:16M; do
 	mkdir -p /etc/systemd/system/${u%%:*}.service.d
 	printf '[Service]\nMemoryLow=%s\n' "${u#*:}" >/etc/systemd/system/${u%%:*}.service.d/quest1-memory.conf
 done
