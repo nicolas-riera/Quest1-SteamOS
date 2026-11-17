@@ -150,6 +150,13 @@ static void get_hands(int64_t t, struct q1hands_shm *m)
 		memset(m->raw, 0, sizeof(m->raw));
 		return;
 	}
+	uint64_t sc = ((u64_fn)vt[2])(hands); /* Optional<float>: the float in the low 32 bits, has_value in byte 4 */
+	float scale = 0;
+	if ((sc >> 32) & 1) {
+		uint32_t bits = (uint32_t)sc;
+		memcpy(&scale, &bits, 4);
+	}
+	m->hand_scale = scale;
 	static struct hands_state s;
 	memset(&s, 0, sizeof(s));
 	s = ((hands_get_state_fn)vt[0])(hands, &t);
@@ -317,9 +324,7 @@ static int do_dump(double seconds)
 	while (!stop && now_ns() - t0 < (int64_t)(seconds * 1e9)) {
 		int64_t t = now_ns();
 		get_hands(t, &m);
-		void **vt = *(void ***)hands;
-		uint64_t en = ((u64_fn)vt[3])(hands);
-		printf("%.2f enabled %016llx\n", (t - t0) / 1e9, (unsigned long long)en);
+		printf("%.2f enabled %u scale %.3f\n", (t - t0) / 1e9, m.hands_enabled, m.hand_scale);
 		for (int h = 0; h < 2; h++) {
 			struct q1hands_hand *o = &m.hand[h];
 			printf("  %c status %u tracked %u ts %.3f root rot [%.3f %.3f %.3f %.3f] pos [%.3f %.3f %.3f] conf "
