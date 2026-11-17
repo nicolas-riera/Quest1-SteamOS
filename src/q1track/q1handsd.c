@@ -363,8 +363,7 @@ static int do_serve(double hz)
 	if (vfd >= 0) {
 		fchmod(vfd, 0666);
 		if (ftruncate(vfd, 1024) != 0)
-			fprintf(stderr, "q1handsd: handviz file size failed
-");
+			fprintf(stderr, "q1handsd: handviz file size failed\n");
 		close(vfd);
 	}
 	rename(Q1HANDS_SHM_PATH ".tmp", Q1HANDS_SHM_PATH);
