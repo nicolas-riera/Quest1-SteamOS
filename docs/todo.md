@@ -208,9 +208,21 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 ## Streaming
 
 - Steam Link VR (docs/streaming.md, section 2): a new picture each frame, a sharp centre (user, 2026-11-12: "it's
-  sharp") and no trembling any more (2026-11-16, blind A/B worn: "it doesn't tremble at all any more"), but it flashes black
+  sharp"), and on SteamVR 2.19.3 "it nearly doesn't tremble any more" (user, 2026-11-17, item 13), but it flashes black
   when the headset is loaded (the dashboard open) and its latency is still a bit high (user, 2026-11-16). On the table
   (2026-11-16, after the CPU split, device/holo-cpuset.sh) it runs at ~71 fps with the dashboard open or not: check worn.
+  - Putting the headset on: a strong tremble for a moment before the stream settles (user, 2026-11-17): the change
+    from 9 fps (panels off) to 72, the PC's rate control and prediction catching up. Measure it (stepsnap while
+    Monado switches the panels on) and find which side lags.
+  - The PC's chroma key (SteamVR beta, Camera settings, "Key Content": games draw a key colour where the room view
+    should show): the headset shows the key colour (green). 2.19's vrcompositor keys only in its simplified shader
+    for YUV ("spatial encoding 2") input, `distort_ps_achromatic_se2_ck`, and logs "Chroma key (virtual) room view
+    support"; the layer converts vrlink's NV12 itself, so the key must be applied there (alpha where the colour is
+    near the key) with vrcompositor blending the stream over the room view.
+  - Encode sizes other than 1024 a view (user, 2026-11-17): below 1024 the picture is wrong in the headset; both
+    smaller and larger must work (the layer prewarms 1024x4096 buffers; venus's stride and alignment).
+  - The edges look painted ("oil painting", user, 2026-11-17): it was the PC lowering the quality while the decoder
+    was slow (fixed, item 13); to judge again, then 2.19's new `sharpening` settings.
   - Controller buttons to the PC (1a38621): vrlink now accepts the controllers and reads our binding, but it found no
     controller then (they were asleep): check worn that each button, stick, trigger and grip reaches the PC's game
     (`vrcmd --pollcontrollers` on the PC), and which PC input the left X/Y land on (vrlink sends the Frame's left
@@ -230,8 +242,9 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
     these takes it there (vrcompositor's `sync_fence` leak is fixed: PR #4, display-event fences from a pool):
     - The headset slowing down over time: 64-71 fps at the start, 55 fps 90 minutes later, ~380 MB available, swap
       in use, load ~14.
-  - Black flashes (user, 2026-11-12): vrlink logs no decoder reset outside the session's start; not seen on the table
-    (2026-11-16: 60 snapshots with the dashboard open, no black frame): catch them worn.
+  - Black flashes (user, 2026-11-12, still on 2026-11-17): one worn was a second without a picture as the dashboard
+    opened, with datagrams dropped (now fewer: vrlink's receive threads realtime, 8 MB buffers, docs/streaming.md
+    item 16); match the next ones with the shim's log (`journalctl -b | grep "quest1_v4l2: vrlink: [0-9]"`).
   - GPU (user, 2026-11-16: a stable 72 fps with margin, for PCs that send views above 1024): vrcompositor takes
     8-15 ms of GPU a frame with the stream depending on the session, ~12 typically (kgsl trace: one batch a frame), so
     there is no margin. Not the layer's inset blend (off: the same), not memory fragmentation (compaction before a

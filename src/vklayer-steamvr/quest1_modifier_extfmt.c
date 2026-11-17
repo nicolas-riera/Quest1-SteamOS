@@ -212,6 +212,8 @@ static struct
 } qnv_imp[128];
 static atomic_int qnv_nimp;
 
+static void qsp_image_imported(VkImage image, int fd); // quest1_modifier_pose.c
+
 static void qnv_imported(VkDeviceMemory m, int fd)
 {
 	int own = fcntl(fd, F_DUPFD_CLOEXEC, 0);
@@ -301,6 +303,7 @@ static bool qnv_import(struct device *d, VkDevice device, const VkMemoryAllocate
 		*r = d->AllocateMemory(device, &mi, alloc, out);
 		if (*r == VK_SUCCESS) {
 			qnv_imported(*out, fd);
+			qsp_image_imported(ded->image, fd); // which of vrlink's buffers it is (quest1_modifier_pose.c)
 			// the frame's luma for qcp_hold
 			void *m = mmap(NULL, (size_t)size, PROT_READ, MAP_SHARED, fd, 0);
 			if (m != MAP_FAILED) {

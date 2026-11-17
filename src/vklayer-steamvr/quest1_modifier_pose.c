@@ -32,7 +32,8 @@
 // the picture's pose), the layer writes it into the snapshot itself: each eye's pose and its inverse, made from the
 // picture's head pose and the eye's offset from the head (qsp_repose). "vrlink's last submit before the copy" was
 // wrong for ~10 % of the pictures when vrlink submitted while vrcompositor took the frame; the picture is now told by
-// its frame buffer, learnt per NV12 image (vrcompositor imports each of vrlink's 16 buffers once). Measured with the
+// its frame buffer, known for each NV12 image vrcompositor imports (qsp_image_imported: kcmp against vrlink's own
+// fds of its buffers, which the shim publishes). Measured with the
 // pose sent to the PC stepped by 1.5°: 0 of 112 pictures off (4 of 40 without the fix); with ±1° of random pitch at
 // every pose read, 2.5 px rms left instead of 7.2. Without the shim's poses (an older shim) the bind's snapshot stays,
 // as for 2.17.
@@ -48,7 +49,7 @@ static struct
 	double moved_deg, neither_deg;                  //!< how far off those not found were, summed
 	uint64_t log_ns;
 } qsp = {PTHREAD_MUTEX_INITIALIZER};
-static unsigned qsp_guess, qsp_learnt; //!< pictures paired with the last submit (not learnt yet), by their buffer
+static unsigned qsp_guess, qsp_learnt, qsp_byfd; //!< pictures paired with the last submit, by the votes, by buffer
 
 static bool qsp_off(void)
 {
@@ -123,11 +124,12 @@ static void qsp_count(bool copied)
 		if (qsp.log_ns)
 			LOG("stream: %u descriptor sets bound with a copy of the stream's pose in 60 s, %u left as they were; the "
 			    "picture's pose was the bind's %u times, the submit's %u, made from them %u (%.2f deg away), not made "
-			    "%u (%.2f deg off), the picture not known %u; pictures found by their frame buffer %u, as the last "
-			    "submit %u\n",
+			    "%u (%.2f deg off), the picture not known %u; pictures found by their buffer %u, by the votes %u, as "
+			    "the last submit %u\n",
 			    qsp.copies, qsp.other, qsp.bind, qsp.submit, qsp.moved, qsp.moved ? qsp.moved_deg / qsp.moved : 0.0,
-			    qsp.neither, qsp.neither ? qsp.neither_deg / qsp.neither : 0.0, qsp.unknown, qsp_learnt, qsp_guess);
-		qsp_learnt = qsp_guess = 0;
+			    qsp.neither, qsp.neither ? qsp.neither_deg / qsp.neither : 0.0, qsp.unknown, qsp_byfd, qsp_learnt,
+			    qsp_guess);
+		qsp_byfd = qsp_learnt = qsp_guess = 0;
 		qsp.copies = qsp.other = qsp.bind = qsp.submit = qsp.moved = qsp.neither = qsp.unknown = 0;
 		qsp.moved_deg = qsp.neither_deg = 0;
 		qsp.log_ns = t;
@@ -159,6 +161,8 @@ static void qsp_paired(int kind, float dist)
 
 // --- Which submit of vrlink's the picture is, and its pose (quest1_views.h q1_poses)
 
+static bool qsp_poses_fd; //!< the shim publishes vrlink's frame buffers' fds (fd[] in q1_poses)
+
 static const struct q1_poses *qsp_poses(void)
 {
 	static _Atomic(const struct q1_poses *) p;
@@ -170,8 +174,10 @@ static const struct q1_poses *qsp_poses(void)
 	atomic_store(&tried_ns, t);
 	int fd = open(Q1_POSES_PATH, O_RDONLY | O_CLOEXEC);
 	struct stat st;
-	void *v = fd >= 0 && fstat(fd, &st) == 0 && st.st_size >= (off_t)sizeof(*m)
+	const size_t old_size = offsetof(struct q1_poses, fd); // a shim without the frame buffers' fds
+	void *v = fd >= 0 && fstat(fd, &st) == 0 && st.st_size >= (off_t)old_size
 	              ? mmap(NULL, sizeof(*m), PROT_READ, MAP_SHARED, fd, 0) : MAP_FAILED;
+	qsp_poses_fd = v != MAP_FAILED && st.st_size >= (off_t)sizeof(*m);
 	if (fd >= 0)
 		close(fd);
 	if (v == MAP_FAILED)
@@ -229,8 +235,12 @@ static int qsp_image_frame(VkImage image, int32_t last, uint64_t now)
 		qsp_img[k].image = image;
 	}
 	qsp_img[k].used_ns = now;
-	if (last >= 0 && last < 16 && qsp_img[k].votes[last] < 60000)
-		qsp_img[k].votes[last]++;
+	// Halved whenever one count reaches 32, so that what was learnt fades: a new vrlink (the stream restarted) brings
+	// new buffers, which vrcompositor may import at the handles of the old ones. Kept for ever, the old counts made
+	// those images unknown for the whole session (0 found by their buffer, 2026-11-17).
+	if (last >= 0 && last < 16 && ++qsp_img[k].votes[last] >= 32)
+		for (int i = 0; i < 16; i++)
+			qsp_img[k].votes[i] /= 2;
 	int best = -1;
 	unsigned top = 0, second = 0;
 	for (int i = 0; i < 16; i++) {
@@ -243,9 +253,88 @@ static int qsp_image_frame(VkImage image, int32_t last, uint64_t now)
 	return top >= QSP_VOTES_MIN && top >= 2 * second ? best : -1;
 }
 
+// Which of vrlink's frame buffers an image is, exactly: the shim publishes vrlink's process and its own fd of each
+// buffer (the dma-buf it has the decoder write into, quest1_views.h), and an image vrcompositor imports is a dma-buf of
+// that same file, which kcmp tells across the two processes (same user, no pid namespace between them). Checked at the
+// import, and again once a second while not found (the import may come before vrlink handed the buffer to the
+// decoder). The votes above stay for when it is not known (an older shim). With the votes alone half the pictures
+// were still guessed as the last submit, ~10 % of them wrongly, and worn the stream trembled now and then, nearly all
+// the time with the dashboard open (2026-11-17). (The handles vrlink submits name fds of vrcompositor's that are not
+// the buffer: a shared memory file each.)
+static struct
+{
+	VkImage image;
+	int own;   //!< the layer's fd of its dma-buf, kept while its buffer is not known
+	int frame; //!< which of vrlink's frame buffers it is, -1 while not known
+	uint64_t tried_ns;
+} qsp_imfd[QSP_IMAGES];
+static unsigned qsp_imfd_next;
+static pthread_mutex_t qsp_imfd_lock = PTHREAD_MUTEX_INITIALIZER;
+
+//! Which of vrlink's frame buffers dma-buf fd `own` is, -1 if none (or no shim that tells).
+static int qsp_frame_of(int own)
+{
+	const struct q1_poses *p = qsp_poses();
+	if (!p || !qsp_poses_fd || own < 0)
+		return -1;
+	pid_t me = getpid(), vr = (pid_t)__atomic_load_n(&p->pid, __ATOMIC_RELAXED);
+	for (int i = 0; vr > 0 && i < Q1_POSES; i++) {
+		int f = __atomic_load_n(&p->fd[i], __ATOMIC_RELAXED);
+		if (f >= 0 && syscall(SYS_kcmp, me, vr, 0 /* KCMP_FILE */, own, f) == 0)
+			return i;
+	}
+	return -1;
+}
+
+//! quest1_modifier_extfmt.c: NV12 image `image` was imported from dma-buf fd `fd` (an fd of the layer's own).
+static void qsp_image_imported(VkImage image, int fd)
+{
+	int own = fcntl(fd, F_DUPFD_CLOEXEC, 0), frame = qsp_frame_of(own);
+	pthread_mutex_lock(&qsp_imfd_lock);
+	unsigned k = 0;
+	while (k < QSP_IMAGES && qsp_imfd[k].image != image)
+		k++;
+	if (k == QSP_IMAGES)
+		k = qsp_imfd_next++ % QSP_IMAGES;
+	if (qsp_imfd[k].image && qsp_imfd[k].own >= 0)
+		close(qsp_imfd[k].own);
+	qsp_imfd[k].image = image;
+	qsp_imfd[k].frame = frame;
+	qsp_imfd[k].own = frame < 0 ? own : -1;
+	qsp_imfd[k].tried_ns = now_ns();
+	pthread_mutex_unlock(&qsp_imfd_lock);
+	if (frame >= 0 && own >= 0)
+		close(own);
+	LOG("stream: NV12 image %p imported: vrlink's frame buffer %d\n", (void *)image, frame);
+}
+
+//! The frame buffer image is, -1 if not known (tried again once a second).
+static int qsp_image_known(VkImage image, uint64_t now)
+{
+	int r = -1;
+	pthread_mutex_lock(&qsp_imfd_lock);
+	for (unsigned k = 0; k < QSP_IMAGES; k++) {
+		if (qsp_imfd[k].image != image)
+			continue;
+		if (qsp_imfd[k].frame < 0 && qsp_imfd[k].own >= 0 && now - qsp_imfd[k].tried_ns > 1000000000ull) {
+			qsp_imfd[k].tried_ns = now;
+			qsp_imfd[k].frame = qsp_frame_of(qsp_imfd[k].own);
+			if (qsp_imfd[k].frame >= 0) {
+				close(qsp_imfd[k].own);
+				qsp_imfd[k].own = -1;
+				LOG("stream: NV12 image %p: vrlink's frame buffer %d\n", (void *)image, qsp_imfd[k].frame);
+			}
+		}
+		r = qsp_imfd[k].frame;
+		break;
+	}
+	pthread_mutex_unlock(&qsp_imfd_lock);
+	return r;
+}
+
 //! qcp_record: command buffer cb draws a picture of vrlink's: NV12 image `image`, copied now (fresh), or the one
-//! copied last. Its pose: the last submit before now of the frame buffer that image is, once learnt, else the last
-//! submit before now.
+//! copied last. Its pose: the last submit before now of that image's buffer (known by kcmp, else by the votes), else
+//! the last submit before now.
 static void qsp_picture(VkCommandBuffer cb, VkImage image, bool fresh)
 {
 	static pthread_mutex_t l = PTHREAD_MUTEX_INITIALIZER;
@@ -268,16 +357,24 @@ static void qsp_picture(VkCommandBuffer cb, VkImage image, bool fresh)
 			if (qsp_pose_entry(p, n, k, &et, &e[ne].frame, e[ne].pose) && et <= t)
 				ne++;
 		if (ne) {
-			int f = qsp_image_frame(image, e[0].frame, t);
+			int known = qsp_image_known(image, t);
 			unsigned pick = 0;
-			while (f >= 0 && pick < ne && e[pick].frame != f)
+			while (known >= 0 && pick < ne && e[pick].frame != known)
 				pick++;
-			if (pick == ne)
+			int f = qsp_image_frame(image, e[0].frame, t); // (counted either way)
+			if (known >= 0 && pick < ne)
+				qsp_byfd++;
+			else {
 				pick = 0;
+				while (f >= 0 && pick < ne && e[pick].frame != f)
+					pick++;
+				if (pick == ne)
+					pick = 0;
+				qsp_guess += f < 0;
+				qsp_learnt += f >= 0;
+			}
 			memcpy(last, e[pick].pose, sizeof(last));
 			have = true;
-			qsp_guess += f < 0;
-			qsp_learnt += f >= 0;
 		}
 	}
 	bool ok = have;

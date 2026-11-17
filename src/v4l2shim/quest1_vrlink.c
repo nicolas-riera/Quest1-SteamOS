@@ -32,6 +32,7 @@
 #include <string.h>
 #include <fcntl.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
 #include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
@@ -303,11 +304,43 @@ EXPORT int sched_setscheduler(pid_t pid, int policy, const struct sched_param *s
 // vrcompositor), EventsThread (the link's messages) and data-loop.0 (its PipeWire sound). With the headset busy
 // (Meta's tracking, SteamVR, Monado: load ~10) they waited for a CPU longer than they ran (169, 274 and 173 ms a
 // second, 2026-11-11). They are made realtime here too, below vrlink's own (RT_MAX), as they come up.
+// SteamVR 2.19's vrlink receives the stream in threads of its own, one a link ("RXT<address>"), which ask for nice -10
+// only (setpriority, then RealtimeKit, which cannot place a thread of Steam's container). Busy, the headset left them
+// waiting: their sockets' buffers filled and the kernel dropped datagrams (thousands, RcvbufErrors), and the PC saw
+// "Bad link event"s and receive losses, throttled the stream, and pictures came late or not at all (a second without
+// one: a black flash), worst when the dashboard opened (2026-11-17). They are made realtime like vrlink's own network
+// threads in 2.17 (RT_MAX).
 static const struct
 {
-	const char *name;
+	const char *name; //!< the thread's name, or its start when it ends with '*'
 	int prio;
-} rt_threads[] = {{"vrlinkrunthread", RT_MAX - 2}, {"EventsThread", RT_MAX - 2}, {"data-loop.0", RT_MAX - 4}};
+} rt_threads[] = {{"vrlinkrunthread", RT_MAX - 2}, {"EventsThread", RT_MAX - 2}, {"data-loop.0", RT_MAX - 4},
+                  {"RXT*", RT_MAX}};
+
+static bool rt_name_is(const char *comm, const char *name)
+{
+	size_t n = strlen(name);
+	return name[n - 1] == '*' ? !strncmp(comm, name, n - 1) : !strcmp(comm, name);
+}
+
+// The stream's sockets: vrlink asks for a receive buffer of ~33 ms of a 160 Mbit/s stream (its queue stopped at
+// 650 KB as datagrams were dropped, 2026-11-17). Any thread that runs late longer than that lost packets. Asked
+// for 8 MB here (~400 ms; net.core.rmem_max is 16 MB, device/holo-perf.sh).
+#define RCVBUF_MIN (8 << 20)
+
+EXPORT int setsockopt(int fd, int level, int name, const void *val, socklen_t len)
+{
+	static int (*real)(int, int, int, const void *, socklen_t);
+	if (!real)
+		*(void **)&real = dlsym(RTLD_NEXT, "setsockopt");
+	if (is_vrlink() && level == SOL_SOCKET && name == SO_RCVBUF && val && len == sizeof(int) &&
+	    *(const int *)val < RCVBUF_MIN) {
+		int big = RCVBUF_MIN;
+		fprintf(stderr, "quest1_v4l2: vrlink: socket %d receive buffer %d asked, %d set\n", fd, *(const int *)val, big);
+		return real(fd, level, name, &big, len);
+	}
+	return real(fd, level, name, val, len);
+}
 
 // The views shared with vrcompositor's layer (quest1_views.h), made as vrlink starts.
 static struct q1_views *views_shm;
@@ -354,7 +387,7 @@ static void *rt_watch(void *arg)
 				comm[strcspn(comm, "\n")] = 0;
 			fclose(f);
 			for (size_t i = 0; i < sizeof(rt_threads) / sizeof(rt_threads[0]); i++) {
-				if (strcmp(comm, rt_threads[i].name) || sched_getscheduler(tid) != SCHED_OTHER)
+				if (!rt_name_is(comm, rt_threads[i].name) || sched_getscheduler(tid) != SCHED_OTHER)
 					continue;
 				struct sched_param p = {.sched_priority = rt_threads[i].prio};
 				if (syscall(SYS_sched_setscheduler, tid, SCHED_FIFO, &p) == 0)
@@ -454,6 +487,10 @@ static void publish_pose(const void *eye, int32_t frame, uint64_t now)
 	e->t_ns = now;
 	e->frame = frame;
 	memcpy(e->pose, m, sizeof(e->pose));
+	// which of vrlink's frame buffers is which dma-buf, for the layer's kcmp (quest1_views.h)
+	__atomic_store_n(&p->pid, (uint32_t)getpid(), __ATOMIC_RELAXED);
+	for (unsigned i = 0; i < Q1_POSES; i++)
+		__atomic_store_n(&p->fd[i], q1dec_client_fd(i), __ATOMIC_RELAXED);
 	__atomic_store_n(&e->seq, n, __ATOMIC_RELEASE);
 	__atomic_store_n(&p->n, n, __ATOMIC_RELEASE);
 }

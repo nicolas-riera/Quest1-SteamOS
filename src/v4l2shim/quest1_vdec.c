@@ -2043,3 +2043,16 @@ int q1dec_epoll_events(int epfd, struct epoll_event *ev, int n)
 	}
 	return out;
 }
+
+// The client's own fd of CAPTURE buffer i (the dma-buf it queued, V4L2_MEMORY_DMABUF) of its low-latency decoder (Steam
+// Link VR's): vrlink's frame buffers, which it shares with vrcompositor, so that vrcompositor's layer can tell which of
+// them an image it imported is (quest1_vrlink.c publish_pose, quest1_modifier_pose.c).
+int q1dec_client_fd(unsigned i)
+{
+	for (int d = 0; d < MAXDEV; d++) {
+		struct q1dec *e = __atomic_load_n(&decs[d], __ATOMIC_ACQUIRE);
+		if (e && e->low_latency && e->cap_dmabuf && !__atomic_load_n(&e->stale, __ATOMIC_ACQUIRE) && i < MAXBUF)
+			return __atomic_load_n(&e->cap_cfd[i], __ATOMIC_RELAXED);
+	}
+	return -1;
+}

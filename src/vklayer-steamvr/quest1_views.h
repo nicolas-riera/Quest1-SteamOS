@@ -29,7 +29,7 @@ struct q1_views
 struct q1_poses
 {
 	uint32_t n; //!< submits published: the last is p[(n - 1) % Q1_POSES]
-	uint32_t reserved;
+	uint32_t pid; //!< vrlink's process, whose fds fd[] are (0 from a shim older than fd[])
 	struct
 	{
 		uint32_t seq;   //!< its submit's number (n after it), 0 while being written
@@ -37,4 +37,8 @@ struct q1_poses
 		uint64_t t_ns;   //!< CLOCK_MONOTONIC, just before vrlink's submit reaches vrcompositor
 		float pose[12];  //!< the submit's head pose (HmdMatrix34_t: row-major 3x4, the position in its last column)
 	} p[Q1_POSES];
+	//! vrlink's own fd of each of its frame buffers (p[].frame), the dma-buf it decodes into, -1 if not known: the
+	//! layer finds which buffer an image it imports is by comparing files (kcmp). After p[] so that a layer built
+	//! before it reads the rest as before.
+	int32_t fd[Q1_POSES];
 };

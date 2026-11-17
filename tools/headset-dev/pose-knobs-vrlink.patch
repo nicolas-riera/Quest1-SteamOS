@@ -6,9 +6,9 @@
  #include <fcntl.h>
 +#include <math.h> // test only (pose knobs)
  #include <sys/mman.h>
+ #include <sys/socket.h>
  #include <sys/syscall.h>
- #include <time.h>
-@@ -564,6 +565,29 @@
+@@ -601,6 +602,29 @@
  		return 0; // VRCompositorError_None
  	}
  	flash_watch(frame, picture, !picture && !eye_l && !eye_r && !count, now);
@@ -38,7 +38,7 @@
  	if (picture)
  		publish_pose(eye_l, frame, now);
  	return real_submit_set(self, index, count, handles, eye_l, eye_r, bounds_l, bounds_r, flags, seconds);
-@@ -669,6 +693,85 @@
+@@ -706,6 +730,85 @@
  		// 2026-11-17). On the user's recorded head (85 s, 92 ms ahead) the low-pass made the prediction error 4.6 deg
  		// rms against 2.9 without, for 10 % less frame-to-frame shake (docs/streaming.md item 15).
  		memcpy(o + RAW_ANGULAR, p.ang, sizeof(p.ang));

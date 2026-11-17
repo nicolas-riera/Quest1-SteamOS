@@ -15,6 +15,7 @@ void q1dec_forget(struct q1dec *d);  // after close()
 int q1dec_close_async(struct q1dec *d, int fd); // 1 if the close was taken over (done in the background)
 struct pollfd;
 int q1dec_poll(struct q1dec *d, struct pollfd *fd, int timeout_ms); // poll() on a decoder fd alone
+int q1dec_client_fd(unsigned i); // the client's own fd of frame buffer i of its low-latency decoder, -1 if none
 int q1_sys_poll(struct pollfd *fds, unsigned long n, int timeout_ms); // the system's poll, past the hook
 struct epoll_event;
 void q1dec_epoll_ctl(struct q1dec *d, int epfd, int op, const struct epoll_event *ev); // after the client's

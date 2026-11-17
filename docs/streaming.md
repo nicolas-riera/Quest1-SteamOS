@@ -712,7 +712,7 @@ vrlink writes its own log, `~/.local/share/Steam/logs/vrlink.txt` (the PC's side
         the picture (its horizon read at the copy) went with the bind's pose 4 times and with the submit's 4 times.
         The fix: the shim publishes each submit's head pose, time and frame buffer index (`/dev/shm/quest1-vrlink-poses`,
         quest1_views.h `q1_poses`); the layer finds the picture's submit at the copy (`qsp_picture`: by the frame
-        buffer, learnt per NV12 image, since "the last submit before the copy" was wrong ~10 % of the time) and at
+        buffer, since "the last submit before the copy" was wrong ~10 % of the time) and at
         vrcompositor's submit keeps whichever snapshot has that pose (bind or submit), or, when neither has it, writes
         the eye poses made from it into the snapshot (`qsp_repose`). The layer's log gives the counts once a minute
         (`stream: ... the picture's pose was the bind's N times, the submit's N, made from them N ...; pictures found
@@ -720,6 +720,16 @@ vrlink writes its own log, `~/.local/share/Steam/logs/vrlink.txt` (the PC's side
         pictures off, 4 of 40 without it; ±1° of random pitch at every pose read (`/tmp/q1-posenoise` of
         pose-knobs-vrlink.patch): 2.5 px rms instead of 7.2. User, worn: "it doesn't tremble any more, almost";
         still under load, which was the decoder's clock (next item).
+      - Which frame buffer a picture is (2026-11-17, later): first learnt per NV12 image from the copies (votes for
+        vrlink's last submit before each copy). Worn, half the pictures stayed unknown, more with the dashboard open
+        (vrcompositor busier: the copy further from the submit), and a stream restart brought new buffers at the old
+        images' handles (votes now fade). Exact instead: the shim publishes vrlink's pid and its own fd of each frame
+        buffer (the dma-buf it queues to the decoder, `q1dec_client_fd`), and at each NV12 import the layer compares
+        that dma-buf with them across the two processes (`kcmp(KCMP_FILE)`; same user, no pid namespace between
+        them), again once a second until vrlink has queued it. The handles vrlink submits are no help: their fds
+        are vrcompositor's shared memory files, not the buffers. A minute with the stream: 485 of 486 pictures found
+        by their buffer. User, worn, dashboard open or not: "it nearly doesn't tremble any more". Left: a strong
+        tremble for a moment when the headset is put on (9 to 72 fps), docs/todo.md.
       - The decoder's clock (2026-11-17): as the 2.19 streams started, the kernel logged "Failed to set clock rate:
         -19" once and venus's core stayed at 200 MHz of 533 for the whole session (`/sys/kernel/debug/clk/
         video_core_clk_src/rate`), turbo asked for or not: decoding took 76 ms a frame (p50, the PC's
@@ -800,6 +810,14 @@ vrlink writes its own log, `~/.local/share/Steam/logs/vrlink.txt` (the PC's side
     - Worn the same day (VRChat): runs of 19-69 black pictures as VRChat started on the PC (its own black screens),
       single ones later. The probe also logs pictures with no chroma (green); the green stream the user saw that day
       was vrcompositor's simplified shader instead (holo-frame-mode.sh, "The distortion shader" below).
+    - SteamVR 2.19 (2026-11-17): the headset dropped the stream's datagrams (UDP `RcvbufErrors`, 18,644 in 35 min)
+      and the PC logged "Bad link event"s and `ClientRxLoss`, then held its encoder back; when the dashboard opened,
+      a second without a picture (a black flash). 2.19's vrlink receives in threads of its own (`RXT<address>`) that
+      ask for nice -10 only (RealtimeKit cannot place them), and its sockets for 1 MB of buffer (~33 ms at
+      160 Mbit/s). The shim makes those threads SCHED_FIFO 40 like vrlink's other network threads and raises the
+      buffers to 8 MB (`setsockopt` of vrlink's). Next session, 5 minutes: its sockets dropped none
+      (`/proc/net/udp`); the system's counter still grew by ~2,000 over the 30 min and five stream restarts around
+      it, not attributed (other sockets, or the sessions' starts).
     - Multilink: with the headset on the PC's USB cable (usb0, the development link) vrlink receives the whole stream on
       both links, 141 Mbit/s over USB and 145 over Wi-Fi, ~0.5 core of receive threads and USB interrupt work. Kept:
       the user wants Valve's multilink as it is.
