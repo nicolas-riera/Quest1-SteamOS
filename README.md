@@ -1,5 +1,14 @@
 # SteamOS on the Oculus Quest
 
+[![Status: experimental](https://img.shields.io/badge/status-experimental-orange)](#work-in-progress)
+[![Device: Oculus Quest 1](https://img.shields.io/badge/device-Oculus%20Quest%201-1c1e20)](#what-works)
+[![SteamOS Holo arm64](https://img.shields.io/badge/SteamOS-Holo%20arm64-1a9fff?logo=steam&logoColor=white)](docs/rootfs-build.md)
+[![SteamVR on the headset](https://img.shields.io/badge/SteamVR-on%20the%20headset-1a9fff?logo=steam&logoColor=white)](docs/steamvr-port.md)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Last commit](https://img.shields.io/github/last-commit/nicolas-riera/Quest1-SteamOS)](https://github.com/nicolas-riera/Quest1-SteamOS/commits/main)
+[![Stars](https://img.shields.io/github/stars/nicolas-riera/Quest1-SteamOS?style=flat)](https://github.com/nicolas-riera/Quest1-SteamOS/stargazers)
+[![Written by Claude](https://img.shields.io/badge/written%20by-Claude-d97757?logo=anthropic&logoColor=white)](#steamos-on-the-oculus-quest)
+
 > **Disclaimer: this whole project was entirely vibecoded.** Every line of code, every
 > script and this README were written by an AI (Claude), directed and tested on real
 > hardware by a human who did not write the code. It works on the headset it was tested on;
