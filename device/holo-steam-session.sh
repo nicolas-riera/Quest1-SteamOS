@@ -96,6 +96,8 @@ cat > /usr/local/bin/steam-webhelper-gpu <<'EOF'
 # write-combined (~220 MB/s CPU reads), QUEST1_VKSHIM_CACHED_READBACK gives ANGLE its really cached type instead.
 # QUEST1_VKSHIM_MAX_INFLIGHT: at most 4 submissions waiting for the GPU (quest1_wsi_x11.c): without it 17-20 waited
 # behind vrcompositor, Steam reacted seconds late and the GPU memory held for them ran the RAM out (2026-11-08).
+# Rasterization without MSAA (--gpu-rasterization-msaa-sample-count=0): Steam's VR page drew 15.1 -> 16.4 frames a
+# second with an animation on it (2026-11-17, GPU submissions of this process); the GPU is what bounds it.
 # Extra GPU process args: QUEST1_STEAM_GPU_ARGS. See docs/steam-gpu.md.
 V=/usr/local/lib/quest1-vk-steam
 export LD_LIBRARY_PATH=$V${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
@@ -104,7 +106,7 @@ export QUEST1_VKSHIM_WSI=1 QUEST1_VKSHIM_LAYER=none QUEST1_VK_REDIRECT=$V/libvul
 	QUEST1_VKSHIM_MAX_INFLIGHT=4
 exec "$@" --use-angle=vulkan --disable-angle-features=supportsExtendedDynamicState \
 	--enable-angle-features=disableFlippingBlitWithCommand --avoid_stencil_buffers \
-	--force-gpu-mem-available-mb=384 --force-gpu-mem-discardable-limit-mb=64 $QUEST1_STEAM_GPU_ARGS
+	--force-gpu-mem-available-mb=384 --force-gpu-mem-discardable-limit-mb=64 \n	--gpu-rasterization-msaa-sample-count=0 $QUEST1_STEAM_GPU_ARGS
 EOF
 chmod 755 /usr/local/bin/steam-webhelper-gpu
 ln -sfn steam-webhelper-gpu "/usr/local/bin/'steam-webhelper-gpu'"
