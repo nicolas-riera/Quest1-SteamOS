@@ -98,16 +98,16 @@ cat > /usr/local/bin/steam-webhelper-gpu <<'EOF'
 # behind vrcompositor, Steam reacted seconds late and the GPU memory held for them ran the RAM out (2026-11-08).
 # Rasterization without MSAA (--gpu-rasterization-msaa-sample-count=0): Steam's VR page drew 15.1 -> 16.4 frames a
 # second with an animation on it (2026-11-17, GPU submissions of this process); the GPU is what bounds it.
-# QUEST1_VKSHIM_NO_MUTABLE: ANGLE makes all its images mutable-format, which the Adreno blob does not compress (UBWC);
-# the ~40 render passes (22 Mpixel) of a Steam VR page frame then took 24 ms of GPU, 11-12 ms without the flag.
-# QUEST1_VKSHIM_MEM_CACHE: the 8.3 MB readback buffer was allocated and freed every frame (6.8 ms of CPU on average);
-# freed memory of 1 MB and more is kept for the next allocation.
+# Not set: QUEST1_VKSHIM_NO_MUTABLE (images without the mutable-format flag, so the Adreno blob compresses them: the
+# VR page's GPU frame 24 -> 11-12 ms) and QUEST1_VKSHIM_MEM_CACHE (freed allocations of 1 MB and more kept for reuse):
+# together they took the page from ~11.5 to ~20 fps, but Steam's UI then showed corruption everywhere, white flashes,
+# missing pictures and GPU page faults (user, 2026-11-17); gone without them. Which one is to blame: docs/steam-gpu.md.
 # Extra GPU process args: QUEST1_STEAM_GPU_ARGS. See docs/steam-gpu.md.
 V=/usr/local/lib/quest1-vk-steam
 export LD_LIBRARY_PATH=$V${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 export LD_PRELOAD=/opt/hybris/lib/libbionictls.so:$V/libquest1_vkredirect.so${LD_PRELOAD:+:$LD_PRELOAD}
 export QUEST1_VKSHIM_WSI=1 QUEST1_VKSHIM_LAYER=none QUEST1_VK_REDIRECT=$V/libvulkan.so.1 QUEST1_VKSHIM_CACHED_READBACK=1 \
-	QUEST1_VKSHIM_MAX_INFLIGHT=4 QUEST1_VKSHIM_NO_MUTABLE=1 QUEST1_VKSHIM_MEM_CACHE=1
+	QUEST1_VKSHIM_MAX_INFLIGHT=4
 exec "$@" --use-angle=vulkan --disable-angle-features=supportsExtendedDynamicState \
 	--enable-angle-features=disableFlippingBlitWithCommand --avoid_stencil_buffers \
 	--force-gpu-mem-available-mb=384 --force-gpu-mem-discardable-limit-mb=64 \

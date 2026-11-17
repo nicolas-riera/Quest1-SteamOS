@@ -201,3 +201,10 @@ What does not help: GPU priority of Steam equal to vrcompositor's (`QUEST1_COMPA
 vrcompositor falls to 44-57 fps), a bigger Skia budget (768 MB: no change), dropping backdrop filters/masks/shadows
 in the page (each 2-5 ms of the 24, no visual-neutral choice). The GPU is shared 56 % vrcompositor, 19 % Monado, the
 rest Steam, so 30 fps needs the Steam frame under ~7 ms GPU or less vrcompositor/Monado work.
+
+Both flags are off again (same day): worn, Steam's UI showed corruption everywhere, white flashes and missing
+pictures (the avatar, the sidebar), and the kernel logged GPU page faults from steamwebhelper (48 in one 90 s
+hover/scroll run, none in four later runs with any combination: intermittent). Without the flags the user found
+the UI clean. A likely cause for NO_MUTABLE: ANGLE does view some images in another format (sRGB/UNORM pairs), which
+the flag promises it won't; MEM_CACHE reuses memory the GPU may still read. To find out which one, and a safe form
+(e.g. drop the flag only for formats with no view of another format), before turning either back on.
