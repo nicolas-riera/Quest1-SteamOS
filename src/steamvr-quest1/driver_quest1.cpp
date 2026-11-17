@@ -2064,6 +2064,23 @@ private:
 		// Steam's quick menu set it, Prop_DisplaySupportsAnalogGain_Bool shows them)
 		SettingToFile("steamvr", "analogGain", 100.0f, 2.0f, 100.0f, "/tmp/quest1-brightness", writtenBrightness,
 		              "display brightness %.0f %% (backlight)");
+		{ // Meta's hand tracking: q1handsd follows /tmp/quest1-hands ("auto" or "off"; docs/hand-tracking.md)
+			err = VRSettingsError_None;
+			bool on = VRSettings()->GetBool("driver_quest1", "handTracking", &err) && err == VRSettingsError_None;
+			if ((int)on != writtenHands) {
+				if (FILE *f = fopen("/tmp/quest1-hands.tmp", "w")) {
+					fputs(on ? "auto
+" : "off
+", f);
+					fclose(f);
+					chmod("/tmp/quest1-hands.tmp", 0644);
+					rename("/tmp/quest1-hands.tmp", "/tmp/quest1-hands");
+					writtenHands = on;
+					Log("quest1: settings: hand tracking %s
+", on ? "on" : "off");
+				}
+			}
+		}
 		err = VRSettingsError_None;
 		if (!VRSettings()->GetBool("driver_quest1", "clearSpatialAnchors", &err) || err != VRSettingsError_None)
 			return;
@@ -2141,6 +2158,7 @@ private:
 	Quest1Controllers controllers;
 	std::chrono::steady_clock::time_point nextSettingsPoll{};
 	float writtenBrightness = -1.0f;
+	int writtenHands = -1;
 };
 
 static Quest1Provider g_provider;

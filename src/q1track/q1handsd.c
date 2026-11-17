@@ -240,8 +240,19 @@ static void set_hands_pref(int on)
 
 static int read_policy(void) /* 0 off, 1 auto, 2 hands */
 {
-	FILE *f = fopen("/etc/quest1-hands", "r");
+	/* /tmp/quest1-hands: the SteamVR setting (driver_quest1), "auto" or "off"; /etc/quest1-hands: a fixed override
+	 * ("hands" = hands only), used when the setting says off or the file is absent */
 	char w[16] = {0};
+	FILE *f = fopen("/tmp/quest1-hands", "r");
+	if (f) {
+		if (!fgets(w, sizeof(w), f))
+			w[0] = 0;
+		fclose(f);
+		if (!strncmp(w, "auto", 4))
+			return 1;
+	}
+	w[0] = 0;
+	f = fopen("/etc/quest1-hands", "r");
 	if (f) {
 		if (!fgets(w, sizeof(w), f))
 			w[0] = 0;

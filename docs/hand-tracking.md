@@ -49,10 +49,18 @@ trackingservice --libossdk--> q1handsd (bionic) --/run/q1track/hands--> driver_q
 
 ## 4. Hands vs controllers
 
-`/etc/quest1-hands`: `off` (default, preference never touched), `auto`, `hands`. In `auto` q1handsd sets
+`/tmp/quest1-hands` (SteamVR setting) or `/etc/quest1-hands`: `off` (default, preference never touched), `auto`, `hands`. In `auto` q1handsd sets
 `hand_tracking_enabled` true when no controller is in use (no button/trigger/grip, not in hand by libossdk's own
 detection, 3 s) or none is connected, and false as soon as a controller is picked up (200 ms). A 3 s hold-off avoids
 flapping. Switching the cameras takes ~1-2 s, as on Meta's OS. In hand mode the Touch devices carry the tracked hands.
+
+### The switch: SteamVR settings, Oculus Quest page
+
+"Hand tracking" (`driver_quest1/handTracking`, off by default): the driver writes `auto` or `off` to `/tmp/quest1-hands`
+and q1handsd follows it (the file replaces `/etc/quest1-hands` as the normal switch; that one stays as a debug override,
+`hands` = hands only). There is **no "Multimodal (hands + controllers)" toggle on purpose**: Quest 1's camera mux has no
+mode with hand and controller frames at once (section 2), and the multimodal preference changes nothing. The
+setting that does exist already gives the nearest thing, hands when the controllers are down and controllers when picked up.
 
 ## 5. SteamVR side (driver_quest1)
 
