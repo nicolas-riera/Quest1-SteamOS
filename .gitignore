@@ -39,3 +39,4 @@ src/vklayer-steamvr/sdftest_cs.h
 private/
 src/q1perfhud/q1-perfhud
 src/q1pairing/q1pairing
+src/q1handviz/q1-handviz

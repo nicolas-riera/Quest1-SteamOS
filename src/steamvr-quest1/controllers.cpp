@@ -27,9 +27,14 @@
 #include "controllers.h"
 #include "battery.h"
 #include "chaperone_frame.h"
+#include "hands.h"
+#include "handviz_shm.h"
 
 #include <pthread.h>
+#include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -242,9 +247,10 @@ public:
 		struct stat st;
 		bool ours = !left && stat("/opt/quest1-steamvr/quest1/resources/rendermodels/quest1_controller_right/"
 		                          "quest1_controller_right.json", &st) == 0;
-		p->SetStringProperty(container, Prop_RenderModelName_String,
-		                     noModel ? "" : left ? "oculus_quest_controller_left"
-		                     : ours ? "{quest1}quest1_controller_right" : "oculus_quest_controller_right");
+		modelName = noModel ? "" : left ? "oculus_quest_controller_left"
+		            : ours ? "{quest1}quest1_controller_right" : "oculus_quest_controller_right";
+		handModel = false;
+		p->SetStringProperty(container, Prop_RenderModelName_String, modelName.c_str());
 		p->SetStringProperty(container, Prop_RegisteredDeviceType_String,
 		                     left ? "quest1/QUEST1-Touch-Left" : "quest1/QUEST1-Touch-Right");
 		p->SetStringProperty(container, Prop_InputProfilePath_String, "{quest1}/input/quest1_touch_profile.json");
@@ -292,6 +298,22 @@ public:
 		in->CreateBooleanComponent(container, "/input/joystick/touch", &comp[C_STICK_TOUCH]);
 		in->CreateBooleanComponent(container, "/input/thumbrest/touch", &comp[C_THUMBREST_TOUCH]);
 		in->CreateHapticComponent(container, "/output/haptic", &haptic);
+		{ // SteamVR's hand skeleton (docs/hand-tracking.md): the controller's hand, or Meta's tracked hand
+			vr::VRBoneTransform_t grip[q1hands::kBones];
+			const float gripCurl[5] = {0.3f, 0.7f, 0.8f, 0.8f, 0.8f};
+			if (q1hands::CurledBones(left ? 0 : 1, gripCurl, grip)) {
+				EVRInputError e = in->CreateSkeletonComponent(
+				    container, left ? "/input/skeleton/left" : "/input/skeleton/right",
+				    left ? "/skeleton/hand/left" : "/skeleton/hand/right", "/pose/raw", VRSkeletalTracking_Full, grip,
+				    q1hands::kBones, &skel);
+				if (e != VRInputError_None) {
+					CLog("quest1: %s skeleton component failed (%d)\n", left ? "left" : "right", (int)e);
+					skel = k_ulInvalidInputComponentHandle;
+				}
+			} else {
+				CLog("quest1: %s hand skeleton resources not found, no skeleton\n", left ? "left" : "right");
+			}
+		}
 		for (float &v : last)
 			v = NAN; // send everything once
 		activated = true;
@@ -333,6 +355,23 @@ public:
 			VRDriverInput()->UpdateBooleanComponent(comp[c], v != 0, 0);
 	}
 
+	//! Update thread: the hand skeleton (31 bones, parent space), for both motion ranges
+	void UpdateSkeleton(const vr::VRBoneTransform_t *bones)
+	{
+		if (!activated || skel == k_ulInvalidInputComponentHandle)
+			return;
+		VRDriverInput()->UpdateSkeletonComponent(skel, VRSkeletalMotionRange_WithController, bones, q1hands::kBones);
+		VRDriverInput()->UpdateSkeletonComponent(skel, VRSkeletalMotionRange_WithoutController, bones, q1hands::kBones);
+	}
+	//! The render model: the controller's, or none while the tracked hand is the device (the hand has none)
+	void SetHandModel(bool handOnly)
+	{
+		if (!activated || handOnly == handModel)
+			return;
+		handModel = handOnly;
+		VRProperties()->SetStringProperty(container, Prop_RenderModelName_String, handOnly ? "" : modelName.c_str());
+	}
+
 	void Publish(const DriverPose_t &p)
 	{
 		{
@@ -350,6 +389,9 @@ public:
 	uint32_t id = k_unTrackedDeviceIndexInvalid;
 	PropertyContainerHandle_t container = k_ulInvalidPropertyContainer;
 	VRInputComponentHandle_t haptic = k_ulInvalidInputComponentHandle;
+	VRInputComponentHandle_t skel = k_ulInvalidInputComponentHandle;
+	std::string modelName;
+	bool handModel = false;
 
 private:
 	VRInputComponentHandle_t comp[C_COUNT] = {};
@@ -382,6 +424,17 @@ struct Hand
 	bool haveUp = false;
 	Vec calForward, calDown; //!< calibration samples: up while pointing forward / down
 	bool haveForward = false, haveDown = false;
+	// Meta's hand tracking (hands.cpp)
+	bool handActive = false; //!< the device is the tracked hand (debounced)
+	double handSeenAt = -10;
+	bool palmFacing = false, pinchDown = false, pinchFacing = false;
+	Vec lastHandPos;
+	double lastHandT = 0;
+	Vec handVel;
+	bool haveHandVel = false;
+	float curl[5] = {};      //!< the controller hand's fingers, smoothed
+	float curlSent[5] = {-1, -1, -1, -1, -1};
+	bool wasHandSeen = false;
 };
 
 struct State
@@ -396,6 +449,7 @@ struct State
 	Hand hands[2];
 	std::thread thread;
 	std::atomic<bool> running{false};
+	std::atomic<bool> dashboard{false}; //!< SteamVR's dashboard is open (events)
 
 	// knobs
 	std::atomic<float> pitchDeg{40.0f}; //!< default aim = IMU frame pitched up by this much (rift_s: 40)
@@ -716,6 +770,48 @@ static bool IgnoreSystemWhileMoving(double now)
 	return on;
 }
 
+//! Tells q1handviz (the hand overlay) what the tracked hands look like; in place, tmpfs
+static void PublishViz(int h, const q1hands::Frame *f, bool tracked, bool palmFacing, bool pinch, const Quat &rq, const Vec &rt)
+{
+	static q1handviz_shm *m = nullptr;
+	static double tried = 0;
+	if (!m) {
+		double now = MonoSeconds();
+		if (now - tried < 2)
+			return;
+		tried = now;
+		int fd = open(Q1HANDVIZ_PATH, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+		if (fd < 0)
+			return;
+		if (ftruncate(fd, sizeof(q1handviz_shm)) == 0)
+			m = (q1handviz_shm *)mmap(nullptr, sizeof(q1handviz_shm), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+		close(fd);
+		if (m == MAP_FAILED)
+			m = nullptr;
+		if (!m)
+			return;
+		m->magic = Q1HANDVIZ_MAGIC;
+	}
+	q1handviz_hand &o = m->hand[h];
+	m->seq++;
+	o.tracked = tracked;
+	o.palmFacing = palmFacing;
+	o.pinch = pinch;
+	if (tracked && f) {
+		o.rootRot[0] = rq.w, o.rootRot[1] = rq.x, o.rootRot[2] = rq.y, o.rootRot[3] = rq.z;
+		o.rootPos[0] = rt.x, o.rootPos[1] = rt.y, o.rootPos[2] = rt.z;
+		for (int k = 0; k < 3; k++)
+			o.palmDev[k] = (float)f->palmDev[k];
+		for (int j = 0; j < 24; j++)
+			for (int k = 0; k < 3; k++)
+				o.joints[j][k] = (float)f->joints[j][k];
+	}
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	m->updateNs = (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec;
+	m->seq++;
+}
+
 void State::UpdateHand(int h, double now, const XrPosef &headPose, bool headValid, bool headTracked)
 {
 	TouchController *d = dev[h];
@@ -734,8 +830,50 @@ void State::UpdateHand(int h, double now, const XrPosef &headPose, bool headVali
 	};
 	d->forced = pressHand == h && now >= pressFrom && now < pressUntil ? (int)pressComp : -1;
 	d->forcedValue = pressValue;
+
+	// Meta's hand tracking (hands.cpp, q1handsd): while the system tracks hands, the tracked hand is this device.
+	// The head at the hand sample's time puts the hand into the OpenXR local space, whatever that space's origin is.
+	q1hands::Frame hf;
+	bool handSeen = q1hands::Read(h, &hf) && hf.tracked && hf.headValid && headValid;
+	XrPosef headAtHand = headPose;
+	Quat qx;  // OpenXR local space from libossdk's tracking space
+	Vec tx;
+	float gestureSystem = 0, gestureTrigger = 0;
+	if (handSeen) {
+		struct timespec mono;
+		clock_gettime(CLOCK_MONOTONIC, &mono);
+		int64_t monoNs = (int64_t)mono.tv_sec * 1000000000 + mono.tv_nsec;
+		XrSpaceLocation hl{XR_TYPE_SPACE_LOCATION};
+		if (XR_SUCCEEDED(cxrLocateSpace(view, xr.local, xr.now() + (hf.sampleNs - monoNs), &hl)) &&
+		    (hl.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT))
+			headAtHand = hl.pose;
+		Quat qhx{headAtHand.orientation.w, headAtHand.orientation.x, headAtHand.orientation.y, headAtHand.orientation.z};
+		Quat qho{hf.headRot[0], hf.headRot[1], hf.headRot[2], hf.headRot[3]};
+		qx = Mul(qhx, Conj(qho));
+		Vec rho = Rotate(qx, {hf.headPos[0], hf.headPos[1], hf.headPos[2]});
+		tx = {headAtHand.position.x - rho.x, headAtHand.position.y - rho.y, headAtHand.position.z - rho.z};
+		// gestures: the thumb and the index finger pinched; with the palm toward the user it is the system button
+		// (Meta's OS: the Oculus / Menu button), otherwise a trigger click, in the dashboard only
+		Vec palmN = Rotate(qx, {hf.palmNormal[0], hf.palmNormal[1], hf.palmNormal[2]});
+		Vec palmC = Rotate(qx, {hf.palmCenter[0], hf.palmCenter[1], hf.palmCenter[2]});
+		palmC = {palmC.x + tx.x, palmC.y + tx.y, palmC.z + tx.z};
+		Vec toHead = Normalize({headAtHand.position.x - palmC.x, headAtHand.position.y - palmC.y,
+		                        headAtHand.position.z - palmC.z});
+		double facing = Dot(palmN, toHead);
+		hd.palmFacing = facing > (hd.palmFacing ? 0.35 : 0.6);
+		bool pinch = hf.pinchDist < (hd.pinchDown ? 0.034 : 0.021);
+		if (pinch && !hd.pinchDown)
+			hd.pinchFacing = hd.palmFacing;
+		hd.pinchDown = pinch;
+		if (pinch && hd.pinchFacing)
+			gestureSystem = 1;
+		else if (pinch && dashboard)
+			gestureTrigger = 1;
+	} else {
+		hd.pinchDown = hd.palmFacing = false;
+	}
 	// each hand's own button (left Menu, right Oculus) is its "system": both are bound in our dashboard bindings
-	float system = boolean(ACT_SYSTEM);
+	float system = std::max(boolean(ACT_SYSTEM), gestureSystem);
 	if (system > 0 && !hd.systemWasDown)
 		hd.systemIgnored = now < hd.movingUntil && IgnoreSystemWhileMoving(now);
 	hd.systemWasDown = system > 0;
@@ -748,9 +886,9 @@ void State::UpdateHand(int h, double now, const XrPosef &headPose, bool headVali
 	d->Set(C_PRIMARY_TOUCH, boolean(ACT_PRIMARY_TOUCH));
 	d->Set(C_SECONDARY_CLICK, boolean(ACT_SECONDARY));
 	d->Set(C_SECONDARY_TOUCH, boolean(ACT_SECONDARY_TOUCH));
-	float trigger = scalar(ACT_TRIGGER);
+	float trigger = std::max(scalar(ACT_TRIGGER), gestureTrigger);
 	d->Set(C_TRIGGER_VALUE, trigger);
-	d->Set(C_TRIGGER_TOUCH, boolean(ACT_TRIGGER_TOUCH));
+	d->Set(C_TRIGGER_TOUCH, std::max(boolean(ACT_TRIGGER_TOUCH), gestureTrigger));
 	float squeeze = scalar(ACT_SQUEEZE);
 	d->Set(C_GRIP_VALUE, squeeze);
 	d->Set(C_GRIP_TOUCH, squeeze > 0.05f ? 1.f : 0.f); // no capacitive sensor on the grip
@@ -764,6 +902,102 @@ void State::UpdateHand(int h, double now, const XrPosef &headPose, bool headVali
 	d->Set(C_STICK_CLICK, boolean(ACT_STICK_CLICK));
 	d->Set(C_STICK_TOUCH, boolean(ACT_STICK_TOUCH));
 	d->Set(C_THUMBREST_TOUCH, boolean(ACT_THUMBREST_TOUCH));
+
+	// the tracked hand: the device is the hand's skeleton frame (the wrist), the raw pose is the pointer (the pinch
+	// point on the ray from the shoulder through it: the dashboard's laser), and the skeleton's root is the
+	// transform between the two
+	if (handSeen) {
+		hd.handSeenAt = now;
+		if (!hd.handActive) {
+			hd.handActive = true;
+			CLog("quest1: %s hand tracked: the hand is the device\n", d->left ? "left" : "right");
+		}
+		d->SetHandModel(true);
+		Quat qs = Mul(qx, Quat{hf.rot[0], hf.rot[1], hf.rot[2], hf.rot[3]});
+		Vec pw = Rotate(qx, {hf.pos[0], hf.pos[1], hf.pos[2]});
+		pw = {pw.x + tx.x, pw.y + tx.y, pw.z + tx.z};
+		Vec pp = Rotate(qx, {hf.pinchPoint[0], hf.pinchPoint[1], hf.pinchPoint[2]});
+		pp = {pp.x + tx.x, pp.y + tx.y, pp.z + tx.z};
+		Quat qhead{headAtHand.orientation.w, headAtHand.orientation.x, headAtHand.orientation.y,
+		           headAtHand.orientation.z};
+		Vec shoulderOff = Rotate(YawOf(qhead), {d->left ? -0.16 : 0.16, -0.20, 0.05});
+		Vec shoulder{headAtHand.position.x + shoulderOff.x, headAtHand.position.y + shoulderOff.y,
+		             headAtHand.position.z + shoulderOff.z};
+		Vec dir = Normalize({pp.x - shoulder.x, pp.y - shoulder.y, pp.z - shoulder.z});
+		Vec zr{-dir.x, -dir.y, -dir.z};
+		Vec xr_ = Cross({0, 1, 0}, zr);
+		if (Dot(xr_, xr_) < 1e-6)
+			xr_ = {1, 0, 0};
+		xr_ = Normalize(xr_);
+		Vec yr = Cross(zr, xr_);
+		Quat qa = FromBasis(xr_, yr, zr);
+		Quat dq = Mul(Conj(qs), qa);
+		Vec dt = Rotate(Conj(qs), {pp.x - pw.x, pp.y - pw.y, pp.z - pw.z});
+		// the skeleton's root, in the raw (pointer) frame: the inverse of raw-from-driver
+		Quat rq = Conj(dq);
+		Vec rt = Rotate(rq, {-dt.x, -dt.y, -dt.z});
+		vr::VRBoneTransform_t bones[q1hands::kBones];
+		memcpy(bones, hf.bones, sizeof(bones));
+		bones[0].position.v[0] = (float)rt.x;
+		bones[0].position.v[1] = (float)rt.y;
+		bones[0].position.v[2] = (float)rt.z;
+		bones[0].position.v[3] = 1.0f;
+		bones[0].orientation.w = (float)rq.w;
+		bones[0].orientation.x = (float)rq.x;
+		bones[0].orientation.y = (float)rq.y;
+		bones[0].orientation.z = (float)rq.z;
+		d->UpdateSkeleton(bones);
+		PublishViz(h, &hf, true, hd.palmFacing, hd.pinchDown, rq, rt);
+
+		DriverPose_t p{};
+		p.qWorldFromDriverRotation.w = 1;
+		Quest1FrameApply(p);
+		p.qRotation = {qs.w, qs.x, qs.y, qs.z};
+		p.vecPosition[0] = pw.x;
+		p.vecPosition[1] = pw.y;
+		p.vecPosition[2] = pw.z;
+		p.qDriverFromHeadRotation = {dq.w, dq.x, dq.y, dq.z};
+		p.vecDriverFromHeadTranslation[0] = dt.x;
+		p.vecDriverFromHeadTranslation[1] = dt.y;
+		p.vecDriverFromHeadTranslation[2] = dt.z;
+		// velocity from the samples' own times (a hand sample is ~30 ms old: SteamVR predicts it forward)
+		double ts = hf.sampleNs * 1e-9;
+		if (hd.lastHandT > 0 && ts > hd.lastHandT + 1e-4) {
+			double dtm = ts - hd.lastHandT;
+			Vec v{(pw.x - hd.lastHandPos.x) / dtm, (pw.y - hd.lastHandPos.y) / dtm, (pw.z - hd.lastHandPos.z) / dtm};
+			double a = hd.haveHandVel ? 0.35 : 1.0;
+			hd.handVel = {hd.handVel.x + a * (v.x - hd.handVel.x), hd.handVel.y + a * (v.y - hd.handVel.y),
+			              hd.handVel.z + a * (v.z - hd.handVel.z)};
+			hd.haveHandVel = true;
+		}
+		if (ts > hd.lastHandT + 1e-4) {
+			hd.lastHandPos = pw;
+			hd.lastHandT = ts;
+		}
+		const float vsc = velocities;
+		p.vecVelocity[0] = hd.handVel.x * vsc;
+		p.vecVelocity[1] = hd.handVel.y * vsc;
+		p.vecVelocity[2] = hd.handVel.z * vsc;
+		p.poseTimeOffset = -std::min(0.1, std::max(0.0, now - ts));
+		p.poseIsValid = true;
+		p.result = TrackingResult_Running_OK;
+		p.willDriftInYaw = false;
+		p.deviceIsConnected = true;
+		hd.lastValid = now;
+		hd.wasValid = true;
+		hd.wasHandSeen = true;
+		d->Publish(p);
+		return;
+	}
+	if (hd.handActive && now - hd.handSeenAt > 0.5) {
+		hd.handActive = false;
+		hd.haveHandVel = false;
+		hd.lastHandT = 0;
+		d->SetHandModel(false);
+		CLog("quest1: %s hand lost: back to the controller\n", d->left ? "left" : "right");
+	}
+	hd.wasHandSeen = false;
+	PublishViz(h, nullptr, false, false, false, Quat{}, Vec{});
 
 	// pose
 	DriverPose_t p{};
@@ -947,6 +1181,23 @@ void State::UpdateHand(int h, double now, const XrPosef &headPose, bool headVali
 	if (valid != hd.wasValid)
 		CLog("quest1: %s controller %s\n", d->left ? "left" : "right", valid ? "tracking" : "lost");
 	hd.wasValid = valid;
+	{ // the controller's hand: fingers curled by the trigger and grip, the thumb by what it touches
+		bool thumb = boolean(ACT_PRIMARY_TOUCH) > 0 || boolean(ACT_SECONDARY_TOUCH) > 0 || boolean(ACT_STICK_TOUCH) > 0 ||
+		             boolean(ACT_THUMBREST_TOUCH) > 0;
+		const float target[5] = {thumb ? 0.5f : 0.0f, trigger, squeeze, squeeze, squeeze};
+		bool changed = false;
+		for (int i = 0; i < 5; i++) {
+			hd.curl[i] += 0.5f * (target[i] - hd.curl[i]);
+			changed |= fabsf(hd.curl[i] - hd.curlSent[i]) > 0.01f;
+		}
+		if (changed && p.deviceIsConnected) {
+			vr::VRBoneTransform_t bones[q1hands::kBones];
+			if (q1hands::CurledBones(h, hd.curl, bones)) {
+				d->UpdateSkeleton(bones);
+				memcpy(hd.curlSent, hd.curl, sizeof(hd.curl));
+			}
+		}
+	}
 	d->Publish(p);
 }
 
@@ -1127,6 +1378,10 @@ void Quest1Controllers::Shutdown()
 void Quest1Controllers::OnEvent(const VREvent_t &e)
 {
 	State *s = g_state;
+	if (s && e.eventType == VREvent_DashboardActivated)
+		s->dashboard = true;
+	else if (s && e.eventType == VREvent_DashboardDeactivated)
+		s->dashboard = false;
 	if (!s || e.eventType != VREvent_Input_HapticVibration)
 		return;
 	const VREvent_HapticVibration_t &hv = e.data.hapticVibration;
