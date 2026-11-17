@@ -5,6 +5,9 @@
 // places are the same here (driver_quest1's ComputeDistortion gives (u, v) to all three). This one reads each once
 // and otherwise does what it does: the app's eye masked to its bounds, from sRGB when asked, under the overlays
 // (premultiplied), scaled, to sRGB, scaled, floored. Same interface (bindings, inputs, entry point PS_DISTORT).
+// Built twice (build_nv12_shaders.sh): as is for SteamVR 2.17 (the Frame's 0.3.0), and with STEAMVR_2_19 for 2.19
+// (the Frame's 0.5.9), whose shader has one more vec4 before the scales and takes the eye's bounds' centre from
+// row 1 (the middle of its min and max) instead of row 2.
 struct EyeParams
 {
 	mat4 m0;
@@ -13,7 +16,8 @@ struct EyeParams
 	mat4 m3;
 	mat4 m4;
 	mat4 m5;
-	mat4 bounds; // column 2: the eye's bounds, centre and half size
+	mat4 bounds; // 2.17: column 2 = the eye's bounds' centre and half size; 2.19: column 1 = min and max, column 2 zw =
+	             // half size
 };
 struct Layer
 {
@@ -26,6 +30,28 @@ layout(set = 0, binding = 4, std140) uniform Frame
 	layout(row_major) mat4 m1;
 	vec4 v2;
 	vec4 v3;
+#ifdef STEAMVR_2_19
+	vec4 v4;
+	vec4 v5;
+	vec4 scale;      // before the sRGB encoding
+	vec3 scale_srgb; // after it
+	float f8;
+	float floor_;
+	float app_srgb; // the app's eye holds sRGB
+	vec2 v11;
+	float f12;
+	float f13;
+	vec2 v14;
+	vec2 v15;
+	vec2 v16;
+	float f17;
+	float f18;
+	float f19;
+	float f20;
+	uint eye; // which of each layer's two eyes
+	float f22;
+	uint u23;
+#else
 	vec4 scale;      // before the sRGB encoding
 	vec3 scale_srgb; // after it
 	float f6;
@@ -44,6 +70,7 @@ layout(set = 0, binding = 4, std140) uniform Frame
 	uint eye; // which of each layer's two eyes
 	float f20;
 	uint u21;
+#endif
 } frame;
 layout(set = 0, binding = 6, std140) uniform Layers
 {
@@ -76,7 +103,12 @@ void main()
 		break;
 	}
 	mat4 b = frame.eye == 0u ? layers.layer[index].eye[0].bounds : layers.layer[index].eye[1].bounds;
-	vec2 inside = step(abs(uv - b[2].xy), b[2].zw);
+#ifdef STEAMVR_2_19
+	vec2 centre = (b[1].xy + b[1].zw) * 0.5;
+#else
+	vec2 centre = b[2].xy;
+#endif
+	vec2 inside = step(abs(uv - centre), b[2].zw);
 	c *= inside.x * inside.y;
 	if (frame.app_srgb != 0.0)
 		c = mix(pow(c * 0.947867334 + 0.0521327, vec3(2.4)), c * 0.0773993805, lessThanEqual(c, vec3(0.04045)));

@@ -59,10 +59,20 @@ static VKAPI_ATTR void VKAPI_CALL DestroyShaderModule(VkDevice device, VkShaderM
 // (1500x1664 here; 2.7 to 5 ms an eye measured when that pass did the lens, 2026-11-02). With Monado doing the lens
 // (/etc/quest1-warp-lens "1" or "2") driver_quest1's distortion is an identity and the three reads of each are at
 // one place, so distort_layered_identity.frag reads each once and gives the same picture. The pass runs while
-// Steam Link VR streams (quest1_scanout.c). Another version of SteamVR's shader is left as it is.
+// Steam Link VR streams (quest1_scanout.c). Known versions: SteamVR 2.17.10 (the Frame's 0.3.0) and 2.19.3 (0.5.9,
+// another uniform layout: the .frag's STEAMVR_2_19); any other version of SteamVR's shader is left as it is.
 #include "quest1_distort_spv.h"
-#define DISTORT_LAYERED_SIZE 7724
-#define DISTORT_LAYERED_FNV 0x2151f5242dccf0a6ull
+static const struct {
+	size_t size;
+	uint64_t fnv;
+	const uint32_t *identity;
+	size_t identity_size;
+	const char *version;
+} distort_layered[] = {
+	{7724, 0x2151f5242dccf0a6ull, distort_layered_identity_frag, sizeof(distort_layered_identity_frag), "2.17"},
+	{7896, 0xc854a56d1d36b547ull, distort_layered_identity_2_19_frag, sizeof(distort_layered_identity_2_19_frag),
+	 "2.19"},
+};
 
 static bool distort_is_identity(void)
 {
@@ -77,15 +87,20 @@ static bool distort_is_identity(void)
 	return on;
 }
 
-static bool is_distort_layered(const VkShaderModuleCreateInfo *ci)
+// The entry of distort_layered that ci is, or -1
+static int distort_layered_version(const VkShaderModuleCreateInfo *ci)
 {
-	if (ci->codeSize != DISTORT_LAYERED_SIZE)
-		return false;
-	uint64_t h = 0xcbf29ce484222325ull;
-	const uint8_t *p = (const uint8_t *)ci->pCode;
-	for (size_t i = 0; i < ci->codeSize; i++)
-		h = (h ^ p[i]) * 0x100000001b3ull;
-	return h == DISTORT_LAYERED_FNV;
+	for (size_t v = 0; v < sizeof(distort_layered) / sizeof(distort_layered[0]); v++) {
+		if (ci->codeSize != distort_layered[v].size)
+			continue;
+		uint64_t h = 0xcbf29ce484222325ull;
+		const uint8_t *p = (const uint8_t *)ci->pCode;
+		for (size_t i = 0; i < ci->codeSize; i++)
+			h = (h ^ p[i]) * 0x100000001b3ull;
+		if (h == distort_layered[v].fnv)
+			return (int)v;
+	}
+	return -1;
 }
 
 static VKAPI_ATTR VkResult VKAPI_CALL CreateShaderModule(VkDevice device, const VkShaderModuleCreateInfo *ci,
@@ -93,12 +108,14 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateShaderModule(VkDevice device, const 
 {
 	VkShaderModuleCreateInfo rewritten, identity;
 	uint32_t *code = NULL, words = 0;
-	if (is_distort_layered(ci) && distort_is_identity()) {
+	int v = distort_layered_version(ci);
+	if (v >= 0 && distort_is_identity()) {
 		identity = *ci;
-		identity.pCode = distort_layered_identity_frag;
-		identity.codeSize = sizeof(distort_layered_identity_frag);
+		identity.pCode = distort_layered[v].identity;
+		identity.codeSize = distort_layered[v].identity_size;
 		ci = &identity;
-		LOG("shader module: distort_ps_layered with one read per texture (the distortion is an identity)\n");
+		LOG("shader module: distort_ps_layered (SteamVR %s) with one read per texture (the distortion is an identity)\n",
+		    distort_layered[v].version);
 	}
 	if (ci->codeSize >= 20 && ci->pCode[0] == 0x07230203 && !getenv("QUEST1_COMPAT_NO_SPIRV_REWRITE") &&
 	    (code = rewrite_layer_builtins(ci->pCode, ci->codeSize / 4, &words))) {
