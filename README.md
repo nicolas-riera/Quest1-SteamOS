@@ -169,6 +169,12 @@ The parts that run on the headset (Monado, the SteamVR driver, the Vulkan layer)
 on the headset or cross-built in WSL. Their `build.sh` scripts and the `device/` scripts
 show how.
 
+## Contributing
+
+Read [AGENTS.md](AGENTS.md) first, whether you work by hand or with an AI agent: the headset's safety rules, what
+may and may not go into the repository, how to build, install and restart things on the headset, and how changes
+are verified there.
+
 ## Related project
 
 [quest2-steamos](https://github.com/URFAVF3MBOY/quest2-steamos) runs SteamOS on the Quest 2. Its
