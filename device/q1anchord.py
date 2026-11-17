@@ -46,6 +46,8 @@ SVC = ['unshare', '-m', 'sh', '-c',
        '/system/bin/service "$@"', 'svc']
 MAPUUID = '/data/misc/tracking/world-map.uuid'
 ANCHORUUID = '/data/misc/tracking/world-anchor.uuid'
+ROOMUUIDS = '/data/misc/tracking/room-anchors.uuid'  # anchors the room is tied to (q1trackd, src/q1track/q1room.h)
+ROOMREFS = '/data/misc/tracking/room-anchors.bin'  # their reference poses (written by q1trackd)
 STATE = '/run/q1track/frame-state'
 MAPSTATE = '/run/q1track/map-state'
 CLEAR = '/tmp/quest1-clear-map'
@@ -61,6 +63,8 @@ EMPTY_LOST = 30.0  # mapdb empty this long: the map is gone
 UNFOUND_WORN = 120.0  # worn this long without the saved map becoming current: relocalization failed, anchor on the head
 BAD_WINDOW = 10.0  # "bad" while bad-tracking lines of weight BAD_COUNT came within this (an "all submaps" one counts more)
 BAD_COUNT = 3
+ROOM_ANCHOR_EVERY = 10.0  # worn, tracking and the map saved: placeAnchor this often (it re-uses a nearby anchor)
+ROOM_ANCHOR_MAX = 8
 PERSIST_QUIET = 20.0  # tracking state and no bad map tracking this long before a map is persisted
 SAVED_URGENT_PERSIST = 300.0  # how long after a playspace save a persist may wait for a good tracking moment
 MAPDB_STAT_EVERY = 60.0
@@ -172,7 +176,7 @@ def forget():
 
 
 def drop_saved():
-    for p in (MAPUUID, ANCHORUUID):
+    for p in (MAPUUID, ANCHORUUID, ROOMUUIDS, ROOMREFS):
         try:
             os.unlink(p)
         except OSError:
@@ -200,6 +204,41 @@ def persist():
     write_atomic(MAPUUID, m)
     log('q1anchord: persisted map %s anchor %s' % (m, u))
     return True
+
+
+def room_uuids():
+    return [l for l in read(ROOMUUIDS).splitlines() if l.strip()]
+
+
+def place_room_anchor(handles):
+    """placeAnchor returns the anchor nearby or makes one at the current submap; a new one is persisted and its uuid
+    listed for q1trackd, which stores its pose in the room frame once the engine locates it (src/q1track/q1room.h).
+    handles: the handles seen in this engine session (they restart with the engine)."""
+    r = svc('call', 'TrackingEnvironment', '10')
+    if len(r) < 4 or r[0] != 0 or r[1] != 1:
+        return
+    h = (r[2], r[3])
+    if h in handles:
+        return
+    handles.add(h)
+    u = persist_anchor(h)
+    if not u or u == read(ANCHORUUID):
+        return
+    known = room_uuids()
+    if u in known or len(known) >= ROOM_ANCHOR_MAX:
+        return
+    with open(ROOMUUIDS, 'a') as f:
+        f.write(u + '\n')
+    log('q1anchord: room anchor %d placed and persisted (handle %d)' % (len(known) + 1, h[0]))
+
+
+def persist_anchor(h):  # persistAnchor(handle) -> uuid text or ''
+    r = svc('call', 'TrackingEnvironment', '13', 'i32', '1', 'i32', str(struct.unpack('<i', struct.pack('<I', h[0]))[0]),
+            'i32', str(struct.unpack('<i', struct.pack('<I', h[1]))[0]))
+    if len(r) < 6 or r[0] != 0 or r[1] != 1:
+        return ''
+    u = uuid_from_words(r[2:6])
+    return '' if u.startswith('00000000-0000') else u
 
 
 class Engine:
@@ -287,6 +326,7 @@ def main():
     sig, sig_since, backed = None, 0.0, None
     found, lost_logged = '', ''  # the saved map was the current one in this run; the map logged as temporary
     empty_since = None  # since when mapdb has been empty
+    handles, last_place = set(), 0.0  # room anchors: handles placed this engine session
     eng, pid = Engine(), engine_pid()
     mstate, last_mstate, unfound_worn, last_stat, last_t, last_cur = 'unknown', '', 0.0, 0.0, time.time(), ''
     while True:
@@ -301,6 +341,8 @@ def main():
             p = engine_pid()
             if p != pid:  # trackingservice restarted: a new session, the saved map has to be found again
                 pid, found, lost_logged, unfound_worn = p, '', '', 0.0
+                handles.clear()
+                last_place = now
                 eng.reset()
                 log('q1anchord: tracking engine restarted: the saved map has to be found again')
             eng.feed(now)
@@ -390,6 +432,11 @@ def main():
             if not saved and cur and good and (now < urgent_persist or
                                                (worn_since and now - worn_since > WORN_BEFORE_PERSIST)):
                 persist()
+            # room anchors: once the saved map is the current one and tracking is good, keep placing anchors where
+            # the user is (a new one only when none is near)
+            if saved and cur == saved and good and worn_since and now - last_place > ROOM_ANCHOR_EVERY and                     len(room_uuids()) < ROOM_ANCHOR_MAX:
+                last_place = now
+                place_room_anchor(handles)
         except Exception as e:  # keep running
             log('q1anchord: %r' % (e,))
         time.sleep(3)

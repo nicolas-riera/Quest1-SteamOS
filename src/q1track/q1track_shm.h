@@ -61,4 +61,10 @@ struct q1track_shm {
 	volatile uint32_t haptic_seq[2];
 	float haptic_amplitude[2];
 	int64_t haptic_until_ns[2];
+
+	/* q1trackd's room correction (q1room.h): already applied to every pose above (diagnostics only).
+	 * state: 0 no reference anchor located yet (identity), 1 following located anchors, 2 holding (relocalizing) */
+	uint32_t room_state, room_anchors; /* anchors used by the last update */
+	float room_orientation[4], room_position[3]; /* T_room_world */
+	float room_err_m, room_err_deg; /* applied vs target */
 };

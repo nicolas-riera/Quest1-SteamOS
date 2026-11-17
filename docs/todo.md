@@ -58,6 +58,12 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   Guardian and Home do, through the engine's anchor API (InternalAnchorApiServer v2 / SlamAnchorServer over
   RuntimeIPC, or TrackingEnvironment registerAnchor + its shared memory). No "verify your space" prompt (user: the
   old Guardian had one, Meta removed it, SteamOS has none and that is better).
+  2026-11-17: written, committed as work in progress, NOT tested (src/q1track/q1room.h, q1trackd.c, q1anchord.py;
+  installed on the headset that evening, q1trackd logs `room state` every 10 s): q1anchord places and persists up to
+  8 anchors while worn; q1trackd locates them (map manager, 20 Hz) and moves the room by a blend of them, slewed
+  (2 cm/s, 2 deg/s). To test worn: walk the room ~2 min (`journalctl -u android-q1trackd | grep room`: anchors > 0),
+  restart SteamVR then Monado (the room must come back in place), cover the cameras and uncover them (no jump).
+  Unverified: the world frame (assumed the world anchor's), a second persisted anchor in the same context.
 - Worn test of the map state (2026-11-16, docs/boundary.md "Map state and the room"): the chaperone must hide during
   relocalizing/lost/bad and come back in place; check that vrcompositor's chaperone follows the collisionBounds alpha
   setting live (not verified without the headset worn), the Meta-like UX (black/passthrough while relocalizing) if
@@ -129,6 +135,8 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 
 ## Passthrough
 
+- Turning the room view on (2026-11-17, with the layer's pipeline memo: no freeze any more): a first fade, then a
+  black flash and a second fade, then fine (user). Find what restarts it (vrcompositor's roomview log, q1-ptprovider).
 - Passthrough sometimes goes black and comes back with its fade-in, as if turned off and on at once (user,
   2026-11-10, with desktop mode and a stream open: the CPU was saturated). q1-ptprovider logged no disable and
   vrcompositor no roomview restart then: catch it with `PT_DUMP=1` (record states once a second) while it happens.
@@ -146,6 +154,9 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 
 - `ComputeInverseDistortion` returns identity while direct scanout distorts.
 - Pairing Quest controllers from Steam's UI (`syncboss_input_pair`: never without the user's explicit go).
+  docs/controller-pairing.md; user, 2026-11-17, with q1-pairing and the driver installed: the page still shows the
+  Steam Frame's controllers and no Touch controller (nothing to identify or forget), though it sees two connected;
+  and it stops searching once two are connected (the user wants more than two later). Real pairing call not wired.
 - SteamVR's playspace setup (user, 2026-11-12): the controllers' models are wrong there (seen before elsewhere too: a
   dark disc where the ring should be), and it runs poorly.
 
@@ -329,4 +340,9 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - Worn test of Meta's hands: `echo auto > /etc/quest1-hands`, then check tracked status values, the hand's pose space, the retargeted skeleton, pinch gestures (system / dashboard trigger).
 - Deploy the `android-q1handsd` unit in the image (holo-android-tracking setup, build-native) and merge the branch.
 - Menu icon near the palm (overlay) and a joint overlay; the vrlink hand path (probably controller inputs only).
+- Worn, 2026-11-17 (merged, setting on): the controllers disappear when put down, but no hand shows: no skeleton, no
+  palm mark (q1-handviz runs; check q1handsd's tracked status and the driver's hand device first).
+- The switch to hands (user): only when the controllers lie still, nothing on them is touched, and the hands are away
+  from them (not where the controllers are). Back to controllers on its own when one is picked up (a clear motion or
+  a touch); today a button must be pressed.
 

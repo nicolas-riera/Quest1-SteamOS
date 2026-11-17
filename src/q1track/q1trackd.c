@@ -37,6 +37,7 @@
 #include <unistd.h>
 
 #include "q1track_shm.h"
+#include "q1room.h"
 
 /* ---- bionic process start (crtbegin_dynamic without the NDK) ---- */
 struct structors {
@@ -72,6 +73,21 @@ typedef uint64_t (*haptic_simple_fn)(void *self, uint64_t id, float amp);
 static void *hub, *ctrls, *cinput, *haptics;
 
 static void *head; /* IHeadTracker v8 */
+static void *mapmgr; /* MapManager v13: slot 17 getAnchorStates(AnchorStates *out, uint64_t *seq) */
+
+/* anchor states of the engine, refreshed from shared memory (no binder); returns 1 when new data came */
+static int read_engine_state(struct eng_state *st)
+{
+	static _Alignas(16) uint8_t buf[4096];
+	static uint64_t seq;
+	if (!mapmgr)
+		return 0;
+	int (*fn)(void *, void *, uint64_t *) = (int (*)(void *, void *, uint64_t *))(*(void ***)mapmgr)[17];
+	if (!fn(mapmgr, buf, &seq))
+		return 0;
+	parse_anchor_states(buf, st);
+	return st->ok;
+}
 static volatile sig_atomic_t stop;
 
 static void on_signal(int s) { stop = 1; }
@@ -119,6 +135,9 @@ static int load_ossdk(void)
 		cinput = create(1);
 	if ((create = (void *(*)(long))dlsym(lib, "createHaptics")))
 		haptics = create(1);
+	if ((create = (void *(*)(long))dlsym(lib, "createMapManager")))
+		mapmgr = create(13);
+	fprintf(stderr, "q1trackd: map manager %p\n", mapmgr);
 	fprintf(stderr, "q1trackd: hub %p controllers %p input %p haptics %p\n", hub, ctrls, cinput, haptics);
 	return 0;
 }
@@ -377,6 +396,46 @@ static int do_print(double seconds, double hz)
 	return 0;
 }
 
+/* anchors: prints what the engine says about its anchors (handles and poses only, never uuids), for measurements */
+static int do_anchors(double seconds, double hz)
+{
+	struct eng_state st;
+	struct room room;
+	room_load(&room);
+	uint8_t w[1][16];
+	room.have_world = uuids_read(WORLD_UUID, w, 1) == 1;
+	if (room.have_world)
+		memcpy(room.world, w[0], 16);
+	int64_t t0 = now_ns(), next = t0;
+	memset(&st, 0, sizeof(st));
+	while (!stop && now_ns() - t0 < (int64_t)(seconds * 1e9)) {
+		struct q1track_pose p;
+		get_head(now_ns(), &p);
+		read_engine_state(&st);
+		struct pose7 odo_w = p_ident();
+		for (int i = 0; i < AS_MAXANCH; i++)
+			if (st.a[i].located && room.have_world && !memcmp(st.a[i].uuid, room.world, 16))
+				odo_w = st.a[i].odo;
+		struct pose7 w_odo = p_inv(odo_w);
+		printf("%.1f head [%.3f %.3f %.3f] submaps %llu reloc %d | T_odo_world p [%.3f %.3f %.3f] q [%.3f %.3f %.3f %.3f]",
+		       (now_ns() - t0) / 1e9, p.position[0], p.position[1], p.position[2], (unsigned long long)st.nsub,
+		       st.reloc, odo_w.p[0], odo_w.p[1], odo_w.p[2], odo_w.q[0], odo_w.q[1], odo_w.q[2], odo_w.q[3]);
+		for (int i = 0; i < AS_MAXANCH; i++) {
+			if (st.a[i].handle == -1)
+				continue;
+			struct pose7 tw = p_mul(w_odo, st.a[i].odo);
+			printf(" | a%lld%s %s p [%.3f %.3f %.3f] q [%.3f %.3f %.3f %.3f]", (long long)st.a[i].handle,
+			       room_ref_find(&room, st.a[i].uuid) ? "r" : "", st.a[i].located ? "loc" : "unloc", tw.p[0],
+			       tw.p[1], tw.p[2], tw.q[0], tw.q[1], tw.q[2], tw.q[3]);
+		}
+		putchar('\n');
+		fflush(stdout);
+		next += (int64_t)(1e9 / hz);
+		sleep_until(next);
+	}
+	return 0;
+}
+
 static int do_serve(double hz)
 {
 	mkdir("/run/q1track", 0755);
@@ -403,13 +462,45 @@ static int do_serve(double hz)
 	struct sched_param sp = {.sched_priority = 52};
 	if (sched_setscheduler(0, SCHED_FIFO, &sp) != 0)
 		fprintf(stderr, "q1trackd: SCHED_FIFO 52 refused\n");
-	int64_t next = now_ns(), last_log = 0, last_ipd = 0, last_dev = 0, last_battery = 0;
+	int64_t next = now_ns(), last_log = 0, last_ipd = 0, last_dev = 0, last_battery = 0, last_room = 0;
 	uint64_t valid = 0, n = 0;
+	static struct room room;
+	static struct eng_state est;
+	room_load(&room);
+	{
+		uint8_t w[1][16];
+		if (uuids_read(WORLD_UUID, w, 1) == 1) {
+			memcpy(room.world, w[0], 16);
+			room.have_world = 1;
+		}
+	}
+	int room_state = 0;
+	fprintf(stderr, "q1trackd: room: %d reference anchors\n", room.nref);
 	float ipd = 0;
 	while (!stop) {
 		struct q1track_pose p;
 		int64_t t = now_ns();
 		get_head(t, &p);
+		if (t - last_room > 50000000LL) { /* anchors of the engine, 20 Hz */
+			last_room = t;
+			if (!room.have_world) { /* q1anchord saves the world anchor's uuid once the map is persisted */
+				uint8_t w[1][16];
+				if (uuids_read(WORLD_UUID, w, 1) == 1) {
+					memcpy(room.world, w[0], 16);
+					room.have_world = 1;
+				}
+			}
+			read_engine_state(&est);
+			if (p.valid)
+				room_update(&room, &est, p.position, t);
+			room_state = room.used ? 1 : (room.have_c ? 2 : 0);
+		}
+		if (room.have_c) {
+			if (p.valid) {
+				float *v[4] = {p.angular_velocity, p.linear_velocity, p.angular_acceleration, p.linear_acceleration};
+				room_apply(&room.c, p.orientation, p.position, v, 4);
+			}
+		}
 		if (t - last_ipd > 1000000000) {
 			ipd = get_ipd();
 			last_ipd = t;
@@ -429,6 +520,12 @@ static int do_serve(double hz)
 				int slot = devs[i].hand == HAND_LEFT ? 0 : devs[i].hand == HAND_RIGHT ? 1 : -1;
 				if (slot >= 0) {
 					get_ctrl(devs[i].id, t, &cs[slot]);
+					if (room.have_c && cs[slot].pose.valid) {
+						struct q1track_pose *cp = &cs[slot].pose;
+						float *v[4] = {cp->angular_velocity, cp->linear_velocity, cp->angular_acceleration,
+							       cp->linear_acceleration};
+						room_apply(&room.c, cp->orientation, cp->position, v, 4);
+					}
 					liveness(slot, t, &cs[slot]);
 					cs[slot].battery = devs[i].battery;
 				}
@@ -439,6 +536,12 @@ static int do_serve(double hz)
 		memcpy((void *)m->controller, cs, sizeof(cs));
 		m->head = p;
 		m->ipd = ipd;
+		m->room_state = (uint32_t)room_state;
+		m->room_anchors = (uint32_t)room.used;
+		memcpy(m->room_orientation, room.c.q, 16);
+		memcpy(m->room_position, room.c.p, 12);
+		m->room_err_m = room.err_m;
+		m->room_err_deg = room.err_deg;
 		m->update_ns = t;
 		m->updates++;
 		__atomic_thread_fence(__ATOMIC_RELEASE);
@@ -447,6 +550,10 @@ static int do_serve(double hz)
 		n++;
 		valid += p.valid;
 		if (t - last_log > 10000000000LL) {
+			fprintf(stderr, "q1trackd: room state %d, %d/%d anchors, C pos [%.3f %.3f %.3f] rot [%.3f %.3f %.3f %.3f] "
+				"target err %.1f mm %.2f deg, engine: %llu submaps%s\n", room_state, room.used, room.nref,
+				room.c.p[0], room.c.p[1], room.c.p[2], room.c.q[0], room.c.q[1], room.c.q[2], room.c.q[3],
+				room.err_m * 1000, room.err_deg, (unsigned long long)est.nsub, est.reloc ? ", relocalizing" : "");
 			fprintf(stderr, "q1trackd: %llu/%llu head samples valid, status %x, pos [%.3f %.3f %.3f]\n",
 				(unsigned long long)valid, (unsigned long long)n, p.status, p.position[0],
 				p.position[1], p.position[2]);
@@ -468,14 +575,16 @@ int main(int argc, char **argv)
 	setvbuf(stdout, NULL, _IOLBF, 0);
 	signal(SIGINT, on_signal);
 	signal(SIGTERM, on_signal);
-	if (argc < 2 || (strcmp(argv[1], "print") && strcmp(argv[1], "serve") && strcmp(argv[1], "ctl"))) {
-		fprintf(stderr, "usage: %s print [seconds] [hz] | ctl [seconds] [hz] | serve [hz]\n", argv[0]);
+	if (argc < 2 || (strcmp(argv[1], "print") && strcmp(argv[1], "serve") && strcmp(argv[1], "ctl") && strcmp(argv[1], "anchors"))) {
+		fprintf(stderr, "usage: %s print [seconds] [hz] | ctl [seconds] [hz] | anchors [seconds] [hz] | serve [hz]\n", argv[0]);
 		return 2;
 	}
 	if (load_ossdk() < 0)
 		return 1;
 	if (!strcmp(argv[1], "print"))
 		return do_print(argc > 2 ? atof(argv[2]) : 10, argc > 3 ? atof(argv[3]) : 10);
+	if (!strcmp(argv[1], "anchors"))
+		return do_anchors(argc > 2 ? atof(argv[2]) : 10, argc > 3 ? atof(argv[3]) : 2);
 	if (!strcmp(argv[1], "ctl"))
 		return do_ctl(argc > 2 ? atof(argv[2]) : 10, argc > 3 ? atof(argv[3]) : 10);
 	return do_serve(argc > 2 ? atof(argv[2]) : 500);

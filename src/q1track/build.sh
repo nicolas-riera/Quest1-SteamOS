@@ -9,5 +9,5 @@ B=/apex/com.android.runtime/lib64/bionic
 gcc -std=gnu11 -O2 -Wall -Wextra -Wno-unused-parameter \
 	-fPIE -pie -nostdlib -nostartfiles -fno-stack-protector -U_FORTIFY_SOURCE \
 	-Wl,--dynamic-linker=/system/bin/linker64 -Wl,-z,now -Wl,--no-undefined -Wl,--allow-shlib-undefined \
-	-o q1trackd q1trackd.c $B/libc.so $B/libdl.so
+	-o q1trackd q1trackd.c $B/libc.so $B/libdl.so $B/libm.so
 ls -la q1trackd
