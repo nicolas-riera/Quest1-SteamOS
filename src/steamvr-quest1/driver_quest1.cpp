@@ -2069,15 +2069,12 @@ private:
 			bool on = VRSettings()->GetBool("driver_quest1", "handTracking", &err) && err == VRSettingsError_None;
 			if ((int)on != writtenHands) {
 				if (FILE *f = fopen("/tmp/quest1-hands.tmp", "w")) {
-					fputs(on ? "auto
-" : "off
-", f);
+					fputs(on ? "auto\n" : "off\n", f);
 					fclose(f);
 					chmod("/tmp/quest1-hands.tmp", 0644);
 					rename("/tmp/quest1-hands.tmp", "/tmp/quest1-hands");
 					writtenHands = on;
-					Log("quest1: settings: hand tracking %s
-", on ? "on" : "off");
+					Log("quest1: settings: hand tracking %s\n", on ? "on" : "off");
 				}
 			}
 		}
