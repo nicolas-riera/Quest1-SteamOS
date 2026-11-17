@@ -31,6 +31,15 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   -> 0.29 GB, +0.4 GB in zram) and the load goes 11 -> 18 while it starts; Baloo, Discover's notifier, ibus and
   kaccess are now off (holo-desktop.sh, ~0.1 GB). Next if it freezes again: what else to trim (plasmashell 0.3 GB, the
   Steam webhelpers 0.65 GB), or stop the desktop's apps first under pressure (no PSI on 4.4: a MemAvailable watch).
+  2026-11-17 (night, autonomous): under the user's load (stream-load.sh: desktop mode plus 500 MB) MemAvailable fell to
+  ~140 MB, vrcompositor to 56 fps for a few seconds and vrlink's pictures came with gaps of ~100 ms (the shim's flash
+  log): a stutter the user may see as a flash and a tremble. No freeze. At 02:07 the headset powered itself off
+  cleanly with nothing special running (673 MB available, 71 fps): logind "The system will power off now!", no power
+  key event (logind ignores it), after ~4.5 h of panels, stream and benches with only the PC's USB port charging. Most
+  likely the battery's critical level (UPower powers off at 2 %): check the battery's level when it comes back
+  (`/run/vpower`, Steam's battery icon), and charge it before long benches. The journal is not kept across boots
+  (no /var/log/journal): make it persistent (Storage=persistent, capped) so that the next power-off or freeze can be
+  read after the reboot.
 
 - Performance (docs/performance.md): GPU-bound, ~12.4 of 13.9 ms a frame. Levers left, all visible, so the user
   decides: achromatic distortion (vrcompositor's distortion pass is ~2 ms per eye), a lighter environment than Aurora
