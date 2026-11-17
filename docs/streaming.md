@@ -705,6 +705,28 @@ vrlink writes its own log, `~/.local/share/Steam/logs/vrlink.txt` (the PC's side
         recording that copy as a `vkCmdUpdateBuffer` of what the memory held then (all no change, since the device
         copy is not read). Drawing vrlink's last frame instead of the one vrcompositor took makes it worse (the
         layer's choice comes before vrcompositor's pose).
+      - SteamVR 2.19.3 (2026-11-17): the trembling came back (user, worn). 2.19's vrcompositor writes that memory
+        later, after it bound the sets and just before it submits the frame, with the pose of vrlink's last submit
+        at that moment, while the picture is vrlink's last submit before the layer's copy, earlier in the frame. When
+        vrlink submitted in between, the bind's snapshot holds the pose of the frame before: at 8 steps of the pose,
+        the picture (its horizon read at the copy) went with the bind's pose 4 times and with the submit's 4 times.
+        The fix: the shim publishes each submit's head pose, time and frame buffer index (`/dev/shm/quest1-vrlink-poses`,
+        quest1_views.h `q1_poses`); the layer finds the picture's submit at the copy (`qsp_picture`: by the frame
+        buffer, learnt per NV12 image, since "the last submit before the copy" was wrong ~10 % of the time) and at
+        vrcompositor's submit keeps whichever snapshot has that pose (bind or submit), or, when neither has it, writes
+        the eye poses made from it into the snapshot (`qsp_repose`). The layer's log gives the counts once a minute
+        (`stream: ... the picture's pose was the bind's N times, the submit's N, made from them N ...; pictures found
+        by their frame buffer N, as the last submit N`). `stepsnap.py`, pitch steps of 1.5°: 0 of 52 and 0 of 60
+        pictures off, 4 of 40 without it; ±1° of random pitch at every pose read (`/tmp/q1-posenoise` of
+        pose-knobs-vrlink.patch): 2.5 px rms instead of 7.2. User, worn: "it doesn't tremble any more, almost";
+        still under load, which was the decoder's clock (next item).
+      - The decoder's clock (2026-11-17): as the 2.19 streams started, the kernel logged "Failed to set clock rate:
+        -19" once and venus's core stayed at 200 MHz of 533 for the whole session (`/sys/kernel/debug/clk/
+        video_core_clk_src/rate`), turbo asked for or not: decoding took 76 ms a frame (p50, the PC's
+        vrlink_aftm CSV) instead of 12-17, every frame late. The driver sets the clock again only when a control
+        changes (V4L2's control framework skips a write of the same value), so the shim switches the perf level to
+        nominal and back to turbo every 2 s while a low-latency client takes frames (`keep_clock` in
+        quest1_vdec.c): 533 MHz again, decode p50 12.2 ms, p90 17.5.
 
 14. **Controller buttons** (2026-11-16). vrlink forwards a controller's buttons and axes to the PC only if the
     controller's type reads `frame_controller` (vrlink.bin 0x563b0: each frame it reads Prop_ControllerType_String into

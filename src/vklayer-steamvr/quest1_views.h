@@ -19,3 +19,22 @@ struct q1_views
 	float inset[2][4]; //!< the inset's place over it, in the atlas; the inset itself is the view just above
 	uint64_t alive_ns; //!< CLOCK_MONOTONIC, written every second while vrlink runs
 };
+
+// The head pose of each frame vrlink submits, for vrcompositor's distortion (quest1_modifier_pose.c): the layer pairs
+// the picture it copies with the pose of its submit, found by its frame buffer. A file of its own, so that an older
+// shim or layer on the other side reads the views above as before.
+#define Q1_POSES_PATH "/dev/shm/quest1-vrlink-poses"
+#define Q1_POSES 16
+
+struct q1_poses
+{
+	uint32_t n; //!< submits published: the last is p[(n - 1) % Q1_POSES]
+	uint32_t reserved;
+	struct
+	{
+		uint32_t seq;   //!< its submit's number (n after it), 0 while being written
+		int32_t frame;  //!< which of vrlink's 16 frame buffers (its texture set's index) the picture is in
+		uint64_t t_ns;   //!< CLOCK_MONOTONIC, just before vrlink's submit reaches vrcompositor
+		float pose[12];  //!< the submit's head pose (HmdMatrix34_t: row-major 3x4, the position in its last column)
+	} p[Q1_POSES];
+};

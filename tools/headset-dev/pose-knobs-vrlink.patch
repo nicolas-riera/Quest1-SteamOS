@@ -1,9 +1,17 @@
 --- a/src/v4l2shim/quest1_vrlink.c
 +++ b/src/v4l2shim/quest1_vrlink.c
-@@ -359,6 +359,29 @@
- 	else if (!eye_l && !eye_r && !count && last_picture && now - last_picture < 200000000ull) {
+@@ -31,6 +31,7 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <fcntl.h>
++#include <math.h> // test only (pose knobs)
+ #include <sys/mman.h>
+ #include <sys/syscall.h>
+ #include <time.h>
+@@ -564,6 +565,29 @@
  		return 0; // VRCompositorError_None
  	}
+ 	flash_watch(frame, picture, !picture && !eye_l && !eye_r && !count, now);
 +	{ // test only: /tmp/q1-labellog: each submit's pose (its forward vector) to /tmp/q1lab.txt
 +		static uint64_t chk;
 +		static FILE *lf;
@@ -27,16 +35,17 @@
 +			fflush(lf);
 +		}
 +	}
+ 	if (picture)
+ 		publish_pose(eye_l, frame, now);
  	return real_submit_set(self, index, count, handles, eye_l, eye_r, bounds_l, bounds_r, flags, seconds);
- }
- 
-@@ -469,6 +492,74 @@
- 		for (int i = 0; i < 3; i++)
- 			s[i] += k * (p.ang[i] - s[i]);
- 		memcpy(o + RAW_ANGULAR, s, sizeof(s));
+@@ -669,6 +693,85 @@
+ 		// 2026-11-17). On the user's recorded head (85 s, 92 ms ahead) the low-pass made the prediction error 4.6 deg
+ 		// rms against 2.9 without, for 10 % less frame-to-frame shake (docs/streaming.md item 15).
+ 		memcpy(o + RAW_ANGULAR, p.ang, sizeof(p.ang));
 +		{ // test only (tools/headset-dev/pose-knobs-vrlink.patch): what vrlink and the PC get, from files read 3 times a second
 +			static uint64_t chk;
 +			static double po[3], ro[2], noise, sine_hz, wo[3], vo[3];
++			static int noise_pitch;
 +			if (now - chk > 300000000ull) {
 +				chk = now;
 +				FILE *f;
@@ -51,9 +60,13 @@
 +						ro[0] = ro[1] = 0;
 +					fclose(f);
 +				}
-+				if ((f = fopen("/tmp/q1-posenoise", "r"))) { // "DEG": a random world yaw within +-DEG at each read
-+					if (fscanf(f, "%lf", &noise) != 1)
++				noise_pitch = 0;
++				if ((f = fopen("/tmp/q1-posenoise", "r"))) { // "DEG [pitch]": a random world yaw (or head pitch)
++					char axis[16] = "";                       // within +-DEG at each read
++					int got = fscanf(f, "%lf %15s", &noise, axis);
++					if (got < 1)
 +						noise = 0;
++					noise_pitch = got == 2 && !strcmp(axis, "pitch");
 +					fclose(f);
 +				}
 +				if ((f = fopen("/tmp/q1-posesine", "r"))) { // "HZ": with posenoise, a yaw sine of DEG instead
@@ -99,6 +112,12 @@
 +				           (sine_hz > 0 ? sin(2 * M_PI * sine_hz * (double)p.time_ns * 1e-9) : 2.0 * rand() / RAND_MAX - 1);
 +				double c = cos(a / 2), s2 = sin(a / 2); // (c, 0, s, 0) * q
 +				double n[4] = {c * q[0] - s2 * q[2], c * q[1] + s2 * q[3], c * q[2] + s2 * q[0], c * q[3] - s2 * q[1]};
++				if (noise_pitch) { // q * (c, s, 0, 0): a pitch in the head's frame
++					n[0] = q[0] * c - q[1] * s2;
++					n[1] = q[0] * s2 + q[1] * c;
++					n[2] = q[2] * c + q[3] * s2;
++					n[3] = q[3] * c - q[2] * s2;
++				}
 +				memcpy(o + RAW_ROTATION, n, sizeof(n));
 +			}
 +		}

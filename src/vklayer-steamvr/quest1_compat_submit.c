@@ -298,11 +298,14 @@ static void *completer_main(void *arg)
 
 static void ft(const char *what, int64_t arg); // quest1_display.c (frame trace)
 
+static void qsp_submit(uint32_t n, const VkSubmitInfo *submits); // quest1_rpmerge.c (the stream's pose)
+
 static VKAPI_ATTR VkResult VKAPI_CALL QueueSubmit(VkQueue queue, uint32_t n, const VkSubmitInfo *submits, VkFence fence)
 {
 	struct device *d = device_of(queue);
 	q1_rt_cap();
 	ft("submit", (int64_t)(uint64_t)fence);
+	qsp_submit(n, submits);
 	struct submit_job *j = job_build(queue, n, submits, fence);
 	pthread_mutex_lock(&d->mutex);
 	if (d->tail)

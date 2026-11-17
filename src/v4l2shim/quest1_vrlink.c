@@ -423,6 +423,41 @@ static void publish_views(const void *const eye[2], const void *const bounds[2],
 	__atomic_store_n(&v->seq, (seq | 1) + 1, __ATOMIC_RELEASE);
 }
 
+// After an eye's offset: its VRTextureWithPose_t's head pose (HmdMatrix34_t, row-major)
+enum { EYE_POSE = 16 };
+
+//! Each picture's head pose, for vrcompositor's layer (quest1_views.h q1_poses, quest1_modifier_pose.c): published
+//! before the submit reaches vrcompositor, with the time.
+static void publish_pose(const void *eye, int32_t frame, uint64_t now)
+{
+	static struct q1_poses *p;
+	static bool tried;
+	if (!p && !tried) {
+		tried = true;
+		int fd = open(Q1_POSES_PATH, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+		void *m = fd >= 0 && ftruncate(fd, sizeof(*p)) == 0
+		              ? mmap(NULL, sizeof(*p), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) : MAP_FAILED;
+		if (fd >= 0)
+			close(fd);
+		p = m == MAP_FAILED ? NULL : m;
+		fprintf(stderr, "quest1_v4l2: vrlink: each picture's pose for vrcompositor in %s: %s\n", Q1_POSES_PATH,
+		        p ? "ok" : strerror(errno));
+	}
+	if (!p || !eye)
+		return;
+	float m[12];
+	memcpy(m, (const char *)eye + EYE_POSE, sizeof(m));
+	uint32_t n = __atomic_load_n(&p->n, __ATOMIC_RELAXED) + 1;
+	__typeof__(p->p[0]) *e = &p->p[(n - 1) % Q1_POSES];
+	__atomic_store_n(&e->seq, 0, __ATOMIC_RELAXED);
+	__atomic_thread_fence(__ATOMIC_RELEASE);
+	e->t_ns = now;
+	e->frame = frame;
+	memcpy(e->pose, m, sizeof(e->pose));
+	__atomic_store_n(&e->seq, n, __ATOMIC_RELEASE);
+	__atomic_store_n(&p->n, n, __ATOMIC_RELEASE);
+}
+
 // What the user sees as a black flash, logged (journal, "quest1_v4l2: vrlink:") with the time of day, so that a flash
 // seen worn can be matched: no new picture from vrlink for more than 100 ms (vrcompositor shows the last one again,
 // re-projected: a freeze, not black), an empty submit passed on (no picture for 200 ms: vrcompositor draws no stream),
@@ -529,6 +564,8 @@ static uint32_t submit_set(void *self, int32_t index, uint32_t count, const uint
 		return 0; // VRCompositorError_None
 	}
 	flash_watch(frame, picture, !picture && !eye_l && !eye_r && !count, now);
+	if (picture)
+		publish_pose(eye_l, frame, now);
 	return real_submit_set(self, index, count, handles, eye_l, eye_r, bounds_l, bounds_r, flags, seconds);
 }
 

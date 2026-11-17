@@ -33,6 +33,7 @@
 #define RM_LAYOUTS 256
 #define RM_RPS 128
 #define RM_CBS 32
+#define RM_QSP 8 // stream pose snapshots in a command buffer (2 a frame here)
 
 static bool ub_alloc(struct device *d, VkCommandBuffer cb, VkDeviceSize size, VkBuffer *buf, VkDeviceSize *off,
                      void **ptr); // quest1_compat.c
@@ -427,6 +428,14 @@ struct rm_cb
 		VkDeviceSize lo, hi;
 	} dirty[RM_DIRTY]; //!< updates absorbed in this pass
 	struct rm_slot slot[RM_SLOTS];
+	struct
+	{
+		uint8_t *dst;        //!< the snapshot, in the command buffer's staging
+		VkDeviceSize at, sz; //!< where in vrcompositor's pose memory it was taken
+	} qsp[RM_QSP];           //!< the stream pose's snapshots (qsp_bind), settled at the submit (qsp_submit)
+	unsigned nqsp;
+	bool pic_known;     //!< the picture this command buffer draws is a known submit of vrlink's (qsp_picture)
+	float pic_pose[12]; //!< that submit's head pose (HmdMatrix34_t)
 };
 static struct rm_cb rm_cbs[RM_CBS];
 static _Atomic unsigned rm_stat_merged, rm_stat_splits, rm_stat_redirects;
@@ -801,6 +810,9 @@ static bool rm_redirect(struct rm_cb *c, unsigned i)
 
 static bool qsp_host(VkDeviceMemory *mem, const uint8_t **map); // quest1_modifier.c
 static void qsp_count(bool copied);
+static void qsp_paired(int kind, float dist);
+static float qsp_rot_dist(const uint8_t *snap, const float head[12]);
+static bool qsp_repose(uint8_t *dst, const uint8_t *from, size_t sz, const float want[12]);
 static bool u32_buf_mem(VkBuffer b, uint64_t *mem, uint64_t *off); // quest1_compat.c
 
 //! vkCmdBindDescriptorSets (graphics), after the app's: a set that reads a uniform buffer in the memory vrcompositor
@@ -900,7 +912,9 @@ static void qsp_bind(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipelineLayou
 				why = "no staging";
 				break;
 			}
-			memcpy(p, map + at[h], sz); // the pose vrcompositor wrote for the frame it is recording
+			memcpy(p, map + at[h], sz); // the pose vrcompositor wrote last (2.19: for the frame before, see qsp_submit)
+			if (c->nqsp < RM_QSP)
+				c->qsp[c->nqsp++] = (__typeof__(c->qsp[0])){p, at[h], sz};
 			bi[h] = (VkDescriptorBufferInfo){sb, soff, sz};
 			wr[h] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, copy, e.buf[hit[h]].binding,
 			                               e.buf[hit[h]].elem, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, NULL, &bi[h], NULL};
@@ -915,6 +929,54 @@ static void qsp_bind(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipelineLayou
 			LOG("stream: a descriptor set reading the stream's pose cannot be copied (%s)\n", why ? why : "?");
 		qsp_count(ok);
 	}
+}
+
+//! quest1_modifier_pose.c qsp_picture: the head pose of the picture command buffer cb draws, NULL if not known.
+static void rm_picture(VkCommandBuffer cb, const float *pose)
+{
+	struct rm_cb *c = rm_get(cb);
+	if (!c)
+		return;
+	c->pic_known = pose != NULL;
+	if (pose)
+		memcpy(c->pic_pose, pose, sizeof(c->pic_pose));
+}
+
+//! vkQueueSubmit, on the caller's thread: each snapshot of the stream's pose in these command buffers is settled to
+//! the pose of the picture the command buffer draws (quest1_modifier_pose.c "SteamVR 2.19"): the snapshot (the memory
+//! at the bind) when it is that pose, else the memory now when that is, else one of them moved to that pose
+//! (qsp_repose). Without a known picture the bind's stays.
+static void qsp_submit(uint32_t n, const VkSubmitInfo *submits)
+{
+	VkDeviceMemory hm;
+	const uint8_t *map;
+	if (!qsp_host(&hm, &map))
+		return;
+	for (uint32_t s = 0; s < n; s++)
+		for (uint32_t k = 0; k < submits[s].commandBufferCount; k++) {
+			struct rm_cb *c = rm_get(submits[s].pCommandBuffers[k]);
+			for (unsigned i = 0; c && i < c->nqsp; i++) {
+				uint8_t *dst = c->qsp[i].dst;
+				const uint8_t *now = map + c->qsp[i].at;
+				VkDeviceSize sz = c->qsp[i].sz;
+				if (!c->pic_known || sz < 220 * sizeof(float)) { // (both eyes' poses: floats 44-219)
+					qsp_paired(-1, 0);
+					continue;
+				}
+				// the same pose to float precision; a 1.5 degree step is ~1.4e-3 apart
+				float db = qsp_rot_dist(dst, c->pic_pose), dn = qsp_rot_dist(now, c->pic_pose);
+				if (db < 1e-6f) {
+					qsp_paired(0, db);
+				} else if (dn < 1e-6f) {
+					memcpy(dst, now, sz);
+					qsp_paired(1, dn);
+				} else if (qsp_repose(dst, dst, sz, c->pic_pose) || qsp_repose(dst, now, sz, c->pic_pose)) {
+					qsp_paired(2, db < dn ? db : dn);
+				} else {
+					qsp_paired(3, db < dn ? db : dn);
+				}
+			}
+		}
 }
 
 //! Before a draw: inside a merged pass with absorbed updates, the bound sets that read them are redirected.

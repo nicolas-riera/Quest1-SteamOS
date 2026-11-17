@@ -62,6 +62,8 @@ static bool qcp_hold(VkImage nv12)
 	return held;
 }
 
+static void qsp_picture(VkCommandBuffer cb, VkImage image, bool fresh); // quest1_modifier_pose.c
+
 //! Record the copy of NV12 image k's frame into its RGBA image (outside a render pass).
 static void qcp_record(VkCommandBuffer cb, int k)
 {
@@ -96,6 +98,7 @@ static void qcp_record(VkCommandBuffer cb, int k)
 		return;
 	if (qcp_hold(c.nv12)) {
 		atomic_store(&qs_stream_ns, now_ns()); // still streaming
+		qsp_picture(cb, c.nv12, false);
 		return;
 	}
 	// Each frame is copied once, when vrcompositor takes it first. vrcompositor takes the frame it shows again at each
@@ -106,9 +109,11 @@ static void qcp_record(VkCommandBuffer cb, int k)
 	static _Atomic uint64_t copied;
 	if ((uint64_t)c.nv12 == atomic_load(&copied)) {
 		atomic_store(&qs_stream_ns, now_ns());
+		qsp_picture(cb, c.nv12, false);
 		return;
 	}
 	atomic_store(&copied, (uint64_t)c.nv12);
+	qsp_picture(cb, c.nv12, true); // vrlink's last submit before now (quest1_modifier_pose.c)
 	VkRect2D area = {{0, 0}, {c.w, c.h}};
 	VkRenderPassBeginInfo bi = {VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, NULL, qcs.rp, c.fb, area, 0, NULL};
 	begin(cb, &bi, VK_SUBPASS_CONTENTS_INLINE);

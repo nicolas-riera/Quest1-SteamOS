@@ -376,6 +376,11 @@ ExecStart=/usr/local/bin/steam-q1 -gamepadui -steamos3 -steamdeck -steamframe -p
 # 40: Steam Link VR's client (vrlink) runs its network and decoding threads realtime (libquest1_v4l2 lowers its 80
 # to 40); as normal threads they ran late and the PC held its encoder back (2026-11-11, src/v4l2shim/quest1_vrlink.c).
 LimitRTPRIO=40
+# -10: SteamVR 2.19's vrlink gives its network receive threads ("RXT<address>") nice -10 instead, with setpriority
+# and then RealtimeKit, which cannot place a thread of Steam's container (pidns required but no pidfd provided). At
+# LimitNICE=0 both failed and the threads stayed at nice 0 (2026-11-17). (Its slow decode that day was the decoder's
+# clock, not this: src/v4l2shim/quest1_vdec.c keep_clock.)
+LimitNICE=-10
 # Steam exits with status 0 on its own (e.g. when SteamVR restarts); like a console session it must come back
 Restart=always
 RestartSec=5

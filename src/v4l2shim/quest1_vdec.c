@@ -186,6 +186,7 @@ struct q1dec {
 	uint64_t seq_ns;   // when the stream's first sequence came (for a client that waits with epoll)
 	bool stall_logged;
 	bool low_latency;  // frames in decode order, realtime priority (the client's DISPLAY_DELAY 0)
+	uint64_t clock_ns; // when the turbo clock was last asked for again (keep_clock)
 	bool ten_bit;      // the stream is 10-bit: split mode, 8-bit NV12 frames of 10-bit references (split: set)
 	bool split;
 	int evfd;          // in the client's epoll set: readable while a SOURCE_CHANGE or a skipped packet waits; -1 if none
@@ -693,11 +694,38 @@ static void set_low_latency(struct q1dec *e)
 		uint32_t id;
 		int32_t v;
 	} c[] = {{CID_OUTPUT_ORDER, 1}, {CID_PRIORITY, 0}, {CID_OPERATING_RATE, LOW_LATENCY_FPS << 16}, {CID_PERF_LEVEL, 2}};
+	int32_t got[sizeof(c) / sizeof(c[0])];
 	for (size_t i = 0; i < sizeof(c) / sizeof(c[0]); i++) {
 		struct v4l2_control k = {.id = c[i].id, .value = c[i].v};
 		if (sys_ioctl(e->fd, VIDIOC_S_CTRL, &k) < 0)
 			logf_("control 0x%x = %d (low latency): %s", c[i].id, c[i].v, strerror(errno));
+		k.value = -1;
+		got[i] = sys_ioctl(e->fd, VIDIOC_G_CTRL, &k) == 0 ? k.value : -1;
 	}
+	// read back: the driver's clock follows the operating rate and turbo (msm_comm_get_inst_load)
+	logf_("low latency: output order %d (1 = decode), priority %d (0 = realtime), %d fps, perf level %d (2 = turbo)",
+	      got[0], got[1], got[2] < 0 ? -1 : got[2] >> 16, got[3]);
+}
+
+// The turbo clock asked again every 2 s while a low-latency client takes frames. The driver sets the core's clock when
+// a control or a session changes, and once that failed ("Failed to set clock rate: -19" as Steam Link VR's stream
+// started) the core stayed at its lowest, 200 of 533 MHz, for the whole session: 74 ms from packet to frame instead of
+// 14-17, every frame late, the PC holding its encoder back and the stream trembling (2026-11-17, SteamVR 2.19's vrlink
+// at its first sessions). The driver sets the clock again in its handler of the perf level, but V4L2's control framework
+// calls it only when the value changes: nominal then turbo (the clock goes to the load's rate for an instant, then
+// back to turbo).
+static void keep_clock(struct q1dec *e)
+{
+	if (!e->low_latency)
+		return;
+	uint64_t t = now_ns(), was = __atomic_load_n(&e->clock_ns, __ATOMIC_RELAXED);
+	if (t - was < 2000000000ull || !__atomic_compare_exchange_n(&e->clock_ns, &was, t, false, __ATOMIC_RELAXED,
+	                                                             __ATOMIC_RELAXED))
+		return;
+	struct v4l2_control k = {.id = CID_PERF_LEVEL, .value = 0};
+	sys_ioctl(e->fd, VIDIOC_S_CTRL, &k);
+	k.value = 2;
+	sys_ioctl(e->fd, VIDIOC_S_CTRL, &k);
 }
 
 static int s_ctrl(struct q1dec *e, struct v4l2_control *c)
@@ -705,6 +733,8 @@ static int s_ctrl(struct q1dec *e, struct v4l2_control *c)
 	if (c->id == V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY_ENABLE) {
 		pthread_mutex_lock(&e->mu);
 		e->low_latency = c->value != 0;
+		logf_("the client asks for %s (DISPLAY_DELAY_ENABLE %d, OUTPUT format %s)",
+		      e->low_latency ? "each frame at once" : "frames in display order", c->value, e->out_set ? "set" : "not set yet");
 		if (e->low_latency && e->out_set)
 			set_low_latency(e);
 		pthread_mutex_unlock(&e->mu);
@@ -1653,6 +1683,7 @@ static int dqbuf(struct q1dec *e, struct v4l2_buffer *b)
 			if (!e->frames++ && e->epfd >= 0)
 				logf_("first frame, %.0f ms after the first packet", (now_ns() - e->first_packet_ns) / 1e6);
 			pthread_mutex_unlock(&e->mu);
+			keep_clock(e);
 			return 0;
 		}
 		if (e->last_seen)
@@ -1692,6 +1723,8 @@ static int dqbuf(struct q1dec *e, struct v4l2_buffer *b)
 		}
 		to_client(e, q, b, &d, q == CAP ? p[0].bytesused : 0);
 		pthread_mutex_unlock(&e->mu);
+		if (q == CAP)
+			keep_clock(e);
 		return 0;
 	}
 }

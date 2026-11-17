@@ -17,6 +17,25 @@
 // in the command buffer's own staging (quest1_rpmerge.c: qsp_bind). The memory is found as the source of
 // vrcompositor's 2800-byte copy (it copies the same bytes into a device buffer too) and mapped by the layer
 // (vrcompositor writes it through no mapping the layer sees). `nostreampose` in /tmp/quest1-layer turns it off.
+//
+// SteamVR 2.19's vrcompositor writes that memory later: after it has bound those sets, just before it submits the
+// frame, with the pose of vrlink's last submit at that moment. But the picture it draws is the one it took earlier in
+// the frame (the layer copies it at vrcompositor's barrier on it, quest1_modifier_record.c): vrlink's last submit
+// before that copy. When vrlink submitted in between, the frame has two candidates, the memory as it was at the bind
+// (the pose written for the frame before) and as it is at the submit, and either may be the picture's: at each of 8
+// steps of the pose sent to the PC, the picture (its horizon read in the decoded frame at the copy) went with the bind's
+// pose 4 times and with the submit's 4 times, and every one of 353 pictures was vrlink's last submit before the copy
+// (2026-11-17). The user felt it worn as the trembling back with 2.19. So the shim publishes the head pose of each
+// submit with its time and frame buffer index (quest1_views.h q1_poses), the layer notes at the copy which submit the
+// picture is (qsp_picture), and at the submit keeps whichever of the two snapshots has that pose's rotation
+// (qsp_submit in quest1_rpmerge.c). When neither has it (vrlink submitted twice in the frame: the memory never held
+// the picture's pose), the layer writes it into the snapshot itself: each eye's pose and its inverse, made from the
+// picture's head pose and the eye's offset from the head (qsp_repose). "vrlink's last submit before the copy" was
+// wrong for ~10 % of the pictures when vrlink submitted while vrcompositor took the frame; the picture is now told by
+// its frame buffer, learnt per NV12 image (vrcompositor imports each of vrlink's 16 buffers once). Measured with the
+// pose sent to the PC stepped by 1.5°: 0 of 112 pictures off (4 of 40 without the fix); with ±1° of random pitch at
+// every pose read, 2.5 px rms left instead of 7.2. Without the shim's poses (an older shim) the bind's snapshot stays,
+// as for 2.17.
 enum { QSP_BYTES = 2800 };
 
 static struct
@@ -25,8 +44,11 @@ static struct
 	VkDeviceMemory host; //!< the memory vrcompositor writes the pose into
 	const uint8_t *map;  //!< the layer's mapping of it, NULL when it could not map it
 	unsigned copies, other; //!< sets bound with a snapshot, sets that read the memory but could not be copied
+	unsigned bind, submit, moved, neither, unknown; //!< where each snapshot found its picture's pose (qsp_paired)
+	double moved_deg, neither_deg;                  //!< how far off those not found were, summed
 	uint64_t log_ns;
 } qsp = {PTHREAD_MUTEX_INITIALIZER};
+static unsigned qsp_guess, qsp_learnt; //!< pictures paired with the last submit (not learnt yet), by their buffer
 
 static bool qsp_off(void)
 {
@@ -99,10 +121,233 @@ static void qsp_count(bool copied)
 	uint64_t t = now_ns();
 	if (t - qsp.log_ns > 60000000000ull) {
 		if (qsp.log_ns)
-			LOG("stream: %u descriptor sets bound with a copy of the stream's pose in 60 s, %u left as they were\n",
-			    qsp.copies, qsp.other);
-		qsp.copies = qsp.other = 0;
+			LOG("stream: %u descriptor sets bound with a copy of the stream's pose in 60 s, %u left as they were; the "
+			    "picture's pose was the bind's %u times, the submit's %u, made from them %u (%.2f deg away), not made "
+			    "%u (%.2f deg off), the picture not known %u; pictures found by their frame buffer %u, as the last "
+			    "submit %u\n",
+			    qsp.copies, qsp.other, qsp.bind, qsp.submit, qsp.moved, qsp.moved ? qsp.moved_deg / qsp.moved : 0.0,
+			    qsp.neither, qsp.neither ? qsp.neither_deg / qsp.neither : 0.0, qsp.unknown, qsp_learnt, qsp_guess);
+		qsp_learnt = qsp_guess = 0;
+		qsp.copies = qsp.other = qsp.bind = qsp.submit = qsp.moved = qsp.neither = qsp.unknown = 0;
+		qsp.moved_deg = qsp.neither_deg = 0;
 		qsp.log_ns = t;
 	}
 	pthread_mutex_unlock(&qsp.lock);
+}
+
+//! qsp_submit's count: where a snapshot found its picture's pose (0 the bind's, 1 the submit's, 2 made from one of
+//! them (qsp_repose), 3 not found; dist: the nearer one's qsp_rot_dist; -1 the picture not known).
+static void qsp_paired(int kind, float dist)
+{
+	// |R1 - R2|^2 = 4 (1 - cos a) ~ 2 a^2 (a square root without libm: the layer does not link it)
+	float x = dist / 2, deg = x > 1 ? x : 1;
+	for (int i = 0; i < 20; i++)
+		deg = 0.5f * (deg + x / deg);
+	deg *= 57.29578f;
+	pthread_mutex_lock(&qsp.lock);
+	qsp.bind += kind == 0;
+	qsp.submit += kind == 1;
+	qsp.moved += kind == 2;
+	qsp.neither += kind == 3;
+	qsp.unknown += kind < 0;
+	if (kind == 2)
+		qsp.moved_deg += deg;
+	if (kind == 3)
+		qsp.neither_deg += deg;
+	pthread_mutex_unlock(&qsp.lock);
+}
+
+// --- Which submit of vrlink's the picture is, and its pose (quest1_views.h q1_poses)
+
+static const struct q1_poses *qsp_poses(void)
+{
+	static _Atomic(const struct q1_poses *) p;
+	static _Atomic uint64_t tried_ns;
+	const struct q1_poses *m = atomic_load(&p);
+	uint64_t t = now_ns();
+	if (m || t - atomic_load(&tried_ns) < 1000000000ull)
+		return m;
+	atomic_store(&tried_ns, t);
+	int fd = open(Q1_POSES_PATH, O_RDONLY | O_CLOEXEC);
+	struct stat st;
+	void *v = fd >= 0 && fstat(fd, &st) == 0 && st.st_size >= (off_t)sizeof(*m)
+	              ? mmap(NULL, sizeof(*m), PROT_READ, MAP_SHARED, fd, 0) : MAP_FAILED;
+	if (fd >= 0)
+		close(fd);
+	if (v == MAP_FAILED)
+		return NULL;
+	const struct q1_poses *expected = NULL;
+	if (!atomic_compare_exchange_strong(&p, &expected, (const struct q1_poses *)v)) {
+		munmap(v, sizeof(*m));
+		return expected;
+	}
+	LOG("stream: each picture's pose from %s\n", Q1_POSES_PATH);
+	return v;
+}
+
+//! A copy of entry k-th newest of vrlink's poses (0 the last), false if being rewritten or not there.
+static bool qsp_pose_entry(const struct q1_poses *p, uint32_t n, uint32_t k, uint64_t *t, int32_t *frame, float pose[12])
+{
+	if (k >= Q1_POSES - 1 || k >= n) // (the oldest slot may be being rewritten)
+		return false;
+	uint32_t want = n - k;
+	const __typeof__(p->p[0]) *e = &p->p[(want - 1) % Q1_POSES];
+	if (__atomic_load_n(&e->seq, __ATOMIC_ACQUIRE) != want)
+		return false;
+	*t = e->t_ns;
+	*frame = e->frame;
+	memcpy(pose, e->pose, 12 * sizeof(float));
+	__atomic_thread_fence(__ATOMIC_ACQUIRE);
+	return __atomic_load_n(&e->seq, __ATOMIC_RELAXED) == want;
+}
+
+// Which of vrlink's frame buffers each NV12 image of vrcompositor's is. vrlink submits the same 16 buffers in the same
+// order each time, with the index of the one to show; vrcompositor imports each once, so an image is always the same
+// index. It is learnt from the copies: the buffer of vrlink's last submit before the copy, which it is for ~90 % of
+// them (the rest: vrlink submitted while vrcompositor was taking the frame), counted until one index has most.
+enum { QSP_IMAGES = 64, QSP_VOTES_MIN = 4 };
+static struct
+{
+	VkImage image;
+	uint64_t used_ns;
+	uint16_t votes[16];
+} qsp_img[QSP_IMAGES];
+
+//! Called with qsp_picture's lock: the frame buffer image is learnt to be, -1 while not known; `last` is the buffer of
+//! vrlink's last submit before the copy, counted for it.
+static int qsp_image_frame(VkImage image, int32_t last, uint64_t now)
+{
+	unsigned k = 0, old = 0;
+	while (k < QSP_IMAGES && qsp_img[k].image != image)
+		k++;
+	if (k == QSP_IMAGES) { // a new image: the slot used longest ago
+		for (k = 0; k < QSP_IMAGES; k++)
+			if (qsp_img[k].used_ns < qsp_img[old].used_ns)
+				old = k;
+		k = old;
+		memset(&qsp_img[k], 0, sizeof(qsp_img[k]));
+		qsp_img[k].image = image;
+	}
+	qsp_img[k].used_ns = now;
+	if (last >= 0 && last < 16 && qsp_img[k].votes[last] < 60000)
+		qsp_img[k].votes[last]++;
+	int best = -1;
+	unsigned top = 0, second = 0;
+	for (int i = 0; i < 16; i++) {
+		unsigned v = qsp_img[k].votes[i];
+		if (v > top)
+			second = top, top = v, best = i;
+		else if (v > second)
+			second = v;
+	}
+	return top >= QSP_VOTES_MIN && top >= 2 * second ? best : -1;
+}
+
+//! qcp_record: command buffer cb draws a picture of vrlink's: NV12 image `image`, copied now (fresh), or the one
+//! copied last. Its pose: the last submit before now of the frame buffer that image is, once learnt, else the last
+//! submit before now.
+static void qsp_picture(VkCommandBuffer cb, VkImage image, bool fresh)
+{
+	static pthread_mutex_t l = PTHREAD_MUTEX_INITIALIZER;
+	static float last[12];
+	static bool have;
+	pthread_mutex_lock(&l);
+	const struct q1_poses *p = fresh ? qsp_poses() : NULL;
+	if (fresh)
+		have = false;
+	if (p) {
+		uint64_t t = now_ns(), et;
+		uint32_t n = __atomic_load_n(&p->n, __ATOMIC_ACQUIRE);
+		struct
+		{
+			int32_t frame;
+			float pose[12];
+		} e[Q1_POSES];
+		unsigned ne = 0;
+		for (uint32_t k = 0; k < Q1_POSES - 1; k++) // newest first, up to now
+			if (qsp_pose_entry(p, n, k, &et, &e[ne].frame, e[ne].pose) && et <= t)
+				ne++;
+		if (ne) {
+			int f = qsp_image_frame(image, e[0].frame, t);
+			unsigned pick = 0;
+			while (f >= 0 && pick < ne && e[pick].frame != f)
+				pick++;
+			if (pick == ne)
+				pick = 0;
+			memcpy(last, e[pick].pose, sizeof(last));
+			have = true;
+			qsp_guess += f < 0;
+			qsp_learnt += f >= 0;
+		}
+	}
+	bool ok = have;
+	float pose[12];
+	memcpy(pose, last, sizeof(pose));
+	pthread_mutex_unlock(&l);
+	rm_picture(cb, ok ? pose : NULL);
+}
+
+// The 2800 bytes hold, per eye (from float QSP_EYE[e]), the eye's pose (column-major 4x4: the head pose moved by half
+// the IPD), the same again, then its inverse twice; nothing else in them follows the pose (2026-11-17, two snapshots of
+// different poses: only those 8 matrices' upper 3 rows differ).
+static const int QSP_EYE[2] = {44, 156};
+
+//! How far the left eye's pose in a 2800-byte snapshot is from head pose `head` (HmdMatrix34_t) in rotation: the sum
+//! of squared differences.
+static float qsp_rot_dist(const uint8_t *snap, const float head[12])
+{
+	float m[16];
+	memcpy(m, snap + QSP_EYE[0] * sizeof(float), sizeof(m));
+	float d = 0;
+	for (int r = 0; r < 3; r++)
+		for (int c = 0; c < 3; c++)
+			d += (m[c * 4 + r] - head[r * 4 + c]) * (m[c * 4 + r] - head[r * 4 + c]);
+	return d;
+}
+
+//! Snapshot `dst` made for head pose `want` from snapshot `from` (made by vrcompositor for another submit of
+//! vrlink's): each eye keeps its offset from the head, and goes with the head to `want`. False when the head pose
+//! `from` was made for is not among vrlink's recent ones (its eye offset is then not known).
+static bool qsp_repose(uint8_t *dst, const uint8_t *from, size_t sz, const float want[12])
+{
+	const struct q1_poses *p = qsp_poses();
+	if (!p || sz < (size_t)(QSP_EYE[1] + 64) * sizeof(float))
+		return false;
+	uint32_t n = __atomic_load_n(&p->n, __ATOMIC_ACQUIRE);
+	float had[12];
+	bool found = false;
+	for (uint32_t k = 0; k < Q1_POSES - 1 && !found; k++) {
+		uint64_t et;
+		int32_t f;
+		found = qsp_pose_entry(p, n, k, &et, &f, had) && qsp_rot_dist(from, had) < 1e-6f;
+	}
+	if (!found)
+		return false;
+	if (dst != from)
+		memcpy(dst, from, sz);
+	for (int e = 0; e < 2; e++) {
+		float m[16];
+		memcpy(m, from + QSP_EYE[e] * sizeof(float), sizeof(m));
+		// the eye's offset in the head's frame: had's rotation transposed times (eye position - head position)
+		float dp[3] = {m[12] - had[3], m[13] - had[7], m[14] - had[11]}, off[3];
+		for (int i = 0; i < 3; i++)
+			off[i] = had[0 * 4 + i] * dp[0] + had[1 * 4 + i] * dp[1] + had[2 * 4 + i] * dp[2];
+		float E[16] = {0}, I[16] = {0}; // column-major: the eye at `want`, and its inverse
+		for (int r = 0; r < 3; r++) {
+			for (int c = 0; c < 3; c++) {
+				E[c * 4 + r] = want[r * 4 + c];
+				I[c * 4 + r] = want[c * 4 + r]; // the rotation transposed
+			}
+			E[12 + r] = want[r * 4 + 3] + want[r * 4 + 0] * off[0] + want[r * 4 + 1] * off[1] + want[r * 4 + 2] * off[2];
+		}
+		for (int r = 0; r < 3; r++)
+			I[12 + r] = -(I[0 * 4 + r] * E[12] + I[1 * 4 + r] * E[13] + I[2 * 4 + r] * E[14]);
+		E[15] = I[15] = 1;
+		float *o = (float *)(void *)dst + QSP_EYE[e];
+		memcpy(o, E, sizeof(E));
+		memcpy(o + 16, E, sizeof(E));
+		memcpy(o + 32, I, sizeof(I));
+		memcpy(o + 48, I, sizeof(I));
+	}
+	return true;
 }
