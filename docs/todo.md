@@ -244,6 +244,9 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
     controller then (they were asleep): check worn that each button, stick, trigger and grip reaches the PC's game
     (`vrcmd --pollcontrollers` on the PC), and which PC input the left X/Y land on (vrlink sends the Frame's left
     controller as a d-pad: dpad_down/dpad_right).
+  - The controllers' battery levels don't reach the PC through vrlink (user, 2026-11-17): find which property vrlink
+    forwards (`Prop_DeviceBatteryPercentage_Float`, `Prop_DeviceProvidesBatteryStatus_Bool` on our driver's
+    controllers?) and set it.
   - Picture quality (user, 2026-11-16: "a bit pixelated/blurry", the PC's desktop view unreadable): the PC alone sizes
     the stream (docs/streaming.md "Picture quality"), and caps each view by its GPU's generation (this PC's Pascal:
     1024; Turing 1280, Ampere and later 1344; no setting lifts it). The bitrate is now 160 (`driver_vrlink/
