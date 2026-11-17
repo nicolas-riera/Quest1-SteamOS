@@ -248,6 +248,16 @@ TemporaryFileSystem=/data/local/tmp" \
 Wants=android-trackingservice.service
 After=android-trackingservice.service
 PartOf=android-sensors-hal.service"
+	# q1handsd: Meta's hand tracking (libossdk) -> /run/q1track/hands for driver_quest1, and the hand/controller mode
+	# switch (/etc/quest1-hands: off, auto, hands; docs/hand-tracking.md). The hand skeleton comes from Meta's own
+	# runtime library, unpacked from the system partition's VrDriver.apk to a tmpfs at start
+	unit q1handsd "q1handsd (Meta hand tracking -> /run/q1track/hands for driver_quest1)" root 		"BindReadOnlyPaths=/usr/local/lib/q1track/q1handsd:/data/local/tmp/q1handsd
+TemporaryFileSystem=/data/local/tmp
+ExecStartPre=+/usr/local/sbin/q1-vrapi-extract
+ExecStartPre=-/usr/bin/env LD_LIBRARY_PATH=/run/q1track/vrapi /data/local/tmp/q1handsd skeleton /run/q1track/handskel.bin /run/q1track/vrapi/libvrapiimpl.so" 		"/data/local/tmp/q1handsd serve 90" "$W
+Wants=android-trackingservice.service
+After=android-trackingservice.service
+PartOf=android-sensors-hal.service"
 	# q1anchord: persists Meta's map (spatial anchor) and tells driver_quest1 whether its frame is the persisted one (frame-state) and whether the room can be shown (map-state)
 	unit q1anchord "q1anchord (persisted tracking map, /run/q1track/frame-state)" root "" /usr/local/sbin/q1anchord "$W
 Wants=android-trackingservice.service
@@ -290,7 +300,7 @@ EOF
 }
 
 BASE="android-ovrstub android-ashmemd android-adsprpcd android-settingsserver android-vrfocus android-iad android-telemetry-hal android-power-hal"
-SB="android-q1anchord android-q1trackd android-trackingservice android-runtimeipcbroker android-calibration android-cameramuxmode android-sensors-hal"
+SB="android-q1anchord android-q1handsd android-q1trackd android-trackingservice android-runtimeipcbroker android-calibration android-cameramuxmode android-sensors-hal"
 TE=/sys/bus/spi/devices/spi12.0/control/te_timestamp
 cli() { # trackinginterface_cli as root (vrfocus grants uid 0) with the stack's property area
 	unshare -m sh -c 'mount --bind /run/q1track/__properties__ /dev/__properties__ && exec env '"$E"' /system/bin/trackinginterface_cli "$@"' cli "$@"
@@ -389,7 +399,7 @@ monado_trial() {
 meta_start() { # Meta's stack, in order (the sensors HAL first: it takes SyncBoss)
 	systemctl start $BASE
 	systemctl start android-sensors-hal
-	systemctl start android-cameramuxmode android-calibration android-trackingservice android-q1trackd android-q1anchord
+	systemctl start android-cameramuxmode android-calibration android-trackingservice android-q1trackd android-q1handsd android-q1anchord
 }
 # restart: Meta's stack from the sensors HAL up, for a controller it did not take. The sensors HAL and
 # trackingservice enumerate the controllers when they start: one asleep then and woken later (2026-11-08: the
@@ -397,7 +407,7 @@ meta_start() { # Meta's stack, in order (the sensors HAL first: it takes SyncBos
 # every 3 s. ovrstub then replays what trackingservice saw at boot, RUNNING and a second later STANDBY: given
 # STANDBY alone (ovrstub already in it), trackingservice never powered the cameras on (front LED off, rotation only).
 meta_restart() {
-	systemctl stop android-q1anchord android-q1trackd android-trackingservice android-runtimeipcbroker 		android-calibration android-cameramuxmode android-sensors-hal
+	systemctl stop android-q1anchord android-q1handsd android-q1trackd android-trackingservice android-runtimeipcbroker 		android-calibration android-cameramuxmode android-sensors-hal
 	sleep 2
 	t0=$(date +%s)
 	meta_start

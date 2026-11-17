@@ -108,9 +108,10 @@ gcc -O2 -o $D/usr/local/bin/xscreen xscreen/xscreen.c xscreen/gamepad.c -lopenxr
 # FILE pointers, 8 bytes as in bionic), resolved by Meta's real ones at run time
 B=$W/bionic; mkdir -p $B
 gcc -std=gnu11 -O2 -fPIE -fno-stack-protector -U_FORTIFY_SOURCE -c -o $B/q1trackd.o q1track/q1trackd.c
+gcc -std=gnu11 -O2 -fPIE -fno-stack-protector -U_FORTIFY_SOURCE -c -o $B/q1handsd.o q1track/q1handsd.c
 gcc -std=gnu11 -O2 -fPIC -mno-outline-atomics -fno-stack-protector -U_FORTIFY_SOURCE -fvisibility=hidden \
 	-c -o $B/camtap.o camtap/camtap.c
-nm -u $B/q1trackd.o $B/camtap.o | awk 'NF==2{print $2}' | sort -u > $B/syms
+nm -u $B/q1trackd.o $B/q1handsd.o $B/camtap.o | awk 'NF==2{print $2}' | sort -u > $B/syms
 { grep -E '^(stdin|stdout|stderr|environ)$' $B/syms | sed 's/.*/void *&;/'
   grep -vE '^(stdin|stdout|stderr|environ|dl[a-z_]*|android_dlopen_ext)$' $B/syms | sed 's/.*/void &(void) {}/'; } > $B/libc.c
 grep -E '^(dl[a-z_]*|android_dlopen_ext)$' $B/syms | sed 's/.*/void &(void) {}/' > $B/libdl.c
@@ -118,6 +119,8 @@ gcc -w -shared -nostdlib -Wl,-soname,libc.so -o $B/libc.so $B/libc.c
 gcc -w -shared -nostdlib -Wl,-soname,libdl.so -o $B/libdl.so $B/libdl.c
 gcc -fPIE -pie -nostdlib -nostartfiles -Wl,--dynamic-linker=/system/bin/linker64 -Wl,-z,now -Wl,--no-undefined \
 	-Wl,--allow-shlib-undefined -o $D/usr/local/lib/q1track/q1trackd $B/q1trackd.o $B/libc.so $B/libdl.so
+gcc -fPIE -pie -nostdlib -nostartfiles -Wl,--dynamic-linker=/system/bin/linker64 -Wl,-z,now -Wl,--no-undefined \n	-Wl,--allow-shlib-undefined -o $D/usr/local/lib/q1track/q1handsd $B/q1handsd.o $B/libc.so $B/libdl.so
+install -D -m 755 ../device/q1-vrapi-extract.sh $D/usr/local/sbin/q1-vrapi-extract
 gcc -shared -nostdlib -Wl,-z,now -Wl,--no-undefined -Wl,--allow-shlib-undefined \
 	-o $D/data/local/tmp/libq1camtap.so $B/camtap.o $B/libc.so $B/libdl.so
 
@@ -128,7 +131,7 @@ V=$D/opt/quest1-steamvr/quest1
 install -d $V/bin/linuxarm64 $V/resources/input $V/resources/settings
 cd "$R/src/steamvr-quest1"
 g++ -std=c++17 -O2 -fPIC -shared -fvisibility=hidden -Wall -Wno-missing-field-initializers -I$S/openvr/headers \
-	-o $V/bin/linuxarm64/driver_quest1.so driver_quest1.cpp chaperone_frame.cpp controllers.cpp battery.cpp camera.cpp \
+	-o $V/bin/linuxarm64/driver_quest1.so driver_quest1.cpp chaperone_frame.cpp controllers.cpp hands.cpp battery.cpp camera.cpp \
 	stereo_depth.cpp stereo_dense.cpp -ldl -lpthread -static-libstdc++ -static-libgcc -Wl,--no-undefined
 cp quest1/driver.vrdrivermanifest $V/; cp quest1/resources/input/*.json $V/resources/input/
 cp quest1/resources/settings/*.vrsettings quest1/resources/settings/*.json $V/resources/settings/
