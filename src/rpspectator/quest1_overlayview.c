@@ -484,7 +484,10 @@ EXPORT void *dlsym(void *h, const char *name)
 {
 	if (!real_dlsym_get())
 		return NULL;
-	if (!strcmp(name, "VR_GetGenericInterface")) {
+	// Steam looks it up in libopenvr_api.so's handle. RTLD_NEXT/RTLD_DEFAULT lookups go on untouched: resolved from
+	// here, RTLD_NEXT would find the caller itself (libquest1_v4l2.so's own VR_GetGenericInterface for vrlink looks
+	// up the next one that way: endless recursion, vrlink crashed at start)
+	if (h != RTLD_NEXT && h != RTLD_DEFAULT && !strcmp(name, "VR_GetGenericInterface")) {
 		void *f = real_dlsym(h, name);
 		if (!f)
 			return NULL;
