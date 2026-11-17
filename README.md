@@ -39,7 +39,7 @@ from Valve's servers and from Meta's last Quest 1 update image.
 | Head tracking | 6DoF with Meta's own tracking service, run natively from the headset's partitions |
 | Controllers | Touch controllers with Meta's tracking (6DoF, with Meta's prediction), buttons, triggers, grips, sticks and vibration |
 | IPD | The physical IPD slider is read live and sets SteamVR's eye separation |
-| Audio | Speakers and microphone through PipeWire, with the volume buttons |
+| Audio | Speakers and microphone through PipeWire, with the volume buttons; the microphone with echo cancellation and noise suppression |
 | Sensors | The proximity sensor turns the panels off when the headset is removed |
 | Heat | The CPUs scale their clock with the load, and the fan's speed follows the temperature (it never stops while the system runs) |
 | Playspace | The Steam Frame's room setup: floor height and drawing the boundary |
@@ -52,7 +52,7 @@ from Valve's servers and from Meta's last Quest 1 update image.
 | Desktop mode | The Steam Frame's desktop (nested KDE Plasma with Dolphin, Konsole, Discover...) from Steam's "+" menu, shown as a SteamVR overlay with the laser, scroll and keyboard. See [docs/desktop.md](docs/desktop.md) |
 | Video decode | The headset's hardware video decoder (venus) for H.264 and HEVC, through V4L2: FFmpeg and VLC with `q1-hwdec <program>` |
 | Steam Link (2D) | A PC game streamed to the headset in Steam's 2D stream, decoded in hardware, with the decoded frames going to the GPU without a copy (about 17% of a CPU core at 1080p60). See [docs/streaming.md](docs/streaming.md) |
-| Steam Link VR | The PC's VR games streamed to the headset, decoded in hardware, with a new picture every frame, a sharp centre, and a picture that stays steady as the head moves. Still below 72 fps, see below and [docs/streaming.md](docs/streaming.md) |
+| Steam Link VR | The PC's VR games streamed to the headset, decoded in hardware, with a new picture every frame, a sharp centre, a picture that stays steady as the head moves, and every controller button. See below and [docs/streaming.md](docs/streaming.md) |
 | Spectator | Steam's "share your view" stream of the headset, encoded in hardware at about 35 fps |
 
 ## Work in progress
@@ -66,10 +66,11 @@ from Valve's servers and from Meta's last Quest 1 update image.
 - **Passthrough.** Each eye sees a composite of its bottom and top camera, but the depth is a fixed sphere,
   so near objects (controllers, hands) are not at their true distance: a stereo depth mesh is being tuned.
 - **Sleep.** Suspend to RAM loses Meta's tracking and the sound on resume.
-- **Streaming** from a PC. Steam Link VR no longer trembles (fixed 2026-11-16). What is left:
-  - black flashes while the headset is loaded (the dashboard open);
-  - a latency still a bit high;
-  - a frame rate below 72 fps.
+- **Streaming** from a PC. Steam Link VR no longer trembles (fixed 2026-11-16) and the PC's prediction no longer
+  overshoots (2026-11-17). What is left:
+  - black flashes and stutters while the headset is loaded (now logged with the time, to be matched worn);
+  - a latency still a bit high (~91 ms, of which ~34 ms waiting on the headset for its display time);
+  - VRChat's loading sky drawn by the PC in the sharp centre only.
 
   In the 2D stream, resizing the PC's window stops the decoder, and the sound stutters. See
   [docs/streaming.md](docs/streaming.md).
@@ -109,7 +110,8 @@ the headset they are used from its own partitions, mounted read-only.
 | `src/ovrstub/` | Stand-ins for the Android system services Meta's tracking service talks to |
 | `src/camtap/` | Camera frames from Meta's tracking service, for passthrough (work in progress) |
 | `src/q1grid/` | A full-screen calibration grid for the lens distortion |
-| `src/vklayer-steamvr/` | Vulkan layer and shim that make SteamVR run on the Adreno 540 driver |
+| `src/vklayer-steamvr/` | Vulkan layer and shim that make SteamVR run on the Adreno 540 driver (`quest1_compat.c` is one translation unit: it includes its parts, `quest1_<name>_<part>.c`) |
+| `src/v4l2shim/` | The video decoder (venus) for Steam's clients and Steam Link VR (vrlink's frames, poses, controls) |
 | `src/xscreen/`, `src/qcam/`, `src/sbimu/`, `src/sbinput/` | Steam screen in VR, camera capture, IMU and controller tests |
 | `tools/` | Build scripts (kernel, boot image, system image), helpers on the PC side; `tools/headset-dev/` debugging helpers |
 | `release/` | Boot scripts for development (`fastboot boot` only) |
