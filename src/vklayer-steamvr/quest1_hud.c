@@ -1,4 +1,4 @@
-// quest1_hud: SteamVR's head-locked overlays drawn apart (included by quest1_scanout.c after quest1_rpmerge.c;
+// quest1_hud: SteamVR's head-locked overlays drawn apart (included by quest1_scanout_cmds.c, after quest1_rpmerge.c;
 // vrcompositor, scene mode: its own frames and, while Steam Link VR streams, the layer of overlays its distortion pass
 // blends over the stream; the same buffers either way, the eye render's size).
 //

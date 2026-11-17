@@ -1,4 +1,4 @@
-// quest1_rpmerge: merges vrcompositor's one-draw render passes (included by quest1_scanout.c, vrcompositor only).
+// quest1_rpmerge: merges vrcompositor's one-draw render passes (included by quest1_scanout_passes.c, vrcompositor only).
 //
 // vrcompositor draws each layer of an eye (environment, overlays, controllers, laser...) in a render pass of its own.
 // Before each draw it rewrites the draw's uniforms with vkCmdUpdateBuffer, between a fragment-shader-to-transfer
