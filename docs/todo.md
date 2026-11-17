@@ -112,7 +112,9 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   ~24 ms of GPU per Steam frame in the gaps vrcompositor leaves, for the full composite of the 1920x1080 page, its
   capture and readback. Find what costs that much (backdrop-filter blurs? the capture copy? ANGLE on this blob), or
   avoid the readback: frames from the GPU process to vrcompositor without the CPU (CEF OSR has no shared texture
-  path in Steam on Linux: only CChromePainterSharedBuffer). A lower device scale is visible (user's call). Not
+  path in Steam on Linux: only CChromePainterSharedBuffer). A lower device scale is visible (user's call). UBWC images and a memory cache in
+  the Vulkan shim took a page animation from 11.5 to 20 fps (docs/steam-gpu.md), but both are off again (corrupted
+  UI worn): find which images ANGLE needs mutable and keep the rest compressed. Not
   RenderMode=Direct for Steam: it froze the headset (2026-11-08). Must leave room for streaming later (user).
 - Steam's VR overlay copy runs on llvmpipe (user, 2026-11-10: the CPU at ~100 % when the pointer moves over a Steam
   page): the pages render on the Adreno (webhelper GPU process, ANGLE Vulkan), but Steam's browser process copies
@@ -147,7 +149,6 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 
 ## Steam settings and Steam
 
-- Timezone dropdown hidden (Steam shows it only under gamescope: `IN_GAMESCOPE` comes from steamui.so itself).
 - Steam's first-run setup of the Frame: untested.
 - SteamVR restarted alone (Steam kept running) breaks Steam's VR UI: steamwebhelper's GPU process takes GPU page faults when
   vrcompositor stops (2026-11-11 17:50 and 17:51, two restarts) and the dashboard then shows its lower half empty and loses
@@ -287,8 +288,9 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 
 ## Steam Frame features
 
-- Performance overlay (fps, then temperatures and clocks).
-- Frame rate limiter; GPU clock in the quick menu.
+- Steam's quick menu (docs/frame-features.md): the Performance tab and the time zone setting show (user, 2026-11-17).
+  Left: check worn the manual GPU clock and the performance overlay's levels (`q1-perfhud`); a frame rate limiter
+  (needs gamescope's atoms outside VR; in VR the Playtime profile, not set).
 
 ## Later
 
@@ -301,7 +303,9 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - Quest 3 controllers (Touch Plus): github.com/Noculus-VR/TouchPlus-on-Quest-1 (user, 2026-11-13) pairs them with the
   Quest 1 by patching `libsyncboss.so` (no MCU or firmware change). Not finished: wait until it is, then see what our
   stack (q1trackd, libossdk) needs.
-- The installer app (app/, installer/); later a Linux version that builds the image on the PC.
+- The installer app (app/, installer/); later a Linux version that builds the image on the PC. The Steam Frame's
+  files can come from Valve's public update store (`frame_source` "ota", SteamVR 2.19.3, installer/README.md): check
+  2.19.3 on the headset (it runs 2.17 now), then make it the default over the 0.3.0 recovery image.
 - While the headset's install system (the small Linux that builds the image on the headset) is building, the
   power LED blinks white <-> purple.
 - Dual boot with a boot selector in the headset (very low priority).
