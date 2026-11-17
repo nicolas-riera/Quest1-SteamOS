@@ -37,9 +37,9 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   cleanly with nothing special running (673 MB available, 71 fps): logind "The system will power off now!", no power
   key event (logind ignores it), after ~4.5 h of panels, stream and benches with only the PC's USB port charging. Most
   likely the battery's critical level (UPower powers off at 2 %): check the battery's level when it comes back
-  (`/run/vpower`, Steam's battery icon), and charge it before long benches. The journal is not kept across boots
-  (no /var/log/journal): make it persistent (Storage=persistent, capped) so that the next power-off or freeze can be
-  read after the reboot.
+  (`/run/vpower`, Steam's battery icon), and charge it before long benches. The journal lives in RAM but goes to the
+  kernel log, which pstore keeps across a reboot: at the next boot read `/sys/fs/pstore/console-ramoops*` for what
+  asked for the power-off (UPower, Steam or other).
 
 - Performance (docs/performance.md): GPU-bound, ~12.4 of 13.9 ms a frame. Levers left, all visible, so the user
   decides: achromatic distortion (vrcompositor's distortion pass is ~2 ms per eye), a lighter environment than Aurora
