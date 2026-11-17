@@ -2,6 +2,7 @@
 	"driver_quest1": {
 		"enable": true,
 		"clearSpatialAnchors": false,
-		"ignoreSystemWhileMoving": true
+		"ignoreSystemWhileMoving": true,
+		"chargeSound": true
 	}
 }

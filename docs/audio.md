@@ -425,3 +425,19 @@ lists what is left to do).
   Performance): check the link with it first.
 - A short click is heard each time Steam starts, even with the startup movie silenced (user, 2026-11-05:
   "we're not supposed to hear that"). Find its source: the audio device being opened (pop), or a Steam UI sound.
+
+## 2026-11-17: Meta's charging sound
+
+`device/holo-chargesound.sh` installs `q1-chargesound`, run by a udev rule on the power supplies' change events (nothing
+stays running for it; `quest1-chargesound.service` only records the state at boot). When the charger input
+(`power_supply/usb` or `dc`, `online`) goes from 0 to 1 it plays Meta's own `ChargingStarted.ogg` with `pw-play` as
+`steamos` (default sink, so the system volume applies; works with or without SteamVR). Plugged at boot is silent, it
+plays as soon as the charger's first event arrives (~0.1 s after the plug), sounds are at least 3 s apart (a bouncing
+connector; 15 s was too long for the user), and nothing plays in standby.
+
+- The file is never in the repository or its output: it is read in place from Meta's system partition
+  (`/system/product/media/audio/ui/ChargingStarted.ogg`, mounted read-only by `holo-android-blobs`). The installer drops
+  `./system/product` from Meta's public OTA (`installer/meta-exclude.txt`) but `build_image.py` keeps this one file.
+- Setting: "Play a sound when the charger is plugged in" on the "Oculus Quest" SteamVR settings page
+  (`/settings/driver_quest1/chargeSound`, on when absent). The service reads it from `steamvr.vrsettings`.
+

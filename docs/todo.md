@@ -166,8 +166,6 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 
 ## Power
 
-- A sound when the charger is plugged in (user, 2026-11-17): SteamOS has none; the user has the Quest's original
-  sound file to use (not in the repo unless its licence allows: load it from the user's copy).
 - The sleep animation shows inside the dashboard panel instead of full screen.
 - Real sleep (suspend to RAM, `/etc/quest1-sleep` deep, opt-in): on resume Meta's tracking is lost, no sound,
   the proximity sensor wakes the headset while worn, the fan and power LED stay on.

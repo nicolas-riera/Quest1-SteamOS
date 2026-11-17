@@ -410,6 +410,15 @@ class Build:
             dst.stdin.close()
             if src.wait() or dst.wait():
                 sys.exit("copying Meta's system tree failed")
+            # the one file of ./system/product kept: Meta's charging sound, played in place by q1-chargesound
+            # (device/holo-chargesound.sh); never put in the repository
+            snd = "./system/product/media/audio/ui/ChargingStarted.ogg"
+            if os.path.isfile(os.path.join(m, snd)):
+                s1 = subprocess.Popen(["tar", "-C", m, "-c", "--xattrs", "--numeric-owner", snd],
+                                      stdout=subprocess.PIPE)
+                if subprocess.run(["tar", "-C", out, "-x", "--xattrs", "--numeric-owner", "-p"],
+                                  stdin=s1.stdout).returncode or s1.wait():
+                    sys.exit("copying Meta's charging sound failed")
         finally:
             run("umount", m)
         shutil.copyfile(modem, os.path.join(d, "modem.img"))

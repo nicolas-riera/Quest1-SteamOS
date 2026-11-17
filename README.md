@@ -44,7 +44,7 @@ from Valve's servers and from Meta's last Quest 1 update image.
 | Heat | The CPUs scale their clock with the load, and the fan's speed follows the temperature (it never stops while the system runs) |
 | Playspace | The Steam Frame's room setup: floor height and drawing the boundary |
 | Passthrough | The Steam Frame's room view with the tracking cameras: 3D view, tint colour, double click on the Steam or Oculus button to toggle it |
-| Power | Power button to Steam (sleep, power menu), shutdown and restart from Steam, battery levels, power LED |
+| Power | Power button to Steam (sleep, power menu), shutdown and restart from Steam, battery levels, power LED, Meta's charging sound when the charger is plugged in (can be turned off in SteamVR's Oculus Quest settings) |
 | Identity | The system reports itself as SteamOS on an Oculus Quest (os-release, host name) |
 | GPU | The Adreno 540 Vulkan driver runs natively through libhybris |
 | Access | USB network (`ssh root@192.168.77.1`), a serial console over USB, native Wi-Fi |

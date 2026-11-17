@@ -10,6 +10,12 @@
 			"text": "A press of the Oculus or Menu button that begins while the controller swings or moves fast is ignored: on Touch controllers they are easy to press by mistake."
 		},
 		{
+			"name": "/settings/driver_quest1/chargeSound",
+			"control": "toggle",
+			"label": "Play a sound when the charger is plugged in",
+			"text": "Meta's original charging sound, played from the headset's own system partition (on by default)."
+		},
+		{
 			"name": "/settings/driver_quest1/clearSpatialAnchors",
 			"control": "button",
 			"value": true,
