@@ -186,6 +186,12 @@ are trademarks of Valve Corporation.
 No firmware, library or software from Meta or Valve is included in this repository or in
 its releases.
 
+## Contributors
+
+<a href="https://github.com/nicolas-riera/Quest1-SteamOS/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=nicolas-riera/Quest1-SteamOS" alt="Contributors" />
+</a>
+
 ## License
 
 MIT ([LICENSE](LICENSE)), except the kernel changes (`kernel/`), GPL-2.0-only like Linux, and
