@@ -144,6 +144,7 @@ struct q1dec {
 	int fd, ion;
 	dev_t rdev; // the device and node fd was opened on (see find() in quest1_v4l2.c)
 	ino_t ino;
+	bool stale; // fd was closed behind the shim: skipped, never freed by the lookup
 	pthread_mutex_t mu;
 	bool set_up;
 	struct v4l2_format out_fmt; // the client's OUTPUT format
@@ -260,13 +261,12 @@ struct q1dec *q1dec_find(int fd)
 {
 	for (int i = 0; i < MAXDEV; i++) {
 		struct q1dec *e = __atomic_load_n(&decs[i], __ATOMIC_ACQUIRE);
-		if (e && e->fd == fd) {
+		if (e && e->fd == fd && !__atomic_load_n(&e->stale, __ATOMIC_ACQUIRE)) {
 			struct stat st;
 			if (fstat(fd, &st) == 0 && S_ISCHR(st.st_mode) && st.st_rdev == e->rdev && st.st_ino == e->ino)
 				return e;
-			logf_("fd %d is no longer the decoder (closed behind the shim): forgotten", fd);
-			q1dec_forget(e);
-			return NULL;
+			if (!__atomic_exchange_n(&e->stale, true, __ATOMIC_ACQ_REL))
+				logf_("fd %d is no longer the decoder (closed behind the shim): skipped from now on", fd);
 		}
 	}
 	return NULL;
@@ -392,8 +392,8 @@ struct q1dec *q1dec_adopt(int fd)
 	e->ion = e->evfd = e->epfd = -1;
 	pthread_mutex_init(&e->mu, NULL);
 	pthread_mutex_lock(&lock);
-	int i = 0;
-	while (i < MAXDEV && decs[i])
+	int i = 0; // a free slot, or a stale entry's (left allocated: it may still be in use, see find())
+	while (i < MAXDEV && decs[i] && !__atomic_load_n(&decs[i]->stale, __ATOMIC_ACQUIRE))
 		i++;
 	if (i < MAXDEV)
 		__atomic_store_n(&decs[i], e, __ATOMIC_RELEASE);

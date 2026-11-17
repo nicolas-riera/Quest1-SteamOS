@@ -13,20 +13,19 @@
 // (VROverlayError_InvalidTexture).
 //
 // Steam reaches vrclient through its own libopenvr_api.so (dlsym "VR_GetGenericInterface"). dlsym is wrapped here,
-// and the IVROverlayView_003 it hands out is a proxy. An OpenGL view is the headset's VR view as Monado makes it
-// for Remote Play anyway (comp_window_mdp.c "Remote Play spectator": the left eye, 1280x720 NV12 in
-// /dev/shm/quest1-spectator while /tmp/quest1-spectator exists), converted to RGBA and uploaded into an OpenGL
-// texture of the caller's context: the view Steam gets (TextureType_OpenGL, like vrclient's own). The trigger is
-// made on the first request and removed 3 s after the last one, if made here. Without a new frame for 0.5 s (the
-// headset asleep or taken off: Monado renders nothing) the view is dark blue (#1b2838), as the Frame's stream and
-// q1screencast's.
+// and the IVROverlayView_003 it hands out is a proxy. An OpenGL view is a constant 1280x720 texture of the caller's
+// context, uploaded once: the picture itself goes into the encoder's input without Steam's OpenGL, by
+// libquest1_v4l2.so (quest1_v4l2.c "Steam's VR stream"), which this proxy tells that the spectator is on (each
+// view) and which then copies Monado's NV12 spectator frames (/dev/shm/quest1-spectator, made while
+// /tmp/quest1-spectator exists) into each raw frame, or dark blue after 0.5 s without one, as q1screencast did. The
+// trigger is made on the first request and removed 3 s after the last one, if made here. A first version converted
+// every frame to RGBA and uploaded it into llvmpipe, where Steam converted it back to NV12: ~5 frames a second.
 // Vulkan and D3D11 requests go through untouched.
 #define _GNU_SOURCE
 #include <GL/gl.h>
 #include <GL/glext.h>
 #include <dlfcn.h>
 #include <fcntl.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -177,30 +176,16 @@ static pthread_mutex_t view_lock = PTHREAD_MUTEX_INITIALIZER;
 typedef void *get_generic_fn(const char *version, int *error);
 static get_generic_fn *real_get_generic;
 
-// Monado's spectator frames (comp_window_mdp.c, spect_thread; read as q1screencast does)
 #define SPECT_TRIGGER "/tmp/quest1-spectator"
-#define SPECT_FILE "/dev/shm/quest1-spectator"
-#define SPECT_MAGIC 0x32535051u // "QPS2": NV12, BT.709 full range
-#define SPECT_HEADER 4096
-#define SPECT_W 1280
-#define SPECT_H 720
-struct spect_header {
-	uint32_t magic, width, height, stride, frame_bytes;
-	uint32_t index, seq;
-};
+#define VIEW_W 1280
+#define VIEW_H 720
 
 static struct {
 	bool made_trigger;
 	struct timespec last; // the last request
 	bool reaper;
-	const struct spect_header *map;
-	size_t size;
-	ino_t ino;
-	uint32_t seq;
-	struct timespec fresh; // the last new frame
-	bool blue;
-	uint8_t *rgba;
-	uint32_t w, h;
+	void (*shim_spectator)(void);
+	bool shim_looked;
 } sp;
 
 static double since(const struct timespec *t)
@@ -227,74 +212,11 @@ static void *reaper(void *arg)
 	return NULL;
 }
 
-static void spect_unmap(void)
-{
-	if (sp.map)
-		munmap((void *)sp.map, sp.size);
-	sp.map = NULL;
-	sp.ino = 0;
-}
-
-static const struct spect_header *spect_frames(void)
-{
-	struct stat st;
-	if (stat(SPECT_FILE, &st) != 0) {
-		spect_unmap();
-		return NULL;
-	}
-	if (!sp.map || st.st_ino != sp.ino) {
-		spect_unmap();
-		int fd = open(SPECT_FILE, O_RDONLY | O_CLOEXEC);
-		if (fd < 0)
-			return NULL;
-		void *m = st.st_size >= SPECT_HEADER ? mmap(NULL, st.st_size, PROT_READ, MAP_SHARED, fd, 0) : MAP_FAILED;
-		close(fd);
-		if (m == MAP_FAILED)
-			return NULL;
-		const struct spect_header *h = m;
-		if (h->magic != SPECT_MAGIC || !h->width || !h->height || h->width > 4096 || h->height > 4096 ||
-		    h->stride < h->width || h->frame_bytes < h->stride * h->height * 3 / 2 ||
-		    SPECT_HEADER + 2 * (uint64_t)h->frame_bytes > (uint64_t)st.st_size) {
-			munmap(m, st.st_size);
-			return NULL;
-		}
-		sp.map = h;
-		sp.size = st.st_size;
-		sp.ino = st.st_ino;
-		sp.seq = 0;
-	}
-	return sp.map;
-}
-
-static uint8_t clamp8(int v)
-{
-	return v < 0 ? 0 : v > 255 ? 255 : (uint8_t)v;
-}
-
-//! NV12 (BT.709 full range) to RGBA
-static void nv12_to_rgba(const uint8_t *y, const uint8_t *uv, uint32_t stride, uint32_t w, uint32_t h, uint8_t *out)
-{
-	// 16.16 fixed point: R = Y + 1.5748 V, G = Y - 0.1873 U - 0.4681 V, B = Y + 1.8556 U
-	const int rv = 103206, gu = 12276, gv = 30679, bu = 121609;
-	for (uint32_t j = 0; j < h; j++) {
-		const uint8_t *yr = y + (size_t)j * stride, *uvr = uv + (size_t)(j / 2) * stride;
-		uint8_t *o = out + (size_t)j * w * 4;
-		for (uint32_t i = 0; i < w; i++) {
-			int Y = yr[i] << 16, U = uvr[i & ~1u] - 128, V = uvr[i | 1u] - 128;
-			o[0] = clamp8((Y + rv * V + 32768) >> 16);
-			o[1] = clamp8((Y - gu * U - gv * V + 32768) >> 16);
-			o[2] = clamp8((Y + bu * U + 32768) >> 16);
-			o[3] = 255;
-			o += 4;
-		}
-	}
-}
-
-//! An OpenGL view (no native device) of the spectator overlay: the headset's VR view
+//! An OpenGL view (no native device) of the spectator overlay: see the top of the file
 static int gl_view(uint64_t overlay, void *view, uint32_t size)
 {
 	static struct gltex tex;
-	static unsigned long served, fresh;
+	static unsigned long served;
 	if (!view || size < sizeof(VROverlayView_t))
 		return refuse(overlay, view, size, "view too small");
 	pthread_mutex_lock(&view_lock);
@@ -303,6 +225,14 @@ static int gl_view(uint64_t overlay, void *view, uint32_t size)
 		why = "no OpenGL";
 		goto out;
 	}
+	if (!sp.shim_looked) {
+		sp.shim_looked = true;
+		*(void **)&sp.shim_spectator = real_dlsym_get() ? real_dlsym(RTLD_DEFAULT, "quest1_v4l2_spectator") : NULL;
+		if (!sp.shim_spectator)
+			LOG("libquest1_v4l2.so has no quest1_v4l2_spectator: the stream shows the constant texture\n");
+	}
+	if (sp.shim_spectator)
+		sp.shim_spectator();
 	clock_gettime(CLOCK_MONOTONIC, &sp.last);
 	if (!sp.reaper) {
 		pthread_t t;
@@ -318,43 +248,22 @@ static int gl_view(uint64_t overlay, void *view, uint32_t size)
 			LOG("spectator view asked for: %s made\n", SPECT_TRIGGER);
 		}
 	}
-	const struct spect_header *h = spect_frames();
-	uint32_t seq = h ? __atomic_load_n(&h->seq, __ATOMIC_ACQUIRE) : 0;
-	uint32_t w = h ? h->width : SPECT_W, hh = h ? h->height : SPECT_H;
-	bool changed = !sp.rgba || sp.w != w || sp.h != hh;
-	if (changed) {
-		uint8_t *n = realloc(sp.rgba, (size_t)w * hh * 4);
-		if (!n) {
+	if (!tex.tex) {
+		// dark blue (#1b2838): what the encoder input would show if the shim ever left it alone
+		uint8_t *px = malloc((size_t)VIEW_W * VIEW_H * 4);
+		if (!px) {
 			why = "out of memory";
 			goto out;
 		}
-		sp.rgba = n;
-		sp.w = w;
-		sp.h = hh;
-		sp.blue = false;
-	}
-	if (h && seq && seq != sp.seq) {
-		uint32_t idx = h->index & 1;
-		const uint8_t *f = (const uint8_t *)h + SPECT_HEADER + (size_t)idx * h->frame_bytes;
-		nv12_to_rgba(f, f + (size_t)h->stride * hh, h->stride, w, hh, sp.rgba);
-		sp.seq = seq;
-		sp.fresh = sp.last;
-		sp.blue = false;
-		changed = true;
-		fresh++;
-	} else if (!sp.blue && (!sp.fresh.tv_sec || since(&sp.fresh) > 0.5)) {
-		for (size_t i = 0; i < (size_t)w * hh; i++)
-			memcpy(sp.rgba + i * 4, "\x1b\x28\x38\xff", 4);
-		sp.blue = true;
-		changed = true;
-	}
-	if (changed || !tex.tex) {
+		for (size_t i = 0; i < (size_t)VIEW_W * VIEW_H; i++)
+			memcpy(px + i * 4, "\x1b\x28\x38\xff", 4);
 		tex.overlay = overlay;
-		gl_upload(&tex, sp.rgba, w, hh);
+		gl_upload(&tex, px, VIEW_W, VIEW_H);
+		free(px);
 	}
 	VROverlayView_t o = {overlay, {(void *)(uintptr_t)tex.tex, TextureType_OpenGL, 0}, {0, 0, 1, 1}};
 	if (served++ % 1800 == 0)
-		LOG("spectator view %ux%u served to Steam's VR stream (%lu views, %lu new frames)\n", w, hh, served, fresh);
+		LOG("spectator view served to Steam's VR stream (%lu views)\n", served);
 	memset(view, 0, size);
 	memcpy(view, &o, sizeof(o));
 out:

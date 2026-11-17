@@ -111,6 +111,7 @@ struct enc {
 	int fd;
 	dev_t rdev; // the device and node fd was opened on (a stale fd number is someone else's file now)
 	ino_t ino;
+	bool stale; // fd was closed behind the shim: skipped by find(), never freed (see there)
 	int ion;
 	bool cap_set, out_pending;
 	struct v4l2_format out_fmt; // an OUTPUT S_FMT that came before the CAPTURE one
@@ -196,24 +197,24 @@ static bool is_venc(int fd, const struct stat *st)
 	return true;
 }
 
-static void forget(struct enc *e);
-
 // The encoder tracked for fd, after a check that fd is still that device: a process can close it without going
 // through close() here (Chromium's GPU process probes the encoder in Steam's webhelper), and the number is then
 // another file's. Without the check, a shared memory region that got the number was "mapped" as an encoder
 // buffer (EINVAL, no system call): the webhelper's GPU process lost its raster contexts, fonts and images, i.e.
-// Steam's UI drew white panels and pages without text (2026-11-17).
+// Steam's UI drew white panels and pages without text (2026-11-17). Such an entry is only marked and skipped from
+// then on, never freed here: another thread may be in the middle of the real close (the decoder closes in the
+// background), and freeing its buffers twice closes other files' fds (a first version did that; the headset froze
+// during a Steam Link start right after).
 static struct enc *find(int fd)
 {
 	for (int i = 0; i < MAXDEV; i++) {
 		struct enc *e = __atomic_load_n(&encs[i], __ATOMIC_ACQUIRE);
-		if (e && e->fd == fd) {
+		if (e && e->fd == fd && !__atomic_load_n(&e->stale, __ATOMIC_ACQUIRE)) {
 			struct stat st;
 			if (fstat(fd, &st) == 0 && S_ISCHR(st.st_mode) && st.st_rdev == e->rdev && st.st_ino == e->ino)
 				return e;
-			logf_("fd %d is no longer the encoder (closed behind the shim): forgotten", fd);
-			forget(e);
-			return NULL;
+			if (!__atomic_exchange_n(&e->stale, true, __ATOMIC_ACQ_REL))
+				logf_("fd %d is no longer the encoder (closed behind the shim): skipped from now on", fd);
 		}
 	}
 	return NULL;
@@ -233,8 +234,8 @@ static struct enc *adopt(int fd)
 	if (e->ion < 0)
 		logf_("/dev/ion: %s (the encoder's buffers cannot be made)", strerror(errno));
 	pthread_mutex_lock(&lock);
-	int i = 0;
-	while (i < MAXDEV && encs[i])
+	int i = 0; // a free slot, or a stale entry's (left allocated: it may still be in use, see find())
+	while (i < MAXDEV && encs[i] && !__atomic_load_n(&encs[i]->stale, __ATOMIC_ACQUIRE))
 		i++;
 	if (i < MAXDEV)
 		__atomic_store_n(&encs[i], e, __ATOMIC_RELEASE);
@@ -590,6 +591,106 @@ static void to_driver(struct enc *e, int q, const struct v4l2_buffer *b, struct 
 	p->reserved[1] = 0;
 }
 
+// --- Steam's VR stream (Remote Play spectator in Frame mode): Monado's frames straight into the encoder ---
+//
+// Steam encodes what IVROverlayView gives it (src/rpspectator/quest1_overlayview.c): an OpenGL texture it turns into
+// NV12 on llvmpipe and reads back. The headset's VR view already exists as NV12 (Monado's spectator file, the one
+// q1screencast streamed as is), so while the proxy says the spectator is on, each raw frame Steam queues is
+// replaced here by Monado's latest one, copied into the buffer as venus lays it out (1.4 MB, as q1screencast), and
+// the proxy's texture never changes. Without a new Monado frame for 0.5 s: dark blue (#1b2838), as before.
+#define SPECT_FILE "/dev/shm/quest1-spectator"
+#define SPECT_MAGIC 0x32535051u // "QPS2": NV12, BT.709 full range
+#define SPECT_HEADER 4096
+struct spect_header {
+	uint32_t magic, width, height, stride, frame_bytes;
+	uint32_t index, seq;
+};
+
+static double mono_s(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return ts.tv_sec + ts.tv_nsec * 1e-9;
+}
+
+static int64_t spect_until_ms; // the proxy's last request + 0.5 s, CLOCK_MONOTONIC
+
+//! Called by the IVROverlayView proxy for each view it serves Steam's VR stream
+EXPORT void quest1_v4l2_spectator(void)
+{
+	__atomic_store_n(&spect_until_ms, (int64_t)(mono_s() * 1000) + 500, __ATOMIC_RELAXED);
+}
+
+static struct {
+	const struct spect_header *map;
+	size_t size;
+	ino_t ino;
+	uint32_t seq;
+	double fresh; // when seq last changed
+} spf;
+
+static const struct spect_header *spect_map(void)
+{
+	struct stat st;
+	if (stat(SPECT_FILE, &st) != 0)
+		return NULL;
+	if (!spf.map || st.st_ino != spf.ino) {
+		if (spf.map)
+			munmap((void *)spf.map, spf.size);
+		spf.map = NULL;
+		int fd = open(SPECT_FILE, O_RDONLY | O_CLOEXEC);
+		if (fd < 0)
+			return NULL;
+		void *m = st.st_size >= SPECT_HEADER ? sys_mmap(NULL, st.st_size, PROT_READ, MAP_SHARED, fd, 0) : MAP_FAILED;
+		syscall(SYS_close, fd);
+		if (m == MAP_FAILED)
+			return NULL;
+		const struct spect_header *h = m;
+		if (h->magic != SPECT_MAGIC || h->stride < h->width || h->frame_bytes < h->stride * h->height * 3 / 2 ||
+		    SPECT_HEADER + 2 * (uint64_t)h->frame_bytes > (uint64_t)st.st_size) {
+			munmap(m, st.st_size);
+			return NULL;
+		}
+		spf.map = h;
+		spf.size = st.st_size;
+		spf.ino = st.st_ino;
+	}
+	return spf.map;
+}
+
+//! Fills raw frame buffer i with the spectator's picture; false if this frame is not the spectator's
+static bool spect_fill(struct enc *e, struct ionbuf *b)
+{
+	double now = mono_s();
+	if ((int64_t)(now * 1000) > __atomic_load_n(&spect_until_ms, __ATOMIC_RELAXED) || e->pix != V4L2_PIX_FMT_NV12 || !b->map)
+		return false;
+	uint8_t *y = b->map, *uv = (uint8_t *)b->map + e->uv_venus;
+	const struct spect_header *h = spect_map();
+	uint32_t seq = h ? __atomic_load_n(&h->seq, __ATOMIC_ACQUIRE) : 0;
+	if (seq && seq != spf.seq) {
+		spf.seq = seq;
+		spf.fresh = now;
+	}
+	if (h && seq && now - spf.fresh <= 0.5 && h->width == e->w && h->height == e->h) {
+		const uint8_t *f = (const uint8_t *)h + SPECT_HEADER + (size_t)(h->index & 1) * h->frame_bytes;
+		const uint8_t *fuv = f + (size_t)h->stride * h->height;
+		for (uint32_t j = 0; j < e->h; j++)
+			memcpy(y + (size_t)j * e->stride, f + (size_t)j * h->stride, e->w);
+		for (uint32_t j = 0; j < e->h / 2; j++)
+			memcpy(uv + (size_t)j * e->stride, fuv + (size_t)j * h->stride, e->w);
+	} else {
+		// #1b2838 in BT.709 full range: Y 38, U 137, V 121
+		for (uint32_t j = 0; j < e->h; j++)
+			memset(y + (size_t)j * e->stride, 38, e->w);
+		for (uint32_t j = 0; j < e->h / 2; j++) {
+			uint8_t *r = uv + (size_t)j * e->stride;
+			for (uint32_t i = 0; i + 1 < e->w; i += 2)
+				r[i] = 137, r[i + 1] = 121;
+		}
+	}
+	return true;
+}
+
 static int qbuf(struct enc *e, struct v4l2_buffer *b)
 {
 	int q;
@@ -599,7 +700,9 @@ static int qbuf(struct enc *e, struct v4l2_buffer *b)
 	struct v4l2_plane p;
 	to_driver(e, q, b, &d, &p);
 	if (q == OUT) {
-		if (e->uv_len && e->uv_steam != e->uv_venus && !e->remap)
+		if (spect_fill(e, &e->b[q][b->index]))
+			; // written where venus reads it
+		else if (e->uv_len && e->uv_steam != e->uv_venus && !e->remap)
 			memmove(e->b[q][b->index].map + e->uv_venus, e->b[q][b->index].map + e->uv_steam, e->uv_len);
 		p.bytesused = e->frame;
 	}
