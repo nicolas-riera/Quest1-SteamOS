@@ -8,7 +8,9 @@ still matches), stage/ what the image build (build_image.py, on the headset) tak
     stage/repo/       this repository's source tree (sources.json "repo"), repo.zip the same with Unix modes
     stage/holo/       system.rootfs.zst, SteamOS Holo core aarch64 (Valve)
     stage/steam/      the arm64 Steam client: package/ holds Valve's zips + manifest (unpacked by the build)
-    stage/frame/      the Steam Frame's recovery image (.img.bz2, Valve): SteamVR and GTK 2, extracted by the build
+    stage/frame/      SteamVR and GTK 2 from Valve's Steam Frame, extracted by the build: the recovery image (.img.bz2,
+                      sources.json "frame_source": "recovery", the default) or the update server's RAUC bundle
+                      (.raucb) with its chunk store, chunks/<4 hex>/<id>.cacnk ("ota": up to date and smaller)
     stage/prebuilt/   our binaries (prebuilt branch): native-arm64.tar.zst, boot-native-holo.img, installer.img
     stage/pkgs/       Holo packages (device/packages.txt + dependencies) and the repository databases
     stage/meta/       system.img and modem.img from Meta's OTA (tracking stack, GPU driver, firmware), boot.img (restore)
@@ -19,7 +21,8 @@ drive is checked against what is still to download, to stage and to build (the i
 Standard library only. --cleanup deletes the work folder (after flashing).
 Nothing here is ever shipped: every file comes from its owner's server on the user's machine.
 """
-import argparse, hashlib, importlib.util, io, json, lzma, os, re, shutil, sys, tarfile, tempfile, time, urllib.request, zipfile
+import argparse, hashlib, importlib.util, io, json, lzma, os, re, shutil, sys, tarfile, tempfile, threading, time, urllib.request, zipfile
+from concurrent.futures import ThreadPoolExecutor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 LOCAL_PREBUILT = None
@@ -43,12 +46,14 @@ class Progress:
 
     def __init__(self, step, total):
         self.step, self.total, self.done, self.last = step, total, 0, 0
+        self.lock = threading.Lock()  # the OTA chunks are fetched by several threads
 
     def add(self, n):
-        self.done += n
-        if time.time() - self.last > 0.5 or self.done >= self.total:
-            self.last = time.time()
-            event("progress", step=self.step, done=self.done, total=self.total)
+        with self.lock:
+            self.done += n
+            if time.time() - self.last > 0.5 or self.done >= self.total:
+                self.last = time.time()
+                event("progress", step=self.step, done=self.done, total=self.total)
 
 
 def sha256(path, prog=None):
@@ -161,6 +166,90 @@ def step_file(name):
         rep[name] = {"url": url, "sha256": fetch(url, d, src.get("sha256"), prog)}
         place(d, os.path.join(stage, name, os.path.basename(url)))
     return run
+
+
+def step_frame(src, dl, stage, rep, prog):
+    """The recovery image (one file) or, with frame_source "ota", the update server's bundle and chunks."""
+    out = os.path.join(stage, "frame")
+    for f in (os.listdir(out) if os.path.isdir(out) else []):  # another source's leftovers: the build takes one
+        if f.endswith(".img.bz2") or f.endswith(".raucb") or f == "chunks":
+            q = os.path.join(out, f)
+            shutil.rmtree(q) if os.path.isdir(q) else os.remove(q)
+    if src.get("frame_source", "recovery") == "ota":
+        return frame_ota(src["steam_frame_ota"], dl, stage, rep, prog)
+    return step_file("frame")(src["steam_frame"], dl, stage, rep, prog)
+
+
+def ota_url(s, *parts):
+    return s["base"] + s["buildid"] + "/" + "".join(parts)
+
+
+def ota_files(s, dl):
+    """The bundle's local path (fetched, pinned) and the chunk list: [{id, uncompressed_size, compressed_size}]."""
+    name = "deckard-%s-%s" % (s["buildid"], s["version"])
+    d = os.path.join(dl, "frame-ota", s["buildid"])
+    raucb = os.path.join(d, name + ".raucb")
+    fetch(ota_url(s, name, ".raucb"), raucb, s["raucb_sha256"])
+    details = os.path.join(d, name + ".chunks_details.json")
+    if not os.path.exists(details):
+        fetch(ota_url(s, name, ".chunks_details.json"), details)
+    with open(details) as f:
+        return raucb, json.load(f)
+
+
+def chunk_rel(cid):
+    return os.path.join("chunks", cid[:4], cid + ".cacnk")
+
+
+def fetch_chunk(url, dest, size, prog, tries=6):
+    """One compressed chunk; its integrity (SHA-512/256 of the decompressed data = its id) is checked by the build."""
+    if os.path.exists(dest) and os.path.getsize(dest) == size:
+        prog.add(size)
+        return
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    tmp = dest + ".part"
+    for t in range(tries):
+        got = 0
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=60) as r, open(tmp, "wb") as f:
+                for b in iter(lambda: r.read(1 << 18), b""):
+                    f.write(b)
+                    got += len(b)
+            if got != size:
+                raise OSError("%d bytes, expected %d" % (got, size))
+            os.replace(tmp, dest)
+            prog.add(size)
+            return
+        except OSError:  # URLError and timeouts are OSErrors
+            if t == tries - 1:
+                raise
+            time.sleep(1 + 2 * t)
+
+
+def frame_ota(s, dl, stage, rep, prog, threads=16):
+    raucb, details = ota_files(s, dl)
+    details = list({c["id"]: c for c in details}.values())  # a chunk can be listed twice
+    prog.total = sum(int(c["compressed_size"]) for c in details)
+    log("Steam Frame %s (SteamVR %s, build %s): %d chunks, %.0f MB" % (s["version"], s["steamvr"], s["buildid"],
+                                                                      len(details), prog.total / 1e6))
+    out = os.path.join(stage, "frame")
+    os.makedirs(out, exist_ok=True)
+    place(raucb, os.path.join(out, os.path.basename(raucb)))
+    base = os.path.join(dl, "frame-ota", "chunks")  # shared by all builds: a chunk's id is its content's hash
+
+    def one(c):
+        cid, size = c["id"], int(c["compressed_size"])
+        if not re.fullmatch("[0-9a-f]{64}", cid):
+            raise ValueError("bad chunk id %r" % cid)
+        d = os.path.join(base, cid[:4], cid + ".cacnk")
+        fetch_chunk(s["base"] + "chunks.castr/%s/%s.cacnk" % (cid[:4], cid), d, size, prog)
+        place(d, os.path.join(out, chunk_rel(cid)))
+
+    with ThreadPoolExecutor(threads) as pool:
+        for _ in pool.map(one, details):
+            pass
+    rep["frame"] = {"source": "ota", "version": s["version"], "steamvr": s["steamvr"], "buildid": s["buildid"],
+                    "raucb_sha256": s["raucb_sha256"], "rootfs_sha256": s["rootfs_sha256"], "chunks": len(details)}
 
 
 def step_steam(src, dl, stage, rep, prog):
@@ -306,7 +395,7 @@ STEPS = [("repo", step_repo, "repo", 8 << 20, 16 << 20),
          ("holo", step_file("holo"), "holo_rootfs", None, 0),
          ("pkgs", step_pkgs, "holo_packages", None, 0),
          ("steam", step_steam, "steam_client", None, 0),
-         ("frame", step_file("frame"), "steam_frame", None, 0),
+         ("frame", step_frame, None, None, 0),
          ("meta", step_meta, "meta_ota", None, int(2.8 * GB))]
 
 
@@ -314,7 +403,17 @@ def check_space(src, workdir, steps, dl):
     """Free space on the work folder's drive >= what is left to download + stage + the image, with a margin."""
     need = IMAGE_BYTES
     for name, _, key, est, staged in steps:
-        s = src[key]
+        s = src[key] if key else src
+        if name == "frame":
+            if src.get("frame_source", "recovery") == "ota":
+                _, details = ota_files(src["steam_frame_ota"], dl)  # the bundle and the chunk list are fetched here
+                base = os.path.join(dl, "frame-ota", "chunks")
+                for c in details:
+                    f = os.path.join(base, c["id"][:4], c["id"] + ".cacnk")
+                    if not (os.path.exists(f) and os.path.getsize(f) == int(c["compressed_size"])):
+                        need += int(c["compressed_size"])
+                continue
+            s = src["steam_frame"]
         if name == "steam":
             size = sum(int(v["size"]) for v in steam_manifest(s)[2].values())
         elif name == "pkgs":
@@ -343,6 +442,7 @@ def main():
     ap.add_argument("--cleanup", action="store_true", help="delete the work folder and exit")
     ap.add_argument("--prebuilt", help="development: take our binaries from this local folder")
     ap.add_argument("--move", action="store_true", help="move downloads into stage/ (no cache kept in dl/)")
+    ap.add_argument("--frame-source", choices=["recovery", "ota"], help="override sources.json frame_source")
     a = ap.parse_args()
     global LOCAL_PREBUILT, MOVE
     LOCAL_PREBUILT, MOVE = a.prebuilt, a.move
@@ -351,6 +451,8 @@ def main():
         log("removed", a.workdir)
         return
     src = json.load(open(os.path.join(HERE, "sources.json")))
+    if a.frame_source:
+        src["frame_source"] = a.frame_source
     dl, stage = os.path.join(a.workdir, "dl"), os.path.join(a.workdir, "stage")
     only = set(a.only.split(",")) if a.only else None
     steps = [s for s in STEPS if not only or s[0] in only]
@@ -359,8 +461,10 @@ def main():
     rp = os.path.join(stage, "report.json")
     rep = json.load(open(rp)) if os.path.exists(rp) else {}
     for name, fn, key, est, _ in steps:
-        s = src[key]
+        s = src[key] if key else src
         total = est or (head_size(s["url"]) if "url" in s else 0)
+        if name == "frame" and src.get("frame_source", "recovery") == "recovery":
+            total = head_size(src["steam_frame"]["url"])
         event("step", step=name, status="start")
         log("==", name)
         fn(s, dl, stage, rep, Progress(name, total))

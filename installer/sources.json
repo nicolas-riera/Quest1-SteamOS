@@ -20,6 +20,16 @@
     "url": "https://steamdeck-images.steamos.cloud/recovery/steamframe-oobe-repair-20260922.5153644-0.3.0.img.bz2",
     "sha256": "3a4a077f1b1f40688ab3279affcb56776bd97c54db1573e7c65fc52a97106676"
   },
+  "frame_source": "recovery",
+  "steam_frame_ota": {
+    "comment": "The other source of the same files, up to date and smaller (~3.7 GB instead of 7): Valve's public Steam Frame update server. It has no full image: a RAUC bundle (a squashfs holding the casync index of the rootfs) and a chunk store; the build rebuilds the 10 GiB rootfs from the chunks and checks it against rootfs_sha256. Used when \"frame_source\" is \"ota\" (default \"recovery\": steam_frame above).",
+    "base": "https://steamdeck-images.steamos.cloud/vr/",
+    "buildid": "20261113.6134720",
+    "version": "0.5.9",
+    "steamvr": "2.19.3",
+    "raucb_sha256": "1d8ffb2e450ce2284dc4c6272bb97c18e385d4f11078983aad307d1f553b4983",
+    "rootfs_sha256": "78faa0f093951e71496b2d0409f828690c4f824feffa70fe6640d7021923ec1b"
+  },
   "meta_ota": {
     "comment": "Meta's last Quest 1 OTA (full A/B payload). Its system and modem images are bit-identical to a headset on this build (checked 2026-11-04 against a dump).",
     "url": "https://files.cocaine.trade/firmware/meta/Quest/q1_49845030443200410.zip",

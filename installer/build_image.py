@@ -27,6 +27,7 @@ Steps:
 import argparse, bz2, json, os, re, shutil, signal, stat, struct, subprocess, sys, tempfile, time, zipfile
 
 import btrfsread  # noqa: E402 (next to this file)
+import frame_ota  # noqa: E402
 
 USERDATA_BYTES = 56092471296  # Quest 1 userdata partition (GPT of the 64 GB model)
 GB = 1 << 30
@@ -246,12 +247,31 @@ class Build:
         prog.add(prog.total)
 
     def frame(self, prog):
-        """The Frame image is a GPT disk (esp, efi-A, rootfs-A (btrfs), var-A, home); only rootfs-A is kept, cut
-        out of the bz2 stream. SteamVR and GTK 2 are copied from it with installer/btrfsread.py."""
+        """The Frame's rootfs (btrfs) as an image file, from the recovery image or from the update server's chunks
+        (stage/frame, whichever prepare.py staged); SteamVR and GTK 2 are copied from it with installer/btrfsread.py."""
         d = os.path.join(self.stage, "frame")
+        part = os.path.join(self.a.scratch, "frame-rootfs.img")
+        if any(f.endswith(".raucb") for f in os.listdir(d)):
+            self.frame_rootfs_ota(d, part, prog)
+        else:
+            self.frame_rootfs_recovery(d, part, prog)
+        self.frame_copy(part)
+
+    def frame_rootfs_ota(self, d, part, prog):
+        """Rebuilt from the RAUC bundle's casync index and the chunk store (installer/frame_ota.py); checked against
+        the bundle's manifest and the sha256 prepare.py pinned (sources.json) in the report."""
+        want = self.report.get("frame", {}).get("rootfs_sha256")
+        if not want:
+            raise RuntimeError("report.json has no pinned rootfs sha256 for the Frame's update bundle")
+        sha, size, text = frame_ota.assemble(d, part, want, delete=self.a.consume, prog=prog)
+        log("frame: rootfs of build %s rebuilt, %d bytes, sha256 %s" % (frame_ota.manifest_value(text, "update", "version"),
+                                                                        size, sha))
+
+    def frame_rootfs_recovery(self, d, part, prog):
+        """The recovery image is a GPT disk (esp, efi-A, rootfs-A (btrfs), var-A, home); only rootfs-A is kept, cut
+        out of the bz2 stream."""
         bz = os.path.join(d, [f for f in os.listdir(d) if f.endswith(".img.bz2")][0])
         prog.total = os.path.getsize(bz)
-        part = os.path.join(self.a.scratch, "frame-rootfs.img")
         head, pos, rng = b"", 0, None
         pieces = bunzip2(bz, prog)  # on every core: one core of the headset takes 40 min
         with open(part, "wb") as o:
@@ -277,6 +297,8 @@ class Build:
             finally:
                 pieces.close()
             o.truncate()
+
+    def frame_copy(self, part):
         # read with our own btrfs reader on every host: the headset's kernel cannot mount it, and `btrfs restore`
         # gets its small files wrong (installer/btrfsread.py)
         im = btrfsread.Image(part)
@@ -294,6 +316,12 @@ class Build:
                     os.remove(os.path.join(local, f))
                 im.copy(child, os.path.join(local, f))
         self.frame_kde_presets(im)
+        for v in ("/usr/share/deckard/version", "/usr/lib/os-release"):
+            try:
+                log("frame: %s: %s" % (v, b"".join(c for _, c in im.extents(im.lookup(v))).decode().strip().replace("\n", " ")[:300]))
+                break
+            except Exception:
+                pass
         im.f.close()
         os.remove(part)
         # our SteamVR edits and steamvr-q1 (device/holo-steamvr.sh), from outside (Holo core has no python3)
