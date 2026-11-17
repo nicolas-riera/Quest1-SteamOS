@@ -68,16 +68,41 @@ flapping. Switching the cameras takes ~1-2 s, as on Meta's OS. In hand mode the 
 * Gestures: pinch (thumb-index tip < 21 mm, release 34 mm) with the palm facing the head = system button (Oculus/Menu),
   otherwise trigger, only while the dashboard is open (`VREvent_DashboardActivated`). **[I]** thresholds untested.
 
-## 6. Steam Link VR
+## 6. Steam Link VR (checked in the binaries, 2026-11-17)
 
-The arm64 `vrlink` client has no hand/skeleton strings, only controller inputs (including capsense finger curls); the
-PC `driver_vrlink.dll` has `SVLHandTrackingDriver`, which takes data from the Android client. So the joints most likely
-do not reach the PC; the Touch inputs (system, trigger gesture, poses) do. **[I]** Not tested.
+* The arm64 `vrlink` client (`/opt/steamvr/tools/vrlink/bin/linuxarm64/vrlink`) contains **no** string or protobuf
+  field name about hands, skeletons, joints, bones, fingers (other than `capsense/*`), pinch or gestures. Its tracking
+  upload is `PackControllerInput` plus the head pose; the input paths it knows are the Frame controller's
+  (`/user/hand/<side>/input/...`: system, menu, a/b/x/y, trigger, grip, thumbstick, thumbrest, bumper, dpad, view,
+  `capsense/{grip,trigger,ring,pinky,bumper}`, `handgrip1/2/touch`). So **no skeleton or joint data goes from this
+  client to the PC**. **[V]** (absence of any code path/strings; it reads controllers only when their type is
+  `frame_controller`, docs/streaming.md).
+* The PC side (`driver_vrlink.dll`) has `SVLHandTrackingDriver`, an `svl_hand_interaction_augmented` device with
+  Index-style `index/middle/ring/pinky_pinch` inputs, `enableHandTracking` and `HandAnimEvaluator`
+  (`hand_right_closeanim.glb`): it is fed by the hand data of Valve's own Android/Frame clients, over a message our
+  client does not have. **[V]** strings; the message format is not known.
+* What works today over the stream: the Touch device the PC sees carries our gestures (pinch with the palm toward you
+  = system, pinch in the dashboard = trigger) and the hand pose as the controller pose, so the dashboard and
+  controller-style games work with hands.
+* What would be needed for joints/skeleton on the PC: (a) reverse the hand message that `driver_vrlink.dll` parses
+  (SVLHandTrackingDriver) and the client packing in the Android Steam Link APK, then send it from the shim
+  (`src/v4l2shim/quest1_vrlink.c`); or (b) cheaper, partial: send finger curls through the Frame controller's
+  `capsense/grip|trigger|ring|pinky` paths from Meta's joints, so the PC's controller skeleton curls the fingers
+  (the thumb has no capsense path except thumbrest/touch).
 
-## 7. Open
+## 7. Visualisation
 
-* Worn test: `echo auto > /etc/quest1-hands`, check the status values of a tracked hand, root pose space, retargeting,
-  gestures. Debug: `q1handsd dump`, driver log lines "quest1: <side> hand tracked".
-* Menu icon near the palm and a joint overlay (SteamVR overlay attached to the hand): not done.
-* Deployment: unit `android-q1handsd` in `device/holo-android-tracking.sh` (needs `holo-android-tracking setup` and an
-  image build), `tools/headset-dev/hands-fake.py` to test the driver without wearing the headset.
+`src/q1handviz` (`/usr/local/bin/q1-handviz`, unit from `device/holo-hands.sh`): a SteamVR overlay per tracked hand
+with the 24 joints drawn as a skeleton seen from the palm side, attached to the hand's tracked device, and, while the
+palm faces the user, the Oculus mark (right: ring) or Menu mark (left: bars) 7 cm in front of the palm (yellow while
+pinched). driver_quest1 publishes the joints and flags in `/run/q1track/handviz` (made by q1handsd, world-writable
+tmpfs file). Nothing is drawn while no hand is tracked. Untested on the headset (it was off SteamOS).
+
+## 8. Worn test and open items
+
+`tools/headset-dev/hands-worn-test.sh on|log|off` and its header: the steps for the user.
+* Check with real hands: the status values of a tracked hand, the root pose space, the retargeting (fingers, wrist twist),
+  gesture thresholds, the overlay placement (skeleton picture offset, mark position).
+* Deploy: image build runs `holo-hands.sh install`, the `android-q1handsd` unit comes from `holo-android-tracking.sh`.
+  `tools/headset-dev/hands-fake.py` tests the driver without wearing the headset (it rewrites the file, so use
+  q1handsd's in-place writes for long runs).
