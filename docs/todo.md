@@ -130,7 +130,9 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   vrcompositor no roomview restart then: catch it with `PT_DUMP=1` (record states once a second) while it happens.
 - q1-ptprovider takes 20-21 % of a core while passthrough shows (2026-11-16, after the composite's NEON rewrite:
   docs/passthrough.md): the composite itself is ~2 ms an eye a camera frame; profile the rest (`perf top -p`).
-- The camera test in SteamVR's camera settings (passthrough) does not work (user, 2026-11-11).
+- The camera test in SteamVR's camera settings works (the four cameras, docs/passthrough.md "The camera test") but
+  the whole dashboard panel lags while it runs (user, 2026-11-17), with no CPU saturation: the dashboard redraws the
+  panel for each test picture (ten a second); find what makes that redraw slow here.
 - Camera power-up race at some boots (trackingservice "Timeout: (power: SLEEP) => (power: STANDBY)", 3DoF
   only), and udev helpers hanging ~3 min at the same boots (2026-11-08: `libinput-device-group` on event0 and
   `scsi_id` on sdd/sde, killed after 2 min 59 s): q1-hangwatch starts at sysinit now and logs D-state threads with

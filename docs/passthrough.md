@@ -484,6 +484,24 @@ driver_quest1:
   four), and a check of the matching on rectified patches instead of axis-aligned ones.
 - `src/camtap/depth_test.cpp`: the same module on the live ring, printing only numbers (timing, a coarse depth map).
 
+## The camera test (2026-11-17)
+
+SteamVR's dashboard (Settings > Camera > camera test) calls only the public `IVRTrackedCamera_006` from vrwebhelper:
+`AcquireVideoStreamingService`, then every 100 ms `GetCameraFrameSize` and `GetVideoStreamFrameBuffer` (frame type 2).
+In SteamVR 2.17 (and 2.19.3, same code) vrclient reads those frames from a `VR_TrackedCameraExternalService` shared
+segment that it only ever opens (never creates), and that no shipped binary fills: the handle it checks there is the
+compositor's client-context pointer, so nothing outside vrcompositor could fill it either. The call returned
+InvalidHandle and the test stayed empty.
+
+`src/camtap/q1_trackedcam_shim.cpp` (`libq1trackedcam.so`, preloaded into vrwebhelper by `device/holo-steamvr.sh`
+when installed) interposes `VR_GetGenericInterface` and answers those three calls itself from the camera ring
+(`/dev/shm/quest1-cameras`, refreshed through its `.want` heartbeat); every other call goes to the real interface.
+The picture is the four cameras in their raw orientation, 2x2 (0 1 / 2 3), each averaged 5x5 down to 128x96: 256x192,
+with an auto gain and a gamma. 256 columns because vrwebhelper PNG-encodes a frame of up to 256 columns as is and a
+wider one by keeping every (width / 256)-th column of its first 256 x step only: the first version (two cameras
+upright, 480x1280) showed one camera cropped and stretched (user, 2026-11-17). Works (user, 2026-11-17); the panel
+lags while the test runs (docs/todo.md).
+
 ## Notes moved from the to-do list (2026-11-08): Passthrough
 
 History of measurements, fixes and open points as they were written in docs/todo.md (the to-do list now only

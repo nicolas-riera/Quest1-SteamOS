@@ -136,6 +136,9 @@ g++ -std=c++17 -O2 -o $D/usr/local/bin/vrdash vrdash.cpp $OVR
 cd "$R/src/camtap"
 g++ -std=c++17 -O2 -o $D/usr/local/bin/q1-camoverlay camoverlay.cpp $OVR
 g++ -std=c++17 -O2 -o $D/usr/local/bin/q1-ptprovider ptprovider.cpp $OVR
+# the dashboard's camera test, preloaded into vrwebhelper (device/holo-steamvr.sh)
+# (headers only: it takes the real VR_GetGenericInterface with dlsym(RTLD_NEXT), it must not link libopenvr_api)
+g++ -std=c++17 -O2 -fPIC -shared -o $D/usr/local/lib/libq1trackedcam.so q1_trackedcam_shim.cpp -I$S/openvr/headers -ldl
 # desktop mode: a nested Plasma's Xvfb as the SteamVR overlay gamescope would make (device/holo-desktop.sh)
 cd "$R/src/q1desktop"
 g++ -std=c++17 -O2 -Wall -o $D/usr/local/bin/q1desktop q1desktop.cpp $OVR -ldl -lX11 -lXdamage -lXtst

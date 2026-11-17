@@ -69,6 +69,16 @@ edit("bin/vrwebhelper/linuxarm64/vrwebhelper.sh", "QUEST1_STEAMVR_COMPAT", [
      "\texec nice -n 10 ./vrwebhelper \"$@\""),
 ])
 
+# Dashboard camera test (src/camtap/q1_trackedcam_shim.cpp, docs/passthrough.md "The camera test"): the four cameras
+# from the camera ring, when /usr/local/lib/libq1trackedcam.so is installed (tools/build-native.sh)
+edit("bin/vrwebhelper/linuxarm64/vrwebhelper.sh", "QUEST1_TRACKEDCAM_SHIM", [
+    ('export QUEST1_STEAMVR_COMPAT=1 QUEST1_VKSHIM_WSI=1', "after",
+     "# Quest 1: the dashboard's camera test from the camera ring\n"
+     "if [ -e /usr/local/lib/libq1trackedcam.so ]; then\n"
+     "\texport LD_PRELOAD=$LD_PRELOAD:/usr/local/lib/libq1trackedcam.so QUEST1_TRACKEDCAM_SHIM=1\n"
+     "fi"),
+])
+
 p = os.path.join(R, "resources/safe_mode_driver_whitelist.json")
 s = open(p, newline="").read()
 if "quest1" not in json.loads(s)["drivers"]:
