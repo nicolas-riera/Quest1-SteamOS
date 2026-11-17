@@ -93,8 +93,10 @@ cc -fPIC -shared -fvisibility=hidden -Wextra -o $D/usr/local/lib/libquest1_v4l2.
 # libdrm.so.2 (device/holo-steam-session.sh links them into /usr/local/lib/quest1-streamclient)
 cc -fPIC -shared -fvisibility=hidden -Wextra -o $D/usr/local/lib/libquest1_angle_egl.so v4l2shim/quest1_angle_egl.c -ldl
 cc -fPIC -shared -fvisibility=hidden -Wextra -o $D/usr/local/lib/libquest1_streamdrm.so v4l2shim/quest1_streamdrm.c
-# Remote Play spectator: the PC's input, cursor and gamepads kept out of the headset (preloaded by steam-q1)
-cc -fPIC -shared -fvisibility=hidden -Wextra -o $D/usr/local/lib/libquest1_rpspectator.so rpspectator/quest1_rpspectator.c -ldl
+# Remote Play spectator: the PC's input, cursor and gamepads kept out of the headset, Steam's VR stream fed with
+# Monado's spectator frames (IVROverlayView proxy; preloaded by steam-q1)
+cc -O2 -fPIC -shared -fvisibility=hidden -Wextra -o $D/usr/local/lib/libquest1_rpspectator.so rpspectator/quest1_rpspectator.c \
+	rpspectator/quest1_overlayview.c -ldl -lpthread
 # Remote Play's capture: the ScreenCast portal backend for Steam's X screen (device/holo-steam-session.sh installs
 # its portal and D-Bus files)
 gcc -std=gnu11 -O3 -Wall -Wextra -o $D/usr/local/bin/q1screencast q1screencast/q1screencast.c \

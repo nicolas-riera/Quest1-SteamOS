@@ -109,6 +109,8 @@ struct ionbuf {
 
 struct enc {
 	int fd;
+	dev_t rdev; // the device and node fd was opened on (a stale fd number is someone else's file now)
+	ino_t ino;
 	int ion;
 	bool cap_set, out_pending;
 	struct v4l2_format out_fmt; // an OUTPUT S_FMT that came before the CAPTURE one
@@ -194,12 +196,25 @@ static bool is_venc(int fd, const struct stat *st)
 	return true;
 }
 
+static void forget(struct enc *e);
+
+// The encoder tracked for fd, after a check that fd is still that device: a process can close it without going
+// through close() here (Chromium's GPU process probes the encoder in Steam's webhelper), and the number is then
+// another file's. Without the check, a shared memory region that got the number was "mapped" as an encoder
+// buffer (EINVAL, no system call): the webhelper's GPU process lost its raster contexts, fonts and images, i.e.
+// Steam's UI drew white panels and pages without text (2026-11-17).
 static struct enc *find(int fd)
 {
 	for (int i = 0; i < MAXDEV; i++) {
 		struct enc *e = __atomic_load_n(&encs[i], __ATOMIC_ACQUIRE);
-		if (e && e->fd == fd)
-			return e;
+		if (e && e->fd == fd) {
+			struct stat st;
+			if (fstat(fd, &st) == 0 && S_ISCHR(st.st_mode) && st.st_rdev == e->rdev && st.st_ino == e->ino)
+				return e;
+			logf_("fd %d is no longer the encoder (closed behind the shim): forgotten", fd);
+			forget(e);
+			return NULL;
+		}
 	}
 	return NULL;
 }
@@ -212,6 +227,8 @@ static struct enc *adopt(int fd)
 		return NULL;
 	struct enc *e = calloc(1, sizeof(*e));
 	e->fd = fd;
+	e->rdev = st.st_rdev;
+	e->ino = st.st_ino;
 	e->ion = open("/dev/ion", O_RDONLY | O_CLOEXEC);
 	if (e->ion < 0)
 		logf_("/dev/ion: %s (the encoder's buffers cannot be made)", strerror(errno));

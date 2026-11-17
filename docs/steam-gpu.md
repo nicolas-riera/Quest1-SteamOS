@@ -208,3 +208,24 @@ hover/scroll run, none in four later runs with any combination: intermittent). W
 the UI clean. A likely cause for NO_MUTABLE: ANGLE does view some images in another format (sRGB/UNORM pairs), which
 the flag promises it won't; MEM_CACHE reuses memory the GPU may still read. To find out which one, and a safe form
 (e.g. drop the flag only for formats with no view of another format), before turning either back on.
+
+## White panels, missing text and pictures: the V4L2 shim's stale fds (fixed 2026-11-17)
+
+The corruption that stayed with both flags off (whole panels white, the sidebar missing, pages without text or
+pictures, in Steam and in the dashboard) was the webhelper's GPU process losing its shared memory. Its
+`logs/cef_log.txt` had thousands of `raster_command_buffer_stub.cc: Failed to map shared state buffer`, then
+`glRasterCHROMIUM: Can not read paint buffer`, `Invalid font discardable handle`, `Invalid shm for discardable
+handle`, `Can not read transfer cache entry data`: no raster context for a renderer (a white panel), no glyphs (text
+gone, the DOM still had it), no decoded images. strace showed no failing `mmap` at all.
+
+`libquest1_v4l2.so` (Steam's encoder and stream-client shim, src/v4l2shim) is preloaded into the Steam client and so
+into every webhelper process. Chromium's GPU process probes the venus decoder (Steam enables `V4L2VideoDecode`); the
+shim tracks that fd as a decoder, and Chromium closes it without going through the shim's `close()`. The number then
+went to a shared memory region, and the shim served its `mmap` as a decoder buffer: EINVAL, no system call. The
+bursts came with each Remote Play start (2800 failures at 18:32 for one session) and at startup.
+
+Fix (quest1_v4l2.c `find()`, quest1_vdec.c `q1dec_find()`): an encoder or decoder remembers the device and inode its
+fd was opened on, and a lookup that hits checks them with `fstat`; a stale entry is forgotten and logged
+("fd 68 is no longer the decoder (closed behind the shim): forgotten", seen in steamwebhelper.log right after the fix).
+No cost when no encoder or decoder is tracked.
+

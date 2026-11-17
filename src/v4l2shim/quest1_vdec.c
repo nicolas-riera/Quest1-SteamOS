@@ -142,6 +142,8 @@ struct ionbuf {
 
 struct q1dec {
 	int fd, ion;
+	dev_t rdev; // the device and node fd was opened on (see find() in quest1_v4l2.c)
+	ino_t ino;
 	pthread_mutex_t mu;
 	bool set_up;
 	struct v4l2_format out_fmt; // the client's OUTPUT format
@@ -253,12 +255,19 @@ static int qof(uint32_t type)
 
 // --- which fd is the decoder
 
+// after a check that fd is still the decoder's device (find() in quest1_v4l2.c says why)
 struct q1dec *q1dec_find(int fd)
 {
 	for (int i = 0; i < MAXDEV; i++) {
 		struct q1dec *e = __atomic_load_n(&decs[i], __ATOMIC_ACQUIRE);
-		if (e && e->fd == fd)
-			return e;
+		if (e && e->fd == fd) {
+			struct stat st;
+			if (fstat(fd, &st) == 0 && S_ISCHR(st.st_mode) && st.st_rdev == e->rdev && st.st_ino == e->ino)
+				return e;
+			logf_("fd %d is no longer the decoder (closed behind the shim): forgotten", fd);
+			q1dec_forget(e);
+			return NULL;
+		}
 	}
 	return NULL;
 }
@@ -378,6 +387,8 @@ struct q1dec *q1dec_adopt(int fd)
 		return NULL;
 	struct q1dec *e = calloc(1, sizeof(*e));
 	e->fd = fd;
+	e->rdev = st.st_rdev;
+	e->ino = st.st_ino;
 	e->ion = e->evfd = e->epfd = -1;
 	pthread_mutex_init(&e->mu, NULL);
 	pthread_mutex_lock(&lock);

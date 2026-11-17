@@ -63,8 +63,8 @@ if [ "${QUEST1_STEAM_VR:-0}" = 1 ]; then
 fi
 # Remote Play's hardware encoder (CGameStreamVideoStageV4L2 on /dev/video-enc0) through the msm_vidc translation
 [ -f /usr/local/lib/libquest1_v4l2.so ] && export LD_PRELOAD=/usr/local/lib/libquest1_v4l2.so${LD_PRELOAD:+:$LD_PRELOAD}
-# Remote Play from the headset is a spectator view: the PC's mouse, keyboard, cursor and gamepads stay out
-# (src/rpspectator)
+# Remote Play from the headset is a spectator view: the PC's mouse, keyboard, cursor and gamepads stay out, and
+# Steam's VR stream gets Monado's spectator frames instead of vrclient's OpenGL path that crashed it (src/rpspectator)
 [ -f /usr/local/lib/libquest1_rpspectator.so ] &&
 	export LD_PRELOAD=/usr/local/lib/libquest1_rpspectator.so${LD_PRELOAD:+:$LD_PRELOAD}
 # exit status 42 = "restart me" (after a self-update), as steam.sh handles it
@@ -187,7 +187,7 @@ if [ -f /usr/share/applications/vlc.desktop ]; then
 fi
 if [ -n "$RPSRC" ]; then
 	gcc -std=gnu11 -O2 -Wall -fPIC -shared -fvisibility=hidden -o /usr/local/lib/libquest1_rpspectator.so \
-		"$RPSRC/quest1_rpspectator.c" -ldl
+		"$RPSRC/quest1_rpspectator.c" "$RPSRC/quest1_overlayview.c" -ldl -lpthread
 fi
 if [ -n "$SCSRC" ]; then
 	gcc -std=gnu11 -O3 -Wall -o /usr/local/bin/q1screencast "$SCSRC/q1screencast.c" \

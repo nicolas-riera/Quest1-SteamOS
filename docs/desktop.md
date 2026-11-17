@@ -169,8 +169,21 @@ docs/streaming.md "The capture"):
   pad 0" (28de:11ff), made when Steam starts, not by the stream. Steam listed it as a connected "controller" (user,
   2026-11-10); Frame mode now turns steam-screen off (device/holo-frame-mode.sh).
 - SteamVR's own headset view (`system.HeadsetView`, `IVRHeadsetView`) was tried first: vrcompositor renders it in
-  two 256x256 passes, ignores `SetHeadsetViewSize` and the image is black here, and Steam's own VR capture
-  (`CVRStreamThread`, GL) only runs on the Frame's hardware type and needs GL interop that llvmpipe lacks.
+  two 256x256 passes, ignores `SetHeadsetViewSize` and the image is black here.
+- **Steam's own VR capture** (`CVRStreamThread`, ">>> Starting VR stream", "Capture method set to VR OpenGL NV12 +
+  V4L2 HEVC") runs on the Frame's hardware type, so in Frame mode (`-steamframe`, 2026-11-16) a spectator session
+  takes it instead of the X screen and q1screencast. Every frame it calls `IVROverlayView::AcquireOverlayView` on
+  SteamVR's spectator overlay with no native device (an OpenGL view). vrclient serves that by importing the
+  overlay's Vulkan image into OpenGL with `GL_EXT_memory_object_fd`, which steam.service hides from llvmpipe, and
+  calls the missing `glCreateMemoryObjectsEXT` anyway: Steam crashed (SIGSEGV at 0) and took vrcompositor with it
+  (SteamVR 2.17 and 2.19 alike). A Vulkan view crashes too (vrclient never loaded its Vulkan entry points in Steam's
+  process), and `GetOverlayImageData` only reads raw/file overlays (`VROverlayError_InvalidTexture`).
+  `src/rpspectator/quest1_overlayview.c` (same preload) wraps Steam's `dlsym("VR_GetGenericInterface")` and hands
+  out a proxy `IVROverlayView_003` whose OpenGL views are what q1screencast streamed: Monado's spectator frames
+  (made on the first request: the proxy creates `/tmp/quest1-spectator`, removed 3 s after the last request),
+  NV12 BT.709 full range converted to RGBA and uploaded into a texture of Steam's context; dark blue `#1b2838`
+  after 0.5 s without a new frame. Steam then encodes it with the hardware encoder as before (V4L2 HEVC through
+  `quest1_v4l2`). Vulkan/D3D11 views pass through. User-checked 2026-11-17: the PC shows the VR view.
 
 
 ## Notes moved from the to-do list (2026-11-08): Steam and desktop
