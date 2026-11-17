@@ -1,5 +1,5 @@
 // quest1_scanout: direct scanout of vrcompositor's display swapchain on the Quest 1 panels
-// (QUEST1_DIRECT_SCANOUT=1; included by quest1_display.c after struct qd_swapchain).
+// (QUEST1_DIRECT_SCANOUT=1; included by quest1_display_swapchains.c after struct qd_swapchain).
 //
 // vrcompositor does the lens distortion itself (driver_quest1's ComputeDistortion) into a
 // 2880x1600 swapchain whose images are gralloc buffers the display engine can read. A present

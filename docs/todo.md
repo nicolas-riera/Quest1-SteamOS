@@ -187,10 +187,11 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   headset, only by this project when the user asks (a manual update of ours). The app's own update system must never
   delete the user's data on the headset. SteamOS and SteamVR updates must keep working without undoing our changes.
 - Code layout (user, 2026-11-17): split the long sources into small modules that are easy to read and work in.
-  Done: `quest1_scanout.c` (2088 lines) into setup + six parts of 170-450 lines (same binary byte for byte:
-  `tools/same-binary.sh`, the layer being one translation unit). Next by size: `quest1_compat.c` (3272),
-  `quest1_modifier.c` (1939), `quest1_display.c` (1803), `quest1_wsi_x11.c` (1357), then the driver and Monado's
-  `comp_window_mdp.c`; for C++ or separate units, check with a build and a run instead.
+  Done (2026-11-17, the same binary byte for byte: `tools/same-binary.sh`, the layer being one translation unit):
+  `quest1_scanout.c` (2088 lines), `quest1_compat.c` (3272), `quest1_modifier.c` (1939) and `quest1_display.c`
+  (1803), each now a short file and parts of 50-600 lines named after it. Next: `quest1_wsi_x11.c` (1357, a unit of
+  its own), the driver (`driver_quest1.cpp`, `controllers.cpp`) and Monado's `comp_window_mdp.c`: separate units or
+  C++, so check those with a build and a run in the headset instead.
 - Slim the install: drop what this headset never uses (other controllers' render models, etc.).
 - The telemetry HAL's loop (docs/performance.md, 2026-11-11 heat): once an event cannot go to ovrstub's
   TelemetryService it retries with no pause (a core at 100 %, ~50000 log lines/s, fakelogd at 90 %). Stopping the HAL
