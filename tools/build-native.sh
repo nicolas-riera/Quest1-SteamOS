@@ -121,7 +121,8 @@ gcc -w -shared -nostdlib -Wl,-soname,libc.so -o $B/libc.so $B/libc.c
 gcc -w -shared -nostdlib -Wl,-soname,libdl.so -o $B/libdl.so $B/libdl.c
 gcc -fPIE -pie -nostdlib -nostartfiles -Wl,--dynamic-linker=/system/bin/linker64 -Wl,-z,now -Wl,--no-undefined \
 	-Wl,--allow-shlib-undefined -o $D/usr/local/lib/q1track/q1trackd $B/q1trackd.o $B/libc.so $B/libdl.so
-gcc -fPIE -pie -nostdlib -nostartfiles -Wl,--dynamic-linker=/system/bin/linker64 -Wl,-z,now -Wl,--no-undefined \n	-Wl,--allow-shlib-undefined -o $D/usr/local/lib/q1track/q1handsd $B/q1handsd.o $B/libc.so $B/libdl.so
+gcc -fPIE -pie -nostdlib -nostartfiles -Wl,--dynamic-linker=/system/bin/linker64 -Wl,-z,now -Wl,--no-undefined \
+	-Wl,--allow-shlib-undefined -o $D/usr/local/lib/q1track/q1handsd $B/q1handsd.o $B/libc.so $B/libdl.so
 install -D -m 755 ../device/q1-vrapi-extract.sh $D/usr/local/sbin/q1-vrapi-extract
 gcc -shared -nostdlib -Wl,-z,now -Wl,--no-undefined -Wl,--allow-shlib-undefined \
 	-o $D/data/local/tmp/libq1camtap.so $B/camtap.o $B/libc.so $B/libdl.so

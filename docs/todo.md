@@ -93,6 +93,9 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 
 ## Display
 
+- SteamVR's own trembling or over-prediction (user, 2026-11-17): in the spectator view the black edges tremble a lot,
+  which is suspect. Measure the head pose vrcompositor renders with against the pose at display (Monado's), without
+  a stream, and whether the re-projection then corrects it on the panels only.
 - 90 Hz mode, selectable from the refresh rate setting (low priority). Base: github.com/TheCez/quest1-90hz-orangefox,
   and a Reddit write-up (r/OculusQuest "I got a Quest 1 running at a real 90 Hz", Juspertinry's boot image and module):
   only the device tree changes on Meta's kernel (`qcom,mdss-dsi-panel-framerate`, `max-refresh-rate` and the timing
