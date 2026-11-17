@@ -74,6 +74,9 @@ start() {
 	a 'PRIM_MI2S_RX Channels' Two
 	a 'PRIM_MI2S_TX Channels' Two
 	a 'EQ Pre Gain' 10
+	# The microphone's codec gain at 0 dB (23 of 0..31, -17.25..+6 dB): the codec's default, 2 (-15.75 dB), made the
+	# voice far too quiet (user, 2026-11-17); the fan's noise then reads -42 dBFS, a loud voice stays well below full scale
+	a 'MIC Volume' 23,23
 	b=1
 	for g in 25 25 25 24 22 21 18 17 13 14 20 24 24 22 25 26 27 28 28; do
 		a "EQ Band $b" $g; b=$((b + 1))
@@ -350,8 +353,13 @@ context.objects = [
       # the msm PCM only moves its pointer at period boundaries: PipeWire's timer-based
       # scheduling then underruns all the time (audible stutter), so use period interrupts
       api.alsa.disable-tsched = true
-      api.alsa.period-size = 1024
+      # 960 (20 ms), not 1024: the period is the graph's quantum, and the microphone's echo canceller works in
+      # blocks of 480; with 1024 it dropped 64 samples of the voice every cycle (crackle, 2026-11-17)
+      api.alsa.period-size = 960
       api.alsa.period-num = 4
+      # the output and the microphone run on the same codec clock: one clock name, so that PipeWire does not
+      # rate-match the microphone to the output (with two names it resynced the capture at every cycle)
+      clock.name = "api.alsa.0"
       # read/write instead of mmap: with mmap the msm PCM hands the ADSP one period at a time, the next one
       # only when the ADSP's "write done" for the last has come back through glink, so any delay on that round
       # trip starved the ADSP (crackle on sounds, never heard on silence); with writes each period PipeWire
@@ -380,8 +388,9 @@ context.objects = [
       media.class = "Audio/Source"
       api.alsa.path = "hw:0,0"
       api.alsa.disable-tsched = true
-      api.alsa.period-size = 1024
+      api.alsa.period-size = 960
       api.alsa.period-num = 4
+      clock.name = "api.alsa.0"
       audio.format = "S16LE"
       audio.rate = 48000
       audio.channels = 1
@@ -399,7 +408,7 @@ EOF
 	# offers quest1-mic-aec, which WirePlumber prefers as default source (priority above quest1-mic's 2100)
 	# so Steam voice, SteamVR and apps use it. It only processes while something records from it
 	# (node.passive). WebRTC's noise suppression is on by default; AGC (gain_control) is off: it pumps the
-	# fan's noise up between words, turn it on if the voice is too quiet.
+	# fan's noise up between words (the codec's gain is raised instead, holo-audio start).
 	cat > /etc/pipewire/pipewire.conf.d/51-quest1-mic-aec.conf <<'EOF'
 # Quest 1 (holo-audio.sh): echo cancellation and noise suppression for quest1-mic
 context.modules = [
@@ -408,7 +417,9 @@ context.modules = [
     args = {
       library.name = aec/libspa-aec-webrtc
       monitor.mode = true
-      node.latency = 1024/48000
+      # the graph's quantum (the output's period): WebRTC works in 480-sample blocks, the module turns
+      # 960 of them per cycle into its output
+      node.latency = 960/48000
       capture.props = {
         node.name = "quest1-mic-aec-capture"
         target.object = "quest1-mic"
@@ -422,7 +433,6 @@ context.modules = [
       }
       aec.args = {
         webrtc.gain_control = false
-        webrtc.extended_filter = false
       }
     }
   }

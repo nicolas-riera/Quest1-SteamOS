@@ -5,18 +5,16 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 
 ## Found by the user on 2026-11-16 evening (first)
 
-- Storage (development headset): Steam shows 2.3 GB free of ~24 GB with nothing installed from Steam. That headset
-  runs the development layout, one fixed 24 GB image (`/userdata/steamos/holo.img` on loop0, 91 % used; `/userdata`
-  has 21 GB free); the installer's image already takes the whole partition. Nothing large was written in the last two
-  days (no runaway writer). What fills it: `/root` 5.2 GB of development leftovers on that headset only (`.debug`
-  1.3 GB of perf symbols, 15 old monado-service copies 1.3 GB, `tmp` 0.3 GB, the Monado tree 1.5 GB, `sf` 0.7 GB),
-  `/var/cache/pacman` 1.2 GB (now emptied after each pacman transaction: install-image.sh's hook), `/var/lib/flatpak`
-  2.3 GB (the user's apps), Steam 4 GB, `/usr` 5.3 GB. To do: with the user's go, delete `.debug`, the monado-service
-  copies, `tmp`, `stream-crash-*` and the package cache there (~4 GB); grow that image (or not) as the user prefers;
-  check what grows over a day of use (`du` before/after).
-- Audio after the Audacity incident (docs/audio.md, 2026-11-16 evening; other PCMs now closed to applications): the
-  user to confirm by ear that the pitch is normal again and that the microphone works in Steam Link VR and Audacity
-  (its "default" or PulseAudio device).
+- Storage (development headset): the development leftovers are deleted (user's go, 2026-11-17: `.debug`, the old
+  monado-service and library copies, `tmp`, `stream-crash-*`, old audio logs, the package cache): 5.8 GB free of the
+  24 GB image, was 2.2. Left: check what grows over a day of use (`du` before/after); the full install wipes the
+  headset anyway (user).
+- Microphone (docs/audio.md, 2026-11-17): the crackle (the echo canceller dropped samples every cycle, the capture
+  resynced) and the low level (codec gain -15.75 dB) are fixed. The user to judge by ear: crackle gone, level, the
+  voice while the speakers play (with the holes gone the echo canceller should keep more of it; there is no strength
+  knob in this plugin), and the speakers' own sound with the 20 ms periods.
+- Microphone latency in Steam Link VR (~500 ms felt, user 2026-11-17): the headset's capture holds ~20-40 ms; measure
+  vrlink's path (its audio jitter buffer is 50 ms on the headset; the PC's side unknown).
 - Steam Link VR: still black flashes (fewer), and sometimes a flash brings a trembling that goes away once the
   headset's load drops (seen with desktop mode and Dolphin open).
 - A whole-system freeze (SSH too; ping fine): desktop mode open with Discover searching, headset on the forehead, then
@@ -43,13 +41,6 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - Audio: a click at each Steam start (user, 2026-11-12: still there; the crackle is gone). The output no longer
   closes between sounds (docs/audio.md), so find what Steam does at its start: a sound of its own, or a stream it
   opens and closes.
-- Microphone: noise suppression and echo cancellation (user, 2026-11-12: it picks up everything, from the speakers'
-  sound to the fan's noise). Built 2026-11-16 (docs/audio.md: WebRTC echo-cancel source `quest1-mic-aec`, default
-  source, ~15 % of a core while the mic is used); left: the user's listening test (echo, fan noise, voice quality,
-  AGC on or off) after the image's next PipeWire restart.
-
-## Tracking
-
 - The room comes back a bit off at the first put-on after a boot (docs/boundary.md "The room after a boot"): the saved
   map has 2 submaps from one spot, so away from it the engine tracks by odometry and snaps back at the next
   relocalization. Next (user: "as on Android, no constant delocalization"): clear the map with the user, walk the room
@@ -179,7 +170,11 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 
 ## System
 
-- SteamOS and SteamVR updates must keep working without undoing our changes.
+- Updates (user, 2026-11-17): Steam's client updates itself (kept on); SteamOS and SteamVR are never updated by the
+  headset, only by this project when the user asks (a manual update of ours). The app's own update system must never
+  delete the user's data on the headset. SteamOS and SteamVR updates must keep working without undoing our changes.
+- Code layout (user, 2026-11-17): split the long sources (e.g. `src/vklayer-steamvr/quest1_scanout.c`, 2000+ lines)
+  into small modules that are easy to read and work in, with the build scripts and docs following.
 - Slim the install: drop what this headset never uses (other controllers' render models, etc.).
 - The telemetry HAL's loop (docs/performance.md, 2026-11-11 heat): once an event cannot go to ovrstub's
   TelemetryService it retries with no pause (a core at 100 %, ~50000 log lines/s, fakelogd at 90 %). Stopping the HAL

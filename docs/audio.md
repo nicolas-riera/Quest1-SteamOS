@@ -322,8 +322,7 @@ The user: the built-in microphone picks up everything, the speakers' sound and t
   `quest1-output`, no latency added. It offers the source `quest1-mic-aec` ("Microphone (echo cancelled)"), 1 channel,
   `priority.session = 2200` (above `quest1-mic`'s 2100). The capture side is `node.passive`: nothing runs until an
   application records from it.
-- **Settings.** WebRTC echo canceller and noise suppression (default on); AGC (`webrtc.gain_control`) off, extended
-  filter off (it made no measurable CPU difference).
+- **Settings.** WebRTC echo canceller and noise suppression (default on); AGC (`webrtc.gain_control`) off.
 - **Default source.** WirePlumber keeps the last default it was given (`~/.local/state/wireplumber/default-nodes`,
   `default.configured.audio.source`) and prefers it to priorities: on the headset it was `quest1-mic`, so with the
   module loaded at runtime the default stayed the raw mic. `holo-audio` rewrites that line to `quest1-mic-aec` (works
@@ -358,6 +357,50 @@ hw:0,0 (held by PipeWire) and PipeWire's own devices (ALSA's default, PulseAudio
 hw:0,1` as steamos gets "Permission denied"; PipeWire's output stays RUNNING and the microphone records (RMS ~24 in a
 quiet room, nothing played). The lower pitch the user heard came in the same incident; after the reboot both PCMs and
 PipeWire run at 48 kHz (`hw_params`, `clock.rate`), and the MI2S ports' rate controls read `KHZ_48`: to confirm by ear.
+
+## 2026-11-17: the microphone crackled, was too quiet, and lost the voice under the speakers
+
+The user, after the evening's fix: the microphone works with its noise suppression, but it crackles, it is far too
+quiet, and the voice "disappears" whenever the speakers play (the same as on Meta's OS, which has one microphone too);
+it also feels ~500 ms late in Steam Link VR.
+
+- **Crackle: the echo canceller dropped samples every cycle.** WebRTC (`libspa-aec-webrtc`, PipeWire 1.4.9) works in
+  blocks of 480 samples (its latency is fixed at 480/48000); the graph ran at the output's period, 1024. Each cycle
+  the module turned two blocks (960) into output and its capture and reference ring buffers overflowed by the rest:
+  `capture ringbuffer xrun ... dropping 256` (64 samples, 1.3 ms of voice) at every cycle in a debug log
+  (`pw-metadata -n settings 0 log.level 4` for 2 s), and the processed source counted ~3 xruns a second. A voice cut
+  every 21 ms crackles, and an echo canceller fed a signal with holes cannot model the echo, so its suppressor takes
+  everything away while the speakers play.
+- **And the capture resynced at every cycle.** The output and the microphone are two PCMs of one codec, on one clock,
+  but PipeWire names each ALSA clock by direction (`api.alsa.p-0`, `api.alsa.c-0`), so it rate-matched the capture
+  to the output. The capture pointer only moves by whole periods, so the delay it saw jumped by a period and it
+  resynced (`hw:0,0c: follower delay:234 target:1058 thr:1024 resample:1, resync`, ~28 a second, logged since boot).
+- **Fix** (`holo-audio.sh`, 50-quest1-audio.conf and 51-quest1-mic-aec.conf): output and microphone periods of 960
+  (20 ms; the period is the graph's quantum), the echo canceller's `node.latency` 960/48000, and one
+  `clock.name = "api.alsa.0"` on both nodes (no rate matching: the same clock). Tested by restarting PipeWire with
+  each candidate and recording the processed source for 16 s (levels computed in memory, nothing kept), counting the
+  nodes' errors and a 3 s debug log:
+
+  | output / mic period, extra | resyncs (3 s) | ring xruns (3 s) | errors (7 s) |
+  |---|---|---|---|
+  | 1024 / 1024 (before) | 150 | 298 | echo canceller +22 |
+  | 960 / 960 | 163 | 0 | 0 |
+  | 960 / 240 x16 | 157 | 0 | mic +373 |
+  | 960 / 960, capture headroom 480 or 960 | 2 in 6 of 11 runs, ~160 in the others | 0 | 0 |
+  | 960 / 960, one clock name | 2 (the start) in 10 of 10 runs | 0 | 0 |
+
+  With a Steam Link VR session running (vrlink records the processed source and plays the PC's sound): quantum 960
+  everywhere, no resync and no new error in a minute. The output's sound is unchanged in kind (same period interrupts
+  and writes, 20 ms periods instead of 21.3): the user to confirm by ear.
+- **Too quiet: the codec's microphone gain was -15.75 dB.** `MIC Volume` (0..31 = -17.25..+6 dB) sat at its default,
+  2. `holo-audio start` now sets 23 (0 dB): the fan's noise reads -42 dBFS (raw, RMS 251 of 32767, peaks ~1100;
+  was RMS 43), a voice has ample headroom. The processed source's noise floor after suppression: RMS ~28.
+- **Not settable here:** WebRTC's options in this plugin are `webrtc.high_pass_filter`, `noise_suppression`,
+  `voice_detection`, `transient_suppression`, `mobile_mode` and `gain_control`; `extended_filter` (set before) does not
+  exist and was dropped. There is no knob for the suppressor's strength during double talk: with the holes gone it
+  should model the echo and leave more of the voice; the user to judge.
+- **Latency:** the capture side now holds ~20-40 ms (one or two periods); the ~500 ms felt is not on the headset's
+  audio path (vrlink's own buffers and the PC's: docs/todo.md).
 
 ## Notes moved from the to-do list (2026-11-08): Audio
 
