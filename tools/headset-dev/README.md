@@ -60,6 +60,11 @@ Stream picture placement (docs/streaming.md, "Measuring where the stream's frame
   "X Y Z" deg/s, `/tmp/q1-veloff` "X Y Z" cm/s; and `/tmp/q1-labellog`: each submit's pose to `/tmp/q1lab.txt`. With
   pcmarker next to q1marker, the headset still: a pose that is right in the headset shows the PC's marker at 0 px
   for any change of the pose the PC renders with (docs/streaming.md item 13, 2026-11-13 night).
+- `mic-check.sh [SECONDS]` (as root): the microphone's health while it is recorded (the echo-cancelled source, level
+  computed in memory, nothing kept): capture resyncs, the echo canceller's dropped samples and the nodes' errors, which
+  made the voice crackle until 2026-11-17 (docs/audio.md). Healthy: 0 ring buffer xruns, no new errors, quantum 960.
+- `stream-load.sh [SECONDS]` (as root, during a Steam Link VR session, panels on): desktop mode plus 500 MB taken, with
+  the memory, load and fps every 5 s, then the shim's flash log of that time (docs/streaming.md item 16).
 - `pred-log-vrlink.patch` (test only, to the shim) and `predfit.py TAG...` (on the PC): with `/tmp/q1-predlog`, each
   vrlink submit's pose and the head's true pose are logged (`/tmp/q1pred-sub.txt`, `/tmp/q1pred-head.txt`, renamed
   `sub-TAG.txt` / `head-TAG.txt`); predfit gives how many ms after its submit each frame's pose matches the head, and
