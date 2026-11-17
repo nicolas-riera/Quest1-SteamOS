@@ -54,14 +54,15 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - Audio: a click at each Steam start (user, 2026-11-12: still there; the crackle is gone). The output no longer
   closes between sounds (docs/audio.md), so find what Steam does at its start: a sound of its own, or a stream it
   opens and closes.
-- The room comes back a bit off at the first put-on after a boot (docs/boundary.md "The room after a boot"): the saved
-  map has 2 submaps from one spot, so away from it the engine tracks by odometry and snaps back at the next
-  relocalization. Next (user: "as on Android, no constant delocalization"): clear the map with the user, walk the room
-  (setup page: guide the user to walk the edges ~1 min before "Set up"), then set the playspace; q1anchord now
-  persists only in good tracking. Left: re-persist/grow the map after the boundary is committed and the user moved;
-  a second map when relocalization fails (Meta persists a new anchor in the new context, one map per room; check that
-  mapdb keeps both and the tracker cost); locate the anchor itself (registerAnchor, shared memory) instead of the
-  current map uuid as the truth that the room is valid.
+- The room comes off (rotated and moved, "quite a lot") after a tracking loss (user, 2026-11-17, docs/boundary.md
+  "The room tied to anchors, as on Meta's OS"): the room is tied to the map's world origin, which moves when the
+  engine relocalizes through another submap of the same map. Meta's OS (logcat of the same morning, same room) had
+  the same failed validations and two contexts, yet its room mapping (13 scene anchors) did not move: each anchor is
+  located from the landmarks around it. User: 100 % Meta's behaviour, tracking never worse than on Meta's OS. Do:
+  tie the playspace and floor to persisted spatial anchors located by the engine (several around the room), as
+  Guardian and Home do, through the engine's anchor API (InternalAnchorApiServer v2 / SlamAnchorServer over
+  RuntimeIPC, or TrackingEnvironment registerAnchor + its shared memory). No "verify your space" prompt (user: the
+  old Guardian had one, Meta removed it, SteamOS has none and that is better).
 - Worn test of the map state (2026-11-16, docs/boundary.md "Map state and the room"): the chaperone must hide during
   relocalizing/lost/bad and come back in place; check that vrcompositor's chaperone follows the collisionBounds alpha
   setting live (not verified without the headset worn), the Meta-like UX (black/passthrough while relocalizing) if
@@ -169,6 +170,8 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 
 ## Power
 
+- A sound when the charger is plugged in (user, 2026-11-17): SteamOS has none; the user has the Quest's original
+  sound file to use (not in the repo unless its licence allows: load it from the user's copy).
 - The sleep animation shows inside the dashboard panel instead of full screen.
 - Real sleep (suspend to RAM, `/etc/quest1-sleep` deep, opt-in): on resume Meta's tracking is lost, no sound,
   the proximity sensor wakes the headset while worn, the fan and power LED stay on.

@@ -222,6 +222,35 @@ tracks two contexts it skips map building. Before it, while the playspace was be
 - The user, 2026-11-13: the boundary shifts mostly after a reset of the tracking, e.g. when its service is
   restarted. A restart starts a new context that has to relocalize in the saved map, the step that failed above.
 
+## The room tied to anchors, as on Meta's OS (2026-11-17, open in docs/todo.md)
+
+The user put the headset on after a boot on the table: the room was rotated and moved, "quite a lot", from the
+start. `/var/log/quest1-map.log` of that boot: the engine relocalized in the saved map 4 s after it started (through
+submap `8ed77038`), map tracking then failed validation and did not run for ~30 s, it reset ("No tracking for too
+long"), opened a new context and relocalized again in the saved map, this time through submap `f082d5eb`, then logged
+"Bad map tracking" on submap 2 once or twice a second. The CPU split was in place (trackingservice ~1.3 cores on 0-3,
+everything else on 4-7).
+
+The same morning on Meta's OS (stock boot, same room, headset on the table at boot then worn; adb logcat, no root):
+- The engine did the same: "Validation failed", two active contexts, "Pausing map building until validation is
+  complete" (~20 s, then map building runs: new key rigs, bundle adjustment). Meta's Guardian asked the user to
+  verify the space or switch (`GUARDIAN_SYSTEM_SETUP_NEEDS_VERIFY`, `SHOW_SWITCH_SPACE_DIALOG`, black pushed).
+- The user's room mapping (Meta's scene: 13 anchors, planes) did not move. Home locates each anchor in the current
+  tracking ("Finished Anchor Search - 13 locatable Anchors"; the anchor health monitor: 13-65 landmarks per anchor,
+  ~24 covisible key frames): an anchor sticks to the landmarks around it, whichever submap the engine tracks.
+- Meta's clients reach the engine's anchors over RuntimeIPC: Guardian is a client of trackingservice's
+  `SlamAnchorServer` (`InternalAnchorApiServer` capability v2), and `com.facebook.spatial_persistence_service`
+  (`anchor_persistence_server`, "SpatialPersistence" capability v1) saves them. Guardian's stationary boundary is
+  itself a saved plane anchor ("Updated guardian plane anchor ... for stationary guardian").
+- Android sets no tracking property that the stack here lacks (only `persist.ovr.foreground.cpus` 0-3 and the
+  `persist.ovr.tracking.ch*` confidence values, defaults).
+
+So the difference is not the engine but what the room is tied to: here the playspace is in the map's world frame,
+whose origin follows the submap the engine relocalized through; on Meta's OS the room's content is tied to anchors
+located one by one. Next: tie the playspace and the floor to persisted anchors (several around the room) located
+by the engine. No "verify your space" prompt: this OS's old Guardian asks, Meta's later versions removed it, and
+SteamOS has none (user: better so).
+
 ## Notes moved from the to-do list (2026-11-08): Boundary
 
 History of measurements, fixes and open points as they were written in docs/todo.md (the to-do list now only
