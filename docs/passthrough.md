@@ -484,6 +484,27 @@ driver_quest1:
   four), and a check of the matching on rectified patches instead of axis-aligned ones.
 - `src/camtap/depth_test.cpp`: the same module on the live ring, printing only numbers (timing, a coarse depth map).
 
+## Dense stereo depth (2026-11-17)
+
+How Meta's OS does it on the Quest 1 (libmrengine, read for the method only): a "MotionVectorDisparityPipeline". The
+left/right pair is composed into one picture and run through the Venus H.264 hardware encoder; the macroblock motion
+vectors read back from its bitstream are the disparity (640x480 input). Then fixed-point rectification warps,
+left-right, epipolar and filter checks, refine passes, and a temporal fusion in world space on the head pose with
+separate foreground and background histories; the mesh is tuned by favor_foreground, neighbour and solver keys. Almost
+no CPU or GPU: the encoder does the matching.
+
+Ours (`src/steamvr-quest1/stereo_dense.{h,cpp}`, `QUEST1_CAMERA_DEPTH=2`; 1 is the older plane sweep, 0 the fixed
+sphere, the default): rectified census block matching on the bottom pair (0/2) and the top pair (1/3), near and far
+disparity ranges, left-right, uniqueness and speckle checks, then a 64x48 grid of view directions taking
+foreground-biased depths, a Kalman fusion on the head's tracking pose, an optional floor prior (`QUEST1_CAMERA_FLOOR=1`)
+and mesh vertices taking the nearer cell at depth edges. Geometry at `QUEST1_CAMERA_DEPTH_HZ` (15 by default).
+Offline, on synthetic scenes rendered through the real calibration (`src/camtap/dense_eval.cpp`): 62 % of the cells
+measured, 95 % of them within 10 % (median error 1.5 %), against 42 %, 57 % and 7.4 % for the plane sweep; in low
+light 87 % good against 35 %. Untextured walls are still filled in, not measured.
+
+Worn (user, 2026-11-17): "works surprisingly well", but far too much rippling, and once a second the view flickers as
+if the depth turned off and on. Still off by default (docs/todo.md). The Venus encoder route, Meta's, would cost no CPU.
+
 ## The camera test (2026-11-17)
 
 SteamVR's dashboard (Settings > Camera > camera test) calls only the public `IVRTrackedCamera_006` from vrwebhelper:

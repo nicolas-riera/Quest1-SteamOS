@@ -11,3 +11,5 @@ aarch64-linux-gnu-g++ -std=c++17 -O2 -I/root/openvr-sdk/headers -o vrscene_idle 
 	-L/opt/q1libs -l:libopenvr_api.so -Wl,-rpath,/opt/steamvr/bin/linuxarm64 -Wl,--allow-shlib-undefined
 # depth_test (headset depth from the bottom stereo pair; needs no OpenVR library at run time)
 aarch64-linux-gnu-g++ -std=c++17 -O2 -I/root/openvr-sdk/headers -o depth_test depth_test.cpp ../steamvr-quest1/stereo_depth.cpp
+# dense_eval (offline evaluation of the dense stereo; runs anywhere, build natively in WSL for x86 or with the aarch64 compiler)
+aarch64-linux-gnu-g++ -std=c++17 -O2 -I/root/openvr-sdk/headers -o dense_eval dense_eval.cpp ../steamvr-quest1/stereo_dense.cpp ../steamvr-quest1/stereo_depth.cpp

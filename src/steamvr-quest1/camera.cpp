@@ -26,6 +26,7 @@
 #include "camera.h"
 #include "q1json.h"
 #include "quest1_camera_ring.h"
+#include "stereo_dense.h"
 #include "stereo_depth.h"
 
 #include <fcntl.h>
@@ -1209,9 +1210,14 @@ private:
 	void SetupDepth()
 	{
 		// off by default: on 2026-11-08 the depths were too unreliable (~10 % of the cells confident, on a desk) and the
-		// view warped; QUEST1_CAMERA_DEPTH=1 turns it on to work on it
-		if (!atoi(Env("QUEST1_CAMERA_DEPTH", "0")))
+		// view warped; QUEST1_CAMERA_DEPTH=1 turns it on to work on it, =2 selects the dense stereo (stereo_dense.h)
+		const int mode = atoi(Env("QUEST1_CAMERA_DEPTH", "0"));
+		if (!mode)
 			return;
+		if (mode == 2) {
+			SetupDense();
+			return;
+		}
 		std::vector<CamModel> pair(2);
 		pair[0].id = 0, pair[1].id = 2;
 		LoadCalibration(pair);
@@ -1231,8 +1237,16 @@ private:
 			CLog("quest1 camera: stereo depth unusable: fixed-depth mesh\n");
 			return;
 		}
-		const double fade = 10, deg = 180 / M_PI;
 		const StereoDepth::Params &dp = depthParams;
+		BuildGridMap(dp.cols, dp.rows, dp.azMinDeg, dp.azMaxDeg, dp.elMinDeg, dp.elMaxDeg);
+		CLog("quest1 camera: stereo depth on the bottom camera pair, %dx%d cells\n", dp.cols, dp.rows);
+	}
+
+	//! Where each sphere vertex reads a depth grid of view directions: grid coordinates and a weight that fades to the
+	//! default radius over the grid's last 10 degrees.
+	void BuildGridMap(int cols, int rows, double azMin, double azMax, double elMin, double elMax)
+	{
+		const double fade = 10, deg = 180 / M_PI;
 		size_t n = dirs.size() / 3;
 		gridX.assign(n, -1), gridY.assign(n, -1), gridW.assign(n, 0);
 		for (size_t v = 0; v < n; v++) {
@@ -1240,21 +1254,70 @@ private:
 			if (d[2] >= 0)
 				continue; // behind
 			double az = atan2(d[0], -d[2]) * deg, el = asin(std::max(-1.f, std::min(1.f, d[1]))) * deg;
-			double x = (az - dp.azMinDeg) / (dp.azMaxDeg - dp.azMinDeg) * dp.cols - 0.5;
-			double y = (dp.elMaxDeg - el) / (dp.elMaxDeg - dp.elMinDeg) * dp.rows - 0.5;
-			double edge = std::min({az - dp.azMinDeg, dp.azMaxDeg - az, el - dp.elMinDeg, dp.elMaxDeg - el});
+			double x = (az - azMin) / (azMax - azMin) * cols - 0.5;
+			double y = (elMax - el) / (elMax - elMin) * rows - 0.5;
+			double edge = std::min({az - azMin, azMax - az, el - elMin, elMax - el});
 			if (edge <= 0)
 				continue;
-			gridX[v] = (float)std::max(0.0, std::min(x, dp.cols - 1.0));
-			gridY[v] = (float)std::max(0.0, std::min(y, dp.rows - 1.0));
+			gridX[v] = (float)std::max(0.0, std::min(x, cols - 1.0));
+			gridY[v] = (float)std::max(0.0, std::min(y, rows - 1.0));
 			gridW[v] = (float)std::min(1.0, edge / fade);
 		}
 		depthOn = true;
-		CLog("quest1 camera: stereo depth on the bottom camera pair, %dx%d cells\n", dp.cols, dp.rows);
+	}
+
+	//! The dense stereo (stereo_dense.h): the bottom pair 0/2 and the top pair 1/3, a 64x48 direction grid with temporal
+	//! fusion on the head's tracking-space pose, optionally the floor plane as a prior (QUEST1_CAMERA_FLOOR=1: the raw
+	//! tracking space has its floor at y = 0).
+	void SetupDense()
+	{
+		std::vector<CamModel> cams(4);
+		for (int i = 0; i < 4; i++)
+			cams[i].id = i;
+		LoadCalibration(cams);
+		for (const CamModel &c : cams)
+			if (!c.calibrated) {
+				CLog("quest1 camera: no calibration for camera %d: fixed-depth mesh\n", c.id);
+				return;
+			}
+		auto proj = [](CamModel c) {
+			return [c](const double p[3], double &px, double &py) {
+				double q[3] = {p[0] - c.t[0], p[1] - c.t[1], p[2] - c.t[2]}, d[3];
+				for (int i = 0; i < 3; i++)
+					d[i] = c.R[0][i] * q[0] + c.R[1][i] * q[1] + c.R[2][i] * q[2]; // R^T (p - t)
+				return d[2] > 0 && c.Project(d, px, py);
+			};
+		};
+		auto rig = [&](StereoDenseRig &r, int l, int rr, const StereoDenseRig::Params &p) {
+			if (cams[l].t[0] > cams[rr].t[0])
+				std::swap(l, rr);
+			const CamModel &a = cams[l], &b = cams[rr];
+			double v[3];
+			for (int i = 0; i < 3; i++)
+				v[i] = a.R[i][2] + b.R[i][2]; // mean optical axis, device frame
+			bool ok = r.Configure(p, proj(a), proj(b), a.t, b.t, v, a.w, a.h);
+			CLog("quest1 camera: dense stereo rig %d/%d: %s (baseline %.3f m)\n", l, rr, ok ? "ok" : "unusable", ok ? r.Baseline() : 0.0);
+			return ok;
+		};
+		StereoDenseRig::Params bottom, top;
+		top.rectW = 192; // the top pair's views overlap only around the middle
+		denseBottomOk = rig(denseBottom, 0, 2, bottom);
+		denseTopOk = rig(denseTop, 1, 3, top);
+		if (!denseBottomOk && !denseTopOk)
+			return;
+		dense.Configure(denseParams);
+		if (denseBottomOk)
+			dense.AddRig(&denseBottom);
+		if (denseTopOk)
+			dense.AddRig(&denseTop);
+		denseOn = true;
+		BuildGridMap(denseParams.cols, denseParams.rows, denseParams.azMinDeg, denseParams.azMaxDeg, denseParams.elMinDeg, denseParams.elMaxDeg);
+		CLog("quest1 camera: dense stereo depth, %dx%d cells\n", denseParams.cols, denseParams.rows);
 	}
 
 	//! New radii for the sphere's vertices from the latest depth grid (bilinear), in place.
-	void UpdateDepth()
+	template <class Grid>
+	void UpdateDepth(const Grid &depth, bool favorForeground = false)
 	{
 		const int cols = depth.Cols(), rows = depth.Rows();
 		for (size_t v = 0; v < gridW.size(); v++) {
@@ -1262,9 +1325,18 @@ private:
 			if (gridW[v] > 0) {
 				int x0 = (int)gridX[v], y0 = (int)gridY[v], x1 = std::min(x0 + 1, cols - 1), y1 = std::min(y0 + 1, rows - 1);
 				float fx = gridX[v] - x0, fy = gridY[v] - y0;
-				float a = depth.Depth(y0 * cols + x0) * (1 - fx) + depth.Depth(y0 * cols + x1) * fx;
-				float b = depth.Depth(y1 * cols + x0) * (1 - fx) + depth.Depth(y1 * cols + x1) * fx;
+				const float d00 = depth.Depth(y0 * cols + x0), d01 = depth.Depth(y0 * cols + x1), d10 = depth.Depth(y1 * cols + x0),
+				            d11 = depth.Depth(y1 * cols + x1);
+				float a = d00 * (1 - fx) + d01 * fx;
+				float b = d10 * (1 - fx) + d11 * fx;
 				float dd = a * (1 - fy) + b * fy;
+				if (favorForeground) {
+					// a depth edge inside the 2x2 cells: blending the near and the far side puts the vertex in mid-air and
+					// stretches the triangles across the edge; take the nearer side (Meta's mesh.favor_foreground)
+					float lo = std::min(std::min(d00, d01), std::min(d10, d11)), hi = std::max(std::max(d00, d01), std::max(d10, d11));
+					if (hi > 1.25f * lo)
+						dd = lo;
+				}
 				r = defaultRadius + (dd - defaultRadius) * gridW[v];
 			}
 			for (int i = 0; i < 3; i++)
@@ -1351,6 +1423,17 @@ private:
 		return true;
 	}
 
+	//! img: cameras 0, 2, 1, 3 (bottom left/right, top left/right)
+	bool DenseCompute(const std::vector<SrcImage> &img)
+	{
+		bool ok = true;
+		if (denseBottomOk)
+			ok = img[0].data && img[1].data && img[0].stride == img[1].stride && denseBottom.Compute(img[0].data, img[1].data, img[0].stride);
+		if (ok && denseTopOk)
+			ok = img[2].data && img[3].data && img[2].stride == img[3].stride && denseTop.Compute(img[2].data, img[3].data, img[2].stride);
+		return ok;
+	}
+
 	//! maps the 25088-byte VR_CameraPassthroughState file and keeps its "camera enabled" byte set
 	void Run()
 	{
@@ -1394,7 +1477,7 @@ private:
 			for (int64_t until = MonoNs() + 1000000000LL; running && MonoNs() < until;) {
 				std::vector<SrcImage> img;
 				int64_t cap = 0;
-				if (!ring || !ring->Acquire({0, 2}, img, cap, 100)) {
+				if (!ring || !ring->Acquire(denseOn ? std::vector<int>{0, 2, 1, 3} : std::vector<int>{0, 2}, img, cap, 100)) {
 					if (!ring) { // the sphere follows the head
 						usleep(33000);
 						if (MeshPose(MonoNs(), false, meshPose))
@@ -1406,19 +1489,55 @@ private:
 					ring->Done();
 					continue;
 				}
+				if (denseOn) {
+					// geometry at QUEST1_CAMERA_DEPTH_HZ (default 15): the grid is fused over time on the head pose, a mesh
+					// every other frame set is enough and halves the CPU time
+					if (++frameSets % std::max(1, (int)lround(30.0 / std::max(1.0, atof(Env("QUEST1_CAMERA_DEPTH_HZ", "15"))))) != 0) {
+						ring->Done();
+						continue;
+					}
+					int64_t t0 = MonoNs();
+					bool ok = img.size() == 4 && DenseCompute(img);
+					if (!ring->Done() || !ok)
+						continue; // torn frame set
+					bool havePose = MeshPose(cap, true, meshPose);
+					double pose[12];
+					for (int i = 0; i < 12; i++)
+						pose[i] = meshPose[i];
+					dense.SetPose(havePose ? pose : nullptr);
+					if (havePose && atoi(Env("QUEST1_CAMERA_FLOOR", "0"))) {
+						// raw tracking space: floor at y = 0, up = +y; in the device frame n = R^T (0,1,0), d = t_y
+						double plane[4] = {pose[4], pose[5], pose[6], pose[7]};
+						dense.SetFloor(plane);
+					} else {
+						dense.SetFloor(nullptr);
+					}
+					dense.Update();
+					UpdateDepth(dense, true);
+					if (havePose)
+						PublishMesh(++meshId, false, meshPose);
+					computeNs += MonoNs() - t0, computed++;
+					continue;
+				}
 				int64_t t0 = MonoNs();
 				bool ok = depth.Compute(img[0].data, img[1].data, img[0].stride);
 				if (!ring->Done() || !ok)
 					continue; // torn frame set
-				UpdateDepth();
+				UpdateDepth(depth);
 				if (MeshPose(cap, true, meshPose))
 					PublishMesh(++meshId, false, meshPose);
 				computeNs += MonoNs() - t0, computed++;
 			}
 			if (computed && MonoNs() - lastReport > 30000000000LL) {
-				const StereoDepth::Stats &st = depth.LastStats();
-				CLog("quest1 camera: depth mesh: %.1f updates/s, %.2f ms each, %d of %d cells textured\n",
-				     computed * 1e9 / (MonoNs() - lastReport), computeNs / 1e6 / computed, st.textured, st.visible);
+				if (denseOn) {
+					const StereoDense::Stats &st = dense.LastStats();
+					CLog("quest1 camera: dense depth mesh: %.1f updates/s, %.2f ms each, cells: %d fresh, %d fused, %d floor, %d filled\n",
+					     computed * 1e9 / (MonoNs() - lastReport), computeNs / 1e6 / computed, st.measured, st.fused, st.floor, st.filled);
+				} else {
+					const StereoDepth::Stats &st = depth.LastStats();
+					CLog("quest1 camera: depth mesh: %.1f updates/s, %.2f ms each, %d of %d cells textured\n",
+					     computed * 1e9 / (MonoNs() - lastReport), computeNs / 1e6 / computed, st.textured, st.visible);
+				}
 				computed = computeNs = 0, lastReport = MonoNs();
 			}
 		}
@@ -1436,6 +1555,11 @@ private:
 	float defaultRadius = 3;
 	StereoDepth depth;
 	StereoDepth::Params depthParams;
+	StereoDenseRig denseBottom, denseTop;
+	StereoDense dense;
+	StereoDense::Params denseParams;
+	bool denseBottomOk = false, denseTopOk = false, denseOn = false;
+	int frameSets = 0;
 	bool depthOn = false;
 	std::vector<float> gridX, gridY, gridW; //!< per vertex: where it reads the depth grid, and how much
 	BlockQueueIface *table = nullptr;
