@@ -65,6 +65,16 @@
 			"click": false,
 			"touch": true
 		},
+		"/input/skeleton/left": {
+			"type": "skeleton",
+			"side": "left",
+			"skeleton": "/skeleton/hand/left"
+		},
+		"/input/skeleton/right": {
+			"type": "skeleton",
+			"side": "right",
+			"skeleton": "/skeleton/hand/right"
+		},
 		"/output/haptic": {
 			"type": "vibration"
 		},
