@@ -123,11 +123,17 @@ public:
 		double fuseNoise = 0.04;              //!< relative inverse-depth noise of one measurement
 		double processNoise = 0.02;           //!< relative inverse-depth change allowed per frame (variance growth)
 		int maxAge = 4;                       //!< frames a cell is kept without a new measurement
+		double edgeBiasMin = 0.06, edgeBiasRamp = 0.10; //!< the low quantile counts only where it is this far (relative) below the median
+		double deadband = 2.0;                //!< innovations below this many sigmas are mostly ignored (a still scene stays still)
+		double fillBlend = 0.3;               //!< weight of a new membrane value against the carried one (unmeasured cells)
+		double smoothRel = 0.08;              //!< output smoothing: neighbours within this relative inverse depth are averaged (0 = off)
 	};
 
 	void Configure(const Params &p);
 	//! Rigs are not owned; add before Compute. Each must be configured.
-	void AddRig(StereoDenseRig *rig) { rigs_.push_back(rig); }
+	void AddRig(StereoDenseRig *rig) { rigs_.push_back(rig), rigFresh_.push_back(1); }
+	//! A rig whose Compute was skipped this time keeps its old disparities: leave it out of the next Update (default: all in).
+	void SetRigFresh(size_t i, bool fresh) { if (i < rigFresh_.size()) rigFresh_[i] = fresh; }
 
 	//! Head pose at this frame as a row-major 3x4 (device -> world); null = unknown: no temporal propagation.
 	void SetPose(const double *world_from_device_3x4);
@@ -152,8 +158,9 @@ public:
 private:
 	Params params_;
 	std::vector<StereoDenseRig *> rigs_;
+	std::vector<uint8_t> rigFresh_;
 	std::vector<double> dirs_;
-	std::vector<float> depth_, conf_, inv_, var_, prevInv_, prevVar_, tmp_;
+	std::vector<float> depth_, conf_, inv_, var_, prevInv_, prevVar_, tmp_, prevFill_;
 	std::vector<uint8_t> src_, age_, prevAge_, has_;
 	std::vector<float> sampleR_;
 	std::vector<int32_t> sampleCell_, cellStart_, cellCount_;

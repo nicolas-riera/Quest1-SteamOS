@@ -3,6 +3,7 @@
 		"enable": true,
 		"clearSpatialAnchors": false,
 		"ignoreSystemWhileMoving": true,
-		"chargeSound": true
+		"chargeSound": true,
+		"passthroughDepth": true
 	}
 }

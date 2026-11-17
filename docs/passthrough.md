@@ -505,6 +505,15 @@ light 87 % good against 35 %. Untextured walls are still filled in, not measured
 Worn (user, 2026-11-17): "works surprisingly well", but far too much rippling, and once a second the view flickers as
 if the depth turned off and on. Still off by default (docs/todo.md). The Venus encoder route, Meta's, would cost no CPU.
 
+Later the same day: the flicker came from a 1 Hz reset (gone, user-confirmed); temporal filters cut the vertex depth
+change per update from 6.2 % to 4.15 % on average (an hour of a still head, 53k updates; over 5 %: 28 -> 16 % of the
+updates). Measured on the headset, one update cost 41.6 ms of matching and 5.6 ms of grid at 14.5 updates a second,
+~70 % of a big core: now the two pairs alternate (one pair per update, `QUEST1_CAMERA_DEPTH_ALTERNATE=0` for both)
+at 10 updates a second (`QUEST1_CAMERA_DEPTH_HZ`), with no loss offline (`dense_eval still`: mean change 0.42 -> 0.40 %,
+same accuracy). The log gives the cost ("dense depth per update: match/grid/mesh ms, thread cpu"). **On by default**
+(`QUEST1_CAMERA_DEPTH` 2), with a toggle on SteamVR's "Oculus Quest" page (`driver_quest1/passthroughDepth`, read
+once a second; off: the fixed sphere). User, worn: it works, with artifacts still too visible, "good enough" for now.
+
 ## The camera test (2026-11-17)
 
 SteamVR's dashboard (Settings > Camera > camera test) calls only the public `IVRTrackedCamera_006` from vrwebhelper:

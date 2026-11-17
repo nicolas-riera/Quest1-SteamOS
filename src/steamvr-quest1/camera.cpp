@@ -35,6 +35,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sched.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -1209,9 +1210,10 @@ private:
 	//! coordinates and a weight that fades to the default radius over the grid's last 10 degrees.
 	void SetupDepth()
 	{
-		// off by default: on 2026-11-08 the depths were too unreliable (~10 % of the cells confident, on a desk) and the
-		// view warped; QUEST1_CAMERA_DEPTH=1 turns it on to work on it, =2 selects the dense stereo (stereo_dense.h)
-		const int mode = atoi(Env("QUEST1_CAMERA_DEPTH", "0"));
+		// the dense stereo (stereo_dense.h) is on by default (the older plane sweep of 2026-11-08 was too unreliable and
+		// stays opt-in: QUEST1_CAMERA_DEPTH=1; =0 is the fixed sphere). The VR setting driver_quest1/passthroughDepth
+		// ("Oculus Quest" page) switches the dense depth on and off while running (DepthWanted)
+		const int mode = atoi(Env("QUEST1_CAMERA_DEPTH", "2"));
 		if (!mode)
 			return;
 		if (mode == 2) {
@@ -1315,6 +1317,28 @@ private:
 		CLog("quest1 camera: dense stereo depth, %dx%d cells\n", denseParams.cols, denseParams.rows);
 	}
 
+	//! driver_quest1/passthroughDepth (VR settings, "Oculus Quest" page), on by default; read once a second
+	bool DepthWanted()
+	{
+		const int64_t now = MonoNs();
+		if (now - depthSettingAt > 1000000000LL) {
+			depthSettingAt = now;
+			EVRSettingsError err = VRSettingsError_None;
+			bool v = VRSettings() ? VRSettings()->GetBool("driver_quest1", "passthroughDepth", &err) : true;
+			depthSetting = err == VRSettingsError_None ? v : true;
+		}
+		return depthSetting;
+	}
+
+	//! back to the fixed sphere
+	void ResetSphere()
+	{
+		for (size_t v = 0; v < verts.size() / 3; v++)
+			for (int i = 0; i < 3; i++)
+				verts[v * 3 + i] = defaultRadius * dirs[v * 3 + i];
+		prevR.clear();
+	}
+
 	//! New radii for the sphere's vertices from the latest depth grid (bilinear), in place.
 	template <class Grid>
 	void UpdateDepth(const Grid &depth, bool favorForeground = false)
@@ -1334,13 +1358,100 @@ private:
 					// a depth edge inside the 2x2 cells: blending the near and the far side puts the vertex in mid-air and
 					// stretches the triangles across the edge; take the nearer side (Meta's mesh.favor_foreground)
 					float lo = std::min(std::min(d00, d01), std::min(d10, d11)), hi = std::max(std::max(d00, d01), std::max(d10, d11));
-					if (hi > 1.25f * lo)
-						dd = lo;
+					// (smoothly: a hard switch at one ratio makes a vertex hop as a cell's depth wavers around it)
+					float t = std::min(1.0f, std::max(0.0f, (hi / lo - 1.15f) / 0.2f));
+					dd += (lo - dd) * t;
 				}
 				r = defaultRadius + (dd - defaultRadius) * gridW[v];
 			}
 			for (int i = 0; i < 3; i++)
 				verts[v * 3 + i] = r * dirs[v * 3 + i];
+		}
+	}
+
+	//! Debug (QUEST1_CAMERA_DEPTH_STATS=<file>): one line per published mesh, with how much the depth part of the mesh moved since
+	//! the previous one (|dr| / r over the vertices that read the depth grid: mean, p90, max, share above 5 %), to quantify ripple.
+	void LogMeshStats(const char *kind, uint64_t meshId, int64_t capNs, bool rot, const float *pose = nullptr)
+	{
+		static FILE *f = nullptr;
+		static bool tried = false;
+		if (!tried) {
+			tried = true;
+			const char *path = Env("QUEST1_CAMERA_DEPTH_STATS", "");
+			if (*path)
+				f = fopen(path, "a");
+		}
+		if (!f)
+			return;
+		std::vector<float> d;
+		for (size_t v = 0; v < gridW.size() && prevR.size() == gridW.size(); v++) {
+			if (gridW[v] < 1)
+				continue;
+			float r = sqrtf(verts[v * 3] * verts[v * 3] + verts[v * 3 + 1] * verts[v * 3 + 1] + verts[v * 3 + 2] * verts[v * 3 + 2]);
+			d.push_back(fabsf(r - prevR[v]) / std::max(prevR[v], 0.05f));
+		}
+		float mean = 0, p90 = 0, mx = 0;
+		int over = 0;
+		if (!d.empty()) {
+			for (float x : d)
+				mean += x, mx = std::max(mx, x), over += x > 0.05f;
+			mean /= d.size();
+			std::sort(d.begin(), d.end());
+			p90 = d[d.size() * 9 / 10];
+		}
+		// head motion since the previous depth mesh: rotation angle (degrees) and distance (cm)
+		float ang = 0, dist = 0;
+		if (pose && havePrevStatsPose) {
+			float tr = 0, dd = 0;
+			for (int r = 0; r < 3; r++) {
+				for (int c = 0; c < 3; c++)
+					tr += pose[r * 4 + c] * prevStatsPose[r * 4 + c];
+				dd += (pose[r * 4 + 3] - prevStatsPose[r * 4 + 3]) * (pose[r * 4 + 3] - prevStatsPose[r * 4 + 3]);
+			}
+			ang = acosf(std::max(-1.0f, std::min(1.0f, (tr - 1) / 2))) * 57.2958f, dist = sqrtf(dd) * 100;
+		}
+		if (pose)
+			memcpy(prevStatsPose, pose, sizeof(prevStatsPose)), havePrevStatsPose = true;
+		fprintf(f, "%.3f %s id=%llu cap=%.3f rot=%d n=%zu mean=%.4f p90=%.4f max=%.3f over5=%.4f ang=%.2f cm=%.2f\n", MonoNs() / 1e9, kind,
+		        (unsigned long long)meshId, capNs / 1e9, rot, d.size(), mean, p90, mx, d.empty() ? 0.0 : (double)over / d.size(), ang, dist);
+		fflush(f);
+		prevR.resize(gridW.size());
+		for (size_t v = 0; v < gridW.size(); v++)
+			prevR[v] = sqrtf(verts[v * 3] * verts[v * 3] + verts[v * 3 + 1] * verts[v * 3 + 1] + verts[v * 3 + 2] * verts[v * 3 + 2]);
+	}
+
+	//! Debug: per update, the grid cells' depth change split by what the cell was in both updates (M measured or fused,
+	//! F filled, X changed class), as "G" lines of the stats file
+	void LogGridStats()
+	{
+		const char *path = Env("QUEST1_CAMERA_DEPTH_STATS", "");
+		if (!*path)
+			return;
+		static FILE *f = fopen(path, "a");
+		const int n = dense.Cols() * dense.Rows();
+		if (gridPrevDepth.size() != (size_t)n)
+			gridPrevDepth.assign(n, 0.f), gridPrevSrc.assign(n, 0);
+		double sum[3] = {0, 0, 0};
+		int cnt[3] = {0, 0, 0}, big[3] = {0, 0, 0}, freshN = 0;
+		for (int i = 0; i < n; i++) {
+			const uint8_t sr = dense.CellSource(i);
+			const int cls = sr == StereoDense::kFilled ? 1 : (sr == StereoDense::kMeasured || sr == StereoDense::kFused) ? 0 : 2;
+			freshN += sr == StereoDense::kMeasured;
+			const int pc = gridPrevSrc[i];
+			if (gridPrevDepth[i] > 0 && cls == pc && cls < 2) {
+				const double c = fabs(dense.Depth(i) / gridPrevDepth[i] - 1.0);
+				sum[cls] += c, cnt[cls]++, big[cls] += c > 0.05;
+			} else if (gridPrevDepth[i] > 0) {
+				const double c = fabs(dense.Depth(i) / gridPrevDepth[i] - 1.0);
+				sum[2] += c, cnt[2]++, big[2] += c > 0.05;
+			}
+			gridPrevDepth[i] = dense.Depth(i), gridPrevSrc[i] = (uint8_t)cls;
+		}
+		if (f) {
+			fprintf(f, "%.3f G meas=%d | measured/fused both: n=%d mean=%.4f >5%%=%d | filled both: n=%d mean=%.4f >5%%=%d | class changed: n=%d mean=%.4f >5%%=%d\n",
+			        MonoNs() / 1e9, freshN, cnt[0], cnt[0] ? sum[0] / cnt[0] : 0.0, big[0], cnt[1], cnt[1] ? sum[1] / cnt[1] : 0.0, big[1], cnt[2],
+			        cnt[2] ? sum[2] / cnt[2] : 0.0, big[2]);
+			fflush(f);
 		}
 	}
 
@@ -1427,9 +1538,18 @@ private:
 	bool DenseCompute(const std::vector<SrcImage> &img)
 	{
 		bool ok = true;
+		// the two rigs take turns (half the CPU time per update; the fusion carries the other rig's cells over)
+		const bool both = !atoi(Env("QUEST1_CAMERA_DEPTH_ALTERNATE", "1")) || !denseBottomOk || !denseTopOk;
+		denseTurn = !denseTurn;
+		const bool doBottom = denseBottomOk && (both || denseTurn), doTop = denseTopOk && (both || !denseTurn);
+		size_t ri = 0;
 		if (denseBottomOk)
+			dense.SetRigFresh(ri++, doBottom);
+		if (denseTopOk)
+			dense.SetRigFresh(ri++, doTop);
+		if (doBottom)
 			ok = img[0].data && img[1].data && img[0].stride == img[1].stride && denseBottom.Compute(img[0].data, img[1].data, img[0].stride);
-		if (ok && denseTopOk)
+		if (ok && doTop)
 			ok = img[2].data && img[3].data && img[2].stride == img[3].stride && denseTop.Compute(img[2].data, img[3].data, img[2].stride);
 		return ok;
 	}
@@ -1446,7 +1566,13 @@ private:
 		int64_t computeNs = 0, computed = 0, lastReport = MonoNs();
 		float meshPose[12];
 		while (running) {
-			PublishMesh(++meshId, true, MeshPose(MonoNs(), false, meshPose) ? meshPose : nullptr);
+			// the once-a-second layout + data publish. A depth mesh is in the head frame of its frame set's capture, so it
+			// must carry that capture pose (rotation included): the sphere's "head position, no rotation" pose here turned the
+			// depth mesh by the head's whole orientation for one frame, once a second (the flicker, 2026-11-17)
+			const bool depthFresh = lastDepthNs && MonoNs() - lastDepthNs < 3000000000LL;
+			bool periodicPose = depthFresh || MeshPose(MonoNs(), false, meshPose);
+			PublishMesh(++meshId, true, depthFresh ? lastDepthPose : periodicPose ? meshPose : nullptr);
+			LogMeshStats("P", meshId, MonoNs(), depthFresh);
 			if (poke && !state) {
 				if (DIR *d = opendir("/dev/shm")) {
 					while (dirent *de = readdir(d)) {
@@ -1477,8 +1603,20 @@ private:
 			for (int64_t until = MonoNs() + 1000000000LL; running && MonoNs() < until;) {
 				std::vector<SrcImage> img;
 				int64_t cap = 0;
-				if (!ring || !ring->Acquire(denseOn ? std::vector<int>{0, 2, 1, 3} : std::vector<int>{0, 2}, img, cap, 100)) {
-					if (!ring) { // the sphere follows the head
+				const bool want = DepthWanted();
+				if (ring && !want && depthActive) { // switched off in the settings: the fixed sphere again
+					depthActive = false, lastDepthNs = 0;
+					ResetSphere();
+					if (denseOn)
+						dense.ResetHistory();
+					CLog("quest1 camera: passthrough depth off\n");
+				} else if (want && !depthActive) {
+					depthActive = true;
+					if (ring)
+						CLog("quest1 camera: passthrough depth on\n");
+				}
+				if (!ring || !want || !ring->Acquire(denseOn ? std::vector<int>{0, 2, 1, 3} : std::vector<int>{0, 2}, img, cap, 100)) {
+					if (!ring || !want) { // the sphere follows the head
 						usleep(33000);
 						if (MeshPose(MonoNs(), false, meshPose))
 							PublishMesh(++meshId, false, meshPose);
@@ -1492,12 +1630,14 @@ private:
 				if (denseOn) {
 					// geometry at QUEST1_CAMERA_DEPTH_HZ (default 15): the grid is fused over time on the head pose, a mesh
 					// every other frame set is enough and halves the CPU time
-					if (++frameSets % std::max(1, (int)lround(30.0 / std::max(1.0, atof(Env("QUEST1_CAMERA_DEPTH_HZ", "15"))))) != 0) {
+					if (++frameSets % std::max(1, (int)lround(30.0 / std::max(1.0, atof(Env("QUEST1_CAMERA_DEPTH_HZ", "10"))))) != 0) {
 						ring->Done();
 						continue;
 					}
 					int64_t t0 = MonoNs();
+					const double cpu0 = ThreadCpuMs();
 					bool ok = img.size() == 4 && DenseCompute(img);
+					const int64_t tCompute = MonoNs();
 					if (!ring->Done() || !ok)
 						continue; // torn frame set
 					bool havePose = MeshPose(cap, true, meshPose);
@@ -1512,10 +1652,19 @@ private:
 					} else {
 						dense.SetFloor(nullptr);
 					}
+					const int64_t tUpd0 = MonoNs();
 					dense.Update();
+					const int64_t tUpd1 = MonoNs();
 					UpdateDepth(dense, true);
-					if (havePose)
+					LogGridStats();
+					msCompute += (tCompute - t0) / 1e6, msUpdate += (tUpd1 - tUpd0) / 1e6, msMesh += (MonoNs() - tUpd1) / 1e6;
+					cpuMs += ThreadCpuMs() - cpu0;
+					if (havePose) {
 						PublishMesh(++meshId, false, meshPose);
+						memcpy(lastDepthPose, meshPose, sizeof(lastDepthPose));
+						lastDepthNs = MonoNs();
+						LogMeshStats("D", meshId, cap, true, meshPose);
+					}
 					computeNs += MonoNs() - t0, computed++;
 					continue;
 				}
@@ -1538,7 +1687,11 @@ private:
 					CLog("quest1 camera: depth mesh: %.1f updates/s, %.2f ms each, %d of %d cells textured\n",
 					     computed * 1e9 / (MonoNs() - lastReport), computeNs / 1e6 / computed, st.textured, st.visible);
 				}
-				computed = computeNs = 0, lastReport = MonoNs();
+				if (denseOn)
+				CLog("quest1 camera: dense depth per update: match %.1f ms, grid %.1f ms, mesh %.1f ms wall; thread cpu %.1f ms, on cpu %d\n", msCompute / computed,
+				     msUpdate / computed, msMesh / computed, cpuMs / computed, sched_getcpu());
+			msCompute = msUpdate = msMesh = cpuMs = 0;
+			computed = computeNs = 0, lastReport = MonoNs();
 			}
 		}
 		if (state)
@@ -1560,6 +1713,23 @@ private:
 	StereoDense::Params denseParams;
 	bool denseBottomOk = false, denseTopOk = false, denseOn = false;
 	int frameSets = 0;
+	bool denseTurn = false;
+	std::vector<float> gridPrevDepth;
+	std::vector<uint8_t> gridPrevSrc;
+	double msCompute = 0, msUpdate = 0, msMesh = 0, cpuMs = 0;
+	static double ThreadCpuMs()
+	{
+		timespec ts;
+		clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+		return ts.tv_sec * 1e3 + ts.tv_nsec / 1e6;
+	}
+	float lastDepthPose[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0}; //!< the pose the latest depth mesh was published with
+	int64_t lastDepthNs = 0;
+	int64_t depthSettingAt = -10000000000LL;
+	bool depthSetting = true, depthActive = true;
+	std::vector<float> prevR; //!< LogMeshStats
+	float prevStatsPose[12];
+	bool havePrevStatsPose = false;
 	bool depthOn = false;
 	std::vector<float> gridX, gridY, gridW; //!< per vertex: where it reads the depth grid, and how much
 	BlockQueueIface *table = nullptr;

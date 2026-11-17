@@ -44,9 +44,8 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   running kernel traps ~150,000 LSE atomics a second with SteamVR up, 2026-11-16: ~12-24 % of a core; needs USB);
   Meta's tracking threads starving when worn (Android pins syncboss to CPUs 0-3); memory (~500 MB available after
   boot; kswapd and loop0 busy while Steam is used).
-- Passthrough depth, so near things (the controllers, the hands) sit where they are: the dense stereo
-  (`QUEST1_CAMERA_DEPTH=2`, off by default, docs/passthrough.md "Dense stereo depth") works but ripples far too much
-  and flickers once a second (user, 2026-11-17). Then on by default; Meta's encoder route as the next step.
+- Passthrough depth (on by default since 2026-11-17, docs/passthrough.md "Dense stereo depth"): its artifacts are
+  still too visible (user), and it costs CPU; Meta's route (disparity from the Venus encoder's motion vectors) next.
 - Audio: a click at each Steam start (user, 2026-11-12: still there; the crackle is gone). The output no longer
   closes between sounds (docs/audio.md), so find what Steam does at its start: a sound of its own, or a stream it
   opens and closes.

@@ -503,7 +503,7 @@ void StereoDense::Configure(const Params &p)
 			d[0] = sin(az) * cos(el), d[1] = sin(el), d[2] = -cos(az) * cos(el);
 		}
 	depth_.assign(cells, (float)p.defaultDepthM), conf_.assign(cells, 0);
-	inv_.assign(cells, 0), var_.assign(cells, 0), prevInv_.assign(cells, 0), prevVar_.assign(cells, 0), tmp_.assign(cells, 0);
+	inv_.assign(cells, 0), var_.assign(cells, 0), prevInv_.assign(cells, 0), prevVar_.assign(cells, 0), tmp_.assign(cells, 0), prevFill_.assign(cells, 0);
 	src_.assign(cells, 0), age_.assign(cells, 0), prevAge_.assign(cells, 0), has_.assign(cells, 0);
 	cellStart_.assign(cells + 1, 0), cellCount_.assign(cells, 0);
 	haveHistory_ = false;
@@ -549,7 +549,10 @@ void StereoDense::Update()
 
 	// 1. every valid pixel of every rig -> (cell, range)
 	sampleCell_.clear(), sampleR_.clear();
-	for (StereoDenseRig *rig : rigs_) {
+	for (size_t ri = 0; ri < rigs_.size(); ri++) {
+		StereoDenseRig *rig = rigs_[ri];
+		if (!rigFresh_[ri])
+			continue;
 		const uint16_t *disp = rig->Disparity();
 		const int W = rig->Width(), H = rig->Height();
 		for (int y = 0; y < H; y++)
@@ -583,9 +586,10 @@ void StereoDense::Update()
 	}
 
 	// 2. prediction from the previous frame (inverse warp: rotation and translation of the head between the frames)
-	std::vector<float> predInv(cells, 0), predVar(cells, 0);
+	std::vector<float> predInv(cells, 0), predVar(cells, 0), predFill(cells, 0);
 	std::vector<uint8_t> predAge(cells, 0);
 	const bool predict = haveHistory_ && havePose_ && havePrevPose_;
+	float motion = 1; // 0 = the head has not moved since the previous frame, 1 = it has
 	if (predict) {
 		// M = cur^-1 * prev maps a previous device-frame point to the current device frame
 		double Rc[9], Rp[9];
@@ -605,20 +609,33 @@ void StereoDense::Update()
 				s += Rc[k * 3 + r] * (prevPose_[k * 4 + 3] - pose_[k * 4 + 3]);
 			tM[r] = s;
 		}
+		{
+			double tr = M[0] + M[4] + M[8], ang = acos(std::max(-1.0, std::min(1.0, (tr - 1) / 2))); // rotation angle, radians
+			double tl = sqrt(tM[0] * tM[0] + tM[1] * tM[1] + tM[2] * tM[2]);
+			motion = (float)std::min(1.0, std::max(ang / 0.012, tl / 0.02)); // 0.7 degrees or 2 cm = moving
+		}
 		// prediction of current cell j: its direction seen from the previous frame is R_prev^-1 R_cur d = M^T d (rotation part)
 		for (int j = 0; j < cells; j++) {
 			const double *d = &dirs_[j * 3];
 			double dp[3] = {M[0] * d[0] + M[3] * d[1] + M[6] * d[2], M[1] * d[0] + M[4] * d[1] + M[7] * d[2],
 			                M[2] * d[0] + M[5] * d[1] + M[8] * d[2]};
 			int i = CellOf(dp);
-			if (i < 0 || prevAge_[i] > p.maxAge || prevInv_[i] <= 0)
+			if (i < 0)
 				continue;
-			double r = 1.0 / prevInv_[i], pp[3] = {dp[0] * r, dp[1] * r, dp[2] * r};
+			const bool fillOnly = prevInv_[i] <= 0 || prevAge_[i] > p.maxAge; // a carried membrane value, not a measurement
+			const float carried = fillOnly ? prevFill_[i] : prevInv_[i];
+			if (carried <= 0)
+				continue;
+			double r = 1.0 / carried, pp[3] = {dp[0] * r, dp[1] * r, dp[2] * r};
 			double pc[3] = {M[0] * pp[0] + M[1] * pp[1] + M[2] * pp[2] + tM[0], M[3] * pp[0] + M[4] * pp[1] + M[5] * pp[2] + tM[1],
 			                M[6] * pp[0] + M[7] * pp[1] + M[8] * pp[2] + tM[2]};
 			double rc = sqrt(Dot(pc, pc));
 			if (rc < p.nearM || rc > p.farM * 1.5)
 				continue;
+			if (fillOnly) {
+				predFill[j] = (float)(1.0 / rc);
+				continue;
+			}
 			predInv[j] = (float)(1.0 / rc);
 			double q = p.processNoise * predInv[j];
 			predVar[j] = prevVar_[i] + (float)(q * q);
@@ -635,8 +652,12 @@ void StereoDense::Update()
 		if (n >= p.minSamples) {
 			float *s = &sorted[cellStart_[j]];
 			std::sort(s, s + n);
-			float rq = s[std::min(n - 1, (int)(p.foregroundQuantile * n))];
+			float rlow = s[std::min(n - 1, (int)(p.foregroundQuantile * n))];
 			float r25 = s[n / 4], r75 = s[std::min(n - 1, (3 * n) / 4)], med = s[n / 2];
+			// the low quantile is biased by the sample count and the noise (a few noisy samples always have a low one): follow it
+			// only as far as it sits clearly below the median (a real nearer surface in the cell), else take the median
+			float w = std::min(1.0f, std::max(0.0f, ((med - rlow) / med - (float)p.edgeBiasMin) / (float)p.edgeBiasRamp));
+			float rq = med + (rlow - med) * w;
 			float spread = (r75 - r25) / std::max(0.1f, med);
 			float cn = std::min(1.0f, (n - p.minSamples + 1) / 6.0f), cs = std::max(0.0f, 1.0f - spread / 0.5f);
 			cq = cn * (0.4f + 0.6f * cs);
@@ -648,7 +669,11 @@ void StereoDense::Update()
 		const bool pred = predInv[j] > 0;
 		if (meas && pred && fabsf(z - predInv[j]) < (float)p.fuseGate * std::max(z, predInv[j])) {
 			float K = predVar[j] / (predVar[j] + vz);
-			inv_[j] = predInv[j] + K * (z - predInv[j]);
+			// deadband: an innovation within the measurement's own noise is mostly noise; let it through quadratically
+			float e = z - predInv[j], sg = sqrtf(vz) * (float)p.deadband;
+			if (fabsf(e) < sg)
+				e *= fabsf(e) / sg;
+			inv_[j] = predInv[j] + K * e;
 			var_[j] = (1 - K) * predVar[j];
 			src_[j] = kFused, age_[j] = 0, conf_[j] = std::min(1.0f, cq + 0.2f);
 			has_[j] = 1, stats_.fused++;
@@ -696,7 +721,7 @@ void StereoDense::Update()
 		const float start = known ? (float)(mean / known) : defInv;
 		std::vector<float> a(cells), b(cells);
 		for (int j = 0; j < cells; j++)
-			a[j] = has_[j] ? inv_[j] : start;
+			a[j] = has_[j] ? inv_[j] : start; // no warm start from last frame's fill: 80 passes would leave it stale
 		for (int pass = 0; known && known < cells && pass < 80; pass++) {
 			for (int r = 0; r < R; r++)
 				for (int c = 0; c < C; c++) {
@@ -721,17 +746,42 @@ void StereoDense::Update()
 		}
 		for (int j = 0; j < cells; j++) {
 			if (!has_[j]) {
-				inv_[j] = a[j], var_[j] = 1.0f, src_[j] = kFilled, conf_[j] = 0, age_[j] = 255;
+				float v = a[j];
+				// the membrane re-solves a little differently every frame: blend it into last frame's, unless it jumped
+				if (predFill[j] > 0 && fabsf(v - predFill[j]) < 0.35f * std::max(v, predFill[j]))
+					v = predFill[j] + (float)(p.fillBlend + (1 - p.fillBlend) * motion) * (v - predFill[j]);
+				inv_[j] = v, var_[j] = 1.0f, src_[j] = kFilled, conf_[j] = 0, age_[j] = 255;
 				stats_.filled++;
 			}
-			depth_[j] = 1.0f / std::max(inv_[j], 1e-3f);
 		}
+		// output: an edge-preserving 3x3 average in inverse depth (the state above stays unsmoothed)
+		for (int r = 0; r < R; r++)
+			for (int c = 0; c < C; c++) {
+				const int j = r * C + c;
+				const float v0 = inv_[j];
+				float sum = 2 * v0, wsum = 2;
+				if (p.smoothRel > 0) {
+					const float tol = (float)p.smoothRel * v0;
+					for (int dr = -1; dr <= 1; dr++)
+						for (int dc = -1; dc <= 1; dc++) {
+							const int rr = r + dr, cc = c + dc;
+							if ((!dr && !dc) || rr < 0 || rr >= R || cc < 0 || cc >= C)
+								continue;
+							const float v = inv_[rr * C + cc], d = (v - v0) / tol, wk = (dr && dc ? 0.5f : 1.0f) / (1.0f + d * d);
+							sum += wk * v, wsum += wk;
+						}
+				}
+				tmp_[j] = sum / wsum;
+			}
+		for (int j = 0; j < cells; j++)
+			depth_[j] = 1.0f / std::max(tmp_[j], 1e-3f);
 	}
 
 	// 6. remember (only measured/fused/floor cells carry over, not the membrane)
 	for (int j = 0; j < cells; j++) {
 		bool keep = src_[j] == kMeasured || src_[j] == kFused || src_[j] == kFloor;
 		prevInv_[j] = keep ? inv_[j] : 0, prevVar_[j] = var_[j], prevAge_[j] = keep ? age_[j] : 255;
+		prevFill_[j] = src_[j] == kFilled ? inv_[j] : 0;
 	}
 	memcpy(prevPose_, pose_, sizeof(prevPose_));
 	havePrevPose_ = havePose_;

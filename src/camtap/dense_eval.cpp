@@ -466,6 +466,70 @@ static int RunSynth(int sceneId, double noise, double contrast)
 	return 0;
 }
 
+static int RunStill(double noise, double contrast, int frames)
+{
+	// the head still, fresh sensor noise each frame (a headset on a desk): how much the grid moves from frame to frame
+	// (relative change of the depth of a cell), over all cells and over the cells measured or fused in both frames
+	Rigs R;
+	if (!R.Init(true))
+		return 1;
+	Scene sc;
+	sc.contrast = contrast;
+	Rng rng;
+	StereoDense g;
+	StereoDense::Params gp;
+	g.Configure(gp);
+	g.AddRig(&R.bottom), g.AddRig(&R.top);
+	Pose pose = YawPose(10, {0, 0, 0});
+	double m[12];
+	pose.M34(m);
+	std::vector<uint8_t> img[4];
+	std::vector<float> prev, ch, chm;
+	std::vector<uint8_t> prevMeas;
+	Metrics mm;
+	int cells = g.Cols() * g.Rows();
+	double sumAll = 0, sumM = 0;
+	long nAll = 0, nM = 0, over5 = 0, over5m = 0;
+	for (int f = 0; f < frames; f++) {
+		for (int i = 0; i < 4; i++)
+			RenderCam(sc, R.cams[i], pose, noise, i == 2 || i == 3 ? 0.92 : 1.0, img[i], rng);
+		const bool alt = getenv("DENSE_ALT") != nullptr; // the rigs take turns, as the driver does by default
+		if (!alt || f % 2 == 0)
+			R.bottom.Compute(img[0].data(), img[2].data(), 640);
+		if (!alt || f % 2 == 1)
+			R.top.Compute(img[1].data(), img[3].data(), 640);
+		g.SetRigFresh(0, !alt || f % 2 == 0), g.SetRigFresh(1, !alt || f % 2 == 1);
+		g.SetPose(f % 100 == 99 ? nullptr : m); // pose supplied
+		g.Update();
+		std::vector<uint8_t> meas(cells);
+		for (int i = 0; i < cells; i++)
+			meas[i] = g.CellSource(i) == StereoDense::kMeasured || g.CellSource(i) == StereoDense::kFused;
+		if (f >= 10 && !prev.empty()) {
+			for (int i = 0; i < cells; i++) {
+				double c = fabs(g.Depth(i) / prev[i] - 1.0);
+				sumAll += c, nAll++, over5 += c > 0.05;
+				if (meas[i] && prevMeas[i])
+					sumM += c, nM++, over5m += c > 0.05, chm.push_back((float)c);
+				ch.push_back((float)c);
+			}
+		}
+		if (f >= 10)
+			Score(mm, sc, pose, g, cells, [&](int i) { return meas[i] != 0; });
+		prev.resize(cells);
+		for (int i = 0; i < cells; i++)
+			prev[i] = g.Depth(i);
+		prevMeas = meas;
+	}
+	std::sort(ch.begin(), ch.end()), std::sort(chm.begin(), chm.end());
+	printf("still head, noise %.1f contrast %.2f, %d frames\n", noise, contrast, frames);
+	printf("  frame-to-frame depth change, all cells: mean %.2f %%  p90 %.2f %%  >5%%: %.1f %%\n", 100 * sumAll / std::max(1L, nAll),
+	       ch.empty() ? 0.0 : 100.0 * ch[ch.size() * 9 / 10], 100.0 * over5 / std::max(1L, nAll));
+	printf("  measured/fused cells:                    mean %.2f %%  p90 %.2f %%  >5%%: %.1f %%\n", 100 * sumM / std::max(1L, nM),
+	       chm.empty() ? 0.0 : 100.0 * chm[chm.size() * 9 / 10], 100.0 * over5m / std::max(1L, nM));
+	mm.Print("  accuracy of measured/fused cells");
+	return 0;
+}
+
 static int RunSeq(double noise, double contrast)
 {
 	Rigs R;
@@ -659,6 +723,8 @@ int main(int argc, char **argv)
 	std::string mode = argc > 1 ? argv[1] : "synth";
 	if (mode == "synth")
 		return RunSynth(argc > 2 ? atoi(argv[2]) : 0, argc > 3 ? atof(argv[3]) : 2.0, argc > 4 ? atof(argv[4]) : 1.0);
+	if (mode == "still")
+		return RunStill(argc > 2 ? atof(argv[2]) : 2.0, argc > 3 ? atof(argv[3]) : 1.0, argc > 4 ? atoi(argv[4]) : 40);
 	if (mode == "seq")
 		return RunSeq(argc > 2 ? atof(argv[2]) : 2.0, argc > 3 ? atof(argv[3]) : 1.0);
 	if (mode == "real" && argc > 2)
