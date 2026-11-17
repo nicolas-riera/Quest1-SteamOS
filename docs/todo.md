@@ -9,7 +9,7 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   monado-service and library copies, `tmp`, `stream-crash-*`, old audio logs, the package cache): 5.8 GB free of the
   24 GB image, was 2.2. Left: check what grows over a day of use (`du` before/after); the full install wipes the
   headset anyway (user).
-- Microphone latency in Steam Link VR (~500 ms felt, user 2026-11-17): the headset's capture holds ~20-40 ms; measure
+- Microphone latency in Steam Link VR (~500 ms felt, user 2026-11-17, still there at the end of the night): the headset's capture holds ~20-40 ms; measure
   vrlink's path (its audio jitter buffer is 50 ms on the headset; the PC's side unknown).
 - Steam Link VR: still black flashes (fewer), and sometimes a flash brings a trembling that goes away once the
   headset's load drops (seen with desktop mode and Dolphin open). Not reproduced on the table (2026-11-17, panels on,
@@ -254,8 +254,12 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
     (`steamvr/preferredFoveatedAngle`, see the frame rate below) and the PC's sharpening (`driver_vrlink/useSharpening`).
   - Latency: measure it (the head's pose to the picture's pose on screen) and find where it goes: the PC's ~90 ms
     prediction says how far ahead it must guess.
-  - The PC's prediction no longer overshoots from a delayed rate (the low-pass is gone, docs/streaming.md item 15):
-    the user to confirm worn that the black edges and the avatar's head no longer bounce.
+  - The head is still over-predicted (user, 2026-11-17 end of night), although the PC's prediction no longer
+    overshoots from a delayed rate (the low-pass is gone, docs/streaming.md item 15): the black edges and the avatar's
+    head still overshoot. Measure what the PC predicts against the head's real motion (`vrlink_aftm_*.csv`, stepsnap).
+  - Strong lag at random moments (user, 2026-11-17): the stream stalls hard for a moment, then recovers. Match the
+    times with the shim's log, the PC's `driver_vrlink.txt` (ProblemAttribution) and `vrlink_aftm_*.csv`, and the
+    headset's load and memory then.
   - Position: vrlink submits no depth, so a position error of the PC's prediction is not corrected at all.
   - On a system that had run for hours, the stream was 16.6 px rms off the world in Monado's output (2.5-3 px fresh).
     Follow it over a long run (`mjit.py` every few minutes, with vrcompositor's fps, fds and memory) to find which of
