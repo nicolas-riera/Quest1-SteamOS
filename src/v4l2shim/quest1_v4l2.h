@@ -19,3 +19,7 @@ int q1_sys_poll(struct pollfd *fds, unsigned long n, int timeout_ms); // the sys
 struct epoll_event;
 void q1dec_epoll_ctl(struct q1dec *d, int epfd, int op, const struct epoll_event *ev); // after the client's
 int q1dec_epoll_events(int epfd, struct epoll_event *ev, int n); // what the client's epoll_wait gives it
+//! The luma of the frame buffer `index` the client brought (Steam Link VR's), sampled on a grid: its mean in each
+//! quarter of the picture's height (the stream's atlas stacks its four views) and its highest sample. False if there
+//! is no such buffer, or it went away meanwhile.
+_Bool q1dec_client_frame_luma(unsigned index, unsigned mean[4], unsigned *peak);

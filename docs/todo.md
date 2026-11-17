@@ -16,7 +16,11 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - Microphone latency in Steam Link VR (~500 ms felt, user 2026-11-17): the headset's capture holds ~20-40 ms; measure
   vrlink's path (its audio jitter buffer is 50 ms on the headset; the PC's side unknown).
 - Steam Link VR: still black flashes (fewer), and sometimes a flash brings a trembling that goes away once the
-  headset's load drops (seen with desktop mode and Dolphin open).
+  headset's load drops (seen with desktop mode and Dolphin open). Not reproduced on the table (2026-11-17, panels on,
+  stream running, desktop mode plus 500 MB taken, load 19, MemAvailable down to 126 MB): no black picture from the PC,
+  no gap over 100 ms after the start, no empty submit, Monado receiving 69-72 frames a second with none left unshown.
+  The shim now logs each such event with the time of day (`journalctl -b | grep "quest1_v4l2: vrlink: [0-9]"`, the
+  journal is lost at reboot): after a flash seen worn, read it before rebooting, and note the time.
 - A whole-system freeze (SSH too; ping fine): desktop mode open with Discover searching, headset on the forehead, then
   put on: SteamVR froze first (Monado still ran), then everything. Same symptom at 18:43 right after a stack restart
   and a stream start. Not reproduced since; a capture to the PC (dmesg -w and a 10 s snapshot of memory, load, top
@@ -240,6 +244,15 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   With the USB cable in, vrlink and the PC send the stream over the USB network too (each datagram on each link: about
   a core on the headset, 2026-11-12). Hiding usb0 from vrlink (getifaddrs, and dropping what it sends there) made it
   never connect ("Timed out getting information from the server"): the PC reached it over USB first.
+- VRChat's loading skybox (user, 2026-11-17, photo): the world's picture only inside the sharp inset's rounded
+  rectangle, black (the grid) between it and the edges. The PC's compositor draws the stream's views (vrlink forwards
+  no skybox): check whether a Quest 3 on the same PC shows it too, and whether the wide view lacks the skybox in a PC
+  capture (`driver_vrlink` "Dump H265"); the headset can only place the views it gets.
+- Steam Link VR latency (docs/streaming.md item 15; PC logs `vrlink_aftm_*.csv`, 2026-11-17): ~91 ms from the PC's
+  pose to the headset's display, of which decode 15 ms and ~34 ms waiting on the headset between the decode and
+  vrlink taking the frame (the PC predicts for that display time). The PC's `driver_vrlink/maxVideoQueueLatencyUs`
+  (not set: its value goes to the headset in message 0x24) and its 10-bit stream (8-bit decodes ~4 ms faster) are PC
+  settings: ask the user before trying them.
 - Steam Link from a PC, 2D (docs/streaming.md, section 1): it works well (user, 2026-11-12); more performance is
   welcome: the kernel emulates atomic instructions for Steam's programs (`emulate_atomic` in the profiles), the
   Vulkan/OpenGL semaphore is refused (glFinish fallback).

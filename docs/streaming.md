@@ -762,6 +762,20 @@ vrlink writes its own log, `~/.local/share/Steam/logs/vrlink.txt` (the PC's side
       recording, the frame-to-frame shake grows by ~10 % without the low-pass; the headset corrects it.
     - Left: the rest is the latency itself (the error grows ~0.6 deg rms per 10 ms of horizon): docs/todo.md.
 
+16. **Black flashes: logged where they would come from** (2026-11-17). Not reproduced on the table under the user's
+    load (desktop mode, 500 MB more taken, load 19): no black picture, no gap, no empty submit (a test probe on every
+    submit). The shim now logs, with the time of day, in the journal (`quest1_v4l2: vrlink: HH:MM:SS.mmm ...`): a gap
+    of more than 100 ms between vrlink's pictures (a freeze, re-projected), empty submits passed on (no picture for
+    200 ms: no stream drawn), and black pictures (every sample of the decoded atlas at most 24; video black is 16).
+    The picture's luma is read on a 512-sample grid by a `writev` of those bytes into a pipe, not through the
+    pointer: the decoder's thread may unmap a buffer meanwhile, and the copy then fails instead of crashing vrlink
+    (which takes Steam with it); `process_vm_readv` cannot read these mappings (EFAULT). Checked on a session: Aurora
+    reads means of 29-53, the start's empty submits and slow pictures are logged as one line each.
+    - The VRChat loading skybox (user, 2026-11-17, photo: the world's picture only inside a rounded rectangle, the
+      shape of the sharp inset, the grid around it, black between): vrlink forwards no skybox to the headset (no such
+      code in either side's binaries), so the PC's compositor drew it into the inset only. Not reproduced with the
+      PC's default environment (both views drawn). Open (docs/todo.md).
+
 ### Picture quality (2026-11-16, read in driver_vrlink and the PC's settings)
 
 The PC alone sizes the stream: an atlas of four square views (each eye's wide view and inset), `streamFormatWidth`

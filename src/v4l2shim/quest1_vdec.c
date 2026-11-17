@@ -63,6 +63,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/dma-buf.h>
 #include <linux/videodev2.h>
 #include <poll.h>
 #include <pthread.h>
@@ -79,6 +80,7 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/sysmacros.h>
+#include <sys/uio.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -259,6 +261,70 @@ struct q1dec *q1dec_find(int fd)
 			return e;
 	}
 	return NULL;
+}
+
+// Read by a writev of the samples into a pipe, not through the pointer: the decoder's thread may unmap a buffer at a
+// reconfiguration, and the kernel's copy then gives an error instead of a crash (which would take Steam down with
+// vrlink; process_vm_readv cannot read these mappings at all: EFAULT). The decoder itself stays allocated while
+// `lock` is held (q1dec_forget takes it first).
+bool q1dec_client_frame_luma(unsigned index, unsigned mean[4], unsigned *peak)
+{
+	enum { ROWS = 8, COLS = 16 };
+	static uint8_t px[4][ROWS][COLS];
+	static int pipefd[2] = {-1, -1};
+	struct iovec remote[4 * ROWS * COLS];
+	bool ok = false;
+	pthread_mutex_lock(&lock);
+	if (pipefd[0] < 0 && pipe2(pipefd, O_CLOEXEC | O_NONBLOCK) < 0) {
+		pipefd[0] = -1;
+		pthread_mutex_unlock(&lock);
+		return false;
+	}
+	for (int d = 0; d < MAXDEV && !ok; d++) {
+		struct q1dec *e = decs[d];
+		if (!e || !e->cap_dmabuf || index >= e->count[CAP] || index >= MAXBUF || !e->b[CAP][index].map ||
+		    !e->stride || e->ch < 4 * ROWS)
+			continue;
+		const struct ionbuf *b = &e->b[CAP][index];
+		size_t n = 0;
+		for (unsigned q = 0; q < 4; q++)
+			for (unsigned r = 0; r < ROWS; r++)
+				for (unsigned c = 0; c < COLS; c++) {
+					size_t row = q * (e->ch / 4) + (2 * r + 1) * (e->ch / 4) / (2 * ROWS);
+					size_t off = row * e->stride + (2 * c + 1) * e->cw / (2 * COLS);
+					if (off >= b->size)
+						off = 0;
+					remote[n].iov_base = b->map + off;
+					remote[n++].iov_len = 1;
+				}
+		struct dma_buf_sync sy = {DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ};
+		syscall(SYS_ioctl, b->fd, DMA_BUF_IOCTL_SYNC, &sy);
+		ssize_t got = writev(pipefd[1], remote, (int)n);
+		ok = got == (ssize_t)sizeof(px);
+		while (got > 0) { // empty the pipe whatever came
+			ssize_t r = read(pipefd[0], px, sizeof(px));
+			if (r <= 0)
+				break;
+			got -= r;
+		}
+		sy.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ;
+		syscall(SYS_ioctl, b->fd, DMA_BUF_IOCTL_SYNC, &sy);
+	}
+	pthread_mutex_unlock(&lock);
+	if (!ok)
+		return false;
+	*peak = 0;
+	for (unsigned q = 0; q < 4; q++) {
+		unsigned sum = 0;
+		for (unsigned r = 0; r < ROWS; r++)
+			for (unsigned c = 0; c < COLS; c++) {
+				sum += px[q][r][c];
+				if (px[q][r][c] > *peak)
+					*peak = px[q][r][c];
+			}
+		mean[q] = sum / (ROWS * COLS);
+	}
+	return true;
 }
 
 struct q1dec *q1dec_adopt(int fd)

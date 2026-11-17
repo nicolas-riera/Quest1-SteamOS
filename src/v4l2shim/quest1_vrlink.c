@@ -24,6 +24,7 @@
 #include <errno.h> // program_invocation_short_name
 #include <pthread.h>
 #include <sched.h>
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -35,6 +36,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "quest1_v4l2.h"
 #include "../steamvr-quest1/quest1_hmd_pose.h"
 #include "../vklayer-steamvr/quest1_views.h"
 
@@ -421,11 +423,77 @@ static void publish_views(const void *const eye[2], const void *const bounds[2],
 	__atomic_store_n(&v->seq, (seq | 1) + 1, __ATOMIC_RELEASE);
 }
 
+// What the user sees as a black flash, logged (journal, "quest1_v4l2: vrlink:") with the time of day, so that a flash
+// seen worn can be matched: no new picture from vrlink for more than 100 ms (vrcompositor shows the last one again,
+// re-projected: a freeze, not black), an empty submit passed on (no picture for 200 ms: vrcompositor draws no stream),
+// and a black picture (the whole decoded atlas black: the PC sent black). A run of black pictures is one
+// line, with its length. Nothing of it was seen on the table under load (2026-11-17: desktop mode, 500 MB taken,
+// load 19): the cause must show worn.
+static void flash_log(const char *fmt, ...)
+{
+	struct timespec rt;
+	clock_gettime(CLOCK_REALTIME, &rt);
+	struct tm tm;
+	localtime_r(&rt.tv_sec, &tm);
+	char msg[160];
+	va_list ap;
+	va_start(ap, fmt);
+	vsnprintf(msg, sizeof(msg), fmt, ap);
+	va_end(ap);
+	fprintf(stderr, "quest1_v4l2: vrlink: %02d:%02d:%02d.%03ld %s\n", tm.tm_hour, tm.tm_min, tm.tm_sec,
+	        rt.tv_nsec / 1000000, msg);
+}
+
+static void flash_watch(int32_t index, bool picture, bool passed_empty, uint64_t now)
+{
+	static uint64_t last_picture, gap_logged;
+	static unsigned black_run, black_total, empty_run, gaps_unlogged;
+	if (passed_empty) {
+		if (!empty_run++) {
+			if (last_picture)
+				flash_log("empty submits passed on: no stream picture for %.0f ms", (now - last_picture) / 1e6);
+			else
+				flash_log("empty submits passed on: no stream picture yet");
+		}
+		return;
+	}
+	if (!picture)
+		return;
+	if (empty_run) {
+		flash_log("empty submits ended after %u", empty_run);
+		empty_run = 0;
+	}
+	if (last_picture && now - last_picture > 100000000ull && now - last_picture < 10000000000ull) {
+		// at most a line a second (a stream's start runs at ~10 pictures a second for a few seconds)
+		if (now - gap_logged < 1000000000ull) {
+			gaps_unlogged++;
+		} else {
+			flash_log("no new picture for %.0f ms (%u more since the last such line)", (now - last_picture) / 1e6,
+			          gaps_unlogged);
+			gap_logged = now;
+			gaps_unlogged = 0;
+		}
+	}
+	last_picture = now;
+	// black: every sample at most 24 (video black is 16; Aurora, a dark scene, has means of 29-53 and bright stars)
+	unsigned m[4], peak;
+	bool black = index >= 0 && q1dec_client_frame_luma((unsigned)index, m, &peak) && peak <= 24;
+	if (black) {
+		if (!black_run++)
+			flash_log("black picture from the PC");
+	} else if (black_run) {
+		black_total += black_run;
+		flash_log("black pictures ended after %u (%u since vrlink started)", black_run, black_total);
+		black_run = 0;
+	}
+}
+
 static uint32_t submit_set(void *self, int32_t index, uint32_t count, const uint64_t *handles, const void *eye_l,
                            const void *eye_r, const void *bounds_l, const void *bounds_r, uint32_t flags,
                            double seconds)
 {
 	uint64_t set[SET_MAX];
+	const int32_t frame = index; // the decoder's frame buffer
 	if (handles && index > 0 && (uint32_t)index < count && count <= SET_MAX) {
 		memcpy(set, handles, count * sizeof(set[0]));
 		set[0] = handles[index];
@@ -442,11 +510,13 @@ static uint32_t submit_set(void *self, int32_t index, uint32_t count, const uint
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	uint64_t now = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 	static uint64_t last_picture;
-	if (eye_l && eye_r && count)
+	bool picture = eye_l && eye_r && count;
+	if (picture)
 		last_picture = now;
 	else if (!eye_l && !eye_r && !count && last_picture && now - last_picture < 200000000ull) {
 		return 0; // VRCompositorError_None
 	}
+	flash_watch(frame, picture, !picture && !eye_l && !eye_r && !count, now);
 	return real_submit_set(self, index, count, handles, eye_l, eye_r, bounds_l, bounds_r, flags, seconds);
 }
 
