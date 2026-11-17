@@ -9,7 +9,7 @@ still matches), stage/ what the image build (build_image.py, on the headset) tak
     stage/holo/       system.rootfs.zst, SteamOS Holo core aarch64 (Valve)
     stage/steam/      the arm64 Steam client: package/ holds Valve's zips + manifest (unpacked by the build)
     stage/frame/      SteamVR and GTK 2 from Valve's Steam Frame, extracted by the build: the recovery image (.img.bz2,
-                      sources.json "frame_source": "recovery", the default) or the update server's RAUC bundle
+                      sources.json "frame_source": "recovery") or the update server's RAUC bundle
                       (.raucb) with its chunk store, chunks/<4 hex>/<id>.cacnk ("ota": up to date and smaller)
     stage/prebuilt/   our binaries (prebuilt branch): native-arm64.tar.zst, boot-native-holo.img, installer.img
     stage/pkgs/       Holo packages (device/packages.txt + dependencies) and the repository databases

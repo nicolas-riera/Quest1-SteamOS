@@ -1,6 +1,6 @@
 # SteamVR (Linux arm64) on the Quest 1: offline analysis
 
-Source: the SteamVR 2.17.10 bundled in the owner's Steam Frame image at `/opt/steamvr` (rootfs `/mnt/sf/p3`, mounted read-only in WSL).
+Source: the SteamVR bundled in the owner's Steam Frame image at `/opt/steamvr` (rootfs `/mnt/sf/p3`, mounted read-only in WSL). The analysis was made on 2.17.10 (Frame 0.3.0); the headset has run 2.19.3 (build 1794604515, Frame 0.5.9) since 2026-11-17. The interface versions and the vtable layouts the shim relies on are the same in both; the one real difference is `drivers/cv` (see below).
 The analysis is static only: readelf, strings, `aarch64-linux-gnu-objdump` 2.44 disassembly, cross-references from code to `.rodata`/`.data`, and the public OpenVR SDK 2.15.6 (`/root/svr/openvr`).
 Work files are in WSL under `/root/svr/{str,dis}` plus the helper scripts `xref.py`, `dump.py`, `xcode.py`, `ann.py`, `vt.py` and `isa.py`. Nothing was copied into the project tree.
 See `steamframe-stack.md` for the general stack. Target facts: blob Vulkan 1.1.128 (`recon/vulkaninfo_hybris.txt`), 4.4 kernel, MDSS fbdev, no WSI.
@@ -35,7 +35,7 @@ Confidence tags: **[H]** = shown directly by a file, a string or a disassembled 
 ### 1.2 `drivers/` [H]
 | Driver | Content |
 |---|---|
-| `cv` | The real Frame HMD driver: `driver_cv.so` (4.9 MB) + `libArcturusPerception.so` (45 MB), `libmediapipe_linux_arm64.so`, `libonnxruntime_linux_arm64.so`. Manifest: `hmd_presence ["28DE.2300"]`. |
+| `cv` | The real Frame HMD driver: `driver_cv.so` (4.9 MB) + `libArcturusPerception.so` (45 MB), `libmediapipe_linux_arm64.so`, `libonnxruntime_linux_arm64.so`. Manifest: `hmd_presence ["28DE.2300"]`. **Not used here**: `device/holo-steamvr.sh` deletes this directory. From SteamVR 2.19 vrcompositor dlopens `libArcturusPerception.so` from it for its CVP motion estimator, and that library aborts at load unless `/proc/device-tree/model` says SM8650 or SM8250 ("Expecting only to run on either SM8650 or SM8250 but got platform vs1 pvt b (SDC)"). With no `drivers/cv` the load fails cleanly ("Could not load libArcturusPerception.so", motion vectors off), as in 2.17. |
 | `prism` | Manifest has `"redirectsDisplay": true`. `bin/` is empty. Its `default.vrsettings` sets `driver_prism.enable=false`. |
 | `frame_hmd`, `frame_controller`, `indexhmd`, `indexcontroller`, `htc` | `resourceOnly: true` |
 | `deckard` (firmware only), `oculus` (input profiles and anims only) | Resources only, no manifest |

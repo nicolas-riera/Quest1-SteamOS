@@ -1,6 +1,7 @@
 # Steam Frame software stack — offline analysis for the Quest 1 port
 
 Source: owner's Steam Frame image, rootfs = partition 3 (`/mnt/sf/p3`), mounted read-only in WSL.
+Analysed on 0.3.0; the headset runs the 0.5.9 build's SteamVR 2.19.3 (see `steamvr-port.md`).
 Image identity (`/usr/share/deckard/version`): `VERSION_ID=0.3.0`, `BUILD_ID=20260922.5152327`,
 `BUNDLED_STEAMVR_VERSION=2.17.10`. The kernel is `6.18.0-gfbdbca41fd45`. The SoC is SM8650: the cv driver ships `adsp_sm8650.mbn`/`cdsp_sm8650.mbn`.
 The analysis is static only: strings, readelf, unit files and scripts. Nothing was run on any device.

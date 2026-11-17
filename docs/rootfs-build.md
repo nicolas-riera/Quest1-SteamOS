@@ -24,7 +24,7 @@ could install it. Offline notes: nothing here has been run yet.
 | SteamVR driver | `src/steamvr-quest1` | yes | cross-built in WSL |
 | gtk2 (for `steamui.so`) | the Steam Frame rootfs | **no** | copied to `/usr/local/lib` |
 | Steam client (arm64) | the Steam Frame's `steam.tar.zst` | **no** | unpacked in `~steamos/.local/share/Steam`; it then updates itself |
-| SteamVR 2.17 (arm64) | the Steam Frame's `/opt/steamvr` | **no** | copied to `/opt/steamvr`; the Quest 1 edits and `steamvr-q1` by `device/holo-steamvr.sh` |
+| SteamVR 2.19.3 (arm64) | the Steam Frame's `/opt/steamvr` (0.5.9, OTA; 2.17.10 from the 0.3.0 recovery image also works) | **no** | copied to `/opt/steamvr`; the Quest 1 edits and `steamvr-q1` by `device/holo-steamvr.sh` |
 
 ### Packages installed with pacman
 
