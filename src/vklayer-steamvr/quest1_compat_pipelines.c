@@ -262,14 +262,50 @@ static void dump_failed_modules(const VkGraphicsPipelineCreateInfo *c)
 	}
 }
 
+//! Modules (by hash of their code) that a pipeline using them was refused for, and then accepted once rewritten for its
+//! layout: the next pipeline built from such a module is created rewritten straight away. A refused compile costs ~30 ms
+//! on the Adreno and vrcompositor's camera roomview builds a dozen of them in a row at its first activation (a 0.5 s stall
+//! of the view, 2026-11-17: half of it was the refused attempts).
+static uint64_t fixed_hashes[64];
+static unsigned fixed_count;
+
+static uint64_t code_hash(const uint32_t *w, uint32_t words)
+{
+	uint64_t h = 1469598103934665603ull;
+	for (uint32_t i = 0; i < words; i++)
+		h = (h ^ w[i]) * 1099511628211ull;
+	return h ? h : 1;
+}
+
+static bool hash_known(uint64_t h)
+{
+	pthread_mutex_lock(&g_lock);
+	bool k = false;
+	for (unsigned i = 0; i < fixed_count && !k; i++)
+		k = fixed_hashes[i] == h;
+	pthread_mutex_unlock(&g_lock);
+	return k;
+}
+
+static void hash_remember(uint64_t h)
+{
+	if (hash_known(h))
+		return;
+	pthread_mutex_lock(&g_lock);
+	if (fixed_count < 64)
+		fixed_hashes[fixed_count++] = h;
+	pthread_mutex_unlock(&g_lock);
+}
+
 //! Retry of a refused graphics pipeline with its modules rewritten for its layout (null_missing_descriptors).
 static VkResult retry_pipeline(VkDevice device, VkPipelineCache cache, const VkGraphicsPipelineCreateInfo *c,
-                               const VkAllocationCallbacks *alloc, VkPipeline *out)
+                               const VkAllocationCallbacks *alloc, VkPipeline *out, bool quiet)
 {
 	struct device *d = device_of(device);
 	VkPipelineShaderStageCreateInfo st[8];
 	VkShaderModule tmp[8] = {0};
 	unsigned changed = 0, nulled = 0;
+	uint64_t hashes[8] = {0};
 	if (c->stageCount > 8)
 		return VK_ERROR_INITIALIZATION_FAILED;
 	for (uint32_t s = 0; s < c->stageCount; s++) {
@@ -277,6 +313,12 @@ static VkResult retry_pipeline(VkDevice device, VkPipelineCache cache, const VkG
 		uint32_t words = 0, out_words = 0;
 		unsigned nn = 0;
 		uint32_t *code = mod_code_get(st[s].module, &words);
+		if (code)
+			hashes[s] = code_hash(code, words);
+		if (quiet && code && !hash_known(hashes[s])) {
+			free(code);
+			continue;
+		}
 		uint32_t *fixed =
 		    code ? null_missing_descriptors(code, words, (uint64_t)c->layout, st[s].stage, &out_words, &nn) : NULL;
 		free(code);
@@ -297,6 +339,11 @@ static VkResult retry_pipeline(VkDevice device, VkPipelineCache cache, const VkG
 		VkGraphicsPipelineCreateInfo c2 = *c;
 		c2.pStages = st;
 		r = d->CreateGraphicsPipelines(device, cache, 1, &c2, alloc, out);
+		if (r == VK_SUCCESS)
+			for (uint32_t s = 0; s < c->stageCount; s++)
+				if (tmp[s] && hashes[s])
+					hash_remember(hashes[s]);
+		if (!quiet)
 		LOG("graphics pipeline retried with %u descriptor reads the layout lacks turned into 0 (%u stages): %d, "
 		    "pipeline %p\n", nulled, changed, r, r == VK_SUCCESS ? (void *)*out : NULL);
 	}
@@ -331,6 +378,9 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateGraphicsPipelines(VkDevice device, V
 		}
 		ci = single;
 	}
+	// a module that was refused before, and made to work by the rewrite: build it rewritten at once
+	if (n == 1 && fixed_count && ci[0].stageCount <= 8 && retry_pipeline(device, cache, &ci[0], alloc, &out[0], true) == VK_SUCCESS)
+		return VK_SUCCESS;
 	VkResult r = device_of(device)->CreateGraphicsPipelines(device, cache, n, ci, alloc, out);
 	if (spirv_debug())
 		LOG("  -> %d, pipeline %p\n", r, n ? (void *)out[0] : NULL);
@@ -340,7 +390,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateGraphicsPipelines(VkDevice device, V
 			if (!out[i]) {
 				LOG("graphics pipeline %u of %u refused: %d\n", i, n, r);
 				log_failed_pipeline(&ci[i]);
-				if (retry_pipeline(device, cache, &ci[i], alloc, &out[i]) != VK_SUCCESS) {
+				if (retry_pipeline(device, cache, &ci[i], alloc, &out[i], false) != VK_SUCCESS) {
 					dump_failed_modules(&ci[i]);
 					all = false;
 				}
