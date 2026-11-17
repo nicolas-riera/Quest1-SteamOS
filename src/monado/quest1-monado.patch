@@ -249,10 +249,10 @@ index eb41c3c..5214613 100644
  
 diff --git a/src/xrt/compositor/main/comp_window_mdp.c b/src/xrt/compositor/main/comp_window_mdp.c
 new file mode 100644
-index 0000000..897cff3
+index 0000000..05f2f29
 --- /dev/null
 +++ b/src/xrt/compositor/main/comp_window_mdp.c
-@@ -0,0 +1,3945 @@
+@@ -0,0 +1,4216 @@
 +// Copyright 2026, Quest1-SteamOS contributors
 +// SPDX-License-Identifier: BSL-1.0
 +/*!
@@ -290,6 +290,7 @@ index 0000000..897cff3
 +#include "main/comp_compositor.h"
 +
 +#include "quest1_direct_proto.h"
++#include "quest1_lens_decenter.h"
 +#include "quest1_spect_spv.h"
 +#include "quest1_warp_spv.h"
 +
@@ -430,6 +431,8 @@ index 0000000..897cff3
 +	VkFramebuffer fb;      //!< outputs
 +	VkDescriptorSet set;   //!< sources
 +	bool transfer_src;     //!< sources: can be blitted from (spect_tick)
++	bool hud;              //!< a buffer of head-locked overlays (sampled with a transparent border)
++	VkDescriptorSet combo; //!< head-locked overlays: theirs and the frame's (warp_render)
 +};
 +
 +//! Re-project when /tmp/quest1-reproj does not say otherwise (it says "on" or "off", and tuning values, see warp_read_knobs)
@@ -456,6 +459,14 @@ index 0000000..897cff3
 +	VkDescriptorSetLayout dsl;
 +	VkPipelineLayout pl;
 +	VkPipeline pipe;
++	VkPipeline hud_pipe;    //!< head-locked overlays over the re-projected frame (warp_render)
++	VkDescriptorSetLayout hud_dsl; //!< the frame and its head-locked overlays
++	VkPipelineLayout hud_pl;
++	VkSampler hud_sampler;  //!< transparent border
++	bool hud_mesh;          //!< the head-locked overlays' meshes (no rotation) are in the vertex buffer
++	//! The same meshes in plain memory, for warp_hud_scissor: the vertex buffer's mapping is write-combined, and
++	//! reading them there took 5-7 ms of CPU a vsync (the warp then missed its vsync about once in four, 2026-11-13)
++	float *hud_cpu;
 +	VkDescriptorPool dpool;
 +	VkBuffer vbuf, ibuf;
 +	VkDeviceMemory vmem, imem;
@@ -518,6 +529,7 @@ index 0000000..897cff3
 +	uint32_t gaps;      //!< vsync events never seen (the thread woke more than a period late)
 +	double wake_ms_max; //!< vsync event -> this thread running
 +	uint32_t received;   //!< frames of the layer received
++	uint32_t hud;        //!< of them, with head-locked overlays apart (Q1D_FRAME's hud)
 +	uint32_t superseded; //!< frames replaced by a newer one before a tick took them: never on the panels
 +	uint32_t queued;     //!< ticks that showed `pend`, a frame a newer one had come after
 +	//! when the frames came, in 2 ms steps after the last tick (MDP_PERIOD_NS / 2 ms = 7 buckets): a frame that comes
@@ -546,6 +558,10 @@ index 0000000..897cff3
 +	pthread_mutex_t lock;
 +
 +	struct direct_buf buf[Q1D_MAX_IMAGES][2];
++	//! SteamVR's head-locked overlays (its HUD: volume, IPD), drawn by the layer apart from the frame (Q1D_FRAME's hud).
++	//! In the frame, the re-projection turned them with the world by the frame's prediction error, and they trembled
++	//! while the head moved (user, 2026-11-13: "exactly like the stream"); apart, they get the lens only.
++	struct direct_buf hud[Q1D_HUD_SETS][2];
 +	uint32_t count, height;
 +	//! the layer's buffers: the panel's size, or (scene mode, /etc/quest1-warp-lens "2") vrcompositor's undistorted eye
 +	//! renders, of its render size, which only the warp (lens mode) can show
@@ -560,6 +576,9 @@ index 0000000..897cff3
 +		int64_t time_ns;
 +		float q[4];
 +		bool pose_valid;
++		int hud;             //!< the set of `hud` holding its head-locked overlays, -1 when they are in the frame
++		uint32_t hud_halves; //!< bit h: half h has some
++		float hud_rect[2][4]; //!< where in each half's buffer (u0, v0, u1, v1)
 +	} latest_frame;
 +	bool fresh;        //!< `latest` was not on the panels yet
 +	bool need_refresh; //!< the panels came back on: show the latest frame again
@@ -588,6 +607,7 @@ index 0000000..897cff3
 +	struct direct_buf out[WARP_OUT_SETS][2];
 +	struct direct_vk vk;
 +	struct direct_spect spect;
++	float spect_delta[4]; //!< the rotation of the last warp (spect_tick re-projects the spectator's frame with it)
 +	struct
 +	{
 +		bool off;
@@ -1322,6 +1342,14 @@ index 0000000..897cff3
 +		}
 +		D->held[i] = false;
 +	}
++	for (int k = 0; k < Q1D_HUD_SETS; k++) {
++		for (int h = 0; h < 2; h++) {
++			if (D->hud[k][h].ahb != NULL) {
++				AHardwareBuffer_release(D->hud[k][h].ahb);
++			}
++			D->hud[k][h] = (struct direct_buf){0};
++		}
++	}
 +	D->count = 0;
 +	D->latest = -1;
 +	D->pend = -1;
@@ -1378,7 +1406,24 @@ index 0000000..897cff3
 +			direct_disconnect(t);
 +			continue;
 +		}
-+		if (m.type == Q1D_BUFFER && m.index < Q1D_MAX_IMAGES && m.half < 2) {
++		if (m.type == Q1D_BUFFER && (m.half == 2 || m.half == 3) && m.index < Q1D_HUD_SETS) {
++			// the head-locked overlays' buffers, after the frames' ones (same size)
++			AHardwareBuffer *ahb = NULL;
++			if (D->recv_handle(D->client_fd, &ahb) != 0 || ahb == NULL) {
++				U_LOG_E("mdp: cannot receive a buffer from the layer");
++				direct_disconnect(t);
++				continue;
++			}
++			const mdp_native_handle *nh = t->get_native_handle(ahb);
++			pthread_mutex_lock(&D->lock);
++			struct direct_buf *b = &D->hud[m.index][m.half - 2];
++			if (b->ahb != NULL) { // (only after a reconnect, which freed its import)
++				AHardwareBuffer_release(b->ahb);
++			}
++			*b = (struct direct_buf){.ahb = ahb, .fd = nh->data[0], .stride_px = m.stride_px, .ubwc = m.ubwc, .hud = true};
++			pthread_mutex_unlock(&D->lock);
++			U_LOG_W("mdp: head-locked overlays' buffer %u/%u from the layer", m.index, m.half - 2);
++		} else if (m.type == Q1D_BUFFER && m.index < Q1D_MAX_IMAGES && m.half < 2) {
 +			AHardwareBuffer *ahb = NULL;
 +			if (D->recv_handle(D->client_fd, &ahb) != 0 || ahb == NULL) {
 +				U_LOG_E("mdp: cannot receive a buffer from the layer");
@@ -1423,6 +1468,11 @@ index 0000000..897cff3
 +			D->latest_frame.time_ns = m.time_ns;
 +			D->latest_frame.pose_valid = m.pose_valid != 0;
 +			memcpy(D->latest_frame.q, m.pose, sizeof(m.pose));
++			uint32_t hs = m.hud & 0xff;
++			D->latest_frame.hud = hs > 0 && hs <= Q1D_HUD_SETS && (m.hud & 0x300) != 0 ? (int)hs - 1 : -1;
++			D->latest_frame.hud_halves = (m.hud >> 8) & 3;
++			memcpy(D->latest_frame.hud_rect, m.hud_rect, sizeof(m.hud_rect));
++			D->stats.hud += D->latest_frame.hud >= 0;
 +			D->fresh = true;
 +			direct_release_unused(D);
 +			pthread_mutex_unlock(&D->lock);
@@ -1938,6 +1988,12 @@ index 0000000..897cff3
 +{
 +	const int view = 1 - h; // half 0 (x = 0) is the right eye, view 1
 +	const float sx = view == 0 ? -1.0f : 1.0f;
++	// lens centre to panel centre of this eye, with the panel's own alignment from Meta's calibration (the image
++	// shifts by `shift`, see quest1_lens_decenter.h)
++	float shift[2];
++	q1_decenter_shift_m(view, shift);
++	const float lens_x = sx * Q1_LENS_TO_SCREEN_X - shift[0];
++	const float lens_y = Q1_LENS_TO_SCREEN_Y - shift[1];
 +	// each vertex's view direction through the lens does not change: computed once per half
 +	static float dirs[2][(WARP_GRID + 1) * (WARP_GRID + 1)][3][2];
 +	static bool have_dirs[2];
@@ -1946,8 +2002,8 @@ index 0000000..897cff3
 +		for (int j = 0; j <= WARP_GRID; j++) {
 +			for (int i = 0; i <= WARP_GRID; i++) {
 +				float u = 1.0f - (float)i / WARP_GRID, v = 1.0f - (float)j / WARP_GRID;
-+				float x = ((u - 0.5f) * Q1_PANEL_W_M + sx * Q1_LENS_TO_SCREEN_X) / Q1_METERS_PER_TAN_ANGLE;
-+				float y = ((0.5f - v) * Q1_PANEL_H_M + Q1_LENS_TO_SCREEN_Y) / Q1_METERS_PER_TAN_ANGLE;
++				float x = ((u - 0.5f) * Q1_PANEL_W_M + lens_x) / Q1_METERS_PER_TAN_ANGLE;
++				float y = ((0.5f - v) * Q1_PANEL_H_M + lens_y) / Q1_METERS_PER_TAN_ANGLE;
 +				float rsq = x * x + y * y, s = q1_catmull_rom10(rsq), c[3];
 +				q1_chroma(rsq, c);
 +				for (int k = 0; k < 3; k++) {
@@ -1986,8 +2042,8 @@ index 0000000..897cff3
 +					} else {
 +						float x2, y2;
 +						lens_inverse(tx, ty, &x2, &y2);
-+						float su = (x2 * Q1_METERS_PER_TAN_ANGLE - sx * Q1_LENS_TO_SCREEN_X) / Q1_PANEL_W_M + 0.5f;
-+						float sv = 0.5f - (y2 * Q1_METERS_PER_TAN_ANGLE - Q1_LENS_TO_SCREEN_Y) / Q1_PANEL_H_M;
++						float su = (x2 * Q1_METERS_PER_TAN_ANGLE - lens_x) / Q1_PANEL_W_M + 0.5f;
++						float sv = 0.5f - (y2 * Q1_METERS_PER_TAN_ANGLE - lens_y) / Q1_PANEL_H_M;
 +						tu_out = 1.0f - su;
 +						tv_out = 1.0f - sv;
 +					}
@@ -2034,6 +2090,7 @@ index 0000000..897cff3
 +	b->image = VK_NULL_HANDLE;
 +	b->mem = VK_NULL_HANDLE;
 +	b->set = VK_NULL_HANDLE;
++	b->combo = VK_NULL_HANDLE;
 +}
 +
 +//! Import the gralloc buffer as a R8G8B8A8_UNORM image: one of ours, 1440 x height, rendered to, or one of the layer's
@@ -2150,7 +2207,8 @@ index 0000000..897cff3
 +			warp_free_buf_vk(vk, b);
 +			return false;
 +		}
-+		VkDescriptorImageInfo ii = {D->vk.sampler, b->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
++		VkDescriptorImageInfo ii = {b->hud ? D->vk.hud_sampler : D->vk.sampler, b->view,
++		                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
 +		VkWriteDescriptorSet w = {
 +		    .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
 +		    .dstSet = b->set,
@@ -2209,11 +2267,16 @@ index 0000000..897cff3
 +	VkDescriptorSetLayoutBinding bind = {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
 +	VkDescriptorSetLayoutCreateInfo dslci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
 +	                                         .bindingCount = 1, .pBindings = &bind};
-+	VkDescriptorPoolSize psz = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 * Q1D_MAX_IMAGES};
++	// a set per source buffer, and per buffer of head-locked overlays one more of two (see warp_render)
++	VkDescriptorPoolSize psz = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 * (Q1D_MAX_IMAGES + 3 * Q1D_HUD_SETS)};
 +	VkDescriptorPoolCreateInfo dpci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-+	                                   .maxSets = 2 * Q1D_MAX_IMAGES, .poolSizeCount = 1, .pPoolSizes = &psz};
++	                                   .maxSets = 2 * (Q1D_MAX_IMAGES + 2 * Q1D_HUD_SETS), .poolSizeCount = 1,
++	                                   .pPoolSizes = &psz};
++	VkSamplerCreateInfo hsci = sci;
++	hsci.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
 +	if (vk->vkCreateRenderPass(vk->device, &rpci, NULL, &V->rp) != VK_SUCCESS ||
 +	    vk->vkCreateSampler(vk->device, &sci, NULL, &V->sampler) != VK_SUCCESS ||
++	    vk->vkCreateSampler(vk->device, &hsci, NULL, &V->hud_sampler) != VK_SUCCESS ||
 +	    vk->vkCreateDescriptorSetLayout(vk->device, &dslci, NULL, &V->dsl) != VK_SUCCESS ||
 +	    vk->vkCreateDescriptorPool(vk->device, &dpci, NULL, &V->dpool) != VK_SUCCESS) {
 +		U_LOG_E("mdp: warp: render pass, sampler or descriptors failed");
@@ -2277,15 +2340,70 @@ index 0000000..897cff3
 +	    .renderPass = V->rp,
 +	};
 +	VkResult r = vk->vkCreateGraphicsPipelines(vk->device, VK_NULL_HANDLE, 1, &gpci, NULL, &V->pipe);
-+	vk->vkDestroyShaderModule(vk->device, vs, NULL);
 +	vk->vkDestroyShaderModule(vk->device, fs, NULL);
++	if (r == VK_SUCCESS && D->lens) {
++		// the head-locked overlays (lens mode only: they come with the eye renders), with the frame, per channel
++		VkDescriptorSetLayoutBinding hb[2] = {
++		    {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
++		    {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
++		};
++		VkDescriptorSetLayoutCreateInfo hdslci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
++		                                          .bindingCount = 2, .pBindings = hb};
++		VkShaderModuleCreateInfo hvsci = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
++		                                  .codeSize = sizeof(q1_warp_hudc_vert_spv), .pCode = q1_warp_hudc_vert_spv};
++		VkShaderModuleCreateInfo hfsci = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
++		                                  .codeSize = sizeof(q1_warp_hudc_frag_spv), .pCode = q1_warp_hudc_frag_spv};
++		VkShaderModule hvs = VK_NULL_HANDLE, hfs = VK_NULL_HANDLE;
++		// the frame's mesh (binding 0, as the warp's) and the overlays' (binding 1: its three texture coordinates)
++		VkVertexInputBindingDescription hvb[2] = {{0, WARP_VTX_FLOATS * sizeof(float), VK_VERTEX_INPUT_RATE_VERTEX},
++		                                          {1, WARP_VTX_FLOATS * sizeof(float), VK_VERTEX_INPUT_RATE_VERTEX}};
++		VkVertexInputAttributeDescription hva[7] = {{0, 0, VK_FORMAT_R32G32_SFLOAT, 0},
++		                                            {1, 0, VK_FORMAT_R32G32_SFLOAT, 2 * sizeof(float)},
++		                                            {2, 0, VK_FORMAT_R32G32_SFLOAT, 4 * sizeof(float)},
++		                                            {3, 0, VK_FORMAT_R32G32_SFLOAT, 6 * sizeof(float)},
++		                                            {4, 1, VK_FORMAT_R32G32_SFLOAT, 2 * sizeof(float)},
++		                                            {5, 1, VK_FORMAT_R32G32_SFLOAT, 4 * sizeof(float)},
++		                                            {6, 1, VK_FORMAT_R32G32_SFLOAT, 6 * sizeof(float)}};
++		VkPipelineVertexInputStateCreateInfo hvi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
++		                                            .vertexBindingDescriptionCount = 2, .pVertexBindingDescriptions = hvb,
++		                                            .vertexAttributeDescriptionCount = 7, .pVertexAttributeDescriptions = hva};
++		VkPipelineShaderStageCreateInfo hstages[2] = {stages[0], stages[1]};
++		VkGraphicsPipelineCreateInfo hgpci = gpci;
++		hgpci.pStages = hstages;
++		hgpci.pVertexInputState = &hvi;
++		if (vk->vkCreateDescriptorSetLayout(vk->device, &hdslci, NULL, &V->hud_dsl) == VK_SUCCESS) {
++			VkPipelineLayoutCreateInfo hplci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
++			                                    .setLayoutCount = 1, .pSetLayouts = &V->hud_dsl};
++			if (vk->vkCreatePipelineLayout(vk->device, &hplci, NULL, &V->hud_pl) == VK_SUCCESS &&
++			    vk->vkCreateShaderModule(vk->device, &hvsci, NULL, &hvs) == VK_SUCCESS &&
++			    vk->vkCreateShaderModule(vk->device, &hfsci, NULL, &hfs) == VK_SUCCESS) {
++				hstages[0].module = hvs;
++				hstages[1].module = hfs;
++				hgpci.layout = V->hud_pl;
++				if (vk->vkCreateGraphicsPipelines(vk->device, VK_NULL_HANDLE, 1, &hgpci, NULL, &V->hud_pipe) != VK_SUCCESS) {
++					V->hud_pipe = VK_NULL_HANDLE;
++				}
++			}
++		}
++		if (hvs != VK_NULL_HANDLE) {
++			vk->vkDestroyShaderModule(vk->device, hvs, NULL);
++		}
++		if (hfs != VK_NULL_HANDLE) {
++			vk->vkDestroyShaderModule(vk->device, hfs, NULL);
++		}
++		if (V->hud_pipe == VK_NULL_HANDLE) {
++			U_LOG_E("mdp: warp: no pipeline for the head-locked overlays: they stay in the frame");
++		}
++	}
++	vk->vkDestroyShaderModule(vk->device, vs, NULL);
 +	if (r != VK_SUCCESS) {
 +		U_LOG_E("mdp: warp: vkCreateGraphicsPipelines: %d", r);
 +		return false;
 +	}
 +
-+	// vertices (host visible, rewritten for every warp) and indices
-+	const uint32_t nverts = 2 * (WARP_GRID + 1) * (WARP_GRID + 1);
++	// vertices (host visible): the two halves' meshes, rewritten for every warp, then the two of the head-locked
++	// overlays (made once); indices
++	const uint32_t nverts = 4 * (WARP_GRID + 1) * (WARP_GRID + 1);
 +	V->nidx = WARP_GRID * WARP_GRID * 6;
 +	VkBufferCreateInfo bci = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = nverts * WARP_VTX_FLOATS * sizeof(float),
 +	                          .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
@@ -2399,6 +2517,11 @@ index 0000000..897cff3
 +			warp_free_buf_vk(vk, &D->buf[i][h]);
 +		}
 +	}
++	for (int k = 0; k < Q1D_HUD_SETS; k++) {
++		for (int h = 0; h < 2; h++) {
++			warp_free_buf_vk(vk, &D->hud[k][h]);
++		}
++	}
 +	for (int k = 0; k < WARP_OUT_SETS; k++) {
 +		for (int h = 0; h < 2; h++) {
 +			struct direct_buf *b = &D->out[k][h];
@@ -2423,11 +2546,16 @@ index 0000000..897cff3
 +	if (V->fence != VK_NULL_HANDLE) vk->vkDestroyFence(vk->device, V->fence, NULL);
 +	if (V->cpool != VK_NULL_HANDLE) vk->vkDestroyCommandPool(vk->device, V->cpool, NULL);
 +	if (V->pipe != VK_NULL_HANDLE) vk->vkDestroyPipeline(vk->device, V->pipe, NULL);
++	if (V->hud_pipe != VK_NULL_HANDLE) vk->vkDestroyPipeline(vk->device, V->hud_pipe, NULL);
++	if (V->hud_pl != VK_NULL_HANDLE) vk->vkDestroyPipelineLayout(vk->device, V->hud_pl, NULL);
++	if (V->hud_dsl != VK_NULL_HANDLE) vk->vkDestroyDescriptorSetLayout(vk->device, V->hud_dsl, NULL);
++	if (V->hud_sampler != VK_NULL_HANDLE) vk->vkDestroySampler(vk->device, V->hud_sampler, NULL);
 +	if (V->pl != VK_NULL_HANDLE) vk->vkDestroyPipelineLayout(vk->device, V->pl, NULL);
 +	if (V->dpool != VK_NULL_HANDLE) vk->vkDestroyDescriptorPool(vk->device, V->dpool, NULL);
 +	if (V->dsl != VK_NULL_HANDLE) vk->vkDestroyDescriptorSetLayout(vk->device, V->dsl, NULL);
 +	if (V->sampler != VK_NULL_HANDLE) vk->vkDestroySampler(vk->device, V->sampler, NULL);
 +	if (V->rp != VK_NULL_HANDLE) vk->vkDestroyRenderPass(vk->device, V->rp, NULL);
++	free(V->hud_cpu);
 +	*V = (struct direct_vk){0};
 +}
 +
@@ -2485,6 +2613,54 @@ index 0000000..897cff3
 +	        D->tan_l[1], D->tan_r[1], D->tan_u[1], D->tan_d[1]);
 +}
 +
++//! The part of the output the head-locked overlays' mesh (`mesh`, no rotation) maps from `rect` of their buffer: the
++//! cells whose texture coordinates (any channel) reach into it. Blending them over the whole panel cost ~2 ms of GPU
++//! a vsync; SteamVR's HUD covers a small part of it. False when no cell does.
++static bool
++warp_hud_scissor(const struct mdp_direct *D, const float *mesh, const float *rect, VkRect2D *out)
++{
++	const float m = 0.01f; // texture coordinates: a margin for the quads' antialiased edges
++	const float r0 = rect[0] - m, r1 = rect[1] - m, r2 = rect[2] + m, r3 = rect[3] + m;
++	float x0 = 2, y0 = 2, x1 = -2, y1 = -2;
++	for (int j = 0; j < WARP_GRID; j++) {
++		for (int i = 0; i < WARP_GRID; i++) {
++			float u0 = 1e9f, v0 = 1e9f, u1 = -1e9f, v1 = -1e9f;
++			for (int c = 0; c < 4; c++) {
++				const float *vtx = mesh + WARP_VTX_FLOATS * ((j + (c >> 1)) * (WARP_GRID + 1) + i + (c & 1));
++				for (int k = 0; k < 3; k++) {
++					u0 = fminf(u0, vtx[2 + 2 * k]);
++					u1 = fmaxf(u1, vtx[2 + 2 * k]);
++					v0 = fminf(v0, vtx[3 + 2 * k]);
++					v1 = fmaxf(v1, vtx[3 + 2 * k]);
++				}
++			}
++			if (u1 < r0 || u0 > r2 || v1 < r1 || v0 > r3) {
++				continue;
++			}
++			const float *a = mesh + WARP_VTX_FLOATS * (j * (WARP_GRID + 1) + i);
++			const float *b = mesh + WARP_VTX_FLOATS * ((j + 1) * (WARP_GRID + 1) + i + 1);
++			x0 = fminf(x0, fminf(a[0], b[0]));
++			x1 = fmaxf(x1, fmaxf(a[0], b[0]));
++			y0 = fminf(y0, fminf(a[1], b[1]));
++			y1 = fmaxf(y1, fmaxf(a[1], b[1]));
++		}
++	}
++	if (x1 < x0 || y1 < y0) {
++		return false;
++	}
++	int px0 = (int)floorf((x0 + 1) * 0.5f * MDP_HALF), px1 = (int)ceilf((x1 + 1) * 0.5f * MDP_HALF);
++	int py0 = (int)floorf((y0 + 1) * 0.5f * D->height), py1 = (int)ceilf((y1 + 1) * 0.5f * D->height);
++	px0 = px0 < 0 ? 0 : px0;
++	py0 = py0 < 0 ? 0 : py0;
++	px1 = px1 > MDP_HALF ? MDP_HALF : px1;
++	py1 = py1 > (int)D->height ? (int)D->height : py1;
++	if (px1 <= px0 || py1 <= py0) {
++		return false;
++	}
++	*out = (VkRect2D){{px0, py0}, {(uint32_t)(px1 - px0), (uint32_t)(py1 - py0)}};
++	return true;
++}
++
 +//! Call with D->lock held: draw the latest frame warped by `delta` into output set `o`. GPU time in ms.
 +static bool
 +warp_render(struct mdp_target *t, int o, const float *delta_top, const float *delta_bot, double *gpu_ms)
@@ -2499,9 +2675,57 @@ index 0000000..897cff3
 +			return false;
 +		}
 +	}
++	// the frame's head-locked overlays, if the layer drew them apart
++	struct direct_buf *hud = D->latest_frame.hud >= 0 && V->hud_pipe != VK_NULL_HANDLE ? D->hud[D->latest_frame.hud] : NULL;
++	uint32_t hud_halves = D->latest_frame.hud_halves;
++	for (int h = 0; hud != NULL && h < 2; h++) {
++		if (!(hud_halves & (1u << h))) {
++			continue;
++		}
++		if (hud[h].ahb == NULL || (hud[h].image == VK_NULL_HANDLE && !warp_import(t, &hud[h], false))) {
++			static int logged;
++			if (logged++ < 4) {
++				U_LOG_E("mdp: warp: no head-locked overlays' buffer %d/%d", D->latest_frame.hud, h);
++			}
++			hud = NULL;
++			break;
++		}
++		// their set with the frame's buffer of this half (the last pass that read it has finished: warp_render waits)
++		if (hud[h].combo == VK_NULL_HANDLE) {
++			VkDescriptorSetAllocateInfo dai = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
++			                                   .descriptorPool = V->dpool, .descriptorSetCount = 1, .pSetLayouts = &V->hud_dsl};
++			if (vk->vkAllocateDescriptorSets(vk->device, &dai, &hud[h].combo) != VK_SUCCESS) {
++				hud[h].combo = VK_NULL_HANDLE;
++				hud = NULL;
++				break;
++			}
++		}
++		VkDescriptorImageInfo ii[2] = {{V->sampler, src[h].view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
++		                               {V->hud_sampler, hud[h].view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
++		VkWriteDescriptorSet w = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = hud[h].combo,
++		                          .descriptorCount = 2, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
++		                          .pImageInfo = ii};
++		vk->vkUpdateDescriptorSets(vk->device, 1, &w, 0, NULL);
++	}
++	const size_t mesh_floats = WARP_VTX_FLOATS * (WARP_GRID + 1) * (WARP_GRID + 1);
++	if (hud != NULL && !V->hud_mesh) {
++		static const float identity[4] = {0, 0, 0, 1};
++		if (V->hud_cpu == NULL) {
++			V->hud_cpu = malloc(2 * mesh_floats * sizeof(float));
++		}
++		if (V->hud_cpu == NULL) {
++			hud = NULL;
++		} else {
++			for (int h = 0; h < 2; h++) {
++				warp_build_mesh(D, h, identity, identity, V->hud_cpu + h * mesh_floats);
++			}
++			memcpy(V->vptr + 2 * mesh_floats, V->hud_cpu, 2 * mesh_floats * sizeof(float));
++			V->hud_mesh = true;
++		}
++	}
 +	int64_t tm0 = os_monotonic_get_ns();
 +	for (int h = 0; h < 2; h++) {
-+		warp_build_mesh(D, h, delta_top, delta_bot, V->vptr + h * WARP_VTX_FLOATS * (WARP_GRID + 1) * (WARP_GRID + 1));
++		warp_build_mesh(D, h, delta_top, delta_bot, V->vptr + h * mesh_floats);
 +	}
 +	D->tick_mesh_ns = os_monotonic_get_ns() - tm0;
 +	D->stats.mesh_ms_sum += (double)D->tick_mesh_ns / 1e6;
@@ -2527,6 +2751,11 @@ index 0000000..897cff3
 +		};
 +		vk->vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0,
 +		                         NULL, 0, NULL, 1, &ib);
++		if (hud != NULL && (hud_halves & (1u << h))) {
++			ib.image = hud[h].image;
++			vk->vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
++			                         0, NULL, 0, NULL, 1, &ib);
++		}
 +		VkRenderPassBeginInfo rpbi = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
 +		                              .renderPass = V->rp,
 +		                              .framebuffer = D->out[o][h].fb,
@@ -2542,6 +2771,17 @@ index 0000000..897cff3
 +		vk->vkCmdBindVertexBuffers(cmd, 0, 1, &V->vbuf, &off);
 +		vk->vkCmdBindIndexBuffer(cmd, V->ibuf, 0, VK_INDEX_TYPE_UINT16);
 +		vk->vkCmdDrawIndexed(cmd, V->nidx, 1, 0, 0, 0);
++		VkRect2D hsc;
++		if (hud != NULL && (hud_halves & (1u << h)) &&
++		    warp_hud_scissor(D, V->hud_cpu + h * mesh_floats, D->latest_frame.hud_rect[h], &hsc)) {
++			vk->vkCmdSetScissor(cmd, 0, 1, &hsc);
++			vk->vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, V->hud_pipe);
++			vk->vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, V->hud_pl, 0, 1, &hud[h].combo, 0, NULL);
++			VkDeviceSize hoff[2] = {off, (VkDeviceSize)(2 + h) * mesh_floats * sizeof(float)};
++			VkBuffer hbufs[2] = {V->vbuf, V->vbuf};
++			vk->vkCmdBindVertexBuffers(cmd, 0, 2, hbufs, hoff);
++			vk->vkCmdDrawIndexed(cmd, V->nidx, 1, 0, 0, 0);
++		}
 +		vk->vkCmdEndRenderPass(cmd);
 +	}
 +	vk->vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, V->qp, 1);
@@ -2653,6 +2893,9 @@ index 0000000..897cff3
 +{
 +	float origin[2], scale[2];
 +	uint32_t w, h, swap_rb;
++	uint32_t has_hud; //!< blend the head-locked overlays (binding 2)
++	float tan[4];     //!< the eye render's tangents: left, right, up, down
++	float rot[3][4];  //!< rows: the warp's rotation, from the head of the display time into the head of the render
 +};
 +
 +static void *
@@ -2769,14 +3012,15 @@ index 0000000..897cff3
 +	                           .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
 +	                           .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
 +	                           .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE};
-+	VkDescriptorSetLayoutBinding dslb[2] = {
++	VkDescriptorSetLayoutBinding dslb[3] = {
 +	    {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
 +	    {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
++	    {2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
 +	};
 +	VkDescriptorSetLayoutCreateInfo dslci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-+	                                         .bindingCount = 2,
++	                                         .bindingCount = 3,
 +	                                         .pBindings = dslb};
-+	VkDescriptorPoolSize dps[2] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1}};
++	VkDescriptorPoolSize dps[2] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1}};
 +	VkDescriptorPoolCreateInfo dpci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
 +	                                   .maxSets = 1,
 +	                                   .poolSizeCount = 2,
@@ -2983,7 +3227,13 @@ index 0000000..897cff3
 +	// The set is free: the last pass using it has finished (!submitted).
 +	VkDescriptorImageInfo dii = {S->sampler, src->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
 +	VkDescriptorBufferInfo dbi = {S->gbuf, 0, VK_WHOLE_SIZE};
-+	VkWriteDescriptorSet wds[2] = {
++	// the frame's head-locked overlays, if the warp drew some for this half (its buffer is imported and readable)
++	const struct direct_buf *hud = D->latest_frame.hud >= 0 && (D->latest_frame.hud_halves & 2) ? &D->hud[D->latest_frame.hud][1] : NULL;
++	if (hud != NULL && hud->view == VK_NULL_HANDLE) {
++		hud = NULL;
++	}
++	VkDescriptorImageInfo hii = {S->sampler, hud != NULL ? hud->view : src->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
++	VkWriteDescriptorSet wds[3] = {
 +	    {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
 +	     .dstSet = S->set,
 +	     .dstBinding = 0,
@@ -2996,8 +3246,14 @@ index 0000000..897cff3
 +	     .descriptorCount = 1,
 +	     .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
 +	     .pBufferInfo = &dbi},
++	    {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
++	     .dstSet = S->set,
++	     .dstBinding = 2,
++	     .descriptorCount = 1,
++	     .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
++	     .pImageInfo = &hii},
 +	};
-+	vk->vkUpdateDescriptorSets(vk->device, 2, wds, 0, NULL);
++	vk->vkUpdateDescriptorSets(vk->device, 3, wds, 0, NULL);
 +	// The view returns red and blue swapped for linear BGRA inputs unless it swizzles them back (warp_import_usage:
 +	// only when the outputs are UBWC); UBWC inputs are RGBA (bgra 0).
 +	struct spect_push pc = {
@@ -3006,7 +3262,21 @@ index 0000000..897cff3
 +	    .w = SPECT_W,
 +	    .h = SPECT_H,
 +	    .swap_rb = D->bgra && !D->out[0][0].ubwc,
++	    .has_hud = hud != NULL,
++	    .tan = {D->tan_l[1], D->tan_r[1], D->tan_u[1], D->tan_d[1]},
 +	};
++	// the warp's rotation as a matrix (quat_rotate's): the spectator sees the frame where the panels show it, not with
++	// its prediction error
++	const float *q = D->spect_delta;
++	float x = q[0], y = q[1], z = q[2], w = q[3];
++	const float rot[3][3] = {{1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)},
++	                         {2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)},
++	                         {2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)}};
++	for (int i = 0; i < 3; i++) {
++		for (int j = 0; j < 3; j++) {
++			pc.rot[i][j] = rot[i][j];
++		}
++	}
 +	vk->vkBeginCommandBuffer(cmd, &bi);
 +	vk->vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, S->pipeline);
 +	vk->vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, S->playout, 0, 1, &S->set, 0, NULL);
@@ -3324,6 +3594,7 @@ index 0000000..897cff3
 +				}
 +				float delta[4], delta_top[4], delta_bot[4];
 +				warp_delta(D, qr, qd, delta);
++				memcpy(D->spect_delta, delta, sizeof(delta));
 +				memcpy(delta_top, delta, sizeof(delta));
 +				memcpy(delta_bot, delta, sizeof(delta));
 +				if (D->knobs.scan_ms > 0) {
@@ -3456,9 +3727,9 @@ index 0000000..897cff3
 +		        s->no_set, s->late, s->late_skips, s->gaps, s->wake_ms_max, (double)WARP_MAX_DEG, s->wild, s->age_n ? s->age_ms_sum / s->age_n : 0.0, s->age_ms_min,
 +		        s->age_ms_max, D->tick_offset_ns > 0 ? (double)(MDP_PERIOD_NS - D->tick_offset_ns) / 1e6 : 0.0,
 +		        D->knobs.display_delay_ms);
-+		U_LOG_W("mdp: direct: frames received %.1f/s, shown a period late (queued) %u, never shown %u; came after the tick at "
-+		        "0-2 ms %u, 2-4 %u, 4-6 %u, 6-8 %u, 8-10 %u, 10-12 %u, 12+ %u",
-+		        s->received / el, s->queued, s->superseded, s->phase[0], s->phase[1], s->phase[2], s->phase[3], s->phase[4],
++		U_LOG_W("mdp: direct: frames received %.1f/s (%u with head-locked overlays apart), shown a period late (queued) %u, "
++		        "never shown %u; came after the tick at 0-2 ms %u, 2-4 %u, 4-6 %u, 6-8 %u, 8-10 %u, 10-12 %u, 12+ %u",
++		        s->received / el, s->hud, s->queued, s->superseded, s->phase[0], s->phase[1], s->phase[2], s->phase[3], s->phase[4],
 +		        s->phase[5], s->phase[6]);
 +		U_LOG_W("mdp: direct: warp prediction error %.3f deg avg (max %.2f), over 0.1 deg %u, 0.25 %u, 0.5 %u of %u",
 +		        s->perr_n ? s->perr_sum / s->perr_n : 0.0, s->perr_max, s->perr_over[0], s->perr_over[1],
@@ -6962,10 +7233,10 @@ index 0000000..f5a1ec7
 +#endif
 diff --git a/src/xrt/compositor/main/quest1_direct_proto.h b/src/xrt/compositor/main/quest1_direct_proto.h
 new file mode 100644
-index 0000000..d733115
+index 0000000..6e6ff4e
 --- /dev/null
 +++ b/src/xrt/compositor/main/quest1_direct_proto.h
-@@ -0,0 +1,55 @@
+@@ -0,0 +1,66 @@
 +// Copyright 2026, Quest1-SteamOS contributors
 +// SPDX-License-Identifier: BSL-1.0
 +// Protocol between the Quest 1 Vulkan layer inside vrcompositor (src/vklayer-steamvr/quest1_scanout.c)
@@ -6978,11 +7249,14 @@ index 0000000..d733115
 +
 +#define Q1D_SOCKET "/run/monado/quest1_direct"
 +#define Q1D_MAX_IMAGES 4
++//! Sets of buffers of head-locked overlays (see Q1D_BUFFER and Q1D_FRAME's `hud`): one per image, the frame's own
++#define Q1D_HUD_SETS Q1D_MAX_IMAGES
 +
 +enum q1d_msg_type
 +{
 +	//! layer -> Monado: describes the buffer (image `index`, half `half`); the next packet is the
-+	//! AHardwareBuffer itself (AHardwareBuffer_sendHandleToUnixSocket)
++	//! AHardwareBuffer itself (AHardwareBuffer_sendHandleToUnixSocket). Half 2 and 3: the head-locked overlays of
++	//! half 0 and 1 in set `index` (< Q1D_HUD_SETS), the eye render's size, premultiplied alpha
 +	Q1D_BUFFER = 1,
 +	//! layer -> Monado: image `index` holds the finished frame `frame`, rendered with `pose`
 +	Q1D_FRAME = 2,
@@ -7020,28 +7294,161 @@ index 0000000..d733115
 +	uint64_t frame;
 +	int64_t time_ns;  //!< Q1D_FRAME: time the render pose was predicted for; Q1D_DISPLAYED: when
 +	float pose[4];    //!< Q1D_FRAME: render orientation x, y, z, w (OpenXR LOCAL space)
++	//! Q1D_FRAME: the frame's head-locked overlays (SteamVR's HUD: the volume, the IPD) drawn apart: bits 0-7 are 1 +
++	//! the set of buffers holding them (0: none, they are in the frame), bits 8 and 9 the halves that have some. They
++	//! are drawn over the re-projected frame without its rotation, so they stay where they were drawn instead of
++	//! moving with the frame's prediction error.
++	uint32_t hud;
++	//! Q1D_FRAME, with `hud`: per half, the part of its buffer the head-locked overlays may cover (u0, v0, u1, v1, in
++	//! 0..1 of the buffer, row 0 first): Monado blends them only there
++	float hud_rect[2][4];
 +};
-diff --git a/src/xrt/compositor/main/quest1_spect_spv.h b/src/xrt/compositor/main/quest1_spect_spv.h
+diff --git a/src/xrt/compositor/main/quest1_lens_decenter.h b/src/xrt/compositor/main/quest1_lens_decenter.h
 new file mode 100644
-index 0000000..cf32dc2
+index 0000000..a2e5152
 --- /dev/null
-+++ b/src/xrt/compositor/main/quest1_spect_spv.h
-@@ -0,0 +1,254 @@
++++ b/src/xrt/compositor/main/quest1_lens_decenter.h
+@@ -0,0 +1,92 @@
 +// Copyright 2026, Quest1-SteamOS contributors
 +// SPDX-License-Identifier: BSL-1.0
-+// SPIR-V of the Remote Play spectator shader (glslangValidator -V), source below: the left eye render, cropped and
-+// scaled (bilinear), to NV12 (BT.709 full range, what Steam asks for) straight into the host buffer. One invocation
-+// per 4x2 pixels: two words of luma, one of chroma.
++/*!
++ * @file
++ * @brief  Quest 1 per-panel lens-to-panel alignment (decenter), as Meta's OS applies it. Header only, included by
++ *         Monado's quest1 driver and MDP warp and by driver_quest1 (SteamVR), which each evaluate the lens model.
++ *
++ * Meta's compositor (libvrruntimeservice.so, CompositorVR, docs/quest1-lens.md) reads, read only,
++ * /persist/calibration/display/{left,right}/{left,right}_screen_offset.json. Only when "source" is "AUTO" does it use
++ * "decenter" ([x, y] in panel pixels), truncated toward zero to whole pixels; "roll" is not read. It moves the eye's
++ * output viewport by that many pixels: x as read for the left eye and negated for the right eye, y as read for both
++ * (GL window frame: x right, y up, the frame of the lens model's panel points). So the image is shifted by
++ * (sx, sy) pixels, and with the lens model `x = (panel point + lensToScreen) / metersPerTan` this means
++ * lensToScreen - shift * pixel pitch. The files are per unit data: nothing from them goes in the repository.
++ */
++#pragma once
++#include <math.h>
++#include <stdbool.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
 +
++#ifndef Q1_DECENTER_DIR
++#define Q1_DECENTER_DIR "/persist/calibration/display"
++#endif
++#define Q1_DECENTER_PIXEL_M (0.0594f / 1440.0f) //!< panel pixel pitch, 41.25 um
++
++//! One side's file: the truncated decenter in pixels as Meta reads it (0, 0 when the file is missing, malformed or
++//! its source is not AUTO, where Meta keeps zero as well).
++static inline void
++q1_decenter_read_file(const char *side, int out[2])
++{
++	out[0] = out[1] = 0;
++	char path[128], buf[1024];
++	snprintf(path, sizeof(path), Q1_DECENTER_DIR "/%s/%s_screen_offset.json", side, side);
++	FILE *f = fopen(path, "r"); // read only, never written
++	if (f == NULL) {
++		return;
++	}
++	size_t n = fread(buf, 1, sizeof(buf) - 1, f);
++	fclose(f);
++	buf[n] = '\0';
++	// "source": "AUTO" (the quoted key, so that "auto_decenter" or "decenter_mm" do not match)
++	const char *p = strstr(buf, "\"source\"");
++	if (p == NULL || (p = strchr(p + 8, ':')) == NULL) {
++		return;
++	}
++	while (*++p == ' ') {
++	}
++	if (strncmp(p, "\"AUTO\"", 6) != 0) {
++		return;
++	}
++	p = strstr(buf, "\"decenter\"");
++	if (p == NULL || (p = strchr(p + 10, '[')) == NULL) {
++		return;
++	}
++	char *end;
++	double x = strtod(p + 1, &end);
++	if (end == p + 1 || (end = strchr(end, ',')) == NULL) {
++		return;
++	}
++	char *end2;
++	double y = strtod(end + 1, &end2);
++	if (end2 == end + 1) {
++		return;
++	}
++	out[0] = (int)x; // truncation toward zero, as fcvtzs in Meta's reader
++	out[1] = (int)y;
++}
++
++/*!
++ * Meta's image shift of one eye in lens-model metres (x right, y up, the frame of the panel points): subtract it from
++ * lensToScreen. view 0 is the left eye. Read once, then cached; zero without calibration.
++ */
++static inline void
++q1_decenter_shift_m(int view, float out[2])
++{
++	static int shift[2][2];
++	static bool read;
++	if (!read) {
++		int l[2], r[2];
++		q1_decenter_read_file("left", l);
++		q1_decenter_read_file("right", r);
++		shift[0][0] = l[0];
++		shift[0][1] = l[1];
++		shift[1][0] = -r[0]; // Meta negates the right eye's horizontal value
++		shift[1][1] = r[1];
++		read = true;
++	}
++	out[0] = (float)shift[view != 0][0] * Q1_DECENTER_PIXEL_M;
++	out[1] = (float)shift[view != 0][1] * Q1_DECENTER_PIXEL_M;
++}
+diff --git a/src/xrt/compositor/main/quest1_spect_spv.h b/src/xrt/compositor/main/quest1_spect_spv.h
+new file mode 100644
+index 0000000..34eba66
+--- /dev/null
++++ b/src/xrt/compositor/main/quest1_spect_spv.h
+@@ -0,0 +1,366 @@
++// Copyright 2026, Quest1-SteamOS contributors
++// SPDX-License-Identifier: BSL-1.0
++// SPIR-V of the Remote Play spectator shader (glslangValidator -V), source below: the left eye render, cropped,
++// re-projected to the head pose its frame is shown for (as the panels show it: the render's prediction error made the
++// spectator tremble while the headset view was steady), with the head-locked overlays drawn apart over it, scaled
++// (bilinear), to NV12 (BT.709 full range, what Steam asks for) straight into the host buffer. One invocation per 4x2
++// pixels: two words of luma, one of chroma.
 +// #version 450
 +// layout(local_size_x = 8, local_size_y = 8) in;
 +// layout(set = 0, binding = 0) uniform sampler2D src;
 +// layout(set = 0, binding = 1, std430) writeonly buffer Out { uint d[]; };
-+// layout(push_constant) uniform P { vec2 origin; vec2 scale; uint w; uint h; uint swap_rb; } p;
++// layout(set = 0, binding = 2) uniform sampler2D hud;
++// layout(push_constant) uniform P
++// {
++// 	vec2 origin;
++// 	vec2 scale;
++// 	uint w;
++// 	uint h;
++// 	uint swap_rb;
++// 	uint has_hud;
++// 	vec4 tan; // the eye render's tangents: left, right, up, down
++// 	vec4 r0;  // rows of the rotation from the head of the display time into the head of the render
++// 	vec4 r1;
++// 	vec4 r2;
++// } p;
 +// const vec3 KY = vec3(0.2126, 0.7152, 0.0722);
 +// vec3 px(uint x, uint y)
 +// {
-+// 	vec3 c = texture(src, p.origin + (vec2(x, y) + 0.5) * p.scale).rgb;
++// 	vec2 uv = p.origin + (vec2(x, y) + 0.5) * p.scale;
++// 	vec3 dir = vec3(mix(p.tan.x, p.tan.y, uv.x), mix(p.tan.z, p.tan.w, uv.y), -1.0);
++// 	vec3 r = vec3(dot(p.r0.xyz, dir), dot(p.r1.xyz, dir), dot(p.r2.xyz, dir));
++// 	vec3 c = vec3(0.0);
++// 	if (r.z < -0.05) {
++// 		vec2 t = r.xy / -r.z;
++// 		vec2 q = vec2((t.x - p.tan.x) / (p.tan.y - p.tan.x), (p.tan.z - t.y) / (p.tan.z - p.tan.w));
++// 		if (all(greaterThanEqual(q, vec2(0.0))) && all(lessThanEqual(q, vec2(1.0))))
++// 			c = texture(src, q).rgb;
++// 	}
++// 	if (p.has_hud != 0u) {
++// 		vec4 o = texture(hud, uv);
++// 		c = o.rgb + c * (1.0 - o.a);
++// 	}
 +// 	return p.swap_rb != 0u ? c.bgr : c;
 +// }
 +// uint b(float v) { return uint(clamp(v, 0.0, 1.0) * 255.0 + 0.5); }
@@ -7071,222 +7478,307 @@ index 0000000..cf32dc2
 +// }
 +
 +static const uint32_t q1_spect_nv12_comp_spv[] = {
-+	0x07230203,0x00010000,0x0008000b,0x0000012b,0x00000000,0x00020011,0x00000001,0x0006000b,
++	0x07230203,0x00010000,0x0008000b,0x000001a0,0x00000000,0x00020011,0x00000001,0x0006000b,
 +	0x00000001,0x4c534c47,0x6474732e,0x3035342e,0x00000000,0x0003000e,0x00000000,0x00000001,
-+	0x0006000f,0x00000005,0x00000004,0x6e69616d,0x00000000,0x00000052,0x00060010,0x00000004,
++	0x0006000f,0x00000005,0x00000004,0x6e69616d,0x00000000,0x000000c9,0x00060010,0x00000004,
 +	0x00000011,0x00000008,0x00000008,0x00000001,0x00030003,0x00000002,0x000001c2,0x00040005,
 +	0x00000004,0x6e69616d,0x00000000,0x00050005,0x0000000d,0x75287870,0x31753b31,0x0000003b,
 +	0x00030005,0x0000000b,0x00000078,0x00030005,0x0000000c,0x00000079,0x00040005,0x00000012,
-+	0x31662862,0x0000003b,0x00030005,0x00000011,0x00000076,0x00030005,0x00000015,0x00000063,
-+	0x00030005,0x00000019,0x00637273,0x00030005,0x0000001c,0x00000050,0x00050006,0x0000001c,
-+	0x00000000,0x6769726f,0x00006e69,0x00050006,0x0000001c,0x00000001,0x6c616373,0x00000065,
-+	0x00040006,0x0000001c,0x00000002,0x00000077,0x00040006,0x0000001c,0x00000003,0x00000068,
-+	0x00050006,0x0000001c,0x00000004,0x70617773,0x0062725f,0x00030005,0x0000001e,0x00000070,
-+	0x00030005,0x0000004f,0x00003078,0x00080005,0x00000052,0x475f6c67,0x61626f6c,0x766e496c,
-+	0x7461636f,0x496e6f69,0x00000044,0x00030005,0x00000058,0x00003079,0x00030005,0x0000006f,
-+	0x00000069,0x00030005,0x00000077,0x0000006a,0x00030005,0x00000082,0x00000063,0x00040005,
-+	0x0000008d,0x61726170,0x0000006d,0x00040005,0x0000008e,0x61726170,0x0000006d,0x00030005,
-+	0x00000095,0x00003072,0x00030005,0x00000096,0x00003172,0x00030005,0x00000097,0x00007675,
-+	0x00030005,0x00000098,0x0000006a,0x00040005,0x000000a8,0x61726170,0x0000006d,0x00040005,
-+	0x000000b4,0x61726170,0x0000006d,0x00030005,0x000000bd,0x0000006b,0x00030005,0x000000c5,
-+	0x00000061,0x00030005,0x000000df,0x00000079,0x00040005,0x000000e9,0x61726170,0x0000006d,
-+	0x00040005,0x000000f8,0x61726170,0x0000006d,0x00030005,0x00000103,0x0074754f,0x00040006,
-+	0x00000103,0x00000000,0x00000064,0x00030005,0x00000105,0x00000000,0x00040047,0x00000019,
-+	0x00000021,0x00000000,0x00040047,0x00000019,0x00000022,0x00000000,0x00030047,0x0000001c,
-+	0x00000002,0x00050048,0x0000001c,0x00000000,0x00000023,0x00000000,0x00050048,0x0000001c,
-+	0x00000001,0x00000023,0x00000008,0x00050048,0x0000001c,0x00000002,0x00000023,0x00000010,
-+	0x00050048,0x0000001c,0x00000003,0x00000023,0x00000014,0x00050048,0x0000001c,0x00000004,
-+	0x00000023,0x00000018,0x00040047,0x00000052,0x0000000b,0x0000001c,0x00040047,0x00000102,
-+	0x00000006,0x00000004,0x00030047,0x00000103,0x00000003,0x00040048,0x00000103,0x00000000,
-+	0x00000019,0x00050048,0x00000103,0x00000000,0x00000023,0x00000000,0x00030047,0x00000105,
-+	0x00000019,0x00040047,0x00000105,0x00000021,0x00000001,0x00040047,0x00000105,0x00000022,
-+	0x00000000,0x00040047,0x0000012a,0x0000000b,0x00000019,0x00020013,0x00000002,0x00030021,
-+	0x00000003,0x00000002,0x00040015,0x00000006,0x00000020,0x00000000,0x00040020,0x00000007,
-+	0x00000007,0x00000006,0x00030016,0x00000008,0x00000020,0x00040017,0x00000009,0x00000008,
-+	0x00000003,0x00050021,0x0000000a,0x00000009,0x00000007,0x00000007,0x00040020,0x0000000f,
-+	0x00000007,0x00000008,0x00040021,0x00000010,0x00000006,0x0000000f,0x00040020,0x00000014,
-+	0x00000007,0x00000009,0x00090019,0x00000016,0x00000008,0x00000001,0x00000000,0x00000000,
-+	0x00000000,0x00000001,0x00000000,0x0003001b,0x00000017,0x00000016,0x00040020,0x00000018,
-+	0x00000000,0x00000017,0x0004003b,0x00000018,0x00000019,0x00000000,0x00040017,0x0000001b,
-+	0x00000008,0x00000002,0x0007001e,0x0000001c,0x0000001b,0x0000001b,0x00000006,0x00000006,
-+	0x00000006,0x00040020,0x0000001d,0x00000009,0x0000001c,0x0004003b,0x0000001d,0x0000001e,
-+	0x00000009,0x00040015,0x0000001f,0x00000020,0x00000001,0x0004002b,0x0000001f,0x00000020,
-+	0x00000000,0x00040020,0x00000021,0x00000009,0x0000001b,0x0004002b,0x00000008,0x00000029,
-+	0x3f000000,0x0004002b,0x0000001f,0x0000002c,0x00000001,0x00040017,0x00000031,0x00000008,
-+	0x00000004,0x0004002b,0x00000008,0x00000032,0x00000000,0x0004002b,0x0000001f,0x00000035,
-+	0x00000004,0x00040020,0x00000036,0x00000009,0x00000006,0x0004002b,0x00000006,0x00000039,
-+	0x00000000,0x00020014,0x0000003a,0x0004002b,0x00000008,0x00000047,0x3f800000,0x0004002b,
-+	0x00000008,0x00000049,0x437f0000,0x00040017,0x00000050,0x00000006,0x00000003,0x00040020,
-+	0x00000051,0x00000001,0x00000050,0x0004003b,0x00000051,0x00000052,0x00000001,0x00040020,
-+	0x00000053,0x00000001,0x00000006,0x0004002b,0x00000006,0x00000056,0x00000004,0x0004002b,
-+	0x00000006,0x00000059,0x00000001,0x0004002b,0x00000006,0x0000005c,0x00000002,0x0004002b,
-+	0x0000001f,0x0000005f,0x00000002,0x0004002b,0x0000001f,0x00000067,0x00000003,0x0004002b,
-+	0x00000006,0x0000007f,0x00000008,0x0004001c,0x00000080,0x00000009,0x0000007f,0x00040020,
-+	0x00000081,0x00000007,0x00000080,0x0004002b,0x00000008,0x000000a3,0x3e59b3d0,0x0004002b,
-+	0x00000008,0x000000a4,0x3f371759,0x0004002b,0x00000008,0x000000a5,0x3d93dd98,0x0006002c,
-+	0x00000009,0x000000a6,0x000000a3,0x000000a4,0x000000a5,0x0004002b,0x00000006,0x000000d6,
-+	0x00000005,0x0004002b,0x00000008,0x000000dd,0x3e800000,0x0004002b,0x00000008,0x000000e6,
-+	0x3fed844d,0x0004002b,0x00000006,0x000000eb,0x00000010,0x0004002b,0x00000008,0x000000f5,
-+	0x3fc9930c,0x0003001d,0x00000102,0x00000006,0x0003001e,0x00000103,0x00000102,0x00040020,
-+	0x00000104,0x00000002,0x00000103,0x0004003b,0x00000104,0x00000105,0x00000002,0x00040020,
-+	0x0000010e,0x00000002,0x00000006,0x0006002c,0x00000050,0x0000012a,0x0000007f,0x0000007f,
-+	0x00000059,0x00050036,0x00000002,0x00000004,0x00000000,0x00000003,0x000200f8,0x00000005,
-+	0x0004003b,0x00000007,0x0000004f,0x00000007,0x0004003b,0x00000007,0x00000058,0x00000007,
-+	0x0004003b,0x00000007,0x0000006f,0x00000007,0x0004003b,0x00000007,0x00000077,0x00000007,
-+	0x0004003b,0x00000081,0x00000082,0x00000007,0x0004003b,0x00000007,0x0000008d,0x00000007,
-+	0x0004003b,0x00000007,0x0000008e,0x00000007,0x0004003b,0x00000007,0x00000095,0x00000007,
-+	0x0004003b,0x00000007,0x00000096,0x00000007,0x0004003b,0x00000007,0x00000097,0x00000007,
-+	0x0004003b,0x00000007,0x00000098,0x00000007,0x0004003b,0x0000000f,0x000000a8,0x00000007,
-+	0x0004003b,0x0000000f,0x000000b4,0x00000007,0x0004003b,0x00000007,0x000000bd,0x00000007,
-+	0x0004003b,0x00000014,0x000000c5,0x00000007,0x0004003b,0x0000000f,0x000000df,0x00000007,
-+	0x0004003b,0x0000000f,0x000000e9,0x00000007,0x0004003b,0x0000000f,0x000000f8,0x00000007,
-+	0x00050041,0x00000053,0x00000054,0x00000052,0x00000039,0x0004003d,0x00000006,0x00000055,
-+	0x00000054,0x00050084,0x00000006,0x00000057,0x00000055,0x00000056,0x0003003e,0x0000004f,
-+	0x00000057,0x00050041,0x00000053,0x0000005a,0x00000052,0x00000059,0x0004003d,0x00000006,
-+	0x0000005b,0x0000005a,0x00050084,0x00000006,0x0000005d,0x0000005b,0x0000005c,0x0003003e,
-+	0x00000058,0x0000005d,0x0004003d,0x00000006,0x0000005e,0x0000004f,0x00050041,0x00000036,
-+	0x00000060,0x0000001e,0x0000005f,0x0004003d,0x00000006,0x00000061,0x00000060,0x000500ae,
-+	0x0000003a,0x00000062,0x0000005e,0x00000061,0x000400a8,0x0000003a,0x00000063,0x00000062,
-+	0x000300f7,0x00000065,0x00000000,0x000400fa,0x00000063,0x00000064,0x00000065,0x000200f8,
-+	0x00000064,0x0004003d,0x00000006,0x00000066,0x00000058,0x00050041,0x00000036,0x00000068,
-+	0x0000001e,0x00000067,0x0004003d,0x00000006,0x00000069,0x00000068,0x000500ae,0x0000003a,
-+	0x0000006a,0x00000066,0x00000069,0x000200f9,0x00000065,0x000200f8,0x00000065,0x000700f5,
-+	0x0000003a,0x0000006b,0x00000062,0x00000005,0x0000006a,0x00000064,0x000300f7,0x0000006d,
-+	0x00000000,0x000400fa,0x0000006b,0x0000006c,0x0000006d,0x000200f8,0x0000006c,0x000100fd,
-+	0x000200f8,0x0000006d,0x0003003e,0x0000006f,0x00000039,0x000200f9,0x00000070,0x000200f8,
-+	0x00000070,0x000400f6,0x00000072,0x00000073,0x00000000,0x000200f9,0x00000074,0x000200f8,
-+	0x00000074,0x0004003d,0x00000006,0x00000075,0x0000006f,0x000500b0,0x0000003a,0x00000076,
-+	0x00000075,0x0000005c,0x000400fa,0x00000076,0x00000071,0x00000072,0x000200f8,0x00000071,
-+	0x0003003e,0x00000077,0x00000039,0x000200f9,0x00000078,0x000200f8,0x00000078,0x000400f6,
-+	0x0000007a,0x0000007b,0x00000000,0x000200f9,0x0000007c,0x000200f8,0x0000007c,0x0004003d,
-+	0x00000006,0x0000007d,0x00000077,0x000500b0,0x0000003a,0x0000007e,0x0000007d,0x00000056,
-+	0x000400fa,0x0000007e,0x00000079,0x0000007a,0x000200f8,0x00000079,0x0004003d,0x00000006,
-+	0x00000083,0x0000006f,0x00050084,0x00000006,0x00000084,0x00000083,0x00000056,0x0004003d,
-+	0x00000006,0x00000085,0x00000077,0x00050080,0x00000006,0x00000086,0x00000084,0x00000085,
-+	0x0004003d,0x00000006,0x00000087,0x0000004f,0x0004003d,0x00000006,0x00000088,0x00000077,
-+	0x00050080,0x00000006,0x00000089,0x00000087,0x00000088,0x0004003d,0x00000006,0x0000008a,
-+	0x00000058,0x0004003d,0x00000006,0x0000008b,0x0000006f,0x00050080,0x00000006,0x0000008c,
-+	0x0000008a,0x0000008b,0x0003003e,0x0000008d,0x00000089,0x0003003e,0x0000008e,0x0000008c,
-+	0x00060039,0x00000009,0x0000008f,0x0000000d,0x0000008d,0x0000008e,0x00050041,0x00000014,
-+	0x00000090,0x00000082,0x00000086,0x0003003e,0x00000090,0x0000008f,0x000200f9,0x0000007b,
-+	0x000200f8,0x0000007b,0x0004003d,0x00000006,0x00000091,0x00000077,0x00050080,0x00000006,
-+	0x00000092,0x00000091,0x0000002c,0x0003003e,0x00000077,0x00000092,0x000200f9,0x00000078,
-+	0x000200f8,0x0000007a,0x000200f9,0x00000073,0x000200f8,0x00000073,0x0004003d,0x00000006,
-+	0x00000093,0x0000006f,0x00050080,0x00000006,0x00000094,0x00000093,0x0000002c,0x0003003e,
-+	0x0000006f,0x00000094,0x000200f9,0x00000070,0x000200f8,0x00000072,0x0003003e,0x00000095,
-+	0x00000039,0x0003003e,0x00000096,0x00000039,0x0003003e,0x00000097,0x00000039,0x0003003e,
-+	0x00000098,0x00000039,0x000200f9,0x00000099,0x000200f8,0x00000099,0x000400f6,0x0000009b,
-+	0x0000009c,0x00000000,0x000200f9,0x0000009d,0x000200f8,0x0000009d,0x0004003d,0x00000006,
-+	0x0000009e,0x00000098,0x000500b0,0x0000003a,0x0000009f,0x0000009e,0x00000056,0x000400fa,
-+	0x0000009f,0x0000009a,0x0000009b,0x000200f8,0x0000009a,0x0004003d,0x00000006,0x000000a0,
-+	0x00000098,0x00050041,0x00000014,0x000000a1,0x00000082,0x000000a0,0x0004003d,0x00000009,
-+	0x000000a2,0x000000a1,0x00050094,0x00000008,0x000000a7,0x000000a2,0x000000a6,0x0003003e,
-+	0x000000a8,0x000000a7,0x00050039,0x00000006,0x000000a9,0x00000012,0x000000a8,0x0004003d,
-+	0x00000006,0x000000aa,0x00000098,0x00050084,0x00000006,0x000000ab,0x0000007f,0x000000aa,
-+	0x000500c4,0x00000006,0x000000ac,0x000000a9,0x000000ab,0x0004003d,0x00000006,0x000000ad,
-+	0x00000095,0x000500c5,0x00000006,0x000000ae,0x000000ad,0x000000ac,0x0003003e,0x00000095,
-+	0x000000ae,0x0004003d,0x00000006,0x000000af,0x00000098,0x00050080,0x00000006,0x000000b0,
-+	0x00000056,0x000000af,0x00050041,0x00000014,0x000000b1,0x00000082,0x000000b0,0x0004003d,
-+	0x00000009,0x000000b2,0x000000b1,0x00050094,0x00000008,0x000000b3,0x000000b2,0x000000a6,
-+	0x0003003e,0x000000b4,0x000000b3,0x00050039,0x00000006,0x000000b5,0x00000012,0x000000b4,
-+	0x0004003d,0x00000006,0x000000b6,0x00000098,0x00050084,0x00000006,0x000000b7,0x0000007f,
-+	0x000000b6,0x000500c4,0x00000006,0x000000b8,0x000000b5,0x000000b7,0x0004003d,0x00000006,
-+	0x000000b9,0x00000096,0x000500c5,0x00000006,0x000000ba,0x000000b9,0x000000b8,0x0003003e,
-+	0x00000096,0x000000ba,0x000200f9,0x0000009c,0x000200f8,0x0000009c,0x0004003d,0x00000006,
-+	0x000000bb,0x00000098,0x00050080,0x00000006,0x000000bc,0x000000bb,0x0000002c,0x0003003e,
-+	0x00000098,0x000000bc,0x000200f9,0x00000099,0x000200f8,0x0000009b,0x0003003e,0x000000bd,
-+	0x00000039,0x000200f9,0x000000be,0x000200f8,0x000000be,0x000400f6,0x000000c0,0x000000c1,
-+	0x00000000,0x000200f9,0x000000c2,0x000200f8,0x000000c2,0x0004003d,0x00000006,0x000000c3,
-+	0x000000bd,0x000500b0,0x0000003a,0x000000c4,0x000000c3,0x0000005c,0x000400fa,0x000000c4,
-+	0x000000bf,0x000000c0,0x000200f8,0x000000bf,0x0004003d,0x00000006,0x000000c6,0x000000bd,
-+	0x00050084,0x00000006,0x000000c7,0x0000005c,0x000000c6,0x00050041,0x00000014,0x000000c8,
-+	0x00000082,0x000000c7,0x0004003d,0x00000009,0x000000c9,0x000000c8,0x0004003d,0x00000006,
-+	0x000000ca,0x000000bd,0x00050084,0x00000006,0x000000cb,0x0000005c,0x000000ca,0x00050080,
-+	0x00000006,0x000000cc,0x000000cb,0x00000059,0x00050041,0x00000014,0x000000cd,0x00000082,
-+	0x000000cc,0x0004003d,0x00000009,0x000000ce,0x000000cd,0x00050081,0x00000009,0x000000cf,
-+	0x000000c9,0x000000ce,0x0004003d,0x00000006,0x000000d0,0x000000bd,0x00050084,0x00000006,
-+	0x000000d1,0x0000005c,0x000000d0,0x00050080,0x00000006,0x000000d2,0x00000056,0x000000d1,
-+	0x00050041,0x00000014,0x000000d3,0x00000082,0x000000d2,0x0004003d,0x00000009,0x000000d4,
-+	0x000000d3,0x00050081,0x00000009,0x000000d5,0x000000cf,0x000000d4,0x0004003d,0x00000006,
-+	0x000000d7,0x000000bd,0x00050084,0x00000006,0x000000d8,0x0000005c,0x000000d7,0x00050080,
-+	0x00000006,0x000000d9,0x000000d6,0x000000d8,0x00050041,0x00000014,0x000000da,0x00000082,
-+	0x000000d9,0x0004003d,0x00000009,0x000000db,0x000000da,0x00050081,0x00000009,0x000000dc,
-+	0x000000d5,0x000000db,0x0005008e,0x00000009,0x000000de,0x000000dc,0x000000dd,0x0003003e,
-+	0x000000c5,0x000000de,0x0004003d,0x00000009,0x000000e0,0x000000c5,0x00050094,0x00000008,
-+	0x000000e1,0x000000e0,0x000000a6,0x0003003e,0x000000df,0x000000e1,0x00050041,0x0000000f,
-+	0x000000e2,0x000000c5,0x0000005c,0x0004003d,0x00000008,0x000000e3,0x000000e2,0x0004003d,
-+	0x00000008,0x000000e4,0x000000df,0x00050083,0x00000008,0x000000e5,0x000000e3,0x000000e4,
-+	0x00050088,0x00000008,0x000000e7,0x000000e5,0x000000e6,0x00050081,0x00000008,0x000000e8,
-+	0x000000e7,0x00000029,0x0003003e,0x000000e9,0x000000e8,0x00050039,0x00000006,0x000000ea,
-+	0x00000012,0x000000e9,0x0004003d,0x00000006,0x000000ec,0x000000bd,0x00050084,0x00000006,
-+	0x000000ed,0x000000eb,0x000000ec,0x000500c4,0x00000006,0x000000ee,0x000000ea,0x000000ed,
-+	0x0004003d,0x00000006,0x000000ef,0x00000097,0x000500c5,0x00000006,0x000000f0,0x000000ef,
-+	0x000000ee,0x0003003e,0x00000097,0x000000f0,0x00050041,0x0000000f,0x000000f1,0x000000c5,
-+	0x00000039,0x0004003d,0x00000008,0x000000f2,0x000000f1,0x0004003d,0x00000008,0x000000f3,
-+	0x000000df,0x00050083,0x00000008,0x000000f4,0x000000f2,0x000000f3,0x00050088,0x00000008,
-+	0x000000f6,0x000000f4,0x000000f5,0x00050081,0x00000008,0x000000f7,0x000000f6,0x00000029,
-+	0x0003003e,0x000000f8,0x000000f7,0x00050039,0x00000006,0x000000f9,0x00000012,0x000000f8,
-+	0x0004003d,0x00000006,0x000000fa,0x000000bd,0x00050084,0x00000006,0x000000fb,0x000000eb,
-+	0x000000fa,0x00050080,0x00000006,0x000000fc,0x000000fb,0x0000007f,0x000500c4,0x00000006,
-+	0x000000fd,0x000000f9,0x000000fc,0x0004003d,0x00000006,0x000000fe,0x00000097,0x000500c5,
-+	0x00000006,0x000000ff,0x000000fe,0x000000fd,0x0003003e,0x00000097,0x000000ff,0x000200f9,
-+	0x000000c1,0x000200f8,0x000000c1,0x0004003d,0x00000006,0x00000100,0x000000bd,0x00050080,
-+	0x00000006,0x00000101,0x00000100,0x0000002c,0x0003003e,0x000000bd,0x00000101,0x000200f9,
-+	0x000000be,0x000200f8,0x000000c0,0x0004003d,0x00000006,0x00000106,0x00000058,0x00050041,
-+	0x00000036,0x00000107,0x0000001e,0x0000005f,0x0004003d,0x00000006,0x00000108,0x00000107,
-+	0x00050084,0x00000006,0x00000109,0x00000106,0x00000108,0x0004003d,0x00000006,0x0000010a,
-+	0x0000004f,0x00050080,0x00000006,0x0000010b,0x00000109,0x0000010a,0x00050086,0x00000006,
-+	0x0000010c,0x0000010b,0x00000056,0x0004003d,0x00000006,0x0000010d,0x00000095,0x00060041,
-+	0x0000010e,0x0000010f,0x00000105,0x00000020,0x0000010c,0x0003003e,0x0000010f,0x0000010d,
-+	0x0004003d,0x00000006,0x00000110,0x00000058,0x00050080,0x00000006,0x00000111,0x00000110,
-+	0x00000059,0x00050041,0x00000036,0x00000112,0x0000001e,0x0000005f,0x0004003d,0x00000006,
-+	0x00000113,0x00000112,0x00050084,0x00000006,0x00000114,0x00000111,0x00000113,0x0004003d,
-+	0x00000006,0x00000115,0x0000004f,0x00050080,0x00000006,0x00000116,0x00000114,0x00000115,
-+	0x00050086,0x00000006,0x00000117,0x00000116,0x00000056,0x0004003d,0x00000006,0x00000118,
-+	0x00000096,0x00060041,0x0000010e,0x00000119,0x00000105,0x00000020,0x00000117,0x0003003e,
-+	0x00000119,0x00000118,0x00050041,0x00000036,0x0000011a,0x0000001e,0x0000005f,0x0004003d,
-+	0x00000006,0x0000011b,0x0000011a,0x00050041,0x00000036,0x0000011c,0x0000001e,0x00000067,
-+	0x0004003d,0x00000006,0x0000011d,0x0000011c,0x00050084,0x00000006,0x0000011e,0x0000011b,
-+	0x0000011d,0x0004003d,0x00000006,0x0000011f,0x00000058,0x00050086,0x00000006,0x00000120,
-+	0x0000011f,0x0000005c,0x00050041,0x00000036,0x00000121,0x0000001e,0x0000005f,0x0004003d,
-+	0x00000006,0x00000122,0x00000121,0x00050084,0x00000006,0x00000123,0x00000120,0x00000122,
-+	0x00050080,0x00000006,0x00000124,0x0000011e,0x00000123,0x0004003d,0x00000006,0x00000125,
-+	0x0000004f,0x00050080,0x00000006,0x00000126,0x00000124,0x00000125,0x00050086,0x00000006,
-+	0x00000127,0x00000126,0x00000056,0x0004003d,0x00000006,0x00000128,0x00000097,0x00060041,
-+	0x0000010e,0x00000129,0x00000105,0x00000020,0x00000127,0x0003003e,0x00000129,0x00000128,
++	0x31662862,0x0000003b,0x00030005,0x00000011,0x00000076,0x00030005,0x00000016,0x00007675,
++	0x00030005,0x00000018,0x00000050,0x00050006,0x00000018,0x00000000,0x6769726f,0x00006e69,
++	0x00050006,0x00000018,0x00000001,0x6c616373,0x00000065,0x00040006,0x00000018,0x00000002,
++	0x00000077,0x00040006,0x00000018,0x00000003,0x00000068,0x00050006,0x00000018,0x00000004,
++	0x70617773,0x0062725f,0x00050006,0x00000018,0x00000005,0x5f736168,0x00647568,0x00040006,
++	0x00000018,0x00000006,0x006e6174,0x00040006,0x00000018,0x00000007,0x00003072,0x00040006,
++	0x00000018,0x00000008,0x00003172,0x00040006,0x00000018,0x00000009,0x00003272,0x00030005,
++	0x0000001a,0x00000070,0x00030005,0x0000002e,0x00726964,0x00030005,0x00000045,0x00000072,
++	0x00030005,0x0000005a,0x00000063,0x00030005,0x00000064,0x00000074,0x00030005,0x0000006c,
++	0x00000071,0x00030005,0x00000096,0x00637273,0x00030005,0x000000a3,0x0000006f,0x00030005,
++	0x000000a4,0x00647568,0x00030005,0x000000c6,0x00003078,0x00080005,0x000000c9,0x475f6c67,
++	0x61626f6c,0x766e496c,0x7461636f,0x496e6f69,0x00000044,0x00030005,0x000000cf,0x00003079,
++	0x00030005,0x000000e4,0x00000069,0x00030005,0x000000ec,0x0000006a,0x00030005,0x000000f7,
++	0x00000063,0x00040005,0x00000102,0x61726170,0x0000006d,0x00040005,0x00000103,0x61726170,
++	0x0000006d,0x00030005,0x0000010a,0x00003072,0x00030005,0x0000010b,0x00003172,0x00030005,
++	0x0000010c,0x00007675,0x00030005,0x0000010d,0x0000006a,0x00040005,0x0000011d,0x61726170,
++	0x0000006d,0x00040005,0x00000129,0x61726170,0x0000006d,0x00030005,0x00000132,0x0000006b,
++	0x00030005,0x0000013a,0x00000061,0x00030005,0x00000154,0x00000079,0x00040005,0x0000015e,
++	0x61726170,0x0000006d,0x00040005,0x0000016d,0x61726170,0x0000006d,0x00030005,0x00000178,
++	0x0074754f,0x00040006,0x00000178,0x00000000,0x00000064,0x00030005,0x0000017a,0x00000000,
++	0x00030047,0x00000018,0x00000002,0x00050048,0x00000018,0x00000000,0x00000023,0x00000000,
++	0x00050048,0x00000018,0x00000001,0x00000023,0x00000008,0x00050048,0x00000018,0x00000002,
++	0x00000023,0x00000010,0x00050048,0x00000018,0x00000003,0x00000023,0x00000014,0x00050048,
++	0x00000018,0x00000004,0x00000023,0x00000018,0x00050048,0x00000018,0x00000005,0x00000023,
++	0x0000001c,0x00050048,0x00000018,0x00000006,0x00000023,0x00000020,0x00050048,0x00000018,
++	0x00000007,0x00000023,0x00000030,0x00050048,0x00000018,0x00000008,0x00000023,0x00000040,
++	0x00050048,0x00000018,0x00000009,0x00000023,0x00000050,0x00040047,0x00000096,0x00000021,
++	0x00000000,0x00040047,0x00000096,0x00000022,0x00000000,0x00040047,0x000000a4,0x00000021,
++	0x00000002,0x00040047,0x000000a4,0x00000022,0x00000000,0x00040047,0x000000c9,0x0000000b,
++	0x0000001c,0x00040047,0x00000177,0x00000006,0x00000004,0x00030047,0x00000178,0x00000003,
++	0x00040048,0x00000178,0x00000000,0x00000019,0x00050048,0x00000178,0x00000000,0x00000023,
++	0x00000000,0x00030047,0x0000017a,0x00000019,0x00040047,0x0000017a,0x00000021,0x00000001,
++	0x00040047,0x0000017a,0x00000022,0x00000000,0x00040047,0x0000019f,0x0000000b,0x00000019,
++	0x00020013,0x00000002,0x00030021,0x00000003,0x00000002,0x00040015,0x00000006,0x00000020,
++	0x00000000,0x00040020,0x00000007,0x00000007,0x00000006,0x00030016,0x00000008,0x00000020,
++	0x00040017,0x00000009,0x00000008,0x00000003,0x00050021,0x0000000a,0x00000009,0x00000007,
++	0x00000007,0x00040020,0x0000000f,0x00000007,0x00000008,0x00040021,0x00000010,0x00000006,
++	0x0000000f,0x00040017,0x00000014,0x00000008,0x00000002,0x00040020,0x00000015,0x00000007,
++	0x00000014,0x00040017,0x00000017,0x00000008,0x00000004,0x000c001e,0x00000018,0x00000014,
++	0x00000014,0x00000006,0x00000006,0x00000006,0x00000006,0x00000017,0x00000017,0x00000017,
++	0x00000017,0x00040020,0x00000019,0x00000009,0x00000018,0x0004003b,0x00000019,0x0000001a,
++	0x00000009,0x00040015,0x0000001b,0x00000020,0x00000001,0x0004002b,0x0000001b,0x0000001c,
++	0x00000000,0x00040020,0x0000001d,0x00000009,0x00000014,0x0004002b,0x00000008,0x00000025,
++	0x3f000000,0x0004002b,0x0000001b,0x00000028,0x00000001,0x00040020,0x0000002d,0x00000007,
++	0x00000009,0x0004002b,0x0000001b,0x0000002f,0x00000006,0x0004002b,0x00000006,0x00000030,
++	0x00000000,0x00040020,0x00000031,0x00000009,0x00000008,0x0004002b,0x00000006,0x00000034,
++	0x00000001,0x0004002b,0x00000006,0x0000003a,0x00000002,0x0004002b,0x00000006,0x0000003d,
++	0x00000003,0x0004002b,0x00000008,0x00000043,0xbf800000,0x0004002b,0x0000001b,0x00000046,
++	0x00000007,0x00040020,0x00000047,0x00000009,0x00000017,0x0004002b,0x0000001b,0x0000004d,
++	0x00000008,0x0004002b,0x0000001b,0x00000053,0x00000009,0x0004002b,0x00000008,0x0000005b,
++	0x00000000,0x0006002c,0x00000009,0x0000005c,0x0000005b,0x0000005b,0x0000005b,0x0004002b,
++	0x00000008,0x0000005f,0xbd4ccccd,0x00020014,0x00000060,0x0005002c,0x00000014,0x00000085,
++	0x0000005b,0x0000005b,0x00040017,0x00000086,0x00000060,0x00000002,0x0004002b,0x00000008,
++	0x0000008c,0x3f800000,0x0005002c,0x00000014,0x0000008d,0x0000008c,0x0000008c,0x00090019,
++	0x00000093,0x00000008,0x00000001,0x00000000,0x00000000,0x00000000,0x00000001,0x00000000,
++	0x0003001b,0x00000094,0x00000093,0x00040020,0x00000095,0x00000000,0x00000094,0x0004003b,
++	0x00000095,0x00000096,0x00000000,0x0004002b,0x0000001b,0x0000009b,0x00000005,0x00040020,
++	0x0000009c,0x00000009,0x00000006,0x00040020,0x000000a2,0x00000007,0x00000017,0x0004003b,
++	0x00000095,0x000000a4,0x00000000,0x0004002b,0x0000001b,0x000000b0,0x00000004,0x0004002b,
++	0x00000008,0x000000c0,0x437f0000,0x00040017,0x000000c7,0x00000006,0x00000003,0x00040020,
++	0x000000c8,0x00000001,0x000000c7,0x0004003b,0x000000c8,0x000000c9,0x00000001,0x00040020,
++	0x000000ca,0x00000001,0x00000006,0x0004002b,0x00000006,0x000000cd,0x00000004,0x0004002b,
++	0x0000001b,0x000000d4,0x00000002,0x0004002b,0x0000001b,0x000000dc,0x00000003,0x0004002b,
++	0x00000006,0x000000f4,0x00000008,0x0004001c,0x000000f5,0x00000009,0x000000f4,0x00040020,
++	0x000000f6,0x00000007,0x000000f5,0x0004002b,0x00000008,0x00000118,0x3e59b3d0,0x0004002b,
++	0x00000008,0x00000119,0x3f371759,0x0004002b,0x00000008,0x0000011a,0x3d93dd98,0x0006002c,
++	0x00000009,0x0000011b,0x00000118,0x00000119,0x0000011a,0x0004002b,0x00000006,0x0000014b,
++	0x00000005,0x0004002b,0x00000008,0x00000152,0x3e800000,0x0004002b,0x00000008,0x0000015b,
++	0x3fed844d,0x0004002b,0x00000006,0x00000160,0x00000010,0x0004002b,0x00000008,0x0000016a,
++	0x3fc9930c,0x0003001d,0x00000177,0x00000006,0x0003001e,0x00000178,0x00000177,0x00040020,
++	0x00000179,0x00000002,0x00000178,0x0004003b,0x00000179,0x0000017a,0x00000002,0x00040020,
++	0x00000183,0x00000002,0x00000006,0x0006002c,0x000000c7,0x0000019f,0x000000f4,0x000000f4,
++	0x00000034,0x00050036,0x00000002,0x00000004,0x00000000,0x00000003,0x000200f8,0x00000005,
++	0x0004003b,0x00000007,0x000000c6,0x00000007,0x0004003b,0x00000007,0x000000cf,0x00000007,
++	0x0004003b,0x00000007,0x000000e4,0x00000007,0x0004003b,0x00000007,0x000000ec,0x00000007,
++	0x0004003b,0x000000f6,0x000000f7,0x00000007,0x0004003b,0x00000007,0x00000102,0x00000007,
++	0x0004003b,0x00000007,0x00000103,0x00000007,0x0004003b,0x00000007,0x0000010a,0x00000007,
++	0x0004003b,0x00000007,0x0000010b,0x00000007,0x0004003b,0x00000007,0x0000010c,0x00000007,
++	0x0004003b,0x00000007,0x0000010d,0x00000007,0x0004003b,0x0000000f,0x0000011d,0x00000007,
++	0x0004003b,0x0000000f,0x00000129,0x00000007,0x0004003b,0x00000007,0x00000132,0x00000007,
++	0x0004003b,0x0000002d,0x0000013a,0x00000007,0x0004003b,0x0000000f,0x00000154,0x00000007,
++	0x0004003b,0x0000000f,0x0000015e,0x00000007,0x0004003b,0x0000000f,0x0000016d,0x00000007,
++	0x00050041,0x000000ca,0x000000cb,0x000000c9,0x00000030,0x0004003d,0x00000006,0x000000cc,
++	0x000000cb,0x00050084,0x00000006,0x000000ce,0x000000cc,0x000000cd,0x0003003e,0x000000c6,
++	0x000000ce,0x00050041,0x000000ca,0x000000d0,0x000000c9,0x00000034,0x0004003d,0x00000006,
++	0x000000d1,0x000000d0,0x00050084,0x00000006,0x000000d2,0x000000d1,0x0000003a,0x0003003e,
++	0x000000cf,0x000000d2,0x0004003d,0x00000006,0x000000d3,0x000000c6,0x00050041,0x0000009c,
++	0x000000d5,0x0000001a,0x000000d4,0x0004003d,0x00000006,0x000000d6,0x000000d5,0x000500ae,
++	0x00000060,0x000000d7,0x000000d3,0x000000d6,0x000400a8,0x00000060,0x000000d8,0x000000d7,
++	0x000300f7,0x000000da,0x00000000,0x000400fa,0x000000d8,0x000000d9,0x000000da,0x000200f8,
++	0x000000d9,0x0004003d,0x00000006,0x000000db,0x000000cf,0x00050041,0x0000009c,0x000000dd,
++	0x0000001a,0x000000dc,0x0004003d,0x00000006,0x000000de,0x000000dd,0x000500ae,0x00000060,
++	0x000000df,0x000000db,0x000000de,0x000200f9,0x000000da,0x000200f8,0x000000da,0x000700f5,
++	0x00000060,0x000000e0,0x000000d7,0x00000005,0x000000df,0x000000d9,0x000300f7,0x000000e2,
++	0x00000000,0x000400fa,0x000000e0,0x000000e1,0x000000e2,0x000200f8,0x000000e1,0x000100fd,
++	0x000200f8,0x000000e2,0x0003003e,0x000000e4,0x00000030,0x000200f9,0x000000e5,0x000200f8,
++	0x000000e5,0x000400f6,0x000000e7,0x000000e8,0x00000000,0x000200f9,0x000000e9,0x000200f8,
++	0x000000e9,0x0004003d,0x00000006,0x000000ea,0x000000e4,0x000500b0,0x00000060,0x000000eb,
++	0x000000ea,0x0000003a,0x000400fa,0x000000eb,0x000000e6,0x000000e7,0x000200f8,0x000000e6,
++	0x0003003e,0x000000ec,0x00000030,0x000200f9,0x000000ed,0x000200f8,0x000000ed,0x000400f6,
++	0x000000ef,0x000000f0,0x00000000,0x000200f9,0x000000f1,0x000200f8,0x000000f1,0x0004003d,
++	0x00000006,0x000000f2,0x000000ec,0x000500b0,0x00000060,0x000000f3,0x000000f2,0x000000cd,
++	0x000400fa,0x000000f3,0x000000ee,0x000000ef,0x000200f8,0x000000ee,0x0004003d,0x00000006,
++	0x000000f8,0x000000e4,0x00050084,0x00000006,0x000000f9,0x000000f8,0x000000cd,0x0004003d,
++	0x00000006,0x000000fa,0x000000ec,0x00050080,0x00000006,0x000000fb,0x000000f9,0x000000fa,
++	0x0004003d,0x00000006,0x000000fc,0x000000c6,0x0004003d,0x00000006,0x000000fd,0x000000ec,
++	0x00050080,0x00000006,0x000000fe,0x000000fc,0x000000fd,0x0004003d,0x00000006,0x000000ff,
++	0x000000cf,0x0004003d,0x00000006,0x00000100,0x000000e4,0x00050080,0x00000006,0x00000101,
++	0x000000ff,0x00000100,0x0003003e,0x00000102,0x000000fe,0x0003003e,0x00000103,0x00000101,
++	0x00060039,0x00000009,0x00000104,0x0000000d,0x00000102,0x00000103,0x00050041,0x0000002d,
++	0x00000105,0x000000f7,0x000000fb,0x0003003e,0x00000105,0x00000104,0x000200f9,0x000000f0,
++	0x000200f8,0x000000f0,0x0004003d,0x00000006,0x00000106,0x000000ec,0x00050080,0x00000006,
++	0x00000107,0x00000106,0x00000028,0x0003003e,0x000000ec,0x00000107,0x000200f9,0x000000ed,
++	0x000200f8,0x000000ef,0x000200f9,0x000000e8,0x000200f8,0x000000e8,0x0004003d,0x00000006,
++	0x00000108,0x000000e4,0x00050080,0x00000006,0x00000109,0x00000108,0x00000028,0x0003003e,
++	0x000000e4,0x00000109,0x000200f9,0x000000e5,0x000200f8,0x000000e7,0x0003003e,0x0000010a,
++	0x00000030,0x0003003e,0x0000010b,0x00000030,0x0003003e,0x0000010c,0x00000030,0x0003003e,
++	0x0000010d,0x00000030,0x000200f9,0x0000010e,0x000200f8,0x0000010e,0x000400f6,0x00000110,
++	0x00000111,0x00000000,0x000200f9,0x00000112,0x000200f8,0x00000112,0x0004003d,0x00000006,
++	0x00000113,0x0000010d,0x000500b0,0x00000060,0x00000114,0x00000113,0x000000cd,0x000400fa,
++	0x00000114,0x0000010f,0x00000110,0x000200f8,0x0000010f,0x0004003d,0x00000006,0x00000115,
++	0x0000010d,0x00050041,0x0000002d,0x00000116,0x000000f7,0x00000115,0x0004003d,0x00000009,
++	0x00000117,0x00000116,0x00050094,0x00000008,0x0000011c,0x00000117,0x0000011b,0x0003003e,
++	0x0000011d,0x0000011c,0x00050039,0x00000006,0x0000011e,0x00000012,0x0000011d,0x0004003d,
++	0x00000006,0x0000011f,0x0000010d,0x00050084,0x00000006,0x00000120,0x000000f4,0x0000011f,
++	0x000500c4,0x00000006,0x00000121,0x0000011e,0x00000120,0x0004003d,0x00000006,0x00000122,
++	0x0000010a,0x000500c5,0x00000006,0x00000123,0x00000122,0x00000121,0x0003003e,0x0000010a,
++	0x00000123,0x0004003d,0x00000006,0x00000124,0x0000010d,0x00050080,0x00000006,0x00000125,
++	0x000000cd,0x00000124,0x00050041,0x0000002d,0x00000126,0x000000f7,0x00000125,0x0004003d,
++	0x00000009,0x00000127,0x00000126,0x00050094,0x00000008,0x00000128,0x00000127,0x0000011b,
++	0x0003003e,0x00000129,0x00000128,0x00050039,0x00000006,0x0000012a,0x00000012,0x00000129,
++	0x0004003d,0x00000006,0x0000012b,0x0000010d,0x00050084,0x00000006,0x0000012c,0x000000f4,
++	0x0000012b,0x000500c4,0x00000006,0x0000012d,0x0000012a,0x0000012c,0x0004003d,0x00000006,
++	0x0000012e,0x0000010b,0x000500c5,0x00000006,0x0000012f,0x0000012e,0x0000012d,0x0003003e,
++	0x0000010b,0x0000012f,0x000200f9,0x00000111,0x000200f8,0x00000111,0x0004003d,0x00000006,
++	0x00000130,0x0000010d,0x00050080,0x00000006,0x00000131,0x00000130,0x00000028,0x0003003e,
++	0x0000010d,0x00000131,0x000200f9,0x0000010e,0x000200f8,0x00000110,0x0003003e,0x00000132,
++	0x00000030,0x000200f9,0x00000133,0x000200f8,0x00000133,0x000400f6,0x00000135,0x00000136,
++	0x00000000,0x000200f9,0x00000137,0x000200f8,0x00000137,0x0004003d,0x00000006,0x00000138,
++	0x00000132,0x000500b0,0x00000060,0x00000139,0x00000138,0x0000003a,0x000400fa,0x00000139,
++	0x00000134,0x00000135,0x000200f8,0x00000134,0x0004003d,0x00000006,0x0000013b,0x00000132,
++	0x00050084,0x00000006,0x0000013c,0x0000003a,0x0000013b,0x00050041,0x0000002d,0x0000013d,
++	0x000000f7,0x0000013c,0x0004003d,0x00000009,0x0000013e,0x0000013d,0x0004003d,0x00000006,
++	0x0000013f,0x00000132,0x00050084,0x00000006,0x00000140,0x0000003a,0x0000013f,0x00050080,
++	0x00000006,0x00000141,0x00000140,0x00000034,0x00050041,0x0000002d,0x00000142,0x000000f7,
++	0x00000141,0x0004003d,0x00000009,0x00000143,0x00000142,0x00050081,0x00000009,0x00000144,
++	0x0000013e,0x00000143,0x0004003d,0x00000006,0x00000145,0x00000132,0x00050084,0x00000006,
++	0x00000146,0x0000003a,0x00000145,0x00050080,0x00000006,0x00000147,0x000000cd,0x00000146,
++	0x00050041,0x0000002d,0x00000148,0x000000f7,0x00000147,0x0004003d,0x00000009,0x00000149,
++	0x00000148,0x00050081,0x00000009,0x0000014a,0x00000144,0x00000149,0x0004003d,0x00000006,
++	0x0000014c,0x00000132,0x00050084,0x00000006,0x0000014d,0x0000003a,0x0000014c,0x00050080,
++	0x00000006,0x0000014e,0x0000014b,0x0000014d,0x00050041,0x0000002d,0x0000014f,0x000000f7,
++	0x0000014e,0x0004003d,0x00000009,0x00000150,0x0000014f,0x00050081,0x00000009,0x00000151,
++	0x0000014a,0x00000150,0x0005008e,0x00000009,0x00000153,0x00000151,0x00000152,0x0003003e,
++	0x0000013a,0x00000153,0x0004003d,0x00000009,0x00000155,0x0000013a,0x00050094,0x00000008,
++	0x00000156,0x00000155,0x0000011b,0x0003003e,0x00000154,0x00000156,0x00050041,0x0000000f,
++	0x00000157,0x0000013a,0x0000003a,0x0004003d,0x00000008,0x00000158,0x00000157,0x0004003d,
++	0x00000008,0x00000159,0x00000154,0x00050083,0x00000008,0x0000015a,0x00000158,0x00000159,
++	0x00050088,0x00000008,0x0000015c,0x0000015a,0x0000015b,0x00050081,0x00000008,0x0000015d,
++	0x0000015c,0x00000025,0x0003003e,0x0000015e,0x0000015d,0x00050039,0x00000006,0x0000015f,
++	0x00000012,0x0000015e,0x0004003d,0x00000006,0x00000161,0x00000132,0x00050084,0x00000006,
++	0x00000162,0x00000160,0x00000161,0x000500c4,0x00000006,0x00000163,0x0000015f,0x00000162,
++	0x0004003d,0x00000006,0x00000164,0x0000010c,0x000500c5,0x00000006,0x00000165,0x00000164,
++	0x00000163,0x0003003e,0x0000010c,0x00000165,0x00050041,0x0000000f,0x00000166,0x0000013a,
++	0x00000030,0x0004003d,0x00000008,0x00000167,0x00000166,0x0004003d,0x00000008,0x00000168,
++	0x00000154,0x00050083,0x00000008,0x00000169,0x00000167,0x00000168,0x00050088,0x00000008,
++	0x0000016b,0x00000169,0x0000016a,0x00050081,0x00000008,0x0000016c,0x0000016b,0x00000025,
++	0x0003003e,0x0000016d,0x0000016c,0x00050039,0x00000006,0x0000016e,0x00000012,0x0000016d,
++	0x0004003d,0x00000006,0x0000016f,0x00000132,0x00050084,0x00000006,0x00000170,0x00000160,
++	0x0000016f,0x00050080,0x00000006,0x00000171,0x00000170,0x000000f4,0x000500c4,0x00000006,
++	0x00000172,0x0000016e,0x00000171,0x0004003d,0x00000006,0x00000173,0x0000010c,0x000500c5,
++	0x00000006,0x00000174,0x00000173,0x00000172,0x0003003e,0x0000010c,0x00000174,0x000200f9,
++	0x00000136,0x000200f8,0x00000136,0x0004003d,0x00000006,0x00000175,0x00000132,0x00050080,
++	0x00000006,0x00000176,0x00000175,0x00000028,0x0003003e,0x00000132,0x00000176,0x000200f9,
++	0x00000133,0x000200f8,0x00000135,0x0004003d,0x00000006,0x0000017b,0x000000cf,0x00050041,
++	0x0000009c,0x0000017c,0x0000001a,0x000000d4,0x0004003d,0x00000006,0x0000017d,0x0000017c,
++	0x00050084,0x00000006,0x0000017e,0x0000017b,0x0000017d,0x0004003d,0x00000006,0x0000017f,
++	0x000000c6,0x00050080,0x00000006,0x00000180,0x0000017e,0x0000017f,0x00050086,0x00000006,
++	0x00000181,0x00000180,0x000000cd,0x0004003d,0x00000006,0x00000182,0x0000010a,0x00060041,
++	0x00000183,0x00000184,0x0000017a,0x0000001c,0x00000181,0x0003003e,0x00000184,0x00000182,
++	0x0004003d,0x00000006,0x00000185,0x000000cf,0x00050080,0x00000006,0x00000186,0x00000185,
++	0x00000034,0x00050041,0x0000009c,0x00000187,0x0000001a,0x000000d4,0x0004003d,0x00000006,
++	0x00000188,0x00000187,0x00050084,0x00000006,0x00000189,0x00000186,0x00000188,0x0004003d,
++	0x00000006,0x0000018a,0x000000c6,0x00050080,0x00000006,0x0000018b,0x00000189,0x0000018a,
++	0x00050086,0x00000006,0x0000018c,0x0000018b,0x000000cd,0x0004003d,0x00000006,0x0000018d,
++	0x0000010b,0x00060041,0x00000183,0x0000018e,0x0000017a,0x0000001c,0x0000018c,0x0003003e,
++	0x0000018e,0x0000018d,0x00050041,0x0000009c,0x0000018f,0x0000001a,0x000000d4,0x0004003d,
++	0x00000006,0x00000190,0x0000018f,0x00050041,0x0000009c,0x00000191,0x0000001a,0x000000dc,
++	0x0004003d,0x00000006,0x00000192,0x00000191,0x00050084,0x00000006,0x00000193,0x00000190,
++	0x00000192,0x0004003d,0x00000006,0x00000194,0x000000cf,0x00050086,0x00000006,0x00000195,
++	0x00000194,0x0000003a,0x00050041,0x0000009c,0x00000196,0x0000001a,0x000000d4,0x0004003d,
++	0x00000006,0x00000197,0x00000196,0x00050084,0x00000006,0x00000198,0x00000195,0x00000197,
++	0x00050080,0x00000006,0x00000199,0x00000193,0x00000198,0x0004003d,0x00000006,0x0000019a,
++	0x000000c6,0x00050080,0x00000006,0x0000019b,0x00000199,0x0000019a,0x00050086,0x00000006,
++	0x0000019c,0x0000019b,0x000000cd,0x0004003d,0x00000006,0x0000019d,0x0000010c,0x00060041,
++	0x00000183,0x0000019e,0x0000017a,0x0000001c,0x0000019c,0x0003003e,0x0000019e,0x0000019d,
 +	0x000100fd,0x00010038,0x00050036,0x00000009,0x0000000d,0x00000000,0x0000000a,0x00030037,
 +	0x00000007,0x0000000b,0x00030037,0x00000007,0x0000000c,0x000200f8,0x0000000e,0x0004003b,
-+	0x00000014,0x00000015,0x00000007,0x0004003b,0x00000014,0x0000003c,0x00000007,0x0004003d,
-+	0x00000017,0x0000001a,0x00000019,0x00050041,0x00000021,0x00000022,0x0000001e,0x00000020,
-+	0x0004003d,0x0000001b,0x00000023,0x00000022,0x0004003d,0x00000006,0x00000024,0x0000000b,
-+	0x00040070,0x00000008,0x00000025,0x00000024,0x0004003d,0x00000006,0x00000026,0x0000000c,
-+	0x00040070,0x00000008,0x00000027,0x00000026,0x00050050,0x0000001b,0x00000028,0x00000025,
-+	0x00000027,0x00050050,0x0000001b,0x0000002a,0x00000029,0x00000029,0x00050081,0x0000001b,
-+	0x0000002b,0x00000028,0x0000002a,0x00050041,0x00000021,0x0000002d,0x0000001e,0x0000002c,
-+	0x0004003d,0x0000001b,0x0000002e,0x0000002d,0x00050085,0x0000001b,0x0000002f,0x0000002b,
-+	0x0000002e,0x00050081,0x0000001b,0x00000030,0x00000023,0x0000002f,0x00070058,0x00000031,
-+	0x00000033,0x0000001a,0x00000030,0x00000002,0x00000032,0x0008004f,0x00000009,0x00000034,
-+	0x00000033,0x00000033,0x00000000,0x00000001,0x00000002,0x0003003e,0x00000015,0x00000034,
-+	0x00050041,0x00000036,0x00000037,0x0000001e,0x00000035,0x0004003d,0x00000006,0x00000038,
-+	0x00000037,0x000500ab,0x0000003a,0x0000003b,0x00000038,0x00000039,0x000300f7,0x0000003e,
-+	0x00000000,0x000400fa,0x0000003b,0x0000003d,0x00000041,0x000200f8,0x0000003d,0x0004003d,
-+	0x00000009,0x0000003f,0x00000015,0x0008004f,0x00000009,0x00000040,0x0000003f,0x0000003f,
-+	0x00000002,0x00000001,0x00000000,0x0003003e,0x0000003c,0x00000040,0x000200f9,0x0000003e,
-+	0x000200f8,0x00000041,0x0004003d,0x00000009,0x00000042,0x00000015,0x0003003e,0x0000003c,
-+	0x00000042,0x000200f9,0x0000003e,0x000200f8,0x0000003e,0x0004003d,0x00000009,0x00000043,
-+	0x0000003c,0x000200fe,0x00000043,0x00010038,0x00050036,0x00000006,0x00000012,0x00000000,
-+	0x00000010,0x00030037,0x0000000f,0x00000011,0x000200f8,0x00000013,0x0004003d,0x00000008,
-+	0x00000046,0x00000011,0x0008000c,0x00000008,0x00000048,0x00000001,0x0000002b,0x00000046,
-+	0x00000032,0x00000047,0x00050085,0x00000008,0x0000004a,0x00000048,0x00000049,0x00050081,
-+	0x00000008,0x0000004b,0x0000004a,0x00000029,0x0004006d,0x00000006,0x0000004c,0x0000004b,
-+	0x000200fe,0x0000004c,0x00010038
++	0x00000015,0x00000016,0x00000007,0x0004003b,0x0000002d,0x0000002e,0x00000007,0x0004003b,
++	0x0000002d,0x00000045,0x00000007,0x0004003b,0x0000002d,0x0000005a,0x00000007,0x0004003b,
++	0x00000015,0x00000064,0x00000007,0x0004003b,0x00000015,0x0000006c,0x00000007,0x0004003b,
++	0x000000a2,0x000000a3,0x00000007,0x0004003b,0x0000002d,0x000000b4,0x00000007,0x00050041,
++	0x0000001d,0x0000001e,0x0000001a,0x0000001c,0x0004003d,0x00000014,0x0000001f,0x0000001e,
++	0x0004003d,0x00000006,0x00000020,0x0000000b,0x00040070,0x00000008,0x00000021,0x00000020,
++	0x0004003d,0x00000006,0x00000022,0x0000000c,0x00040070,0x00000008,0x00000023,0x00000022,
++	0x00050050,0x00000014,0x00000024,0x00000021,0x00000023,0x00050050,0x00000014,0x00000026,
++	0x00000025,0x00000025,0x00050081,0x00000014,0x00000027,0x00000024,0x00000026,0x00050041,
++	0x0000001d,0x00000029,0x0000001a,0x00000028,0x0004003d,0x00000014,0x0000002a,0x00000029,
++	0x00050085,0x00000014,0x0000002b,0x00000027,0x0000002a,0x00050081,0x00000014,0x0000002c,
++	0x0000001f,0x0000002b,0x0003003e,0x00000016,0x0000002c,0x00060041,0x00000031,0x00000032,
++	0x0000001a,0x0000002f,0x00000030,0x0004003d,0x00000008,0x00000033,0x00000032,0x00060041,
++	0x00000031,0x00000035,0x0000001a,0x0000002f,0x00000034,0x0004003d,0x00000008,0x00000036,
++	0x00000035,0x00050041,0x0000000f,0x00000037,0x00000016,0x00000030,0x0004003d,0x00000008,
++	0x00000038,0x00000037,0x0008000c,0x00000008,0x00000039,0x00000001,0x0000002e,0x00000033,
++	0x00000036,0x00000038,0x00060041,0x00000031,0x0000003b,0x0000001a,0x0000002f,0x0000003a,
++	0x0004003d,0x00000008,0x0000003c,0x0000003b,0x00060041,0x00000031,0x0000003e,0x0000001a,
++	0x0000002f,0x0000003d,0x0004003d,0x00000008,0x0000003f,0x0000003e,0x00050041,0x0000000f,
++	0x00000040,0x00000016,0x00000034,0x0004003d,0x00000008,0x00000041,0x00000040,0x0008000c,
++	0x00000008,0x00000042,0x00000001,0x0000002e,0x0000003c,0x0000003f,0x00000041,0x00060050,
++	0x00000009,0x00000044,0x00000039,0x00000042,0x00000043,0x0003003e,0x0000002e,0x00000044,
++	0x00050041,0x00000047,0x00000048,0x0000001a,0x00000046,0x0004003d,0x00000017,0x00000049,
++	0x00000048,0x0008004f,0x00000009,0x0000004a,0x00000049,0x00000049,0x00000000,0x00000001,
++	0x00000002,0x0004003d,0x00000009,0x0000004b,0x0000002e,0x00050094,0x00000008,0x0000004c,
++	0x0000004a,0x0000004b,0x00050041,0x00000047,0x0000004e,0x0000001a,0x0000004d,0x0004003d,
++	0x00000017,0x0000004f,0x0000004e,0x0008004f,0x00000009,0x00000050,0x0000004f,0x0000004f,
++	0x00000000,0x00000001,0x00000002,0x0004003d,0x00000009,0x00000051,0x0000002e,0x00050094,
++	0x00000008,0x00000052,0x00000050,0x00000051,0x00050041,0x00000047,0x00000054,0x0000001a,
++	0x00000053,0x0004003d,0x00000017,0x00000055,0x00000054,0x0008004f,0x00000009,0x00000056,
++	0x00000055,0x00000055,0x00000000,0x00000001,0x00000002,0x0004003d,0x00000009,0x00000057,
++	0x0000002e,0x00050094,0x00000008,0x00000058,0x00000056,0x00000057,0x00060050,0x00000009,
++	0x00000059,0x0000004c,0x00000052,0x00000058,0x0003003e,0x00000045,0x00000059,0x0003003e,
++	0x0000005a,0x0000005c,0x00050041,0x0000000f,0x0000005d,0x00000045,0x0000003a,0x0004003d,
++	0x00000008,0x0000005e,0x0000005d,0x000500b8,0x00000060,0x00000061,0x0000005e,0x0000005f,
++	0x000300f7,0x00000063,0x00000000,0x000400fa,0x00000061,0x00000062,0x00000063,0x000200f8,
++	0x00000062,0x0004003d,0x00000009,0x00000065,0x00000045,0x0007004f,0x00000014,0x00000066,
++	0x00000065,0x00000065,0x00000000,0x00000001,0x00050041,0x0000000f,0x00000067,0x00000045,
++	0x0000003a,0x0004003d,0x00000008,0x00000068,0x00000067,0x0004007f,0x00000008,0x00000069,
++	0x00000068,0x00050050,0x00000014,0x0000006a,0x00000069,0x00000069,0x00050088,0x00000014,
++	0x0000006b,0x00000066,0x0000006a,0x0003003e,0x00000064,0x0000006b,0x00050041,0x0000000f,
++	0x0000006d,0x00000064,0x00000030,0x0004003d,0x00000008,0x0000006e,0x0000006d,0x00060041,
++	0x00000031,0x0000006f,0x0000001a,0x0000002f,0x00000030,0x0004003d,0x00000008,0x00000070,
++	0x0000006f,0x00050083,0x00000008,0x00000071,0x0000006e,0x00000070,0x00060041,0x00000031,
++	0x00000072,0x0000001a,0x0000002f,0x00000034,0x0004003d,0x00000008,0x00000073,0x00000072,
++	0x00060041,0x00000031,0x00000074,0x0000001a,0x0000002f,0x00000030,0x0004003d,0x00000008,
++	0x00000075,0x00000074,0x00050083,0x00000008,0x00000076,0x00000073,0x00000075,0x00050088,
++	0x00000008,0x00000077,0x00000071,0x00000076,0x00060041,0x00000031,0x00000078,0x0000001a,
++	0x0000002f,0x0000003a,0x0004003d,0x00000008,0x00000079,0x00000078,0x00050041,0x0000000f,
++	0x0000007a,0x00000064,0x00000034,0x0004003d,0x00000008,0x0000007b,0x0000007a,0x00050083,
++	0x00000008,0x0000007c,0x00000079,0x0000007b,0x00060041,0x00000031,0x0000007d,0x0000001a,
++	0x0000002f,0x0000003a,0x0004003d,0x00000008,0x0000007e,0x0000007d,0x00060041,0x00000031,
++	0x0000007f,0x0000001a,0x0000002f,0x0000003d,0x0004003d,0x00000008,0x00000080,0x0000007f,
++	0x00050083,0x00000008,0x00000081,0x0000007e,0x00000080,0x00050088,0x00000008,0x00000082,
++	0x0000007c,0x00000081,0x00050050,0x00000014,0x00000083,0x00000077,0x00000082,0x0003003e,
++	0x0000006c,0x00000083,0x0004003d,0x00000014,0x00000084,0x0000006c,0x000500be,0x00000086,
++	0x00000087,0x00000084,0x00000085,0x0004009b,0x00000060,0x00000088,0x00000087,0x000300f7,
++	0x0000008a,0x00000000,0x000400fa,0x00000088,0x00000089,0x0000008a,0x000200f8,0x00000089,
++	0x0004003d,0x00000014,0x0000008b,0x0000006c,0x000500bc,0x00000086,0x0000008e,0x0000008b,
++	0x0000008d,0x0004009b,0x00000060,0x0000008f,0x0000008e,0x000200f9,0x0000008a,0x000200f8,
++	0x0000008a,0x000700f5,0x00000060,0x00000090,0x00000088,0x00000062,0x0000008f,0x00000089,
++	0x000300f7,0x00000092,0x00000000,0x000400fa,0x00000090,0x00000091,0x00000092,0x000200f8,
++	0x00000091,0x0004003d,0x00000094,0x00000097,0x00000096,0x0004003d,0x00000014,0x00000098,
++	0x0000006c,0x00070058,0x00000017,0x00000099,0x00000097,0x00000098,0x00000002,0x0000005b,
++	0x0008004f,0x00000009,0x0000009a,0x00000099,0x00000099,0x00000000,0x00000001,0x00000002,
++	0x0003003e,0x0000005a,0x0000009a,0x000200f9,0x00000092,0x000200f8,0x00000092,0x000200f9,
++	0x00000063,0x000200f8,0x00000063,0x00050041,0x0000009c,0x0000009d,0x0000001a,0x0000009b,
++	0x0004003d,0x00000006,0x0000009e,0x0000009d,0x000500ab,0x00000060,0x0000009f,0x0000009e,
++	0x00000030,0x000300f7,0x000000a1,0x00000000,0x000400fa,0x0000009f,0x000000a0,0x000000a1,
++	0x000200f8,0x000000a0,0x0004003d,0x00000094,0x000000a5,0x000000a4,0x0004003d,0x00000014,
++	0x000000a6,0x00000016,0x00070058,0x00000017,0x000000a7,0x000000a5,0x000000a6,0x00000002,
++	0x0000005b,0x0003003e,0x000000a3,0x000000a7,0x0004003d,0x00000017,0x000000a8,0x000000a3,
++	0x0008004f,0x00000009,0x000000a9,0x000000a8,0x000000a8,0x00000000,0x00000001,0x00000002,
++	0x0004003d,0x00000009,0x000000aa,0x0000005a,0x00050041,0x0000000f,0x000000ab,0x000000a3,
++	0x0000003d,0x0004003d,0x00000008,0x000000ac,0x000000ab,0x00050083,0x00000008,0x000000ad,
++	0x0000008c,0x000000ac,0x0005008e,0x00000009,0x000000ae,0x000000aa,0x000000ad,0x00050081,
++	0x00000009,0x000000af,0x000000a9,0x000000ae,0x0003003e,0x0000005a,0x000000af,0x000200f9,
++	0x000000a1,0x000200f8,0x000000a1,0x00050041,0x0000009c,0x000000b1,0x0000001a,0x000000b0,
++	0x0004003d,0x00000006,0x000000b2,0x000000b1,0x000500ab,0x00000060,0x000000b3,0x000000b2,
++	0x00000030,0x000300f7,0x000000b6,0x00000000,0x000400fa,0x000000b3,0x000000b5,0x000000b9,
++	0x000200f8,0x000000b5,0x0004003d,0x00000009,0x000000b7,0x0000005a,0x0008004f,0x00000009,
++	0x000000b8,0x000000b7,0x000000b7,0x00000002,0x00000001,0x00000000,0x0003003e,0x000000b4,
++	0x000000b8,0x000200f9,0x000000b6,0x000200f8,0x000000b9,0x0004003d,0x00000009,0x000000ba,
++	0x0000005a,0x0003003e,0x000000b4,0x000000ba,0x000200f9,0x000000b6,0x000200f8,0x000000b6,
++	0x0004003d,0x00000009,0x000000bb,0x000000b4,0x000200fe,0x000000bb,0x00010038,0x00050036,
++	0x00000006,0x00000012,0x00000000,0x00000010,0x00030037,0x0000000f,0x00000011,0x000200f8,
++	0x00000013,0x0004003d,0x00000008,0x000000be,0x00000011,0x0008000c,0x00000008,0x000000bf,
++	0x00000001,0x0000002b,0x000000be,0x0000005b,0x0000008c,0x00050085,0x00000008,0x000000c1,
++	0x000000bf,0x000000c0,0x00050081,0x00000008,0x000000c2,0x000000c1,0x00000025,0x0004006d,
++	0x00000006,0x000000c3,0x000000c2,0x000200fe,0x000000c3,0x00010038
 +};
 diff --git a/src/xrt/compositor/main/quest1_warp_spv.h b/src/xrt/compositor/main/quest1_warp_spv.h
 new file mode 100644
-index 0000000..56824fb
+index 0000000..69e4fd5
 --- /dev/null
 +++ b/src/xrt/compositor/main/quest1_warp_spv.h
-@@ -0,0 +1,125 @@
+@@ -0,0 +1,276 @@
 +// Copyright 2026, Quest1-SteamOS contributors
 +// SPDX-License-Identifier: BSL-1.0
 +// SPIR-V of the re-projection warp shaders (glslangValidator -V), sources below. One texture coordinate per
@@ -7411,6 +7903,157 @@ index 0000000..56824fb
 +	0x00000004, 0x00000000, 0x00000003, 0x000200f8, 0x00000005, 0x0004003d, 0x0000000b, 0x0000000e,
 +	0x0000000d, 0x0004003d, 0x0000000f, 0x00000012, 0x00000011, 0x00050057, 0x00000007, 0x00000013,
 +	0x0000000e, 0x00000012, 0x0003003e, 0x00000009, 0x00000013, 0x000100fd, 0x00010038,
++};
++
++// Head-locked overlays (Q1D_FRAME's hud) over the re-projected frame, where they are (a second draw, clipped): each
++// colour channel of both at its own place (the lens' chromatic aberration), the frame's turned by the warp, the
++// overlays' not, blended per channel with that channel's own alpha (premultiplied). One alpha for the three made red
++// and blue fringes on their edges (user, 2026-11-13).
++// #version 450
++// layout(location = 0) in vec2 pos;
++// layout(location = 1) in vec2 uv_r;
++// layout(location = 2) in vec2 uv_g;
++// layout(location = 3) in vec2 uv_b;
++// layout(location = 4) in vec2 hv_r;
++// layout(location = 5) in vec2 hv_g;
++// layout(location = 6) in vec2 hv_b;
++// layout(location = 0) out vec2 v_r;
++// layout(location = 1) out vec2 v_g;
++// layout(location = 2) out vec2 v_b;
++// layout(location = 3) out vec2 h_r;
++// layout(location = 4) out vec2 h_g;
++// layout(location = 5) out vec2 h_b;
++// void main() { gl_Position = vec4(pos, 0.0, 1.0); v_r = uv_r; v_g = uv_g; v_b = uv_b; h_r = hv_r; h_g = hv_g; h_b = hv_b; }
++static const uint32_t q1_warp_hudc_vert_spv[] = {
++	0x07230203,0x00010000,0x0008000b,0x0000002e,0x00000000,0x00020011,0x00000001,0x0006000b,
++	0x00000001,0x4c534c47,0x6474732e,0x3035342e,0x00000000,0x0003000e,0x00000000,0x00000001,
++	0x0013000f,0x00000000,0x00000004,0x6e69616d,0x00000000,0x0000000d,0x00000012,0x0000001c,
++	0x0000001d,0x0000001f,0x00000020,0x00000022,0x00000023,0x00000025,0x00000026,0x00000028,
++	0x00000029,0x0000002b,0x0000002c,0x00030003,0x00000002,0x000001c2,0x00040005,0x00000004,
++	0x6e69616d,0x00000000,0x00060005,0x0000000b,0x505f6c67,0x65567265,0x78657472,0x00000000,
++	0x00060006,0x0000000b,0x00000000,0x505f6c67,0x7469736f,0x006e6f69,0x00070006,0x0000000b,
++	0x00000001,0x505f6c67,0x746e696f,0x657a6953,0x00000000,0x00070006,0x0000000b,0x00000002,
++	0x435f6c67,0x4470696c,0x61747369,0x0065636e,0x00070006,0x0000000b,0x00000003,0x435f6c67,
++	0x446c6c75,0x61747369,0x0065636e,0x00030005,0x0000000d,0x00000000,0x00030005,0x00000012,
++	0x00736f70,0x00030005,0x0000001c,0x00725f76,0x00040005,0x0000001d,0x725f7675,0x00000000,
++	0x00030005,0x0000001f,0x00675f76,0x00040005,0x00000020,0x675f7675,0x00000000,0x00030005,
++	0x00000022,0x00625f76,0x00040005,0x00000023,0x625f7675,0x00000000,0x00030005,0x00000025,
++	0x00725f68,0x00040005,0x00000026,0x725f7668,0x00000000,0x00030005,0x00000028,0x00675f68,
++	0x00040005,0x00000029,0x675f7668,0x00000000,0x00030005,0x0000002b,0x00625f68,0x00040005,
++	0x0000002c,0x625f7668,0x00000000,0x00030047,0x0000000b,0x00000002,0x00050048,0x0000000b,
++	0x00000000,0x0000000b,0x00000000,0x00050048,0x0000000b,0x00000001,0x0000000b,0x00000001,
++	0x00050048,0x0000000b,0x00000002,0x0000000b,0x00000003,0x00050048,0x0000000b,0x00000003,
++	0x0000000b,0x00000004,0x00040047,0x00000012,0x0000001e,0x00000000,0x00040047,0x0000001c,
++	0x0000001e,0x00000000,0x00040047,0x0000001d,0x0000001e,0x00000001,0x00040047,0x0000001f,
++	0x0000001e,0x00000001,0x00040047,0x00000020,0x0000001e,0x00000002,0x00040047,0x00000022,
++	0x0000001e,0x00000002,0x00040047,0x00000023,0x0000001e,0x00000003,0x00040047,0x00000025,
++	0x0000001e,0x00000003,0x00040047,0x00000026,0x0000001e,0x00000004,0x00040047,0x00000028,
++	0x0000001e,0x00000004,0x00040047,0x00000029,0x0000001e,0x00000005,0x00040047,0x0000002b,
++	0x0000001e,0x00000005,0x00040047,0x0000002c,0x0000001e,0x00000006,0x00020013,0x00000002,
++	0x00030021,0x00000003,0x00000002,0x00030016,0x00000006,0x00000020,0x00040017,0x00000007,
++	0x00000006,0x00000004,0x00040015,0x00000008,0x00000020,0x00000000,0x0004002b,0x00000008,
++	0x00000009,0x00000001,0x0004001c,0x0000000a,0x00000006,0x00000009,0x0006001e,0x0000000b,
++	0x00000007,0x00000006,0x0000000a,0x0000000a,0x00040020,0x0000000c,0x00000003,0x0000000b,
++	0x0004003b,0x0000000c,0x0000000d,0x00000003,0x00040015,0x0000000e,0x00000020,0x00000001,
++	0x0004002b,0x0000000e,0x0000000f,0x00000000,0x00040017,0x00000010,0x00000006,0x00000002,
++	0x00040020,0x00000011,0x00000001,0x00000010,0x0004003b,0x00000011,0x00000012,0x00000001,
++	0x0004002b,0x00000006,0x00000014,0x00000000,0x0004002b,0x00000006,0x00000015,0x3f800000,
++	0x00040020,0x00000019,0x00000003,0x00000007,0x00040020,0x0000001b,0x00000003,0x00000010,
++	0x0004003b,0x0000001b,0x0000001c,0x00000003,0x0004003b,0x00000011,0x0000001d,0x00000001,
++	0x0004003b,0x0000001b,0x0000001f,0x00000003,0x0004003b,0x00000011,0x00000020,0x00000001,
++	0x0004003b,0x0000001b,0x00000022,0x00000003,0x0004003b,0x00000011,0x00000023,0x00000001,
++	0x0004003b,0x0000001b,0x00000025,0x00000003,0x0004003b,0x00000011,0x00000026,0x00000001,
++	0x0004003b,0x0000001b,0x00000028,0x00000003,0x0004003b,0x00000011,0x00000029,0x00000001,
++	0x0004003b,0x0000001b,0x0000002b,0x00000003,0x0004003b,0x00000011,0x0000002c,0x00000001,
++	0x00050036,0x00000002,0x00000004,0x00000000,0x00000003,0x000200f8,0x00000005,0x0004003d,
++	0x00000010,0x00000013,0x00000012,0x00050051,0x00000006,0x00000016,0x00000013,0x00000000,
++	0x00050051,0x00000006,0x00000017,0x00000013,0x00000001,0x00070050,0x00000007,0x00000018,
++	0x00000016,0x00000017,0x00000014,0x00000015,0x00050041,0x00000019,0x0000001a,0x0000000d,
++	0x0000000f,0x0003003e,0x0000001a,0x00000018,0x0004003d,0x00000010,0x0000001e,0x0000001d,
++	0x0003003e,0x0000001c,0x0000001e,0x0004003d,0x00000010,0x00000021,0x00000020,0x0003003e,
++	0x0000001f,0x00000021,0x0004003d,0x00000010,0x00000024,0x00000023,0x0003003e,0x00000022,
++	0x00000024,0x0004003d,0x00000010,0x00000027,0x00000026,0x0003003e,0x00000025,0x00000027,
++	0x0004003d,0x00000010,0x0000002a,0x00000029,0x0003003e,0x00000028,0x0000002a,0x0004003d,
++	0x00000010,0x0000002d,0x0000002c,0x0003003e,0x0000002b,0x0000002d,0x000100fd,0x00010038
++};
++
++// #version 450
++// layout(location = 0) in vec2 v_r;
++// layout(location = 1) in vec2 v_g;
++// layout(location = 2) in vec2 v_b;
++// layout(location = 3) in vec2 h_r;
++// layout(location = 4) in vec2 h_g;
++// layout(location = 5) in vec2 h_b;
++// layout(location = 0) out vec4 o;
++// layout(set = 0, binding = 0) uniform sampler2D src;
++// layout(set = 0, binding = 1) uniform sampler2D hud;
++// void main()
++// {
++// 	vec2 r = texture(hud, h_r).ra, g = texture(hud, h_g).ga, b = texture(hud, h_b).ba;
++// 	o = vec4(r.x + texture(src, v_r).r * (1.0 - r.y), g.x + texture(src, v_g).g * (1.0 - g.y),
++// 	         b.x + texture(src, v_b).b * (1.0 - b.y), 1.0);
++// }
++static const uint32_t q1_warp_hudc_frag_spv[] = {
++	0x07230203,0x00010000,0x0008000b,0x0000004f,0x00000000,0x00020011,0x00000001,0x0006000b,
++	0x00000001,0x4c534c47,0x6474732e,0x3035342e,0x00000000,0x0003000e,0x00000000,0x00000001,
++	0x000c000f,0x00000004,0x00000004,0x6e69616d,0x00000000,0x00000010,0x00000017,0x0000001d,
++	0x00000022,0x0000002a,0x00000038,0x00000044,0x00030010,0x00000004,0x00000007,0x00030003,
++	0x00000002,0x000001c2,0x00040005,0x00000004,0x6e69616d,0x00000000,0x00030005,0x00000009,
++	0x00000072,0x00030005,0x0000000d,0x00647568,0x00030005,0x00000010,0x00725f68,0x00030005,
++	0x00000015,0x00000067,0x00030005,0x00000017,0x00675f68,0x00030005,0x0000001b,0x00000062,
++	0x00030005,0x0000001d,0x00625f68,0x00030005,0x00000022,0x0000006f,0x00030005,0x00000028,
++	0x00637273,0x00030005,0x0000002a,0x00725f76,0x00030005,0x00000038,0x00675f76,0x00030005,
++	0x00000044,0x00625f76,0x00040047,0x0000000d,0x00000021,0x00000001,0x00040047,0x0000000d,
++	0x00000022,0x00000000,0x00040047,0x00000010,0x0000001e,0x00000003,0x00040047,0x00000017,
++	0x0000001e,0x00000004,0x00040047,0x0000001d,0x0000001e,0x00000005,0x00040047,0x00000022,
++	0x0000001e,0x00000000,0x00040047,0x00000028,0x00000021,0x00000000,0x00040047,0x00000028,
++	0x00000022,0x00000000,0x00040047,0x0000002a,0x0000001e,0x00000000,0x00040047,0x00000038,
++	0x0000001e,0x00000001,0x00040047,0x00000044,0x0000001e,0x00000002,0x00020013,0x00000002,
++	0x00030021,0x00000003,0x00000002,0x00030016,0x00000006,0x00000020,0x00040017,0x00000007,
++	0x00000006,0x00000002,0x00040020,0x00000008,0x00000007,0x00000007,0x00090019,0x0000000a,
++	0x00000006,0x00000001,0x00000000,0x00000000,0x00000000,0x00000001,0x00000000,0x0003001b,
++	0x0000000b,0x0000000a,0x00040020,0x0000000c,0x00000000,0x0000000b,0x0004003b,0x0000000c,
++	0x0000000d,0x00000000,0x00040020,0x0000000f,0x00000001,0x00000007,0x0004003b,0x0000000f,
++	0x00000010,0x00000001,0x00040017,0x00000012,0x00000006,0x00000004,0x0004003b,0x0000000f,
++	0x00000017,0x00000001,0x0004003b,0x0000000f,0x0000001d,0x00000001,0x00040020,0x00000021,
++	0x00000003,0x00000012,0x0004003b,0x00000021,0x00000022,0x00000003,0x00040015,0x00000023,
++	0x00000020,0x00000000,0x0004002b,0x00000023,0x00000024,0x00000000,0x00040020,0x00000025,
++	0x00000007,0x00000006,0x0004003b,0x0000000c,0x00000028,0x00000000,0x0004003b,0x0000000f,
++	0x0000002a,0x00000001,0x0004002b,0x00000006,0x0000002e,0x3f800000,0x0004002b,0x00000023,
++	0x0000002f,0x00000001,0x0004003b,0x0000000f,0x00000038,0x00000001,0x0004003b,0x0000000f,
++	0x00000044,0x00000001,0x0004002b,0x00000023,0x00000047,0x00000002,0x00050036,0x00000002,
++	0x00000004,0x00000000,0x00000003,0x000200f8,0x00000005,0x0004003b,0x00000008,0x00000009,
++	0x00000007,0x0004003b,0x00000008,0x00000015,0x00000007,0x0004003b,0x00000008,0x0000001b,
++	0x00000007,0x0004003d,0x0000000b,0x0000000e,0x0000000d,0x0004003d,0x00000007,0x00000011,
++	0x00000010,0x00050057,0x00000012,0x00000013,0x0000000e,0x00000011,0x0007004f,0x00000007,
++	0x00000014,0x00000013,0x00000013,0x00000000,0x00000003,0x0003003e,0x00000009,0x00000014,
++	0x0004003d,0x0000000b,0x00000016,0x0000000d,0x0004003d,0x00000007,0x00000018,0x00000017,
++	0x00050057,0x00000012,0x00000019,0x00000016,0x00000018,0x0007004f,0x00000007,0x0000001a,
++	0x00000019,0x00000019,0x00000001,0x00000003,0x0003003e,0x00000015,0x0000001a,0x0004003d,
++	0x0000000b,0x0000001c,0x0000000d,0x0004003d,0x00000007,0x0000001e,0x0000001d,0x00050057,
++	0x00000012,0x0000001f,0x0000001c,0x0000001e,0x0007004f,0x00000007,0x00000020,0x0000001f,
++	0x0000001f,0x00000002,0x00000003,0x0003003e,0x0000001b,0x00000020,0x00050041,0x00000025,
++	0x00000026,0x00000009,0x00000024,0x0004003d,0x00000006,0x00000027,0x00000026,0x0004003d,
++	0x0000000b,0x00000029,0x00000028,0x0004003d,0x00000007,0x0000002b,0x0000002a,0x00050057,
++	0x00000012,0x0000002c,0x00000029,0x0000002b,0x00050051,0x00000006,0x0000002d,0x0000002c,
++	0x00000000,0x00050041,0x00000025,0x00000030,0x00000009,0x0000002f,0x0004003d,0x00000006,
++	0x00000031,0x00000030,0x00050083,0x00000006,0x00000032,0x0000002e,0x00000031,0x00050085,
++	0x00000006,0x00000033,0x0000002d,0x00000032,0x00050081,0x00000006,0x00000034,0x00000027,
++	0x00000033,0x00050041,0x00000025,0x00000035,0x00000015,0x00000024,0x0004003d,0x00000006,
++	0x00000036,0x00000035,0x0004003d,0x0000000b,0x00000037,0x00000028,0x0004003d,0x00000007,
++	0x00000039,0x00000038,0x00050057,0x00000012,0x0000003a,0x00000037,0x00000039,0x00050051,
++	0x00000006,0x0000003b,0x0000003a,0x00000001,0x00050041,0x00000025,0x0000003c,0x00000015,
++	0x0000002f,0x0004003d,0x00000006,0x0000003d,0x0000003c,0x00050083,0x00000006,0x0000003e,
++	0x0000002e,0x0000003d,0x00050085,0x00000006,0x0000003f,0x0000003b,0x0000003e,0x00050081,
++	0x00000006,0x00000040,0x00000036,0x0000003f,0x00050041,0x00000025,0x00000041,0x0000001b,
++	0x00000024,0x0004003d,0x00000006,0x00000042,0x00000041,0x0004003d,0x0000000b,0x00000043,
++	0x00000028,0x0004003d,0x00000007,0x00000045,0x00000044,0x00050057,0x00000012,0x00000046,
++	0x00000043,0x00000045,0x00050051,0x00000006,0x00000048,0x00000046,0x00000002,0x00050041,
++	0x00000025,0x00000049,0x0000001b,0x0000002f,0x0004003d,0x00000006,0x0000004a,0x00000049,
++	0x00050083,0x00000006,0x0000004b,0x0000002e,0x0000004a,0x00050085,0x00000006,0x0000004c,
++	0x00000048,0x0000004b,0x00050081,0x00000006,0x0000004d,0x00000042,0x0000004c,0x00070050,
++	0x00000012,0x0000004e,0x00000034,0x00000040,0x0000004d,0x0000002e,0x0003003e,0x00000022,
++	0x0000004e,0x000100fd,0x00010038
 +};
 diff --git a/src/xrt/drivers/CMakeLists.txt b/src/xrt/drivers/CMakeLists.txt
 index 5ec9910..514459a 100644
@@ -8876,10 +9519,10 @@ index 0000000..899204b
 +}
 diff --git a/src/xrt/drivers/quest1/quest1_hmd.c b/src/xrt/drivers/quest1/quest1_hmd.c
 new file mode 100644
-index 0000000..c32d128
+index 0000000..b38b4aa
 --- /dev/null
 +++ b/src/xrt/drivers/quest1/quest1_hmd.c
-@@ -0,0 +1,1170 @@
+@@ -0,0 +1,1174 @@
 +// Copyright 2026, Quest1-SteamOS contributors
 +// SPDX-License-Identifier: BSL-1.0
 +/*!
@@ -8910,6 +9553,7 @@ index 0000000..c32d128
 +#include "util/u_debug.h"
 +#include "util/u_device.h"
 +#include "util/u_distortion_mesh.h"
++#include "../../compositor/main/quest1_lens_decenter.h"
 +#include "util/u_logging.h"
 +#include "util/u_misc.h"
 +#include "util/u_time.h"
@@ -9863,9 +10507,12 @@ index 0000000..c32d128
 +	const struct xrt_fov *fov = &xdev->hmd->distortion.fov[view];
 +
 +	// Point on this eye's panel relative to the lens centre, y up, in tan units at the centre.
++	// The panel's own lens alignment from Meta's calibration moves the image: it is taken off lensToScreen.
 +	float sx = view == 0 ? -1.0f : 1.0f;
-+	float x = ((u - 0.5f) * Q1_PANEL_W_M + sx * Q1_LENS_TO_SCREEN_X) / Q1_METERS_PER_TAN_ANGLE;
-+	float y = ((0.5f - v) * Q1_PANEL_H_M + Q1_LENS_TO_SCREEN_Y) / Q1_METERS_PER_TAN_ANGLE;
++	float shift[2];
++	q1_decenter_shift_m((int)view, shift);
++	float x = ((u - 0.5f) * Q1_PANEL_W_M + sx * Q1_LENS_TO_SCREEN_X - shift[0]) / Q1_METERS_PER_TAN_ANGLE;
++	float y = ((0.5f - v) * Q1_PANEL_H_M + Q1_LENS_TO_SCREEN_Y - shift[1]) / Q1_METERS_PER_TAN_ANGLE;
 +	float rsq = x * x + y * y;
 +	float s = q1_catmull_rom10(rsq);
 +

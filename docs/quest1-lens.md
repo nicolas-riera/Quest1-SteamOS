@@ -81,9 +81,39 @@ right: decenter [ 3.85454545, -4.78582395] px, decenter_mm [0.159, -0.253], roll
 ```
 (`decenter_mm` = `auto_decenter` × 41.25 µm.)
 
-How the runtime uses this file: CompositorVR, function 0x234d74 in libvrruntimeservice.so, logs `EYE_DECENTER`. It requires `source == "AUTO"`, reads `decenter`, and **truncates it to integer display pixels**. That gives left H = 2, V = −4 and right H = 3, V = −4, stored at CompositorVR+1412/1416/1420/1424 as a per-eye whole-pixel image shift. `debug.oculus.hOffsetPixelsLeft` and the related properties override these values. The `ipd_min/mid/max` keys are for other headsets and are absent here. `roll` is not read by this reader.
+How the runtime uses this file, Meta's convention (libvrruntimeservice.so, CompositorVR, the reader at 0x234d74):
+- **Reader** (Verified: log strings and code @0x234d74-0x236400). It reads the left file, then the right file. It only
+  uses a file whose `source` is `"AUTO"` (otherwise it logs "old source type ... not reading data" and keeps 0) and takes
+  the `decenter` key (`auto_decenter`, `decenter_mm` and `roll` are not read). Each component is **truncated toward
+  zero** to an integer (`fcvtzs` @0x23634c). Left H/V go to CompositorVR+1412/+1420, right H/V to +1416/+1424. This unit:
+  left (2, -4), right (3, -4) as read. Logged as "EYE_DECENTER left H: %d V: %d right H: %d V: %d".
+- **The right eye's H is negated** (Verified: `ldr w8,[x19,#1416]; neg w8,w8; str w8,[x19,#1416]` @0x2353a4-0x2353ac, the
+  common tail of the reader, after the right file was stored). The effective values are therefore left (+2, -4) and
+  right (-3, -4). V is not negated.
+- **Consumer** (Verified: 0x224e48-0x224ea8 for the right eye's fields, 0x224eac-0x224f08 for the left's, "Viewport
+  updated HO: %d VO: %d W: %d H: %d"): per eye the output viewport is `glViewport(round(s*(H + hdebug) + vp0x),
+  round(s*(V + vdebug) + vp0y), W, H)` (`25cf54` is a glViewport thunk). `s` is a float scale at +1444 (1.0 by default,
+  @0x22abf0), `hdebug`/`vdebug` are `debug.oculus.horizOffsetPixels`/`vertOffsetPixels` (+1372/+1376, added to both
+  eyes), `vp0` is 0 for an eye buffer of the viewport's size (@0x229d04-0x229d28). So the decenter **shifts the
+  eye's whole output image by H, V pixels** (the distortion mesh pass draws into the moved viewport); it does not touch the
+  lens model or the mesh. In OpenGL window coordinates: +H right, +V up. `debug.oculus.hOffsetPixelsLeft/Right` and
+  `vOffsetPixelsLeft/Right` replace the four values (strings at 0xdc9c9-0xdca6a); ipd_min/mid/max entries with
+  `left_decenter`/`right_decenter` feed the same fields for headsets that have them (absent here).
+- **Roll is not used** (Verified for the runtime: no code reads a `roll` key near the reader, the keys it reads are
+  `source`, `decenter`, `left_decenter`, `right_decenter`, `ipd_min/mid/max`; libvrapiimpl and libossdk only
+  reference the file names). So `roll` stays unapplied, as on Meta's OS.
+- **Frame** (Inferred): Meta's GL window frame is the frame of the mesh's panel points, where `lensToScreen` above is
+  defined (x right, y up, the left eye's lens on the right of its panel). The mesh row j = 0 is the bottom, and
+  `verticalFlip` is off on the Quest 1.
 
-I did not trace the sign of the shift. If you want to include it in Monado, add `decenter_px × 41.25e-6 m` to lensToScreen for each eye, then confirm the sign visually. It is at most about 0.2 mm, roughly a 0.3° shift.
+In the lens model a shift of the image by (sx, sy) pixels is `lensToScreen - (sx, sy) * 41.25e-6 m` (content that was at
+panel point p now sits at p + shift, so it shows the direction that was shown at p - shift). With the values above:
+left shift (+2, -4) px, right shift (-3, -4) px, i.e. lensToScreen left (-0.003069, -0.002555), right (+0.003110,
+-0.002555) m. This is applied by `src/monado/src/xrt/compositor/main/quest1_lens_decenter.h` (header only: reads the two
+files read only at the first use, `source != AUTO` or a missing file gives 0), used by `hmd_compute_distortion`
+(quest1_hmd.c), the warp's mesh in comp_window_mdp.c, and driver_quest1's direct-scanout `ComputeDistortion`. In the
+framebuffer (turned by 180 degrees: the left eye is the right half) the left eye's picture moves 2 px left and 4 px up,
+the right eye's 3 px right and 4 px up.
 
 Also present but not relevant to the lens: `*.mura`, `*.mura.astc` and `*.uniformity`, which are per-panel OLED mura/uniformity correction. Panel serials are PANEL-SERIAL-L (left) and PANEL-SERIAL-R (right).
 
@@ -106,4 +136,4 @@ Also present but not relevant to the lens: `*.mura`, `*.mura.astc` and `*.unifor
 - Debug properties that override these fields (useful for tuning without a rebuild): `debug.oculus.distK`, `distK11`, `distRedCAC`, `distBlueCAC`, `metersPerTanAngCtr`, `maxR`, `leftScreenCtr`/`rightScreenCtr`, `lensSepMeters`, `eyeFovUp/Down/Inward/Outward`, `displayMetersW/H`, `verticalFlip`, `distCurve` (CatmullRom10 | RTech16).
 - Confidence summary:
   - High: the coefficients, model, FOV, panel size and lens offsets (verified against the shipped mesh).
-  - Medium: IAD semantics in the runtime, the decenter sign, and the absolute up/down orientation of the panel rows (mesh row 0 = the "down" side; confirm with a test pattern on the device).
+  - Medium: IAD semantics in the runtime, the frame of the decenter (inferred, see above), and the absolute up/down orientation of the panel rows (mesh row 0 = the "down" side; confirm with a test pattern on the device).

@@ -43,6 +43,7 @@
 
 #include "../vklayer-steamvr/quest1_display_proto.h"
 #include "../monado/src/xrt/compositor/main/quest1_direct_proto.h"
+#include "../monado/src/xrt/compositor/main/quest1_lens_decenter.h"
 #include "battery.h"
 #include "camera.h"
 #include "chaperone_frame.h"
@@ -1933,8 +1934,13 @@ public:
 		int e = eye == Eye_Left ? 0 : 1;
 		float pu = 1.0f - u, pv = 1.0f - v;
 		float sx = e == 0 ? -1.0f : 1.0f;
-		float x = ((pu - 0.5f) * kPanelW + sx * kLensToScreenX) / kMetersPerTan;
-		float y = ((0.5f - pv) * kPanelH + (DirectFlip() & 16 ? -kLensToScreenY : kLensToScreenY)) / kMetersPerTan;
+		// The panel's own lens alignment (Meta's calibration, quest1_lens_decenter.h) shifts the image in Meta's
+		// frame (x right as pu, y up): it is taken off lensToScreen before the vertical mirror of bit 16
+		float shift[2];
+		q1_decenter_shift_m(e, shift);
+		float lensY = kLensToScreenY - shift[1];
+		float x = ((pu - 0.5f) * kPanelW + sx * kLensToScreenX - shift[0]) / kMetersPerTan;
+		float y = ((0.5f - pv) * kPanelH + (DirectFlip() & 16 ? -lensY : lensY)) / kMetersPerTan;
 		float rsq = x * x + y * y;
 		float sc = CatmullRom10(rsq);
 		const XrFovf f = VFov(xr.fov[e]);

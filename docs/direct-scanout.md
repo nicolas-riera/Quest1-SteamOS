@@ -308,8 +308,9 @@ copy them into the repo):
   MuraScale` (sRGB output converted with pow(1/2.2) around it). Not applied: it needs a GPU pass over every
   frame, and frames shown without re-projection go to the panels untouched (zero copy).
 - `{left,right}_screen_offset.json`: per-panel lens-to-panel alignment (`decenter` in pixels, about
-  2.5-3.9 px x and -4.8 px y; `roll` 0.02-0.056 degrees). Not applied: Meta's sign and axis
-  conventions for it are unknown, and the effect is ~0.3 % of the panel width.
+  2.5-3.9 px x and -4.8 px y). Applied as Meta's OS does (docs/quest1-lens.md): truncated to whole pixels, the image
+  shifts by it, the right eye's x negated; `roll` is not used by Meta. `quest1_lens_decenter.h` feeds Monado's lens model
+  and driver_quest1's `ComputeDistortion`.
 
 Brightness (2026-11-08). The Samsung dual-DSI panel (`Dual Samsung video mode dsi panel`) uses
 `bl_ctrl_dcs` with `qcom,cmd-sync-wait-broadcast`: one `lcd-backlight` level drives both panels, but at low

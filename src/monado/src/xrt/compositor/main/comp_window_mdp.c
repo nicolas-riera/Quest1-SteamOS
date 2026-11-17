@@ -35,6 +35,7 @@
 #include "main/comp_compositor.h"
 
 #include "quest1_direct_proto.h"
+#include "quest1_lens_decenter.h"
 #include "quest1_spect_spv.h"
 #include "quest1_warp_spv.h"
 
@@ -1732,6 +1733,12 @@ warp_build_mesh(const struct mdp_direct *D, int h, const float *delta_top, const
 {
 	const int view = 1 - h; // half 0 (x = 0) is the right eye, view 1
 	const float sx = view == 0 ? -1.0f : 1.0f;
+	// lens centre to panel centre of this eye, with the panel's own alignment from Meta's calibration (the image
+	// shifts by `shift`, see quest1_lens_decenter.h)
+	float shift[2];
+	q1_decenter_shift_m(view, shift);
+	const float lens_x = sx * Q1_LENS_TO_SCREEN_X - shift[0];
+	const float lens_y = Q1_LENS_TO_SCREEN_Y - shift[1];
 	// each vertex's view direction through the lens does not change: computed once per half
 	static float dirs[2][(WARP_GRID + 1) * (WARP_GRID + 1)][3][2];
 	static bool have_dirs[2];
@@ -1740,8 +1747,8 @@ warp_build_mesh(const struct mdp_direct *D, int h, const float *delta_top, const
 		for (int j = 0; j <= WARP_GRID; j++) {
 			for (int i = 0; i <= WARP_GRID; i++) {
 				float u = 1.0f - (float)i / WARP_GRID, v = 1.0f - (float)j / WARP_GRID;
-				float x = ((u - 0.5f) * Q1_PANEL_W_M + sx * Q1_LENS_TO_SCREEN_X) / Q1_METERS_PER_TAN_ANGLE;
-				float y = ((0.5f - v) * Q1_PANEL_H_M + Q1_LENS_TO_SCREEN_Y) / Q1_METERS_PER_TAN_ANGLE;
+				float x = ((u - 0.5f) * Q1_PANEL_W_M + lens_x) / Q1_METERS_PER_TAN_ANGLE;
+				float y = ((0.5f - v) * Q1_PANEL_H_M + lens_y) / Q1_METERS_PER_TAN_ANGLE;
 				float rsq = x * x + y * y, s = q1_catmull_rom10(rsq), c[3];
 				q1_chroma(rsq, c);
 				for (int k = 0; k < 3; k++) {
@@ -1780,8 +1787,8 @@ warp_build_mesh(const struct mdp_direct *D, int h, const float *delta_top, const
 					} else {
 						float x2, y2;
 						lens_inverse(tx, ty, &x2, &y2);
-						float su = (x2 * Q1_METERS_PER_TAN_ANGLE - sx * Q1_LENS_TO_SCREEN_X) / Q1_PANEL_W_M + 0.5f;
-						float sv = 0.5f - (y2 * Q1_METERS_PER_TAN_ANGLE - Q1_LENS_TO_SCREEN_Y) / Q1_PANEL_H_M;
+						float su = (x2 * Q1_METERS_PER_TAN_ANGLE - lens_x) / Q1_PANEL_W_M + 0.5f;
+						float sv = 0.5f - (y2 * Q1_METERS_PER_TAN_ANGLE - lens_y) / Q1_PANEL_H_M;
 						tu_out = 1.0f - su;
 						tv_out = 1.0f - sv;
 					}

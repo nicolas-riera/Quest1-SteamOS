@@ -28,6 +28,7 @@
 #include "util/u_debug.h"
 #include "util/u_device.h"
 #include "util/u_distortion_mesh.h"
+#include "../../compositor/main/quest1_lens_decenter.h"
 #include "util/u_logging.h"
 #include "util/u_misc.h"
 #include "util/u_time.h"
@@ -981,9 +982,12 @@ hmd_compute_distortion(struct xrt_device *xdev, uint32_t view, float u, float v,
 	const struct xrt_fov *fov = &xdev->hmd->distortion.fov[view];
 
 	// Point on this eye's panel relative to the lens centre, y up, in tan units at the centre.
+	// The panel's own lens alignment from Meta's calibration moves the image: it is taken off lensToScreen.
 	float sx = view == 0 ? -1.0f : 1.0f;
-	float x = ((u - 0.5f) * Q1_PANEL_W_M + sx * Q1_LENS_TO_SCREEN_X) / Q1_METERS_PER_TAN_ANGLE;
-	float y = ((0.5f - v) * Q1_PANEL_H_M + Q1_LENS_TO_SCREEN_Y) / Q1_METERS_PER_TAN_ANGLE;
+	float shift[2];
+	q1_decenter_shift_m((int)view, shift);
+	float x = ((u - 0.5f) * Q1_PANEL_W_M + sx * Q1_LENS_TO_SCREEN_X - shift[0]) / Q1_METERS_PER_TAN_ANGLE;
+	float y = ((0.5f - v) * Q1_PANEL_H_M + Q1_LENS_TO_SCREEN_Y - shift[1]) / Q1_METERS_PER_TAN_ANGLE;
 	float rsq = x * x + y * y;
 	float s = q1_catmull_rom10(rsq);
 
