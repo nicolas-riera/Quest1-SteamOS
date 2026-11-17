@@ -263,6 +263,9 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   - Strong lag at random moments (user, 2026-11-17): the stream stalls hard for a moment, then recovers. Match the
     times with the shim's log, the PC's `driver_vrlink.txt` (ProblemAttribution) and `vrlink_aftm_*.csv`, and the
     headset's load and memory then.
+    What it looks like (user, 2026-11-17): the video is gone (the headset falls back to its own Aurora home), the
+    audio lags very strongly, then it comes back, goes again, comes back, and so on. Only lead so far: it happens
+    when the PC's frame rate varies a lot.
     Logs of the night 2026-11-17 saved outside the repo (they hold connection IDs): `../vrlink-logs-2026-11-17/`
     (`pc/`: driver_vrlink, vrserver, vrcompositor, vrmonitor and 10 `vrlink_aftm_*.csv`; `headset/vlk/`: shim
     journal, vrlink, vrclient_vrlink, vrserver, vrcompositor, layer logs, meminfo; `headset/vlk2/`: Steam's
