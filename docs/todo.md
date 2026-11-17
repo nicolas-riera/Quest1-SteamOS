@@ -9,10 +9,6 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   monado-service and library copies, `tmp`, `stream-crash-*`, old audio logs, the package cache): 5.8 GB free of the
   24 GB image, was 2.2. Left: check what grows over a day of use (`du` before/after); the full install wipes the
   headset anyway (user).
-- Microphone (docs/audio.md, 2026-11-17): the crackle (the echo canceller dropped samples every cycle, the capture
-  resynced) and the low level (codec gain -15.75 dB) are fixed. The user to judge by ear: crackle gone, level, the
-  voice while the speakers play (with the holes gone the echo canceller should keep more of it; there is no strength
-  knob in this plugin), and the speakers' own sound with the 20 ms periods.
 - Microphone latency in Steam Link VR (~500 ms felt, user 2026-11-17): the headset's capture holds ~20-40 ms; measure
   vrlink's path (its audio jitter buffer is 50 ms on the headset; the PC's side unknown).
 - Steam Link VR: still black flashes (fewer), and sometimes a flash brings a trembling that goes away once the

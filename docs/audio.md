@@ -360,6 +360,9 @@ PipeWire run at 48 kHz (`hw_params`, `clock.rate`), and the MI2S ports' rate con
 
 ## 2026-11-17: the microphone crackled, was too quiet, and lost the voice under the speakers
 
+Confirmed by the user the same day, worn in VRChat: speakers and microphone fine; only the microphone's latency in
+Steam Link VR is left (docs/todo.md).
+
 The user, after the evening's fix: the microphone works with its noise suppression, but it crackles, it is far too
 quiet, and the voice "disappears" whenever the speakers play (the same as on Meta's OS, which has one microphone too);
 it also feels ~500 ms late in Steam Link VR.
