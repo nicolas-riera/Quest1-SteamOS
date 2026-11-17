@@ -99,6 +99,10 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - Sometimes, as the headset is put on, the floor's direction seems uncertain and is seen to adjust (user,
   2026-11-12; not remembered from Meta's OS). To investigate: gravity/orientation at the first poses after wake,
   and whether the room's floor comes from the relocalization above.
+- When Meta's tracking service is not running (stopped, restarting, not up yet), show the dark blue screen in the
+  headset, as Meta's OS does, instead of the VR scene (user, 2026-11-17: otherwise the whole VR world spins in every
+  direction and it is almost nauseating). Hook it on q1trackd's state (no fresh poses from the service) in Monado or
+  the driver, and fade back to the scene once poses come back.
 
 ## Display
 
