@@ -257,23 +257,33 @@ static void get_ctrl(uint64_t id, int64_t t, struct q1track_controller *c)
 			c->buttons |= 1u << k;
 	memcpy(&c->trigger, s.b + 0x90, 4);
 	memcpy(&c->grip, s.b + 0x94, 4);
+	/* The stick's position, whether or not the thumb is sensed on it (byte 0, ts_touch), as Meta's own
+	 * trackinginterface_cli reads it: at rest it reads the exact centre (32767 of 65535). Taken only while
+	 * the thumb was sensed, the stick fell back to 0 on both axes for 4-42 ms at a time, 73 times in 3
+	 * minutes of walking in VRChat with the stick held forward (user: "the sticks jump", 2026-11-17). A
+	 * reading the controller does not give (byte 6, has_value) keeps the last position up to 100 ms. */
+	static struct { uint64_t id; float x, y; int64_t t; } last[2];
+	int slot = last[0].id == id || !last[0].id ? 0 : 1;
+	last[slot].id = id;
 	uint64_t tp = ((cin_get_touchpad_fn)vt[2])(cinput, id);
-	if (((tp >> 48) & 0xff) != 0) { /* byte 6 = has_value */
+	static int maxx, maxy;
+	if (((tp >> 48) & 0xff) != 0 && !maxx) {
+		struct big_state pr;
+		memset(&pr, 0, sizeof(pr));
+		pr = ((cin_get_buttons_fn)vt[0])(cinput, id);
+		if (pr.b[0x14]) {
+			memcpy(&maxx, pr.b, 4);
+			memcpy(&maxy, pr.b + 4, 4);
+		}
+	}
+	if (((tp >> 48) & 0xff) != 0 && maxx > 0 && maxy > 0) { /* byte 6 = has_value */
 		uint16_t x = (uint16_t)(tp >> 16), y = (uint16_t)(tp >> 32);
-		static int maxx, maxy;
-		if (!maxx) {
-			struct big_state pr;
-			memset(&pr, 0, sizeof(pr));
-			pr = ((cin_get_buttons_fn)vt[0])(cinput, id);
-			if (pr.b[0x14]) {
-				memcpy(&maxx, pr.b, 4);
-				memcpy(&maxy, pr.b + 4, 4);
-			}
-		}
-		if ((tp & 0xff) && maxx > 0 && maxy > 0) { /* byte 0: stick touched; idle values are garbage */
-			c->stick_x = ((float)x / maxx - 0.5f) * 2.0f;
-			c->stick_y = ((float)y / maxy - 0.5f) * -2.0f;
-		}
+		last[slot].x = c->stick_x = ((float)x / maxx - 0.5f) * 2.0f;
+		last[slot].y = c->stick_y = ((float)y / maxy - 0.5f) * -2.0f;
+		last[slot].t = t;
+	} else if (t - last[slot].t <= 100000000LL) {
+		c->stick_x = last[slot].x;
+		c->stick_y = last[slot].y;
 	}
 }
 

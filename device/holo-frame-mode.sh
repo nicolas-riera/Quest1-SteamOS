@@ -134,10 +134,11 @@ def main():
     except OSError:
         monado_lens = False
     d["steamvr"]["enableAchromaticDistortion"] = monado_lens
-    # and its simplified shaders (the achromatic ones, which need the setting above): 0.8 ms of GPU a frame less with
-    # a stream (11.8 -> 11.0, 2026-11-17). They take the eye texture as linear light: the layer then gives them the
-    # stream as an sRGB image (quest1_modifier.c, qcp_srgb_out), the colours unchanged (docs/streaming.md)
-    d["steamvr"]["enableSimplifiedShaders"] = monado_lens
+    # Not its simplified shaders (the achromatic ones): 0.8 ms of GPU a frame less with a stream (11.8 -> 11.0), but
+    # with no overlay in the pass (the chaperone hidden) vrcompositor draws the stream with its plain achromatic
+    # shader, which the layer does not replace, and the whole stream turned green (user, 2026-11-17). The layer's sRGB
+    # output for them (quest1_modifier.c, qcp_srgb_out) stays, unused while this is off (docs/streaming.md).
+    d["steamvr"]["enableSimplifiedShaders"] = False
     # safe mode after a crash (same as /root/vrunsafe.py)
     s = d.setdefault("steamvr", {})
     s["enableSafeMode"] = False
