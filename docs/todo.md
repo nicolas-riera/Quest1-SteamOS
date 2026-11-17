@@ -64,6 +64,9 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   (2 cm/s, 2 deg/s). To test worn: walk the room ~2 min (`journalctl -u android-q1trackd | grep room`: anchors > 0),
   restart SteamVR then Monado (the room must come back in place), cover the cameras and uncover them (no jump).
   Unverified: the world frame (assumed the world anchor's), a second persisted anchor in the same context.
+  First worn use (user, 2026-11-17 night): after SteamVR restarted, the whole room had moved again, so the anchors
+  don't hold the room yet. q1trackd's `room state` lines of that boot are kept locally (not in the repo, see the
+  Streaming lag entry): check whether anchors were placed and located at all, then what moved the room.
 - Worn test of the map state (2026-11-16, docs/boundary.md "Map state and the room"): the chaperone must hide during
   relocalizing/lost/bad and come back in place; check that vrcompositor's chaperone follows the collisionBounds alpha
   setting live (not verified without the headset worn), the Meta-like UX (black/passthrough while relocalizing) if
@@ -260,6 +263,12 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
   - Strong lag at random moments (user, 2026-11-17): the stream stalls hard for a moment, then recovers. Match the
     times with the shim's log, the PC's `driver_vrlink.txt` (ProblemAttribution) and `vrlink_aftm_*.csv`, and the
     headset's load and memory then.
+    Logs of the night 2026-11-17 saved outside the repo (they hold connection IDs): `../vrlink-logs-2026-11-17/`
+    (`pc/`: driver_vrlink, vrserver, vrcompositor, vrmonitor and 10 `vrlink_aftm_*.csv`; `headset/vlk/`: shim
+    journal, vrlink, vrclient_vrlink, vrserver, vrcompositor, layer logs, meminfo; `headset/vlk2/`: Steam's
+    `*.previous.txt`, q1trackd, monado, warnings, coredump list).
+  - Stopping the stream crashed all of Steam and SteamVR on the headset (user, 2026-11-17 night; no coredump kept).
+    Find the crash in the logs above (Steam's `*.previous.txt`, vrserver, warnings) and reproduce it.
   - Position: vrlink submits no depth, so a position error of the PC's prediction is not corrected at all.
   - On a system that had run for hours, the stream was 16.6 px rms off the world in Monado's output (2.5-3 px fresh).
     Follow it over a long run (`mjit.py` every few minutes, with vrcompositor's fps, fds and memory) to find which of
