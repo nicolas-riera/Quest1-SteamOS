@@ -38,3 +38,4 @@ src/vklayer-steamvr/sdftest_cs.h
 # The user's private requests and plans (closed testing etc.): never in history
 private/
 src/q1perfhud/q1-perfhud
+src/q1pairing/q1pairing

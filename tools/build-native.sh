@@ -17,7 +17,7 @@
 #   /usr/local/lib/quest1-vk, quest1-vk-steam   the Vulkan shim (vrcompositor; Steam's webhelper + vkredirect)
 #   /usr/local/lib/q1track/q1trackd, /data/local/tmp/libq1camtap.so   bionic tools (src/q1track, src/camtap)
 #   /usr/local/lib/q1splash/q1splash, /usr/local/bin/{ovrstub,q1black,xscreen,x11vnc,q1-camoverlay,q1screencast,
-#   q1-ptprovider,q1-perfhud,vrdash,q1desktop,q1apps}
+#   q1-ptprovider,q1-perfhud,q1-pairing,vrdash,q1desktop,q1apps}
 # To check against the development headset (built by hand there, recipe not recorded until now):
 #   the libhybris commit, Monado's CMake options, the vrcompositor shim (here the same build as Steam's).
 set -eo pipefail
@@ -144,6 +144,9 @@ g++ -std=c++17 -O2 -fPIC -shared -o $D/usr/local/lib/libq1trackedcam.so q1_track
 # Steam's Performance Overlay Level as a head-locked overlay (device/holo-frame-perf.sh)
 cd "$R/src/q1perfhud"
 g++ -std=c++17 -O2 -Wall -o $D/usr/local/bin/q1-perfhud q1perfhud.cpp $OVR
+# Steam's Add controllers page for the Touch controllers (device/holo-pairing.sh)
+cd "$R/src/q1pairing"
+g++ -std=c++17 -O2 -Wall -o $D/usr/local/bin/q1-pairing q1pairing.cpp $OVR
 # Plat_IsGamescope() true for the quick menu's Performance tab only (device/holo-frame-perf.sh)
 gcc -O2 -Wall -shared -fPIC -o $D/usr/local/lib/libquest1_gamescopeid.so "$R/src/gamescopeid/gamescopeid.c" -ldl
 # desktop mode: a nested Plasma's Xvfb as the SteamVR overlay gamescope would make (device/holo-desktop.sh)

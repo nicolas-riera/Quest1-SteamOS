@@ -111,6 +111,7 @@ sh holo-cpuset.sh
 sh holo-battery.sh install
 sh holo-chargesound.sh install
 sh holo-frame-perf.sh install
+sh holo-pairing.sh install
 sh holo-bluetooth.sh install
 sh holo-desktop.sh install
 sh holo-bootsplash.sh install

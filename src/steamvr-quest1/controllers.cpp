@@ -31,6 +31,7 @@
 #include <pthread.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
@@ -1149,4 +1150,43 @@ void Quest1Controllers::OnEvent(const VREvent_t &e)
 			     hv.fFrequency);
 		return;
 	}
+}
+
+//! Steam's "Identify" button on the Add controllers page (src/q1pairing): a short buzz on one controller.
+void Quest1Controllers::Identify(int hand)
+{
+	State *s = g_state;
+	if (!s || hand < 0 || hand > 1)
+		return;
+	XrHapticActionInfo hai{XR_TYPE_HAPTIC_ACTION_INFO};
+	hai.action = s->act[ACT_HAPTIC];
+	hai.subactionPath = s->hand[hand];
+	XrHapticVibration v{XR_TYPE_HAPTIC_VIBRATION};
+	v.amplitude = 0.6f;
+	v.duration = 400000000; // 0.4 s
+	v.frequency = XR_FREQUENCY_UNSPECIFIED;
+	cxrApplyHapticFeedback(s->xr.session, &hai, (XrHapticBaseHeader *)&v);
+	CLog("quest1: identify buzz %s\n", hand ? "R" : "L");
+}
+
+//! From RunFrame: q1pairing leaves "left" or "right" in /run/q1pairing/identify to ask for an identify buzz.
+void Quest1Controllers::PollRequests()
+{
+	static std::chrono::steady_clock::time_point next;
+	const auto now = std::chrono::steady_clock::now();
+	if (!g_state || now < next)
+		return;
+	next = now + std::chrono::milliseconds(200);
+	const char *path = "/run/q1pairing/identify";
+	FILE *f = fopen(path, "r");
+	if (!f)
+		return;
+	char buf[16] = {};
+	size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+	fclose(f);
+	unlink(path);
+	if (n && !strncmp(buf, "left", 4))
+		Identify(0);
+	else if (n && !strncmp(buf, "right", 5))
+		Identify(1);
 }

@@ -1,0 +1,7 @@
+#!/bin/sh
+# q1-pair-hal scan | pair <hex id> | unpair <hex id>: the real pairing step used by q1-pairing (src/q1pairing) once
+# /etc/quest1/pairing-real exists. NOT IMPLEMENTED YET: it must drive the sensors HAL's IControllerManagementClient over
+# hwbinder (IControllerProvider::getManagementClient, then enterDMM, getAdvertisingControllers, pairController, exitDMM;
+# the HAL stops and restarts input around pairController: docs/controller-pairing.md). Until then it changes nothing.
+echo "q1-pair-hal: not implemented ($1)" >&2
+exit 3

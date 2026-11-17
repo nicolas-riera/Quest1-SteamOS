@@ -2042,6 +2042,7 @@ public:
 		VREvent_t e;
 		while (VRServerDriverHost()->PollNextEvent(&e, sizeof(e)))
 			controllers.OnEvent(e);
+		controllers.PollRequests();
 		PollSettingsActions();
 	}
 	bool ShouldBlockStandbyMode() override { return false; }

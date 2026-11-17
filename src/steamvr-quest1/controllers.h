@@ -26,4 +26,8 @@ public:
 	void Shutdown();
 	//! vrserver events from IServerTrackedDeviceProvider::RunFrame (haptics).
 	void OnEvent(const vr::VREvent_t &e);
+	//! A short buzz on one hand (0 left, 1 right): Steam's Identify button.
+	void Identify(int hand);
+	//! Request files from src/q1pairing, checked from RunFrame.
+	void PollRequests();
 };
