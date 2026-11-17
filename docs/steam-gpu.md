@@ -177,3 +177,27 @@ being destroyed; VK_ERROR_DEVICE_LOST, SteamVR restarted): the only GPU hang of 
 shared texture freed or replaced by vrclient (overlay reallocation) while vrcompositor still read it, with no
 semaphore between them. The patch is not in the repo; the pieces above are what it needs.
 
+
+## Steam VR page frame cost: UBWC and the readback allocation (2026-11-17)
+
+Measured with the kgsl trace (uncontended = vrcompositor stopped for 2 s, so the batch times are the GPU's own) and a
+shim that logs every render pass (`vkCmdBeginRenderPass`, areas, draws, load/store ops): a frame of Steam's 1920x1080
+VR page is 2 GPU batches, ~40 render passes (22 Mpixel, 13 of them 1920 wide, 80 draws in all), 23.7 + 1.1 ms. It is
+memory-bound, not draw-bound: ~1 ms per Mpixel of pass area. ANGLE creates every image with
+`VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT`, which the Adreno blob does not UBWC-compress. `QUEST1_VKSHIM_NO_MUTABLE=1`
+(quest1_vkshim.c, set by steam-webhelper-gpu) drops the flag on optimal colour attachments without external memory:
+the heavy batch is 11-12 ms, Steam's GPU submissions 23.0 -> 35.6 a second (animated page, 3 x 3 s, steady state;
+pages look right in a vrcompositor snapshot). The same flag removal in vrcompositor's process changed nothing (7.7 vs
+7.8 ms).
+
+Second limit, the CPU of the GPU process's main thread (58-61 % of a core at ~18 fps, 100 % at the ~29 fps it reaches
+with the GPU free): perf shows 35 % in the kernel, and the shim's trace shows why: every frame Chromium allocates and
+frees an 8.3 MB readback buffer (vkAllocateMemory 6.8 ms on average, up to 14.5 ms; kernel memset + cache
+invalidate), 4 MB buffers 3-6 ms, and ~75 `vkFlushMappedMemoryRanges` of 64-1000 bytes (25-200 us each, 8 % of the
+thread). `QUEST1_VKSHIM_MEM_CACHE=1` keeps freed allocations of 1 MB or more for the next one of the same size
+(<= 4 per size, 48 MB, dropped after 3 s idle): 35.6 -> 39.6 submissions a second, uncontended 57 -> 68.
+
+What does not help: GPU priority of Steam equal to vrcompositor's (`QUEST1_COMPAT_KEEP_PRIORITY`: Steam 42 batches/s but
+vrcompositor falls to 44-57 fps), a bigger Skia budget (768 MB: no change), dropping backdrop filters/masks/shadows
+in the page (each 2-5 ms of the 24, no visual-neutral choice). The GPU is shared 56 % vrcompositor, 19 % Monado, the
+rest Steam, so 30 fps needs the Steam frame under ~7 ms GPU or less vrcompositor/Monado work.

@@ -15,6 +15,8 @@
 //      QUEST1_VKSHIM_LAYER (default /usr/local/lib/libVkLayer_quest1_steamvr_compat.so, "none": no layer)
 //      QUEST1_VKSHIM_WSI=1 X11 surfaces and swapchains
 //      QUEST1_VKSHIM_CACHED_READBACK=1 really cached memory for CPU readback (see "readback memory" below)
+//      QUEST1_VKSHIM_NO_MUTABLE=1 render targets without MUTABLE_FORMAT so that the blob compresses them (see below)
+//      QUEST1_VKSHIM_MEM_CACHE=1 freed device memory of 1 MB and more kept for the next allocation (see below)
 #define _GNU_SOURCE // program_invocation_short_name
 #include <vulkan/vk_layer.h>
 #include <vulkan/vulkan.h>
@@ -28,6 +30,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #define EXPORT __attribute__((visibility("default")))
@@ -326,6 +329,258 @@ static PFN_vkVoidFunction cached_proc(const char *name, PFN_vkVoidFunction next)
 	return NULL;
 }
 
+// --- render targets that can compress (QUEST1_VKSHIM_NO_MUTABLE=1, set by steam-webhelper-gpu) ------------------------
+// ANGLE makes every render target and texture of Chromium's GPU process mutable-format (flags
+// VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT, for sRGB views Chromium does not use). The Adreno blob does not compress (UBWC)
+// such images, so each of the ~40 render passes of a Steam VR page frame (22 Mpixel, mostly 1920-wide surfaces) moved
+// twice the memory: 24 ms of GPU a frame, 11-12 ms without the flag (2026-11-17, uncontended batch times from the kgsl
+// trace). Images shared with other processes (external memory) keep their flags: both sides must create them alike.
+static bool no_mutable(void)
+{
+	static int v = -1;
+	if (v < 0)
+		v = getenv("QUEST1_VKSHIM_NO_MUTABLE") != NULL;
+	return v;
+}
+
+static PFN_vkCreateImage real_create_image;
+static VKAPI_ATTR VkResult VKAPI_CALL CreateImageNoMutable(VkDevice d, const VkImageCreateInfo *ci,
+                                                           const VkAllocationCallbacks *alloc, VkImage *out)
+{
+	bool external = false;
+	for (const VkBaseInStructure *p = ci->pNext; p; p = p->pNext)
+		external |= p->sType == VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
+	if ((ci->flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) && (ci->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) &&
+	    ci->tiling == VK_IMAGE_TILING_OPTIMAL && !external) {
+		VkImageCreateInfo c = *ci;
+		c.flags &= ~VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+		return real_create_image(d, &c, alloc, out);
+	}
+	return real_create_image(d, ci, alloc, out);
+}
+
+//! Our vkCreateImage when the option is on, else NULL. *real gets the next one.
+static PFN_vkVoidFunction no_mutable_proc(const char *name, PFN_vkVoidFunction next)
+{
+	if (!no_mutable() || !next || strcmp(name, "vkCreateImage") != 0)
+		return NULL;
+	real_create_image = (PFN_vkCreateImage)next;
+	return (PFN_vkVoidFunction)CreateImageNoMutable;
+}
+
+// --- device memory cache (QUEST1_VKSHIM_MEM_CACHE=1, set by steam-webhelper-gpu) ---------------------------------------
+// Chromium reads each frame of Steam's VR pages back through a new 8.3 MB (1920x1080x4) buffer: vkAllocateMemory takes
+// 6-12 ms of the GPU process's main thread (the kernel zeroes the pages and invalidates the CPU cache over them), the
+// free another 1-2 ms, and 4 MB allocations take 3-6 ms, every frame (2026-11-17, 3 s of the shim's trace: 43
+// allocations, 6.8 ms on average): about a third of the CPU a frame costs there. Freed allocations of 1 MB or more
+// that nothing special was chained to are kept for the next allocation of the same device, size and type (at most
+// MC_PER_KEY of each, MC_TOTAL bytes, dropped after MC_IDLE_S seconds without use). The caller has freed them, so
+// the GPU is done with them; they come back unmapped and not zeroed (Vulkan promises neither).
+#define MC_MIN (1u << 20)
+#define MC_PER_KEY 4
+#define MC_TOTAL (48u << 20)
+#define MC_IDLE_S 3
+#define MC_SLOTS 4096
+
+static bool mem_cache_on(void)
+{
+	static int v = -1;
+	if (v < 0)
+		v = getenv("QUEST1_VKSHIM_MEM_CACHE") != NULL;
+	return v;
+}
+
+static struct mc_entry {
+	VkDeviceMemory m; //!< VK_NULL_HANDLE: slot free
+	VkDevice dev;
+	VkDeviceSize size;
+	uint32_t type;
+	bool mapped; //!< the caller mapped it and has not unmapped it
+	bool cached; //!< sitting in the cache, not owned by the caller
+	time_t since;
+} mc_tab[MC_SLOTS];
+static pthread_mutex_t mc_lock = PTHREAD_MUTEX_INITIALIZER;
+static VkDeviceSize mc_cached_bytes;
+static bool mc_thread_started;
+static PFN_vkAllocateMemory mc_real_alloc;
+static PFN_vkFreeMemory mc_real_free;
+static PFN_vkMapMemory mc_real_map;
+static PFN_vkUnmapMemory mc_real_unmap;
+
+static uint32_t mc_hash(VkDeviceMemory m)
+{
+	return (uint32_t)(((uintptr_t)m >> 4) * 2654435761u) % MC_SLOTS;
+}
+
+static struct mc_entry *mc_find(VkDeviceMemory m)
+{
+	for (uint32_t i = 0, h = mc_hash(m); i < MC_SLOTS; i++) {
+		struct mc_entry *e = &mc_tab[(h + i) % MC_SLOTS];
+		if (e->m == m)
+			return e;
+		if (e->m == VK_NULL_HANDLE)
+			return NULL;
+	}
+	return NULL;
+}
+
+//! The slot a new entry for m goes in (linear probing).
+static struct mc_entry *mc_slot(VkDeviceMemory m)
+{
+	for (uint32_t i = 0, h = mc_hash(m); i < MC_SLOTS; i++) {
+		struct mc_entry *e = &mc_tab[(h + i) % MC_SLOTS];
+		if (e->m == VK_NULL_HANDLE || e->m == m)
+			return e;
+	}
+	return NULL;
+}
+
+//! Forget the entry in slot e (lock held): the entries after it in its probe chain are put in again.
+static void mc_erase(struct mc_entry *e)
+{
+	e->m = VK_NULL_HANDLE;
+	for (uint32_t j = (uint32_t)(e - mc_tab + 1) % MC_SLOTS; mc_tab[j].m != VK_NULL_HANDLE; j = (j + 1) % MC_SLOTS) {
+		struct mc_entry t = mc_tab[j];
+		mc_tab[j].m = VK_NULL_HANDLE;
+		struct mc_entry *n = mc_slot(t.m);
+		if (n)
+			*n = t;
+	}
+}
+
+//! Really free the cached entries idle for more than `idle` seconds (lock held).
+static void mc_purge(time_t idle)
+{
+	time_t now = time(NULL);
+	for (uint32_t i = 0; i < MC_SLOTS; i++) {
+		struct mc_entry *e = &mc_tab[i];
+		if (e->m != VK_NULL_HANDLE && e->cached && now - e->since > idle) {
+			mc_real_free(e->dev, e->m, NULL);
+			mc_cached_bytes -= e->size;
+			mc_erase(e);
+			i = (uint32_t)-1; // entries moved: start again
+		}
+	}
+}
+
+static void *mc_thread(void *arg)
+{
+	for (;;) {
+		sleep(1);
+		pthread_mutex_lock(&mc_lock);
+		mc_purge(MC_IDLE_S);
+		pthread_mutex_unlock(&mc_lock);
+	}
+	return arg;
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL mc_AllocateMemory(VkDevice d, const VkMemoryAllocateInfo *ai,
+                                                        const VkAllocationCallbacks *alloc, VkDeviceMemory *out)
+{
+	if (ai->pNext || alloc || ai->allocationSize < MC_MIN)
+		return mc_real_alloc(d, ai, alloc, out);
+	pthread_mutex_lock(&mc_lock);
+	for (uint32_t i = 0; i < MC_SLOTS; i++) {
+		struct mc_entry *e = &mc_tab[i];
+		if (e->m != VK_NULL_HANDLE && e->cached && e->dev == d && e->size == ai->allocationSize &&
+		    e->type == ai->memoryTypeIndex) {
+			e->cached = false;
+			mc_cached_bytes -= e->size;
+			*out = e->m;
+			pthread_mutex_unlock(&mc_lock);
+			return VK_SUCCESS;
+		}
+	}
+	pthread_mutex_unlock(&mc_lock);
+	VkResult r = mc_real_alloc(d, ai, alloc, out);
+	if (r == VK_SUCCESS) {
+		pthread_mutex_lock(&mc_lock);
+		struct mc_entry *e = mc_slot(*out);
+		if (e)
+			*e = (struct mc_entry){*out, d, ai->allocationSize, ai->memoryTypeIndex, false, false, 0};
+		pthread_mutex_unlock(&mc_lock);
+	}
+	return r;
+}
+
+static VKAPI_ATTR void VKAPI_CALL mc_FreeMemory(VkDevice d, VkDeviceMemory m, const VkAllocationCallbacks *alloc)
+{
+	if (m == VK_NULL_HANDLE || alloc) {
+		mc_real_free(d, m, alloc);
+		return;
+	}
+	pthread_mutex_lock(&mc_lock);
+	struct mc_entry *e = mc_find(m);
+	if (e && !e->cached) {
+		int same = 0;
+		for (uint32_t i = 0; i < MC_SLOTS; i++)
+			same += mc_tab[i].m != VK_NULL_HANDLE && mc_tab[i].cached && mc_tab[i].dev == d &&
+			        mc_tab[i].size == e->size && mc_tab[i].type == e->type;
+		if (same < MC_PER_KEY && mc_cached_bytes + e->size <= MC_TOTAL) {
+			if (e->mapped)
+				mc_real_unmap(d, m);
+			e->mapped = false;
+			e->cached = true;
+			e->since = time(NULL);
+			mc_cached_bytes += e->size;
+			if (!mc_thread_started) {
+				pthread_t t;
+				if (pthread_create(&t, NULL, mc_thread, NULL) == 0) {
+					pthread_detach(t);
+					mc_thread_started = true;
+				}
+			}
+			pthread_mutex_unlock(&mc_lock);
+			return;
+		}
+		mc_erase(e); // not kept: forget it, free it below
+	}
+	pthread_mutex_unlock(&mc_lock);
+	mc_real_free(d, m, alloc);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL mc_MapMemory(VkDevice d, VkDeviceMemory m, VkDeviceSize off, VkDeviceSize sz,
+                                                   VkMemoryMapFlags f, void **pp)
+{
+	VkResult r = mc_real_map(d, m, off, sz, f, pp);
+	if (r == VK_SUCCESS) {
+		pthread_mutex_lock(&mc_lock);
+		struct mc_entry *e = mc_find(m);
+		if (e)
+			e->mapped = true;
+		pthread_mutex_unlock(&mc_lock);
+	}
+	return r;
+}
+
+static VKAPI_ATTR void VKAPI_CALL mc_UnmapMemory(VkDevice d, VkDeviceMemory m)
+{
+	pthread_mutex_lock(&mc_lock);
+	struct mc_entry *e = mc_find(m);
+	if (e)
+		e->mapped = false;
+	pthread_mutex_unlock(&mc_lock);
+	mc_real_unmap(d, m);
+}
+
+//! Our memory entry points when the cache is on, else NULL. *real gets the next one.
+static PFN_vkVoidFunction mem_cache_proc(const char *name, PFN_vkVoidFunction next)
+{
+	if (!mem_cache_on() || !next)
+		return NULL;
+#define W(n, real, fn)                                                                                                 \
+	if (strcmp(name, n) == 0) {                                                                                    \
+		real = (__typeof__(real))next;                                                                         \
+		return (PFN_vkVoidFunction)fn;                                                                         \
+	}
+	W("vkAllocateMemory", mc_real_alloc, mc_AllocateMemory)
+	W("vkFreeMemory", mc_real_free, mc_FreeMemory)
+	W("vkMapMemory", mc_real_map, mc_MapMemory)
+	W("vkUnmapMemory", mc_real_unmap, mc_UnmapMemory)
+#undef W
+	return NULL;
+}
+
 static VKAPI_ATTR VkResult VKAPI_CALL CreateDeviceTrampoline(VkPhysicalDevice pd, const VkDeviceCreateInfo *ci,
                                                              const VkAllocationCallbacks *alloc, VkDevice *out)
 {
@@ -343,6 +598,12 @@ EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice dev
 	if (w)
 		return w;
 	PFN_vkVoidFunction next = down_gdpa(device, name);
+	PFN_vkVoidFunction nm = no_mutable_proc(name, next);
+	if (nm)
+		return nm;
+	nm = mem_cache_proc(name, next);
+	if (nm)
+		return nm;
 	PFN_vkVoidFunction c = cached_proc(name, next);
 	return c ? c : next;
 }
@@ -434,6 +695,12 @@ EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance
 	if (w)
 		return w;
 	PFN_vkVoidFunction next = down_gipa(instance, name);
+	PFN_vkVoidFunction nm = no_mutable_proc(name, next);
+	if (nm)
+		return nm;
+	nm = mem_cache_proc(name, next);
+	if (nm)
+		return nm;
 	PFN_vkVoidFunction c = cached_proc(name, next);
 	return c ? c : next;
 }
