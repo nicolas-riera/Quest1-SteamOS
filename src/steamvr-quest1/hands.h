@@ -27,6 +27,8 @@ struct Frame
 	double pinchPoint[3] = {}; //!< midway between the thumb's and the index finger's tips, tracking space
 	double palmNormal[3] = {}; //!< out of the palm, tracking space
 	double palmCenter[3] = {};
+	double joints[24][3] = {}; //!< Meta's 24 joints in the skeleton frame (wrist at the origin), meters
+	double palmDev[3] = {};    //!< out of the palm, in the skeleton frame
 	double pinchDist = 1;      //!< thumb tip to index tip, meters
 	bool controllerInHand = false; //!< libossdk's own detection for this hand's controller
 	bool controllerConnected = false;

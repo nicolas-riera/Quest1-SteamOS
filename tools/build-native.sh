@@ -145,6 +145,9 @@ g++ -std=c++17 -O2 -fPIC -shared -o $D/usr/local/lib/libq1trackedcam.so q1_track
 # Steam's Performance Overlay Level as a head-locked overlay (device/holo-frame-perf.sh)
 cd "$R/src/q1perfhud"
 g++ -std=c++17 -O2 -Wall -o $D/usr/local/bin/q1-perfhud q1perfhud.cpp $OVR
+# Meta hand tracking overlays: skeleton and system-gesture mark (device/holo-hands.sh)
+cd "$R/src/q1handviz"
+g++ -std=c++17 -O2 -Wall -o $D/usr/local/bin/q1-handviz q1handviz.cpp $OVR
 # Plat_IsGamescope() true for the quick menu's Performance tab only (device/holo-frame-perf.sh)
 gcc -O2 -Wall -shared -fPIC -o $D/usr/local/lib/libquest1_gamescopeid.so "$R/src/gamescopeid/gamescopeid.c" -ldl
 # desktop mode: a nested Plasma's Xvfb as the SteamVR overlay gamescope would make (device/holo-desktop.sh)

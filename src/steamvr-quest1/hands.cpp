@@ -337,6 +337,14 @@ bool Read(int h, Frame *f)
 		MulV(Rwt, d, w);
 		MulV(r.M, w, Pm[j]);
 	}
+	for (int j = 0; j < J_COUNT; j++)
+		for (int k = 0; k < 3; k++)
+			f->joints[j][k] = Pm[j][k];
+	{
+		double w[3];
+		MulV(Rwt, hp.palmNormal, w);
+		MulV(r.M, w, f->palmDev);
+	}
 	M3 Rv[kBones];
 	double Pv[kBones][3];
 	for (int b = 0; b < kBones; b++) {

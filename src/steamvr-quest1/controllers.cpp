@@ -28,9 +28,13 @@
 #include "battery.h"
 #include "chaperone_frame.h"
 #include "hands.h"
+#include "handviz_shm.h"
 
 #include <pthread.h>
+#include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <time.h>
 
 #include <algorithm>
@@ -765,6 +769,48 @@ static bool IgnoreSystemWhileMoving(double now)
 	return on;
 }
 
+//! Tells q1handviz (the hand overlay) what the tracked hands look like; in place, tmpfs
+static void PublishViz(int h, const q1hands::Frame *f, bool tracked, bool palmFacing, bool pinch, const Quat &rq, const Vec &rt)
+{
+	static q1handviz_shm *m = nullptr;
+	static double tried = 0;
+	if (!m) {
+		double now = MonoSeconds();
+		if (now - tried < 2)
+			return;
+		tried = now;
+		int fd = open(Q1HANDVIZ_PATH, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+		if (fd < 0)
+			return;
+		if (ftruncate(fd, sizeof(q1handviz_shm)) == 0)
+			m = (q1handviz_shm *)mmap(nullptr, sizeof(q1handviz_shm), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+		close(fd);
+		if (m == MAP_FAILED)
+			m = nullptr;
+		if (!m)
+			return;
+		m->magic = Q1HANDVIZ_MAGIC;
+	}
+	q1handviz_hand &o = m->hand[h];
+	m->seq++;
+	o.tracked = tracked;
+	o.palmFacing = palmFacing;
+	o.pinch = pinch;
+	if (tracked && f) {
+		o.rootRot[0] = rq.w, o.rootRot[1] = rq.x, o.rootRot[2] = rq.y, o.rootRot[3] = rq.z;
+		o.rootPos[0] = rt.x, o.rootPos[1] = rt.y, o.rootPos[2] = rt.z;
+		for (int k = 0; k < 3; k++)
+			o.palmDev[k] = (float)f->palmDev[k];
+		for (int j = 0; j < 24; j++)
+			for (int k = 0; k < 3; k++)
+				o.joints[j][k] = (float)f->joints[j][k];
+	}
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	m->updateNs = (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec;
+	m->seq++;
+}
+
 void State::UpdateHand(int h, double now, const XrPosef &headPose, bool headValid, bool headTracked)
 {
 	TouchController *d = dev[h];
@@ -900,6 +946,7 @@ void State::UpdateHand(int h, double now, const XrPosef &headPose, bool headVali
 		bones[0].orientation.y = (float)rq.y;
 		bones[0].orientation.z = (float)rq.z;
 		d->UpdateSkeleton(bones);
+		PublishViz(h, &hf, true, hd.palmFacing, hd.pinchDown, rq, rt);
 
 		DriverPose_t p{};
 		p.qWorldFromDriverRotation.w = 1;
@@ -949,6 +996,7 @@ void State::UpdateHand(int h, double now, const XrPosef &headPose, bool headVali
 		CLog("quest1: %s hand lost: back to the controller\n", d->left ? "left" : "right");
 	}
 	hd.wasHandSeen = false;
+	PublishViz(h, nullptr, false, false, false, Quat{}, Vec{});
 
 	// pose
 	DriverPose_t p{};

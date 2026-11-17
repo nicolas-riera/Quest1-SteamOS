@@ -358,6 +358,15 @@ static int do_serve(double hz)
 	m->version = Q1HANDS_VERSION;
 	m->writer_pid = (uint32_t)getpid();
 	load_skeleton(m);
+	/* the file driver_quest1 (user steamos) writes for q1handviz: made here, as the directory is root's */
+	int vfd = open("/run/q1track/handviz", O_RDWR | O_CREAT | O_CLOEXEC, 0666);
+	if (vfd >= 0) {
+		fchmod(vfd, 0666);
+		if (ftruncate(vfd, 1024) != 0)
+			fprintf(stderr, "q1handsd: handviz file size failed
+");
+		close(vfd);
+	}
 	rename(Q1HANDS_SHM_PATH ".tmp", Q1HANDS_SHM_PATH);
 	fprintf(stderr, "q1handsd: publishing at %.0f Hz in %s\n", hz, Q1HANDS_SHM_PATH);
 
