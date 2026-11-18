@@ -2,7 +2,7 @@
 
 [![Device: Oculus Quest](https://img.shields.io/badge/device-Oculus%20Quest-1c1e20)](#what-works)
 [![SteamOS Holo arm64](https://img.shields.io/badge/SteamOS-Holo%20arm64-1a9fff?logo=steam&logoColor=white)](docs/rootfs-build.md)
-[![SteamVR 2.19.3 on the headset](https://img.shields.io/badge/SteamVR-2.19.3%20on%20the%20headset-1a9fff?logo=steam&logoColor=white)](docs/steamvr-port.md)
+[![SteamVR 2.19.3](https://img.shields.io/badge/SteamVR-2.19.3-1a9fff?logo=steam&logoColor=white)](docs/steamvr-port.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Last commit](https://img.shields.io/github/last-commit/nicolas-riera/Quest1-SteamOS)](https://github.com/nicolas-riera/Quest1-SteamOS/commits/main)
 [![Stars](https://img.shields.io/github/stars/nicolas-riera/Quest1-SteamOS?style=flat)](https://github.com/nicolas-riera/Quest1-SteamOS/stargazers)
