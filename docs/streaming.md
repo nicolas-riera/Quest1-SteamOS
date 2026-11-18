@@ -773,6 +773,7 @@ vrlink writes its own log, `~/.local/share/Steam/logs/vrlink.txt` (the PC's side
     closing it with the system button gives them back). vrlink tells the PC the dashboard's state
     (`VTE_DRIVER_SYSTEM_FLAGS` 1 1 1 open, 0 0 0 closed, in its log); the test reads it there, because a new OpenVR
     client (vrdash) connecting opened the dashboard again within a second (2026-11-16).
+    Checked worn by the user (2026-11-18): the controllers' buttons reach the PC's games.
 
 15. **The PC's prediction "bounced"** (user, 2026-11-17: on a sharp turn the black edges and the user's own avatar
     head in VRChat visibly overshoot and come back; the controllers a little too). The shim's 40 ms low-pass of the

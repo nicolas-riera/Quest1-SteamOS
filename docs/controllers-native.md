@@ -300,7 +300,8 @@ OS and the Rift S ignore them then). driver_quest1 (controllers.cpp, `IgnoreSyst
 hand's system button (left Menu, right Oculus) that begins while the controller turns faster than 2.5 rad/s (~145
 deg/s) or, tracked, moves faster than 0.8 m/s, or within 0.15 s of it, until the button is released (the hold to
 recenter included). The setting `driver_quest1/ignoreSystemWhileMoving` (default on) is the toggle "Ignore Oculus and
-Menu buttons while moving" in the VR settings' Oculus Quest category. Thresholds not yet tuned worn.
+Menu buttons while moving" in the VR settings' Oculus Quest category. Checked worn by the user (2026-11-18): it
+works with these thresholds.
 
 ### Calibrating the IMU mounting (two static poses, both hands at once)
 

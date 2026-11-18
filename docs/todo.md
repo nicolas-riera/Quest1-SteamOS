@@ -3,20 +3,119 @@
 Only what is left to do, roughly by priority. Done work leaves this list: it is described in the other docs
 (`docs/*.md`) and in the commit log.
 
-## Found by the user on 2026-11-16 evening (first)
+Priority (user, 2026-11-18): Steam Link VR first (it is what this headset can do really well, and it is
+unusable as it is), then the tracking, then the stability; the rest after.
 
-- Storage (development headset): the development leftovers are deleted (user's go, 2026-11-17: `.debug`, the old
-  monado-service and library copies, `tmp`, `stream-crash-*`, old audio logs, the package cache): 5.8 GB free of the
-  24 GB image, was 2.2. Left: check what grows over a day of use (`du` before/after); the full install wipes the
-  headset anyway (user).
-- Microphone latency in Steam Link VR (~500 ms felt, user 2026-11-17, still there at the end of the night): the headset's capture holds ~20-40 ms; measure
-  vrlink's path (its audio jitter buffer is 50 ms on the headset; the PC's side unknown).
+## Steam Link VR and streaming (first)
+
 - Steam Link VR: still black flashes (fewer), and sometimes a flash brings a trembling that goes away once the
   headset's load drops (seen with desktop mode and Dolphin open). Not reproduced on the table (2026-11-17, panels on,
   stream running, desktop mode plus 500 MB taken, load 19, MemAvailable down to 126 MB): no black picture from the PC,
   no gap over 100 ms after the start, no empty submit, Monado receiving 69-72 frames a second with none left unshown.
   The shim now logs each such event with the time of day (`journalctl -b | grep "quest1_v4l2: vrlink: [0-9]"`, the
   journal is lost at reboot): after a flash seen worn, read it before rebooting, and note the time.
+- Microphone latency in Steam Link VR (~500 ms felt, user 2026-11-17, still there at the end of the night): the headset's capture holds ~20-40 ms; measure
+  vrlink's path (its audio jitter buffer is 50 ms on the headset; the PC's side unknown).
+- Steam Link VR (docs/streaming.md, section 2): a new picture each frame, a sharp centre (user, 2026-11-12: "it's
+  sharp"), and on SteamVR 2.19.3 "it nearly doesn't tremble any more" (user, 2026-11-17, item 13), but it flashes black
+  when the headset is loaded (the dashboard open) and its latency is still a bit high (user, 2026-11-16). On the table
+  (2026-11-16, after the CPU split, device/holo-cpuset.sh) it runs at ~71 fps with the dashboard open or not: check worn.
+  - Putting the headset on: a strong tremble for a moment before the stream settles (user, 2026-11-17): the change
+    from 9 fps (panels off) to 72, the PC's rate control and prediction catching up. Measure it (stepsnap while
+    Monado switches the panels on) and find which side lags.
+  - The PC's chroma key (SteamVR beta, Camera settings, "Key Content": games draw a key colour where the room view
+    should show): the headset shows the key colour (green). 2.19's vrcompositor keys only in its simplified shader
+    for YUV ("spatial encoding 2") input, `distort_ps_achromatic_se2_ck`, and logs "Chroma key (virtual) room view
+    support"; the layer converts vrlink's NV12 itself, so the key must be applied there (alpha where the colour is
+    near the key) with vrcompositor blending the stream over the room view.
+  - Encode sizes other than 1024 a view (user, 2026-11-17): below 1024 the picture is wrong in the headset; both
+    smaller and larger must work (the layer prewarms 1024x4096 buffers; venus's stride and alignment).
+  - The edges look painted ("oil painting", user, 2026-11-17): it was the PC lowering the quality while the decoder
+    was slow (fixed, item 13); to judge again, then 2.19's new `sharpening` settings.
+  - The controllers' battery levels don't reach the PC through vrlink (user, 2026-11-17): find which property vrlink
+    forwards (`Prop_DeviceBatteryPercentage_Float`, `Prop_DeviceProvidesBatteryStatus_Bool` on our driver's
+    controllers?) and set it.
+  - Picture quality (user, 2026-11-16: "a bit pixelated/blurry", the PC's desktop view unreadable): the PC alone sizes
+    the stream (docs/streaming.md "Picture quality"), and caps each view by its GPU's generation (this PC's Pascal:
+    1024; Turing 1280, Ampere and later 1344; no setting lifts it). The bitrate is now 160 (`driver_vrlink/
+    targetBandwidth`, was 110; no cost on the headset). Left for the user to judge worn: a larger sharp centre
+    (`steamvr/preferredFoveatedAngle`, see the frame rate below) and the PC's sharpening (`driver_vrlink/useSharpening`).
+  - Latency: measure it (the head's pose to the picture's pose on screen) and find where it goes: the PC's ~90 ms
+    prediction says how far ahead it must guess.
+  - The head is still over-predicted (user, 2026-11-17 end of night), although the PC's prediction no longer
+    overshoots from a delayed rate (the low-pass is gone, docs/streaming.md item 15): the black edges and the avatar's
+    head still overshoot. Measure what the PC predicts against the head's real motion (`vrlink_aftm_*.csv`, stepsnap).
+  - Strong lag at random moments (user, 2026-11-17): the stream stalls hard for a moment, then recovers. Match the
+    times with the shim's log, the PC's `driver_vrlink.txt` (ProblemAttribution) and `vrlink_aftm_*.csv`, and the
+    headset's load and memory then.
+    What it looks like (user, 2026-11-17): the video is gone (the headset falls back to its own Aurora home), the
+    audio lags very strongly, then it comes back, goes again, comes back, and so on. Only lead so far: it happens
+    when the PC's frame rate varies a lot.
+    Logs of the night 2026-11-17 saved outside the repo (they hold connection IDs): `../vrlink-logs-2026-11-17/`
+    (`pc/`: driver_vrlink, vrserver, vrcompositor, vrmonitor and 10 `vrlink_aftm_*.csv`; `headset/vlk/`: shim
+    journal, vrlink, vrclient_vrlink, vrserver, vrcompositor, layer logs, meminfo; `headset/vlk2/`: Steam's
+    `*.previous.txt`, q1trackd, monado, warnings, coredump list).
+  - Stopping the stream crashed all of Steam and SteamVR on the headset (user, 2026-11-17 night; no coredump kept).
+    Find the crash in the logs above (Steam's `*.previous.txt`, vrserver, warnings) and reproduce it.
+  - Position: vrlink submits no depth, so a position error of the PC's prediction is not corrected at all.
+  - On a system that had run for hours, the stream was 16.6 px rms off the world in Monado's output (2.5-3 px fresh).
+    Follow it over a long run (`mjit.py` every few minutes, with vrcompositor's fps, fds and memory) to find which of
+    these takes it there (vrcompositor's `sync_fence` leak is fixed: PR #4, display-event fences from a pool):
+    - The headset slowing down over time: 64-71 fps at the start, 55 fps 90 minutes later, ~380 MB available, swap
+      in use, load ~14.
+  - Black flashes (user, 2026-11-12, still on 2026-11-17): one worn was a second without a picture as the dashboard
+    opened, with datagrams dropped (now fewer: vrlink's receive threads realtime, 8 MB buffers, docs/streaming.md
+    item 16); match the next ones with the shim's log (`journalctl -b | grep "quest1_v4l2: vrlink: [0-9]"`).
+  - GPU (user, 2026-11-16: a stable 72 fps with margin, for PCs that send views above 1024): vrcompositor takes
+    8-15 ms of GPU a frame with the stream depending on the session, ~12 typically (kgsl trace: one batch a frame), so
+    there is no margin. Not the layer's inset blend (off: the same), not memory fragmentation (compaction before a
+    restart: the same), not Steam's webhelper (idle then). Sessions with the PC's inset widened
+    (`preferredFoveatedAngle` +16) ran at 55-57 fps, +8 at 62-66, 0 at 66-72: unexplained. Next: a per-pass GPU profile
+    during a stream (`/tmp/quest1-gputime` is not used while streaming: the user's call). `enableSimplifiedShaders` (off; the
+    shader choice needs it, docs/streaming.md "The distortion shader") saves 2.2 ms, but the stream's colours come out
+    washed (the simplified shaders take its texture as linear): an sRGB view of the copy fixes the colours but, made
+    mutable, costs ~9 ms (45 fps). Next: copies in an sRGB format of their own, the copy shaders writing linear.
+  - Start of a session: vrcompositor at 22-45 fps for 2-4 s (Monado's re-projection holds the head steady: 0 late),
+    ~250 MB swapped (2026-11-16): vrcompositor +232 MB (ION +174, KGSL +58), vrlink's frame buffers, the decoder's
+    references, and vrlink's first decoder always reset (two rounds of 16 imports). Freeing memory as vrlink starts did
+    not help. Find what else allocates and whether the first decoder's reset can be avoided.
+    Timeline of a start (2026-11-16, vrlink.txt): the session at 0 s, the PC's first packet 11.8 s later (the PC's
+    side), then ~3.5 s of decoder resets: one at once at the first SOURCE_CHANGE (CheckStuck's "last progress" is
+    from the decoder made 11 s before), two "Received frame outside of backtrack window" (the first frames arrive
+    later than vrlink's pose history), one more CheckStuck; stable after that. With the orphaned /dev/shm segments
+    gone (q1-shmclean), one 5 s window at 49 fps, then 70-72.
+  Also: the PC's overlays show only when the PC's SteamVR started after
+  vrlink; stopping a session from the headset (`StopStreamingSession`) does nothing and vrlink hangs on its way out.
+  With the USB cable in, vrlink and the PC send the stream over the USB network too (each datagram on each link: about
+  a core on the headset, 2026-11-12). Hiding usb0 from vrlink (getifaddrs, and dropping what it sends there) made it
+  never connect ("Timed out getting information from the server"): the PC reached it over USB first.
+- VRChat's loading skybox (user, 2026-11-17, photo): the world's picture only inside the sharp inset's rounded
+  rectangle, black (the grid) between it and the edges. The PC's compositor draws the stream's views (vrlink forwards
+  no skybox): check whether a Quest 3 on the same PC shows it too, and whether the wide view lacks the skybox in a PC
+  capture (`driver_vrlink` "Dump H265"); the headset can only place the views it gets.
+- Steam Link VR latency (docs/streaming.md item 15; PC logs `vrlink_aftm_*.csv`, 2026-11-17): ~91 ms from the PC's
+  pose to the headset's display, of which decode 15 ms and ~34 ms waiting on the headset between the decode and
+  vrlink taking the frame (the PC predicts for that display time). The PC's `driver_vrlink/maxVideoQueueLatencyUs`
+  (not set: its value goes to the headset in message 0x24) and its 10-bit stream (8-bit decodes ~4 ms faster) are PC
+  settings: ask the user before trying them.
+- Steam Link from a PC, 2D (docs/streaming.md, section 1): it works well (user, 2026-11-12); more performance is
+  welcome: the kernel emulates atomic instructions for Steam's programs (`emulate_atomic` in the profiles), the
+  Vulkan/OpenGL semaphore is refused (glFinish fallback).
+- Steam Link from a PC, 2D: a controller (gamepad) connected to the headset itself is untested (user,
+  2026-11-18): connect one and check that it reaches the PC's game during a 2D stream.
+- Hardware video decoding for the whole system (user, 2026-11-09: "hardware video decoding system wide, Chromium
+  included"). FFmpeg's `*_v4l2m2m` decoders and VLC use venus (`q1-hwdec`, docs/streaming.md "The decoder"). Left:
+  GStreamer's v4l2 decoders (they fall back by themselves, but set CAPTURE up after SOURCE_CHANGE: the library must
+  start the firmware session itself first); Chromium decodes with VA-API only (Arch's build has no V4L2 decoder): a
+  VA-API driver on top, or another build. The user's target (2026-11-10): the stream at 72 fps next to the dashboard
+  and overlays, so everything on the hardware path and no CPU copy of the frames.
+
+## Then: tracking, stability and the rest found by the user (2026-11-16 evening)
+
+- Storage (development headset): the development leftovers are deleted (user's go, 2026-11-17: `.debug`, the old
+  monado-service and library copies, `tmp`, `stream-crash-*`, old audio logs, the package cache): 5.8 GB free of the
+  24 GB image, was 2.2. Left: check what grows over a day of use (`du` before/after); the full install wipes the
+  headset anyway (user).
 - A whole-system freeze (SSH too; ping fine): desktop mode open with Discover searching, headset on the forehead, then
   put on: SteamVR froze first (Monado still ran), then everything. Same symptom at 18:43 right after a stack restart
   and a stream start. Not reproduced since; a capture to the PC (dmesg -w and a 10 s snapshot of memory, load, top
@@ -176,9 +275,6 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - SteamVR restarted alone (Steam kept running) breaks Steam's VR UI: steamwebhelper's GPU process takes GPU page faults when
   vrcompositor stops (2026-11-11 17:50 and 17:51, two restarts) and the dashboard then shows its lower half empty and loses
   its bottom bar (restarting Steam brought it back, user). SteamVR alone should restart cleanly.
-- Ignoring the Oculus and Menu buttons while the controller moves (2026-11-16, driver_quest1
-  `ignoreSystemWhileMoving`, docs/controllers-native.md): check worn that a press during a swing is ignored, a
-  deliberate one is not, the toggle shows in the VR settings' Oculus Quest category, and tune the thresholds.
 - Frame mode (docs/frame-mode.md, 2026-11-16: device type 5001): the user to check that the library shows the Frame's
   compatibility ratings and that nothing else in Steam broke (its settings' System and update pages, the startup
   movie).
@@ -228,104 +324,6 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - A GPU page fault in a steamwebhelper (2026-11-12 20:28, during a stream) took vrcompositor's device with it
   (`vkQueueSubmit` -4): SteamVR restarted by itself. Again at 21:48, same fault address: the layer's "q1 display
   done" thread spun at 93 % in its fence wait for 5 s, then VK_ERROR_DEVICE_LOST and vrcompositor aborted.
-
-## Streaming
-
-- Steam Link VR (docs/streaming.md, section 2): a new picture each frame, a sharp centre (user, 2026-11-12: "it's
-  sharp"), and on SteamVR 2.19.3 "it nearly doesn't tremble any more" (user, 2026-11-17, item 13), but it flashes black
-  when the headset is loaded (the dashboard open) and its latency is still a bit high (user, 2026-11-16). On the table
-  (2026-11-16, after the CPU split, device/holo-cpuset.sh) it runs at ~71 fps with the dashboard open or not: check worn.
-  - Putting the headset on: a strong tremble for a moment before the stream settles (user, 2026-11-17): the change
-    from 9 fps (panels off) to 72, the PC's rate control and prediction catching up. Measure it (stepsnap while
-    Monado switches the panels on) and find which side lags.
-  - The PC's chroma key (SteamVR beta, Camera settings, "Key Content": games draw a key colour where the room view
-    should show): the headset shows the key colour (green). 2.19's vrcompositor keys only in its simplified shader
-    for YUV ("spatial encoding 2") input, `distort_ps_achromatic_se2_ck`, and logs "Chroma key (virtual) room view
-    support"; the layer converts vrlink's NV12 itself, so the key must be applied there (alpha where the colour is
-    near the key) with vrcompositor blending the stream over the room view.
-  - Encode sizes other than 1024 a view (user, 2026-11-17): below 1024 the picture is wrong in the headset; both
-    smaller and larger must work (the layer prewarms 1024x4096 buffers; venus's stride and alignment).
-  - The edges look painted ("oil painting", user, 2026-11-17): it was the PC lowering the quality while the decoder
-    was slow (fixed, item 13); to judge again, then 2.19's new `sharpening` settings.
-  - Controller buttons to the PC (1a38621): vrlink now accepts the controllers and reads our binding, but it found no
-    controller then (they were asleep): check worn that each button, stick, trigger and grip reaches the PC's game
-    (`vrcmd --pollcontrollers` on the PC), and which PC input the left X/Y land on (vrlink sends the Frame's left
-    controller as a d-pad: dpad_down/dpad_right).
-  - The controllers' battery levels don't reach the PC through vrlink (user, 2026-11-17): find which property vrlink
-    forwards (`Prop_DeviceBatteryPercentage_Float`, `Prop_DeviceProvidesBatteryStatus_Bool` on our driver's
-    controllers?) and set it.
-  - Picture quality (user, 2026-11-16: "a bit pixelated/blurry", the PC's desktop view unreadable): the PC alone sizes
-    the stream (docs/streaming.md "Picture quality"), and caps each view by its GPU's generation (this PC's Pascal:
-    1024; Turing 1280, Ampere and later 1344; no setting lifts it). The bitrate is now 160 (`driver_vrlink/
-    targetBandwidth`, was 110; no cost on the headset). Left for the user to judge worn: a larger sharp centre
-    (`steamvr/preferredFoveatedAngle`, see the frame rate below) and the PC's sharpening (`driver_vrlink/useSharpening`).
-  - Latency: measure it (the head's pose to the picture's pose on screen) and find where it goes: the PC's ~90 ms
-    prediction says how far ahead it must guess.
-  - The head is still over-predicted (user, 2026-11-17 end of night), although the PC's prediction no longer
-    overshoots from a delayed rate (the low-pass is gone, docs/streaming.md item 15): the black edges and the avatar's
-    head still overshoot. Measure what the PC predicts against the head's real motion (`vrlink_aftm_*.csv`, stepsnap).
-  - Strong lag at random moments (user, 2026-11-17): the stream stalls hard for a moment, then recovers. Match the
-    times with the shim's log, the PC's `driver_vrlink.txt` (ProblemAttribution) and `vrlink_aftm_*.csv`, and the
-    headset's load and memory then.
-    What it looks like (user, 2026-11-17): the video is gone (the headset falls back to its own Aurora home), the
-    audio lags very strongly, then it comes back, goes again, comes back, and so on. Only lead so far: it happens
-    when the PC's frame rate varies a lot.
-    Logs of the night 2026-11-17 saved outside the repo (they hold connection IDs): `../vrlink-logs-2026-11-17/`
-    (`pc/`: driver_vrlink, vrserver, vrcompositor, vrmonitor and 10 `vrlink_aftm_*.csv`; `headset/vlk/`: shim
-    journal, vrlink, vrclient_vrlink, vrserver, vrcompositor, layer logs, meminfo; `headset/vlk2/`: Steam's
-    `*.previous.txt`, q1trackd, monado, warnings, coredump list).
-  - Stopping the stream crashed all of Steam and SteamVR on the headset (user, 2026-11-17 night; no coredump kept).
-    Find the crash in the logs above (Steam's `*.previous.txt`, vrserver, warnings) and reproduce it.
-  - Position: vrlink submits no depth, so a position error of the PC's prediction is not corrected at all.
-  - On a system that had run for hours, the stream was 16.6 px rms off the world in Monado's output (2.5-3 px fresh).
-    Follow it over a long run (`mjit.py` every few minutes, with vrcompositor's fps, fds and memory) to find which of
-    these takes it there (vrcompositor's `sync_fence` leak is fixed: PR #4, display-event fences from a pool):
-    - The headset slowing down over time: 64-71 fps at the start, 55 fps 90 minutes later, ~380 MB available, swap
-      in use, load ~14.
-  - Black flashes (user, 2026-11-12, still on 2026-11-17): one worn was a second without a picture as the dashboard
-    opened, with datagrams dropped (now fewer: vrlink's receive threads realtime, 8 MB buffers, docs/streaming.md
-    item 16); match the next ones with the shim's log (`journalctl -b | grep "quest1_v4l2: vrlink: [0-9]"`).
-  - GPU (user, 2026-11-16: a stable 72 fps with margin, for PCs that send views above 1024): vrcompositor takes
-    8-15 ms of GPU a frame with the stream depending on the session, ~12 typically (kgsl trace: one batch a frame), so
-    there is no margin. Not the layer's inset blend (off: the same), not memory fragmentation (compaction before a
-    restart: the same), not Steam's webhelper (idle then). Sessions with the PC's inset widened
-    (`preferredFoveatedAngle` +16) ran at 55-57 fps, +8 at 62-66, 0 at 66-72: unexplained. Next: a per-pass GPU profile
-    during a stream (`/tmp/quest1-gputime` is not used while streaming: the user's call). `enableSimplifiedShaders` (off; the
-    shader choice needs it, docs/streaming.md "The distortion shader") saves 2.2 ms, but the stream's colours come out
-    washed (the simplified shaders take its texture as linear): an sRGB view of the copy fixes the colours but, made
-    mutable, costs ~9 ms (45 fps). Next: copies in an sRGB format of their own, the copy shaders writing linear.
-  - Start of a session: vrcompositor at 22-45 fps for 2-4 s (Monado's re-projection holds the head steady: 0 late),
-    ~250 MB swapped (2026-11-16): vrcompositor +232 MB (ION +174, KGSL +58), vrlink's frame buffers, the decoder's
-    references, and vrlink's first decoder always reset (two rounds of 16 imports). Freeing memory as vrlink starts did
-    not help. Find what else allocates and whether the first decoder's reset can be avoided.
-    Timeline of a start (2026-11-16, vrlink.txt): the session at 0 s, the PC's first packet 11.8 s later (the PC's
-    side), then ~3.5 s of decoder resets: one at once at the first SOURCE_CHANGE (CheckStuck's "last progress" is
-    from the decoder made 11 s before), two "Received frame outside of backtrack window" (the first frames arrive
-    later than vrlink's pose history), one more CheckStuck; stable after that. With the orphaned /dev/shm segments
-    gone (q1-shmclean), one 5 s window at 49 fps, then 70-72.
-  Also: the PC's overlays show only when the PC's SteamVR started after
-  vrlink; stopping a session from the headset (`StopStreamingSession`) does nothing and vrlink hangs on its way out.
-  With the USB cable in, vrlink and the PC send the stream over the USB network too (each datagram on each link: about
-  a core on the headset, 2026-11-12). Hiding usb0 from vrlink (getifaddrs, and dropping what it sends there) made it
-  never connect ("Timed out getting information from the server"): the PC reached it over USB first.
-- VRChat's loading skybox (user, 2026-11-17, photo): the world's picture only inside the sharp inset's rounded
-  rectangle, black (the grid) between it and the edges. The PC's compositor draws the stream's views (vrlink forwards
-  no skybox): check whether a Quest 3 on the same PC shows it too, and whether the wide view lacks the skybox in a PC
-  capture (`driver_vrlink` "Dump H265"); the headset can only place the views it gets.
-- Steam Link VR latency (docs/streaming.md item 15; PC logs `vrlink_aftm_*.csv`, 2026-11-17): ~91 ms from the PC's
-  pose to the headset's display, of which decode 15 ms and ~34 ms waiting on the headset between the decode and
-  vrlink taking the frame (the PC predicts for that display time). The PC's `driver_vrlink/maxVideoQueueLatencyUs`
-  (not set: its value goes to the headset in message 0x24) and its 10-bit stream (8-bit decodes ~4 ms faster) are PC
-  settings: ask the user before trying them.
-- Steam Link from a PC, 2D (docs/streaming.md, section 1): it works well (user, 2026-11-12); more performance is
-  welcome: the kernel emulates atomic instructions for Steam's programs (`emulate_atomic` in the profiles), the
-  Vulkan/OpenGL semaphore is refused (glFinish fallback).
-- Hardware video decoding for the whole system (user, 2026-11-09: "hardware video decoding system wide, Chromium
-  included"). FFmpeg's `*_v4l2m2m` decoders and VLC use venus (`q1-hwdec`, docs/streaming.md "The decoder"). Left:
-  GStreamer's v4l2 decoders (they fall back by themselves, but set CAPTURE up after SOURCE_CHANGE: the library must
-  start the firmware session itself first); Chromium decodes with VA-API only (Arch's build has no V4L2 decoder): a
-  VA-API driver on top, or another build. The user's target (2026-11-10): the stream at 72 fps next to the dashboard
-  and overlays, so everything on the hardware path and no CPU copy of the frames.
 
 ## Hardware
 
