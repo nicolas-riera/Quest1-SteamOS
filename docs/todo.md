@@ -361,6 +361,14 @@ Only what is left to do, roughly by priority. Done work leaves this list: it is 
 - While the headset's install system (the small Linux that builds the image on the headset) is building, the
   power LED blinks white <-> purple.
 - Dual boot with a boot selector in the headset (very low priority).
+- Valve's Steam Frame kernel (7.2) instead of Meta's 4.4, once the port is stable (user, 2026-11-18). Context:
+  github.com/nicolas-riera/Quest1-SteamOS/issues/5, the overpressure organization (SteamOS on the PICO 4,
+  github.com/overpressure) invites the Quest 1 as `overpressure/monterey` once it is stable. Their kernel tree
+  (overpressure/linux, one branch per layer and headset) is the base; the first and biggest piece is Qualcomm's KGSL
+  (GPL, in Meta's Quest kernel source, newer versions still carry the 5xx code) as a module, so the Quest's own
+  Vulkan driver keeps running through libhybris (Turnip has no 5xx support). Needs GPU clock and bandwidth voting,
+  buffer sharing with the display and preemption right. Their repositories (phoenix, packages, headset-template) may
+  be reused for Steam Frame mode, room view, Steam Link, FEX/Proton/Lepton.
 
 ## Hand tracking (branch hand-tracking, docs/hand-tracking.md)
 - Worn test of Meta's hands: `echo auto > /etc/quest1-hands`, then check tracked status values, the hand's pose space, the retargeted skeleton, pinch gestures (system / dashboard trigger).
