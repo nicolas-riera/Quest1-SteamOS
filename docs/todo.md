@@ -14,6 +14,15 @@ unusable as it is), then the tracking, then the stability; the rest after.
   no gap over 100 ms after the start, no empty submit, Monado receiving 69-72 frames a second with none left unshown.
   The shim now logs each such event with the time of day (`journalctl -b | grep "quest1_v4l2: vrlink: [0-9]"`, the
   journal is lost at reboot): after a flash seen worn, read it before rebooting, and note the time.
+- The Wi-Fi driver runs out of receive buffers as a stream starts (2026-11-20): `wlan: NBUF alloc failed 2115B @
+  htt_rx_ring_buf_attach` and "NBUF allocation timer expired Fail count", 9,415 failures and 2,771 allocation stalls
+  in the first 45 s of one stream start (MemFree down to 65 MB; the PC saw PingSpike, HostRxLoss, ClientRxLoss then),
+  none in steady streaming. The Normal zone's watermarks are 6 MB apart (min 24.7, low 31, high 37 MB), so bursts
+  fall to direct reclaim and the driver's atomic allocations fail. Tried `vm.extra_free_kbytes=65536` (live, not kept):
+  the next Steam + SteamVR restart and stream start left the headset unreachable (ping yes, SSH no) for 15 min and
+  more: maybe a coincidence (that restart pair froze it before), but not to retry blindly. Next: a smaller step
+  (`min_free_kbytes` 49152 -> 65536, or extra_free 16 MB) with the freeze capture running, and stream starts that
+  allocate less at once.
 - Microphone latency in Steam Link VR (~500 ms felt, user 2026-11-17, still there at the end of the night): the headset's capture holds ~20-40 ms; measure
   vrlink's path (its audio jitter buffer is 50 ms on the headset; the PC's side unknown).
 - Steam Link VR (docs/streaming.md, section 2): a new picture each frame, a sharp centre (user, 2026-11-12: "it's
@@ -30,6 +39,13 @@ unusable as it is), then the tracking, then the stability; the rest after.
     near the key) with vrcompositor blending the stream over the room view.
   - Encode sizes other than 1024 a view (user, 2026-11-17): below 1024 the picture is wrong in the headset; both
     smaller and larger must work (the layer prewarms 1024x4096 buffers; venus's stride and alignment).
+    2026-11-20, the PC's width set to 832 then 960 during one session: 832x3328 (venus stride 896) and 960x3840
+    (stride 1024) decoded and shown right in a snapshot, the change of size mid-session too (a kernel WARN in
+    `__vb2_queue_cancel` at the reset, harmless). What broke that session was the tracking: lost, the roomview came up
+    and its pipeline crashed vrcompositor (fixed, 2fba144). Larger: venus takes up to 5760x5760 (ENUM_FRAMESIZES) and
+    2,563,200 macroblocks/s, but 1024x4096 already takes 13 ms of firmware a frame: 1280x5120 would take ~20 ms (no
+    72 Hz). Newer PCs choose 1280-1344 in their automatic mode; the PC caps with its own `maxStreamFormatWidth`, and
+    nothing found yet lets the headset ask for less (vrlink only gives the decoder a 1536x6144 bound).
   - The edges look painted ("oil painting", user, 2026-11-17): it was the PC lowering the quality while the decoder
     was slow (fixed, item 13); to judge again, then 2.19's new `sharpening` settings.
   - The controllers' battery levels don't reach the PC through vrlink (user, 2026-11-17): find which property vrlink
