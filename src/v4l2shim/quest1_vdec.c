@@ -183,6 +183,7 @@ struct q1dec {
 	bool pend_q[MAXBUF];
 	bool await_cap;    // the firmware waits for the client's CAPTURE (its "port reconfiguration")
 	bool early;        // the client was given the size of the stream before (known_*) and sets its CAPTURE up
+	bool defer;        // ... will be, at the client's first submit to vrcompositor (known_load)
 	uint64_t seq_ns;   // when the stream's first sequence came (for a client that waits with epoll)
 	bool stall_logged;
 	bool low_latency;  // frames in decode order, realtime priority (the client's DISPLAY_DELAY 0)
@@ -208,12 +209,85 @@ struct q1dec {
 
 static struct q1dec *decs[MAXDEV];
 static uint32_t known_w, known_h, known_pix; // the size of the last stream in this process, and its codec
+static bool known_loaded;                     // (vrlink's: from KNOWN_PATH, the last vrlink's)
+
+// vrlink's last stream size, kept across its processes (one per session; /dev/shm is gone at reboot). Without it the
+// first decoder of each session set our CAPTURE up at 1920x1088, then at the stream's size (split mode for 10-bit),
+// ~1.5 s with the packets held while ~250 MB were allocated; vrlink's CheckStuck took that for a stuck decoder and
+// reset it, a hard reset of 7 s, then took the quick path below with the size it had then learnt (2026-11-20: first
+// frame 12 s after vrlink's start). A wrong size (the PC's stream width changed) is the firmware's "insufficient"
+// at the first sequence, the client's CAPTURE set up again at the new size (seq_changed).
+// The quick path set vrlink's CAPTURE up within 10 ms of its decoder's creation: a new vrlink then crashed in its
+// CaptureSetup (SEGV, 2026-11-20), its Vulkan device not made yet (after a reset of its own it always was). Given the
+// size at its first packet instead, it was safe, but the PC's first I-frame came with that packet and was given back
+// (nothing is decoded before the client's CAPTURE streams), so the stream began at the next one, ~1.2 s later, after a
+// reset anyway. So a new vrlink gets the size at its first submit to vrcompositor (quest1_vrlink.c: its renderer is
+// up), which comes before the PC's first packet; its packets are given back until then (defer).
+// Measured over 6 session starts (2026-11-20/21): 5 without a reset, the first frame 3.8-4.5 s after vrlink's start
+// (6.7-18 s before, always with a reset). The one reset left: the 10-bit stream's first sequence sets split mode up
+// (apply_cap_fmt), whose references (~127 MB) took 1.1 s to allocate under the memory pressure of a stream's start.
+// Setting split mode up before the first packet (the bit depth kept in the file) made it worse: the driver, whose bit
+// depth starts at 8, still called the first sequence insufficient and made them again, 1.5-2.4 s.
+#define KNOWN_PATH "/dev/shm/quest1-vrlink-stream-size"
+static atomic_bool client_submits;
+
+void q1dec_client_submits(void)
+{
+	if (!atomic_load_explicit(&client_submits, memory_order_relaxed))
+		atomic_store(&client_submits, true);
+}
+
+static bool known_shared(void)
+{
+	return !strcmp(program_invocation_short_name, "vrlink");
+}
+
+static void known_load(void)
+{
+	static bool tried;
+	if (tried || known_w || !known_shared())
+		return;
+	tried = true;
+	FILE *f = fopen(KNOWN_PATH, "re");
+	unsigned pix, w, h;
+	if (f && fscanf(f, "%x %u %u", &pix, &w, &h) == 3 && w >= 64 && h >= 64 && w <= VENUS_MAX_SIDE &&
+	    h <= VENUS_MAX_SIDE) {
+		known_w = w;
+		known_h = h;
+		known_pix = pix;
+		known_loaded = true;
+	}
+	if (f)
+		fclose(f);
+}
+
+static void known_save(void)
+{
+	if (!known_shared() || !known_w)
+		return;
+	char tmp[64];
+	snprintf(tmp, sizeof(tmp), "%s.%d", KNOWN_PATH, (int)getpid());
+	FILE *f = fopen(tmp, "we");
+	if (f && fprintf(f, "%x %u %u\n", known_pix, known_w, known_h) > 0 && fclose(f) == 0) {
+		if (rename(tmp, KNOWN_PATH) < 0)
+			unlink(tmp);
+	} else {
+		if (f)
+			fclose(f);
+		unlink(tmp);
+	}
+}
 
 static void stream_size(struct q1dec *e, uint32_t w, uint32_t h)
 {
+	uint32_t pix = e->out_fmt.fmt.pix_mp.pixelformat;
+	bool same = known_w == w && known_h == h && known_pix == pix;
 	known_w = w;
 	known_h = h;
-	known_pix = e->out_fmt.fmt.pix_mp.pixelformat;
+	known_pix = pix;
+	known_loaded = false;
+	if (!same)
+		known_save();
 }
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -790,7 +864,9 @@ static int s_fmt(struct q1dec *e, struct v4l2_format *f, bool try)
 	struct v4l2_control lc = {.id = CID_BUFFER_SIZE_LIMIT, .value = (int32_t)AL(limit < (1u << 19) ? 1u << 19 : limit, PAGE)};
 	if (d.fmt.pix_mp.width > VENUS_MAX_SIDE || d.fmt.pix_mp.height > VENUS_MAX_SIDE) {
 		// The firmware finds its resources sufficient at the first sequence only for the size given here: the size
-		// of this client's last stream when there was one (vrlink's decoder again after a reset of its own)
+		// of this client's last stream when there was one (vrlink's decoder again after a reset of its own, or the
+		// last vrlink's: known_load)
+		known_load();
 		bool known = known_w && known_pix == p->pixelformat;
 		logf_("%ux%u is larger than venus decodes: a bound, the stream's size comes from the stream (%ux%u until then)",
 		      d.fmt.pix_mp.width, d.fmt.pix_mp.height, known ? known_w : 1920, known ? known_h : 1088);
@@ -1227,9 +1303,14 @@ static void boot_check(struct q1dec *e)
 	// one that polls may still set CAPTURE up itself after its first packets
 	if (e->epfd < 0 && (!e->first_packet_ns || now_ns() - e->first_packet_ns < BOOT_AFTER_NS))
 		return;
-	e->booted = true;
 	uint32_t pix = e->out_fmt.fmt.pix_mp.pixelformat;
-	if (e->epfd >= 0 && known_w && known_pix == pix) {
+	known_load();
+	bool quick = e->epfd >= 0 && known_w && known_pix == pix;
+	e->defer = quick && known_loaded && !atomic_load(&client_submits);
+	if (e->defer)
+		return; // (again from ev_loop, every 100 ms at most, and at its next packet)
+	e->booted = true;
+	if (quick) {
 		// vrlink's decoder again after a reset of its own: the stream's size is the one its last decoder saw. It
 		// sets its CAPTURE up now, while the I-frame it asked for comes, instead of after it, then after another
 		// one (it resets again when no frame came 800 ms after its reset, which that took, 2026-11-11).
@@ -1245,7 +1326,9 @@ static void boot_check(struct q1dec *e)
 		e->start_seen = false;
 		e->skipped_all = 0;
 		src_pending(e);
-		logf_("the stream should be %ux%u as before: the client's CAPTURE at once", known_w, known_h);
+		logf_("the stream should be %ux%u as %s: the client's CAPTURE at once", known_w, known_h,
+		      known_loaded ? "in the last session" : "before");
+		known_loaded = false; // (this process's own from now on)
 		return;
 	}
 	if (boot_capture(e) < 0) {
@@ -1590,6 +1673,8 @@ static int qbuf(struct q1dec *e, struct v4l2_buffer *b)
 	else if (q == OUT) {
 		if (!e->first_packet_ns)
 			e->first_packet_ns = now_ns();
+		if (e->defer)
+			boot_check(e);
 		const struct v4l2_plane *pl = &b->m.planes[0];
 		const struct ionbuf *ib = &e->b[OUT][b->index];
 		size_t end = pl->bytesused < ib->size ? pl->bytesused : ib->size, off = pl->data_offset < end ? pl->data_offset : 0;
@@ -1597,7 +1682,7 @@ static int qbuf(struct q1dec *e, struct v4l2_buffer *b)
 		// EPOLLOUT); vrlink sends pictures that need others until the I-frame it asks for after a reset of its own.
 		// So it does while it sets its CAPTURE up (await_cap): the firmware would hold them all, and vrlink takes
 		// ~25 ms for each of its 16 frame buffers (2026-11-11); decoding starts again at the next stream start.
-		bool waiting = (e->await_cap || e->early) && e->epfd >= 0;
+		bool waiting = (e->await_cap || e->early || e->defer) && e->epfd >= 0;
 		if (!e->start_seen && !waiting &&
 		    (e->epfd < 0 || e->skipped_all >= SKIP_MAX || e->skipped_n > MAXBUF ||
 		     stream_start(e->out_fmt.fmt.pix_mp.pixelformat, ib->map + off, end - off))) {

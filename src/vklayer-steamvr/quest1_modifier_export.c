@@ -25,17 +25,53 @@ static struct
 	AHardwareBuffer *b;
 	unsigned w, h;
 } qnv_pool[QNV_POOL];
+static bool qnv_prewarming; // (qdb_lock) the 16 are being made
+static unsigned qnv_set_w, qnv_set_h; // (qdb_lock) the size of vrlink's current set (its last buffer taken)
+static pthread_cond_t qnv_pool_cond = PTHREAD_COND_INITIALIZER;
 
+// A pooled buffer of that size. While the 16 are still being made, the next one is awaited: vrlink sets its frame
+// buffers up at its first submit when the V4L2 shim knows the stream's size from the last session (quest1_vdec.c,
+// known_load), which can be before the 16 are made, and a buffer made here meanwhile would leave one of them unused
+// for the whole session (6 MB each). Pooled buffers of another size go: vrlink uses one set at a time, and after a
+// change of the stream's size the old set stayed here unused (16 of 960x3840 next to the 1024x4096 ones, 90 MB,
+// 2026-11-20).
 static AHardwareBuffer *qnv_pool_take(unsigned w, unsigned h)
 {
-	AHardwareBuffer *b = NULL;
+	AHardwareBuffer *b = NULL, *old[QNV_POOL];
+	unsigned n_old = 0;
+	struct timespec until;
+	clock_gettime(CLOCK_REALTIME, &until);
+	until.tv_nsec += 300000000;
+	if (until.tv_nsec >= 1000000000) {
+		until.tv_sec++;
+		until.tv_nsec -= 1000000000;
+	}
 	pthread_mutex_lock(&qdb_lock);
-	for (unsigned k = 0; k < QNV_POOL && !b; k++)
-		if (qnv_pool[k].b && qnv_pool[k].w == w && qnv_pool[k].h == h) {
-			b = qnv_pool[k].b;
-			qnv_pool[k].b = NULL;
+	qnv_set_w = w;
+	qnv_set_h = h;
+	for (;;) {
+		for (unsigned k = 0; k < QNV_POOL; k++) {
+			if (!qnv_pool[k].b)
+				continue;
+			if (qnv_pool[k].w != w || qnv_pool[k].h != h) {
+				if (n_old == QNV_POOL)
+					continue;
+				old[n_old++] = qnv_pool[k].b;
+				qnv_pool[k].b = NULL;
+			} else if (!b) {
+				b = qnv_pool[k].b;
+				qnv_pool[k].b = NULL;
+			}
 		}
+		if (b || !qnv_prewarming || w != QNV_PREWARM_W || h != QNV_PREWARM_H ||
+		    pthread_cond_timedwait(&qnv_pool_cond, &qdb_lock, &until) != 0)
+			break;
+	}
 	pthread_mutex_unlock(&qdb_lock);
+	for (unsigned k = 0; k < n_old; k++)
+		qdb.release(old[k]);
+	if (n_old)
+		LOG("dma-buf: %u pooled NV12 frame buffers of another size than %ux%u released\n", n_old, w, h);
 	return b;
 }
 
@@ -43,12 +79,16 @@ static void qnv_pool_put(AHardwareBuffer *b, unsigned w, unsigned h)
 {
 	unsigned k = 0;
 	pthread_mutex_lock(&qdb_lock);
+	// a buffer of an older set (vrlink frees one after it set the next up, of another size) is not kept
+	if (qnv_set_w && (w != qnv_set_w || h != qnv_set_h))
+		k = QNV_POOL;
 	while (k < QNV_POOL && qnv_pool[k].b)
 		k++;
 	if (k < QNV_POOL) {
 		qnv_pool[k].b = b;
 		qnv_pool[k].w = w;
 		qnv_pool[k].h = h;
+		pthread_cond_broadcast(&qnv_pool_cond);
 	}
 	pthread_mutex_unlock(&qdb_lock);
 	if (k == QNV_POOL)
@@ -68,6 +108,10 @@ static void *qnv_prewarm_run(void *arg)
 			break;
 		qnv_pool_put(b, QNV_PREWARM_W, QNV_PREWARM_H);
 	}
+	pthread_mutex_lock(&qdb_lock);
+	qnv_prewarming = false;
+	pthread_cond_broadcast(&qnv_pool_cond);
+	pthread_mutex_unlock(&qdb_lock);
 	clock_gettime(CLOCK_MONOTONIC, &t1);
 	LOG("dma-buf: %u NV12 %ux%u frame buffers made ahead in %.0f ms\n", n, QNV_PREWARM_W, QNV_PREWARM_H,
 	    (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6);
@@ -78,8 +122,18 @@ static void qnv_prewarm_once(void)
 {
 	pthread_once(&qdb.once, qdb_load);
 	pthread_t t;
-	if (qdb.allocate && pthread_create(&t, NULL, qnv_prewarm_run, NULL) == 0)
+	if (!qdb.allocate)
+		return;
+	pthread_mutex_lock(&qdb_lock);
+	qnv_prewarming = true;
+	pthread_mutex_unlock(&qdb_lock);
+	if (pthread_create(&t, NULL, qnv_prewarm_run, NULL) == 0) {
 		pthread_detach(t);
+	} else {
+		pthread_mutex_lock(&qdb_lock);
+		qnv_prewarming = false;
+		pthread_mutex_unlock(&qdb_lock);
+	}
 }
 
 //! vrlink's frame buffers, made in the background (once)

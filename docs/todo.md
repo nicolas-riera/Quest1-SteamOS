@@ -106,7 +106,9 @@ unusable as it is), then the tracking, then the stability; the rest after.
   - Start of a session: vrcompositor at 22-45 fps for 2-4 s (Monado's re-projection holds the head steady: 0 late),
     ~250 MB swapped (2026-11-16): vrcompositor +232 MB (ION +174, KGSL +58), vrlink's frame buffers, the decoder's
     references, and vrlink's first decoder always reset (two rounds of 16 imports). Freeing memory as vrlink starts did
-    not help. Find what else allocates and whether the first decoder's reset can be avoided.
+    not help. 2026-11-21: the first decoder's reset is avoided in 5 starts of 6 (the shim keeps the stream's size
+    across sessions, docs/streaming.md "Session start"); left: the 10-bit references made at the first sequence
+    (~127 MB, up to 1.1 s under memory pressure, then vrlink resets), and what else allocates.
     Timeline of a start (2026-11-16, vrlink.txt): the session at 0 s, the PC's first packet 11.8 s later (the PC's
     side), then ~3.5 s of decoder resets: one at once at the first SOURCE_CHANGE (CheckStuck's "last progress" is
     from the decoder made 11 s before), two "Received frame outside of backtrack window" (the first frames arrive

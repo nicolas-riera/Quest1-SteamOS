@@ -581,6 +581,7 @@ static uint32_t submit_set(void *self, int32_t index, uint32_t count, const uint
 {
 	uint64_t set[SET_MAX];
 	const int32_t frame = index; // the decoder's frame buffer
+	q1dec_client_submits();
 	if (handles && index > 0 && (uint32_t)index < count && count <= SET_MAX) {
 		memcpy(set, handles, count * sizeof(set[0]));
 		set[0] = handles[index];

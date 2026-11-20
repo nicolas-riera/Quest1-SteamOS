@@ -853,6 +853,30 @@ network delay and vrlink's ping climbed to ~1,000 ms in three episodes of ~6 s i
 with the decoder at the edge of its budget (DecodeSlow on every frame, the PC's frame rate rising and falling). Not
 reproduced yet with the faster decoder.
 
+### Session start: the stream's size kept across sessions (2026-11-21)
+
+Each Steam Link VR session is a new vrlink process. Its first decoder never knew the stream's size: the shim set its
+own CAPTURE up at 1920x1088, then at the stream's size in split mode (10-bit), ~1.5 s with the packets held while
+~250 MB were allocated, and vrlink's `CheckStuck` (no frame for 800 ms) reset the decoder: a hard reset of 1.6-7 s,
+after which the second decoder took the quick path (the size known in the process). The first frame came 6.7 s
+after vrlink's start on a quiet headset, 12-18 s under memory pressure.
+
+- The shim keeps the size in `/dev/shm/quest1-vrlink-stream-size` (vrlink only; gone at reboot) and a new vrlink's
+  first decoder takes the quick path. Not at once: given within 10 ms of the decoder's creation, vrlink crashed in its
+  `CaptureSetup` (its Vulkan device not made yet). At the first packet it was safe but lost the PC's first I-frame
+  (packets are given back until the client's CAPTURE streams), so the stream began 1.2 s later, after a reset anyway.
+  So it is given at vrlink's first submit to vrcompositor, which comes before the PC's first packet.
+- Measured: 6 session starts, 5 without a reset, the first frame 3.8-4.5 s after vrlink's start, Wi-Fi receive
+  buffer failures 0 in most of them (thousands in some, as before). The one reset left: the 10-bit stream's first
+  sequence makes the references (~127 MB), 1.1 s under memory pressure. Making them before the first packet (the bit
+  depth kept too) was worse (1.5-2.4 s: the driver, whose bit depth starts at 8, made them again).
+- A wrong size kept (the PC's width changed): the firmware's "insufficient" at the first sequence, the client's
+  CAPTURE made again at the right size, one reset (checked with 960x3840 kept for a 1024x4096 stream).
+- The layer's pool of vrlink's frame buffers: a take while the 16 made ahead are still being made waits for the next
+  one (otherwise one buffer more per take, unused for the session), and pooled buffers of another size are released
+  (after the size change above, the 16 of 960x3840 had stayed, 90 MB). vrlink holds 16 NV12 buffers (96 MB) after
+  every start measured.
+
 ### Picture quality (2026-11-16, read in driver_vrlink and the PC's settings)
 
 The PC alone sizes the stream: an atlas of four square views (each eye's wide view and inset), `streamFormatWidth`
