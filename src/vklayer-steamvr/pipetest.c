@@ -7,6 +7,7 @@
 #include <vulkan/vulkan.h>
 
 #include <dlfcn.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -82,6 +83,8 @@ int main(int argc, char **argv)
 	DFN(vkCreatePipelineLayout);
 	DFN(vkCreateRenderPass);
 	DFN(vkCreateGraphicsPipelines);
+	DFN(vkDestroyDescriptorSetLayout);
+	DFN(vkDestroyPipelineLayout);
 
 	VkShaderModule mod[2];
 	for (int i = 0; i < 2; i++) {
@@ -105,7 +108,7 @@ int main(int argc, char **argv)
 	    {11, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE}, {25, VK_DESCRIPTOR_TYPE_SAMPLER},
 	    {26, VK_DESCRIPTOR_TYPE_SAMPLER},       {27, VK_DESCRIPTOR_TYPE_SAMPLER},
 	};
-	VkDescriptorSetLayoutBinding lb[8];
+	VkDescriptorSetLayoutBinding lb[10];
 	uint32_t nb = 8;
 	for (int i = 0; i < 8; i++)
 		lb[i] = (VkDescriptorSetLayoutBinding){.binding = b[i].binding, .descriptorType = b[i].type, .descriptorCount = 1,
@@ -121,14 +124,47 @@ int main(int argc, char **argv)
 			lb[i] = (VkDescriptorSetLayoutBinding){.binding = v[i].binding, .descriptorType = v[i].type,
 			                                       .descriptorCount = 1, .stageFlags = v[i].stages};
 	}
+	if (getenv("PT_LOSS_LAYOUT")) { // the roomview pipeline vrcompositor built as the tracking was lost (2026-11-20):
+		                            // UBOs 0-7, image 9, sampler 25 only (its vertex shader reads 10/11 and 26/27)
+		const uint32_t st[] = {0x1, 0x1, 0x1, 0x1, 0x10, 0x10, 0x10, 0x10};
+		nb = 0;
+		for (uint32_t i = 0; i < 8; i++)
+			lb[nb++] = (VkDescriptorSetLayoutBinding){.binding = i, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+			                                          .descriptorCount = 1, .stageFlags = st[i]};
+		lb[nb++] = (VkDescriptorSetLayoutBinding){.binding = 9, .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+		                                          .descriptorCount = 1, .stageFlags = 0x11};
+		lb[nb++] = (VkDescriptorSetLayoutBinding){.binding = 25, .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER,
+		                                          .descriptorCount = 1, .stageFlags = 0x10};
+	}
 	VkDescriptorSetLayoutCreateInfo dslci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
 	                                         .bindingCount = nb, .pBindings = lb};
 	VkDescriptorSetLayout dsl;
+	if (getenv("PT_REUSE")) { // a full roomview layout made and destroyed first: the driver gives its handles to the
+		                       // layout below, which the layer has recorded twice then (2026-11-20)
+		VkDescriptorSetLayoutBinding fb[8];
+		for (int i = 0; i < 8; i++)
+			fb[i] = (VkDescriptorSetLayoutBinding){.binding = b[i].binding, .descriptorType = b[i].type,
+			                                       .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS};
+		VkDescriptorSetLayoutCreateInfo f = dslci;
+		f.bindingCount = 8;
+		f.pBindings = fb;
+		VkDescriptorSetLayout old;
+		VkPipelineLayout oldpl;
+		vkCreateDescriptorSetLayout(dev, &f, NULL, &old);
+		VkPipelineLayoutCreateInfo o = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1,
+		                                 .pSetLayouts = &old};
+		vkCreatePipelineLayout(dev, &o, NULL, &oldpl);
+		printf("old layouts %p %p\n", (void *)old, (void *)oldpl);
+		vkDestroyPipelineLayout(dev, oldpl, NULL);
+		vkDestroyDescriptorSetLayout(dev, old, NULL);
+	}
 	r = vkCreateDescriptorSetLayout(dev, &dslci, NULL, &dsl);
 	VkPipelineLayoutCreateInfo plci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1,
 	                                   .pSetLayouts = &dsl};
 	VkPipelineLayout pl;
 	r |= vkCreatePipelineLayout(dev, &plci, NULL, &pl);
+	if (getenv("PT_REUSE"))
+		printf("new layouts %p %p\n", (void *)dsl, (void *)pl);
 	VkAttachmentDescription att = {.format = VK_FORMAT_R8G8B8A8_UNORM, .samples = VK_SAMPLE_COUNT_1_BIT,
 	                               .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
 	                               .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
@@ -138,8 +174,23 @@ int main(int argc, char **argv)
 	VkAttachmentReference ref = {0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
 	VkSubpassDescription sub = {.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS, .colorAttachmentCount = 1,
 	                            .pColorAttachments = &ref};
-	VkRenderPassCreateInfo rpci = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, .attachmentCount = 1,
-	                               .pAttachments = &att, .subpassCount = 1, .pSubpasses = &sub};
+	// PT_LOSS_RP: the render pass and states of that pipeline (sRGB colour + D24S8 depth/stencil, strip, back culling,
+	// premultiplied blending, a depth/stencil state with the test off)
+	const bool loss_rp = getenv("PT_LOSS_RP") != NULL;
+	VkAttachmentDescription atts[2] = {att, {.format = VK_FORMAT_D24_UNORM_S8_UINT, .samples = VK_SAMPLE_COUNT_1_BIT,
+	                                         .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+	                                         .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
+	                                         .stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE,
+	                                         .initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+	                                         .finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL}};
+	VkAttachmentReference dref = {1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+	if (loss_rp) {
+		atts[0].format = VK_FORMAT_R8G8B8A8_SRGB;
+		sub.pDepthStencilAttachment = &dref;
+	}
+	VkRenderPassCreateInfo rpci = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+	                               .attachmentCount = loss_rp ? 2 : 1, .pAttachments = atts, .subpassCount = 1,
+	                               .pSubpasses = &sub};
 	VkRenderPass rp;
 	r |= vkCreateRenderPass(dev, &rpci, NULL, &rp);
 	if (r) {
@@ -176,6 +227,19 @@ int main(int argc, char **argv)
 	                                     .pStages = st, .pVertexInputState = &vi, .pInputAssemblyState = &ia,
 	                                     .pViewportState = &vp, .pRasterizationState = &rs, .pMultisampleState = &ms,
 	                                     .pColorBlendState = &cb, .pDynamicState = &ds, .layout = pl, .renderPass = rp};
+	VkPipelineDepthStencilStateCreateInfo dss = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+	                                             .depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL,
+	                                             .front = {.compareOp = VK_COMPARE_OP_ALWAYS},
+	                                             .back = {.compareOp = VK_COMPARE_OP_ALWAYS}};
+	if (loss_rp) {
+		ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+		rs.cullMode = VK_CULL_MODE_BACK_BIT;
+		rs.frontFace = VK_FRONT_FACE_CLOCKWISE;
+		cba.blendEnable = VK_TRUE;
+		cba.srcColorBlendFactor = cba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+		cba.dstColorBlendFactor = cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+		gpci.pDepthStencilState = &dss;
+	}
 	VkPipeline pipe = VK_NULL_HANDLE;
 	r = vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &gpci, NULL, &pipe);
 	printf("pipeline: %d (%p)\n", r, (void *)pipe);

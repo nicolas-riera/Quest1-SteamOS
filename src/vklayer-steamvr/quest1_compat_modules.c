@@ -203,18 +203,26 @@ static void obj_desc_set(uint64_t handle, const char *text)
 static void obj_desc_copy(uint64_t handle, char *out, size_t n)
 {
 	pthread_mutex_lock(&g_lock);
-	for (unsigned i = 0; i < OBJ_DESCS; i++)
-		if (obj_descs[i].handle == handle && handle)
+	for (unsigned a = 1; a <= OBJ_DESCS && handle; a++) { // the newest record of a handle (handles are reused)
+		unsigned i = (obj_desc_next - a) % OBJ_DESCS;
+		if (obj_descs[i].handle == handle) {
 			snprintf(out, n, "%s", obj_descs[i].text);
+			break;
+		}
+	}
 	pthread_mutex_unlock(&g_lock);
 }
 
 static void obj_desc_log(const char *what, uint64_t handle)
 {
 	pthread_mutex_lock(&g_lock);
-	for (unsigned i = 0; i < OBJ_DESCS; i++)
-		if (obj_descs[i].handle == handle && handle)
+	for (unsigned a = 1; a <= OBJ_DESCS && handle; a++) { // the newest record of a handle (handles are reused)
+		unsigned i = (obj_desc_next - a) % OBJ_DESCS;
+		if (obj_descs[i].handle == handle) {
 			LOG("  %s %p: %s\n", what, (void *)handle, obj_descs[i].text);
+			break;
+		}
+	}
 	pthread_mutex_unlock(&g_lock);
 }
 
@@ -225,25 +233,33 @@ static struct { uint64_t handle; uint32_t n; uint64_t sets[8]; } pipe_layouts[LA
 static unsigned set_layout_next, pipe_layout_next;
 
 //! Whether the pipeline layout gives (set, binding) to the stage; true when the layouts are unknown.
+//! The newest record of a handle is the one that counts: the driver gives a destroyed layout's handle to a new one, and
+//! the oldest record (found first before) had described another layout. The rewrite of a refused pipeline then kept a
+//! descriptor read the real layout lacks, the pipeline was refused again and vrcompositor crashed (2026-11-20, the
+//! roomview pipeline as the tracking was lost: its layout's handle was in the table twice).
 static bool layout_has(uint64_t pl, uint32_t set, uint32_t binding, uint32_t stage)
 {
 	bool known = false, has = false;
 	pthread_mutex_lock(&g_lock);
-	for (unsigned i = 0; i < LAYOUTS; i++) {
-		if (pipe_layouts[i].handle != pl || !pl)
+	for (unsigned a = 1; a <= LAYOUTS && pl; a++) {
+		unsigned i = (pipe_layout_next - a) % LAYOUTS;
+		if (pipe_layouts[i].handle != pl)
 			continue;
 		if (set >= pipe_layouts[i].n) {
 			known = true;
 			break;
 		}
-		for (unsigned j = 0; j < LAYOUTS; j++)
-			if (set_layouts[j].handle == pipe_layouts[i].sets[set] && set_layouts[j].handle) {
-				known = true;
-				for (uint32_t k = 0; k < set_layouts[j].n; k++)
-					if (set_layouts[j].binding[k] == binding)
-						has = (set_layouts[j].stages[k] & stage) != 0;
-				break;
-			}
+		uint64_t sl = pipe_layouts[i].sets[set];
+		for (unsigned b = 1; b <= LAYOUTS && sl; b++) {
+			unsigned j = (set_layout_next - b) % LAYOUTS;
+			if (set_layouts[j].handle != sl)
+				continue;
+			known = true;
+			for (uint32_t k = 0; k < set_layouts[j].n; k++)
+				if (set_layouts[j].binding[k] == binding)
+					has = (set_layouts[j].stages[k] & stage) != 0;
+			break;
+		}
 		break;
 	}
 	pthread_mutex_unlock(&g_lock);
