@@ -125,6 +125,61 @@ Rules for installing on the headset:
   (`runuser -u steamos -- touch ...`): `/tmp` has `protected_regular`, so root-owned files there can't be written
   by Steam's processes, and a root-owned snapshot trigger once made the driver write 5.6 MB every frame.
 
+### Building the complete system image yourself, then installing it
+
+Yes, it can be done from scratch: the repository builds the whole image itself, from public downloads only. Nothing
+is taken from a running headset, and no Meta or Valve file is in the repository. The Windows app (`app/`) runs these
+same steps for users. [installer/README.md](installer/README.md) has the details (sources, steps, progress lines);
+this is the command sequence.
+
+1. **Boot image and installer image** (x86_64 Debian/Ubuntu or WSL 2, packages listed at the top of
+   `tools/build-boot.sh`):
+   ```sh
+   tools/build-boot.sh kernel    work kernel-out
+   tools/build-boot.sh image     work kernel-out out/boot-native-holo.img   # the SteamOS kernel + initramfs
+   tools/build-boot.sh installer work kernel-out out/installer.img         # the micro Linux that builds the image
+   ```
+2. **Our arm64 binaries** (libhybris, Monado + patch, the SteamVR driver, the Vulkan layer and shims, q1trackd,
+   ovrstub...): `tools/build-native.sh <repo> out/native-arm64.tar.zst`, as root inside a Holo aarch64 root with
+   network. Run it on a headset that already runs SteamOS (fastest), or in WSL 2 in a chroot of Holo's
+   `system.rootfs.zst` through qemu-user binfmt (slow). The installer otherwise takes these three files from the
+   `prebuilt` branch.
+3. **Download and check everything else** into a work folder (any OS with Python 3):
+   ```sh
+   python3 installer/prepare.py --workdir W --prebuilt out
+   ```
+   This fetches Holo core aarch64, Holo's packages (`device/packages.txt`), Valve's arm64 Steam client, the Steam
+   Frame's SteamVR 2.19.3 and GTK 2 (rebuilt from Valve's public update store, `frame_source: ota` in
+   `installer/sources.json`) and Meta's last Quest 1 OTA (`system`, `modem`). Every file is checked against a pinned
+   hash. The `repo` step takes this repository from GitHub (`sources.json`, `ref`). To build your local tree instead,
+   replace `W/stage/repo` with it afterwards: empty the folder, then `git archive HEAD | tar -x -C W/stage/repo` (commits only).
+4. **Build the image** (an ext4 file system the size of `userdata`, written out as an Android sparse image). There
+   are two ways:
+   - **On the headset, as the app does.** Nothing is written to the headset's storage; its scratch disk is a sparse
+     file on the PC, served over the USB network. Run `fastboot boot out/installer.img`, then on the PC:
+     `python3 installer/remote_build.py --stage W/stage --out userdata.simg --scratch-file scratch.img`.
+     Without `--stage`, the headset downloads everything itself through the PC.
+   - **In WSL 2 / Linux, as root.** This needs `chroot` with qemu-user binfmt for aarch64, GNU tar, zstd and libzstd,
+     and e2fsprogs: `python3 installer/build_image.py --stage W/stage --out userdata.simg --scratch DIR`.
+
+   The steps are `format holo setup pkgs frame steam meta native ours finish sparse`. `--only` resumes from a step.
+5. **Install.** Back to the bootloader, then exactly what the app does (`app/install.go`):
+   ```sh
+   fastboot flash boot_a out/boot-native-holo.img && fastboot flash boot_b out/boot-native-holo.img
+   fastboot flash userdata userdata.simg
+   fastboot erase system_a && fastboot erase system_b
+   fastboot set_active a && fastboot reboot
+   ```
+   `initrd/init` sees a system in `userdata` (`/usr/lib/systemd/systemd`) and boots it as the root, and the swap file
+   is made at the first boot. This **wipes Android and all its data**. Going back to stock means the OTA's `boot.img`
+   and `system.img` to both slots and `userdata` wiped. The boot chain, firmware, `modem`, `persist`, `private` and
+   `vision` are never touched. **For an agent this is the one exception to section 2: it writes partitions, so only
+   with the user's explicit go, given for that flash.**
+
+Status (2026-11-20): the build has run in WSL (2026-11-04) and on the headset's micro Linux (the fixes are in the
+`Installer:` and `Image build:` commits). The flash itself has not been done on the development headset yet: it
+still boots the development layout, `/data/steamos/holo.img` inside Android's `userdata`, by `fastboot boot`.
+
 ## 6. Verifying a change
 
 A build that compiles proves nothing here. **Check every change on the headset** before you call it done, with a
