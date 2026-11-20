@@ -45,6 +45,15 @@ unusable as it is), then the tracking, then the stability; the rest after.
   - The head is still over-predicted (user, 2026-11-17 end of night), although the PC's prediction no longer
     overshoots from a delayed rate (the low-pass is gone, docs/streaming.md item 15): the black edges and the avatar's
     head still overshoot. Measure what the PC predicts against the head's real motion (`vrlink_aftm_*.csv`, stepsnap).
+    Read 2026-11-20 from the PC's CSVs and the code (not worn): the PC predicts 83 ms ahead (97 ms on the worn night
+    of 11-17) and that matches when the frame is shown (Submit Illumination - Predicted Display: +0.7 ms mean, +-6 ms),
+    so it is not a wrong latency figure: it is a constant-velocity guess over ~90 ms (~27 deg at 300 deg/s). Of the
+    83 ms: encode 7, network 4-5, decode 13, then ~26 ms between the decoded frame and vrlink taking it, and 29 ms from
+    vrlink's submit to the photons. Levers: shorten that hold (vrlink's own queue; the PC's
+    `driver_vrlink/maxVideoQueueLatencyUs` is the user's call), a deceleration-aware rate in the shim (`raw_pose`,
+    to simulate on a recorded head first). Controllers: driver_quest1 gives SteamVR Monado's world-frame angular rate
+    (controllers.cpp, ~line 1125) where the HMD's is device-local: check with a constant rate on a yawed controller.
+    The panel runs at 71.82 Hz and vrlink answers the PC "72.00" every second (a +-6 ms beat, small).
   - Strong lag at random moments (user, 2026-11-17): the stream stalls hard for a moment, then recovers. Match the
     times with the shim's log, the PC's `driver_vrlink.txt` (ProblemAttribution) and `vrlink_aftm_*.csv`, and the
     headset's load and memory then.
