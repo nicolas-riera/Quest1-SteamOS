@@ -249,10 +249,10 @@ index eb41c3c..5214613 100644
  
 diff --git a/src/xrt/compositor/main/comp_window_mdp.c b/src/xrt/compositor/main/comp_window_mdp.c
 new file mode 100644
-index 0000000..05f2f29
+index 0000000..0dadf7f
 --- /dev/null
 +++ b/src/xrt/compositor/main/comp_window_mdp.c
-@@ -0,0 +1,4216 @@
+@@ -0,0 +1,4282 @@
 +// Copyright 2026, Quest1-SteamOS contributors
 +// SPDX-License-Identifier: BSL-1.0
 +/*!
@@ -582,6 +582,8 @@ index 0000000..05f2f29
 +	} latest_frame;
 +	bool fresh;        //!< `latest` was not on the panels yet
 +	bool need_refresh; //!< the panels came back on: show the latest frame again
++	bool lost_now;     //!< the head is not tracked at this tick: commits show MDP_LOST_COLOR (head_lost)
++	bool lost_shown;   //!< ... and the panels show it
 +
 +	//! A frame not on the panels yet when a newer one came (`latest` was still fresh): the next tick shows it, the one
 +	//! after shows the newer one. vrcompositor needs ~13.2 ms of a 13.9 ms period for a frame: when its frames come
@@ -1537,6 +1539,43 @@ index 0000000..05f2f29
 +	}
 +}
 +
++/*
++ * Tracking lost. When Meta's tracking stops (trackingservice frozen or gone), drivers/quest1 holds the head pose
++ * still and no longer marks it tracked (meta_thread: no new head sample for Q1_META_STALE_MS). Before, libossdk kept
++ * predicting its last sample to the time asked, with its velocity, and the view spun round and round (user,
++ * 2026-11-20). The panels show a plain dark blue then, as Meta's system does, instead of a world that cannot follow
++ * the head: the display controller fills both pipes with a colour (no buffer, no GPU work).
++ */
++#define MDP_LOST_COLOR 0xff0a1a40u // ARGB
++
++static bool
++head_lost(struct mdp_target *t)
++{
++	struct xrt_device *xdev = t->base.c->xdev;
++	struct xrt_space_relation rel = XRT_SPACE_RELATION_ZERO;
++	return xdev != NULL &&
++	       xrt_device_get_tracked_pose(xdev, XRT_INPUT_GENERIC_HEAD_POSE, os_monotonic_get_ns(), &rel) == XRT_SUCCESS &&
++	       !(rel.relation_flags & XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT);
++}
++
++//! The layers of a commit, turned into MDP_LOST_COLOR over the same rectangles of the panels.
++static void
++layers_lost_fill(struct mdp_input_layer *layers, int n)
++{
++	for (int h = 0; h < n; h++) {
++		struct mdp_input_layer *l = &layers[h];
++		l->flags = MDP_LAYER_SOLID_FILL;
++		l->bg_color = MDP_LOST_COLOR;
++		l->src_rect = (struct mdp_rect){0, 0, l->dst_rect.w, l->dst_rect.h}; // (no scaling on a solid fill)
++		l->buffer.width = l->dst_rect.w;
++		l->buffer.height = l->dst_rect.h;
++		l->buffer.format = MDP_RGBA_8888;
++		l->buffer.planes[0].fd = -1;
++		l->buffer.planes[0].stride = 0;
++		l->buffer.plane_count = 0;
++	}
++}
++
 +//! Call with D->lock held: show the two half buffers b (image `idx` of the layer, or output set `out`) on the
 +//! panels, true when committed. `frame`: the layer's frame to report as displayed, 0 none.
 +static bool
@@ -1565,6 +1604,9 @@ index 0000000..05f2f29
 +		l->buffer.planes[0].stride = b->stride_px * 4;
 +		l->buffer.plane_count = 1;
 +		l->buffer.fence = -1;
++	}
++	if (D->lost_now) {
++		layers_lost_fill(layers, 2);
 +	}
 +	struct mdp_layer_commit c;
 +	memset(&c, 0, sizeof(c));
@@ -3489,9 +3531,14 @@ index 0000000..05f2f29
 +		memset(D->tick_st, 0, sizeof(D->tick_st));
 +		D->tick_gpu_ms = 0;
 +		warp_lens_setup(t);
++		// tracking lost or back: the panels change at once, whether a new frame came or not (head_lost)
++		D->lost_now = head_lost(t);
++		if (D->lost_now != D->lost_shown) {
++			D->need_refresh = true;
++		}
 +		bool commit_raw = D->fresh || D->need_refresh;
 +		bool warped = false;
-+		bool want_warp = (D->lens || !D->knobs.off) && D->buf[D->latest][1].ahb != NULL;
++		bool want_warp = !D->lost_now && (D->lens || !D->knobs.off) && D->buf[D->latest][1].ahb != NULL;
 +		if (D->fresh && D->latest_frame.pose_valid) {
 +			// how late each new frame reaches the panels against the time its pose was predicted for (the same
 +			// display time as the warp's below): what the warp has to make up for
@@ -3661,7 +3708,19 @@ index 0000000..05f2f29
 +			}
 +		}
 +		bool committed = warped;
-+		if (warped) {
++		if (D->lost_now && commit_raw && direct_commit(t, D->buf[D->latest], D->latest, -1, direct_ack_frame(D))) {
++			committed = true;
++			if (!D->lost_shown) {
++				U_LOG_W("mdp: direct: the head is not tracked: the panels show dark blue");
++			}
++			D->lost_shown = true;
++			D->held_frame = 0; // (shown again, warped, once the head is tracked)
++			direct_ack_early(D);
++			D->fresh = false;
++			D->need_refresh = false;
++		} else if (D->lost_now) {
++			// (a failed commit is tried again at the next tick)
++		} else if (warped) {
 +			direct_ack_early(D);
 +			D->fresh = false;
 +			D->need_refresh = false;
@@ -3676,6 +3735,10 @@ index 0000000..05f2f29
 +			direct_ack_early(D);
 +			D->fresh = false;
 +			D->need_refresh = false;
++		}
++		if (committed && !D->lost_now && D->lost_shown) {
++			D->lost_shown = false;
++			U_LOG_W("mdp: direct: the head is tracked again");
 +		}
 +		int64_t done = os_monotonic_get_ns() - vsync;
 +		if (committed && done > MDP_PERIOD_NS) {
@@ -4239,6 +4302,9 @@ index 0000000..05f2f29
 +		l->buffer.planes[0].stride = t->stride_px[index] * 4;
 +		l->buffer.plane_count = 1;
 +		l->buffer.fence = -1;
++	}
++	if (head_lost(t)) {
++		layers_lost_fill(layers, 2); // (only Monado's own frames: no app yet)
 +	}
 +	struct mdp_layer_commit c;
 +	memset(&c, 0, sizeof(c));
@@ -9519,10 +9585,10 @@ index 0000000..899204b
 +}
 diff --git a/src/xrt/drivers/quest1/quest1_hmd.c b/src/xrt/drivers/quest1/quest1_hmd.c
 new file mode 100644
-index 0000000..b38b4aa
+index 0000000..89000cf
 --- /dev/null
 +++ b/src/xrt/drivers/quest1/quest1_hmd.c
-@@ -0,0 +1,1174 @@
+@@ -0,0 +1,1215 @@
 +// Copyright 2026, Quest1-SteamOS contributors
 +// SPDX-License-Identifier: BSL-1.0
 +/*!
@@ -9588,6 +9654,7 @@ index 0000000..b38b4aa
 +#define Q1_TRACE(h, ...) U_LOG_XDEV_IFL_T(&h->base, h->log_level, __VA_ARGS__)
 +#define Q1_DEBUG(h, ...) U_LOG_XDEV_IFL_D(&h->base, h->log_level, __VA_ARGS__)
 +#define Q1_INFO(h, ...) U_LOG_XDEV_IFL_I(&h->base, h->log_level, __VA_ARGS__)
++#define Q1_WARN(h, ...) U_LOG_XDEV_IFL_W(&h->base, h->log_level, __VA_ARGS__)
 +#define Q1_ERROR(h, ...) U_LOG_XDEV_IFL_E(&h->base, h->log_level, __VA_ARGS__)
 +
 +#define Q1_PANEL_W 1440
@@ -9595,6 +9662,13 @@ index 0000000..b38b4aa
 +#define Q1_REFRESH_HZ 72
 +//! SCHED_FIFO priority of the thread that takes q1trackd's poses (see meta_thread)
 +#define QUEST1_META_RT_PRIO 52
++
++//! Meta's tracking stopped when its newest head sample is this old (normal: 4 ms, at most 6, 2026-11-20). q1trackd
++//! asks libossdk for the head at the present time: with trackingservice frozen or gone, libossdk kept predicting its
++//! last sample that far ahead with its velocity, and the view spun round and round (user, 2026-11-20). Such poses
++//! are dropped; the head pose then holds still, not marked tracked, and the compositor shows dark blue
++//! (comp_window_mdp.c, head_lost) until samples come again.
++#define Q1_META_STALE_MS 100
 +
 +
 +/*
@@ -9758,6 +9832,10 @@ index 0000000..b38b4aa
 +		uint64_t pushed, tracked;      //!< Statistics since the last log
 +		int64_t last_log_ns;
 +		bool use_velocity;
++		int64_t sample_ns; //!< Newest head sample time seen (CLOCK_MONOTONIC)
++		int64_t fresh_ns;  //!< When it came, 0 never
++		int64_t gap_ns;    //!< Time without a new head sample before the newest one came
++		bool frozen;       //!< (atomic) no new head sample for Q1_META_STALE_MS: the pose holds, not tracked
 +	} mt;
 +
 +	//! Touch controllers: [0] left, [1] right. NULL when disabled.
@@ -10144,6 +10222,9 @@ index 0000000..b38b4aa
 +	if (!p->valid || ts <= h->mt.last_ts) {
 +		return;
 +	}
++	if (p->sample_ns > 0 && ts - p->sample_ns > Q1_META_STALE_MS * (int64_t)U_TIME_1MS_IN_NS) {
++		return; // a stale sample predicted forward (Q1_META_STALE_MS)
++	}
 +	struct xrt_space_relation rel = XRT_SPACE_RELATION_ZERO;
 +	rel.pose.orientation = (struct xrt_quat){p->orientation[0], p->orientation[1], p->orientation[2],
 +	                                         p->orientation[3]};
@@ -10296,6 +10377,11 @@ index 0000000..b38b4aa
 +			struct q1track_controller ctl[2];
 +			int64_t update_ns;
 +			if (meta_read(h, &p, ctl, &update_ns)) {
++				if (p.valid && p.sample_ns > h->mt.sample_ns) {
++					h->mt.gap_ns = h->mt.fresh_ns != 0 ? now - h->mt.fresh_ns : 0;
++					h->mt.sample_ns = p.sample_ns;
++					h->mt.fresh_ns = now;
++				}
 +				meta_push(h, &p);
 +				meta_push_controller(h, 0, &ctl[0]);
 +				meta_push_controller(h, 1, &ctl[1]);
@@ -10306,6 +10392,19 @@ index 0000000..b38b4aa
 +				h->mt.shm = NULL;
 +				h->mt.wshm = NULL;
 +				next_map = now;
++			}
++		}
++		// (also when q1trackd stops publishing, or is not running)
++		bool frozen = h->mt.fresh_ns == 0 || now - h->mt.fresh_ns > Q1_META_STALE_MS * (int64_t)U_TIME_1MS_IN_NS;
++		if (frozen != __atomic_load_n(&h->mt.frozen, __ATOMIC_RELAXED)) {
++			__atomic_store_n(&h->mt.frozen, frozen, __ATOMIC_RELEASE);
++			if (h->mt.fresh_ns != 0 && frozen) {
++				Q1_WARN(h, "Meta tracking stopped: no new head sample for %d ms (trackingservice frozen or gone): "
++				           "the head pose holds, not tracked",
++				        (int)((now - h->mt.fresh_ns) / U_TIME_1MS_IN_NS));
++			} else if (h->mt.fresh_ns != 0) {
++				Q1_WARN(h, "Meta tracking is back after %d ms without a head sample",
++				        (int)(h->mt.gap_ns / U_TIME_1MS_IN_NS));
 +			}
 +		}
 +		if (now - h->mt.last_log_ns > 10 * (int64_t)U_TIME_1S_IN_NS) {
@@ -10398,7 +10497,15 @@ index 0000000..b38b4aa
 +		return XRT_ERROR_INPUT_UNSUPPORTED;
 +	}
 +	struct xrt_space_relation rel = XRT_SPACE_RELATION_ZERO;
-+	if (m_relation_history_get(h->history, at_timestamp_ns, &rel) == M_RELATION_HISTORY_RESULT_INVALID) {
++	int64_t latest_ns;
++	if (h->meta && __atomic_load_n(&h->mt.frozen, __ATOMIC_ACQUIRE) &&
++	    m_relation_history_get_latest(h->history, &latest_ns, &rel)) {
++		// Meta's tracking stopped (Q1_META_STALE_MS): the last pose, still, not tracked (the compositor shows dark blue)
++		rel.angular_velocity = (struct xrt_vec3){0, 0, 0};
++		rel.linear_velocity = (struct xrt_vec3){0, 0, 0};
++		rel.relation_flags = (enum xrt_space_relation_flags)(
++		    rel.relation_flags & (XRT_SPACE_RELATION_ORIENTATION_VALID_BIT | XRT_SPACE_RELATION_POSITION_VALID_BIT));
++	} else if (m_relation_history_get(h->history, at_timestamp_ns, &rel) == M_RELATION_HISTORY_RESULT_INVALID) {
 +		rel.pose.orientation.w = 1.0f;
 +		rel.relation_flags = (enum xrt_space_relation_flags)(XRT_SPACE_RELATION_ORIENTATION_VALID_BIT |
 +		                                                     XRT_SPACE_RELATION_POSITION_VALID_BIT);

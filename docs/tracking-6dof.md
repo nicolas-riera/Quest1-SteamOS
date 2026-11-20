@@ -512,3 +512,30 @@ lists what is left to do).
   good; a tracking loss also re-anchored the room on the head twice. Fixed (docs/boundary.md: map copy and restore,
   lost-map detection, no "anchor" once found). The playspace must be set up again once (the old map is gone). To
   confirm worn: reboot, walk around, lose tracking (cover the cameras) and see the room come back in place (user).
+
+## 2026-11-21: Meta's tracking stops: dark blue instead of a spinning view
+
+What the user saw: when `trackingservice` froze or crashed, the whole view spun round and round ("like a
+beyblade"). Why: q1trackd asks libossdk for the head at the present time, 500 times a second; with trackingservice
+stopped, libossdk keeps predicting its last sample to that time with the last angular velocity, so each pose is
+turned further than the one before. A stopped q1trackd does the same through Monado's own prediction past its
+newest pose.
+
+The fix (`src/monado/quest1-monado.patch`):
+
+- `drivers/quest1` (meta mode): the newest head sample's time (`sample_ns`) is followed. Its age is normally 4 ms
+  (p99 4.8, max 5.8, measured in the shared memory); a pose predicted from a sample over 100 ms old
+  (`Q1_META_STALE_MS`) is dropped, and after 100 ms without a new sample (q1trackd or trackingservice stopped) the
+  head pose holds still: the last pose, no velocity, not marked tracked. It logs "Meta tracking stopped" and "is
+  back after N ms".
+- `compositor/main/comp_window_mdp.c`: while the head pose is not tracked, every commit to the panels is a solid
+  fill of the display controller (`MDP_LAYER_SOLID_FILL`, `MDP_LOST_COLOR` dark blue; no buffer, no GPU work), for
+  vrcompositor's frames (the direct path, which commits at once when the state changes, with or without a new frame)
+  and Monado's own. The frames go on being acknowledged, so vrcompositor keeps running; the next frame after the
+  tracking is back is shown at once.
+
+Checked on the headset (2026-11-21, panels on, not worn): q1trackd stopped for 3 s (`SIGSTOP`), then trackingservice
+stopped for 3 s: both detected in 100 ms, the panels' commit to dark blue accepted, SteamVR's head pose still within
+0.06 deg during the stop (it used to spin), back at once after. After trackingservice resumed, libossdk gave one wild
+pose (87 deg) for a moment while it settled, and SyncBoss logged 9 rejected SPI transactions: effects of stopping it
+by hand. Left to see worn: the colour itself (Meta's own is close to it).
