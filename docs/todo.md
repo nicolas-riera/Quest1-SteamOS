@@ -323,6 +323,10 @@ unusable as it is), then the tracking, then the stability; the rest after.
   the proximity sensor wakes the headset while worn, the fan and power LED stay on.
 - Restart from Steam: with the OS started by `fastboot boot` it restarts into Android; test it once the OS is
   flashed (user), then drop the sshd `pam_systemd` workaround in `device/holo-perf.sh` if it works.
+- Shut down from Steam (user, 2026-11-21): the headset "crashed" instead of powering off (the user then held power,
+  it came back in Android). The memory log on `/userdata` stops in the middle of the shutdown with nothing wrong in
+  it. To check: whether the kernel's power-off takes the modem down (Linux cannot stop it, and a stop hangs the SoC,
+  docs: `device/holo-android-modem.sh`), which would leave a hang then the watchdog's reboot into Android.
 - Charging while off (user, 2026-11-16): plugged in while off, the headset boots into a charging-only mode (the
   bootloader starts the boot image in charger mode: `androidboot.mode=charger` on the command line, Meta's OS then
   shows its battery screen and charges). Once SteamOS is flashed, that boot would start the whole of SteamOS. The
