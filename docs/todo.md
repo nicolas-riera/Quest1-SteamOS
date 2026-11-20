@@ -65,7 +65,10 @@ unusable as it is), then the tracking, then the stability; the rest after.
     of 11-17) and that matches when the frame is shown (Submit Illumination - Predicted Display: +0.7 ms mean, +-6 ms),
     so it is not a wrong latency figure: it is a constant-velocity guess over ~90 ms (~27 deg at 300 deg/s). Of the
     83 ms: encode 7, network 4-5, decode 13, then ~26 ms between the decoded frame and vrlink taking it, and 29 ms from
-    vrlink's submit to the photons. Levers: shorten that hold (vrlink's own queue; the PC's
+    vrlink's submit to the photons.
+    2026-11-21: the shim now gives vrlink a braking rate while the head slows down (`brake_rate`: the turn stops
+    where a constant deceleration stops it); simulated on the user's recorded head, the overshoot p99 6.7 -> 3.2 deg
+    (max 16.8 -> 9.4), the PC's predicted pose shaking 0.46 -> 0.56 deg rms. To judge worn: fast turns and stops. Levers: shorten that hold (vrlink's own queue; the PC's
     `driver_vrlink/maxVideoQueueLatencyUs` is the user's call), a deceleration-aware rate in the shim (`raw_pose`,
     to simulate on a recorded head first). Controllers: driver_quest1 gives SteamVR Monado's world-frame angular rate
     (controllers.cpp, ~line 1125) where the HMD's is device-local: check with a constant rate on a yawed controller.
@@ -84,6 +87,9 @@ unusable as it is), then the tracking, then the stability; the rest after.
     journal, vrlink, vrclient_vrlink, vrserver, vrcompositor, layer logs, meminfo; `headset/vlk2/`: Steam's
     `*.previous.txt`, q1trackd, monado, warnings, coredump list).
   - Stopping the stream crashed all of Steam and SteamVR on the headset (user, 2026-11-17 night; no coredump kept).
+    2026-11-21: every vrlink of a boot (8 sessions) crashes (SIGSEGV) on its way out, after its 15 s "Timed out
+    getting information from the server" once the PC's SteamVR is closed: start there (coredumps are refused,
+    "Failed to send coredump datagram").
     Find the crash in the logs above (Steam's `*.previous.txt`, vrserver, warnings) and reproduce it.
   - Position: vrlink submits no depth, so a position error of the PC's prediction is not corrected at all.
   - On a system that had run for hours, the stream was 16.6 px rms off the world in Monado's output (2.5-3 px fresh).

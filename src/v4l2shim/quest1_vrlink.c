@@ -22,6 +22,7 @@
 #include <dirent.h>
 #include <dlfcn.h>
 #include <errno.h> // program_invocation_short_name
+#include <math.h>
 #include <pthread.h>
 #include <sched.h>
 #include <stdarg.h>
@@ -664,6 +665,64 @@ static bool raw_pose_lead(int64_t sample, int64_t *lead)
 	return true;
 }
 
+// The head's angular velocity for the PC's prediction, which turns the head on at that constant rate for ~83-97 ms
+// (docs/todo.md): as the head stops, the picture went past it and came back ("it bounces", user, 2026-11-21). While
+// the head brakes, the rate given is the one that turns it as far as a constant deceleration takes it before it
+// stops: never more than the rate measured, never reversed, unchanged while the head turns steadily or speeds up.
+// The deceleration is the rate's least-squares slope over its last 30 ms (the driver's poses, 250 a second), along
+// the turn. Simulated on the user's recorded head (85 s, worn, 83 ms ahead, 72 frames a second): the overshoot past
+// the head p99 6.5 -> 3.3 deg (max 15.5 -> 9.8), the error 2.38 -> 1.94 deg rms, and the frame-to-frame shake of the
+// PC's predicted pose 0.40 -> 0.50 deg rms. A constant-acceleration rate (extended too) halved the error but shook
+// two to three times more (the slope's noise times the horizon); a slope over 20 ms, or smoothed, did no better.
+#define BRAKE_SPAN_NS 30000000ll
+#define BRAKE_HORIZON_S 0.09 // the PC's horizon, about (83 ms on a bench, 97 worn)
+#define BRAKE_HIST 32
+
+static void brake_rate(int64_t t_ns, const double w[3], double out[3])
+{
+	static struct
+	{
+		int64_t t;
+		double w[3];
+	} hist[BRAKE_HIST];
+	static unsigned n, next;
+	memcpy(out, w, 3 * sizeof(double));
+	if (!n || hist[(next + BRAKE_HIST - 1) % BRAKE_HIST].t != t_ns) { // a new pose of the driver
+		hist[next].t = t_ns;
+		memcpy(hist[next].w, w, sizeof(hist[next].w));
+		next = (next + 1) % BRAKE_HIST;
+		n += n < BRAKE_HIST;
+	}
+	double st = 0, stt = 0, sw[3] = {0}, swt[3] = {0};
+	unsigned m = 0;
+	for (unsigned k = 0; k < n; k++) {
+		unsigned i = (next + BRAKE_HIST - 1 - k) % BRAKE_HIST;
+		int64_t age = t_ns - hist[i].t;
+		if (age < 0 || age > BRAKE_SPAN_NS)
+			break;
+		double x = -age / 1e9;
+		st += x, stt += x * x, m++;
+		for (int c = 0; c < 3; c++)
+			sw[c] += hist[i].w[c], swt[c] += hist[i].w[c] * x;
+	}
+	double den = m * stt - st * st, wn = sqrt(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]);
+	if (m < 4 || den <= 0 || wn < 1e-6)
+		return;
+	double a = 0; // the rate's change along the turn, rad/s^2 (< 0: braking)
+	for (int c = 0; c < 3; c++)
+		a += (m * swt[c] - st * sw[c]) / den * (w[c] / wn);
+	if (a >= 0)
+		return;
+	const double h = BRAKE_HORIZON_S;
+	double ang = wn * h, stop = wn * wn / (2 * -a);
+	double braked = wn / -a < h ? stop : wn * h + 0.5 * a * h * h;
+	if (braked < ang) {
+		double k = (braked > 0 ? braked : 0) / ang;
+		for (int c = 0; c < 3; c++)
+			out[c] = w[c] * k;
+	}
+}
+
 static uint64_t raw_pose(void *self, uint32_t dev, void *out)
 {
 	uint64_t r = real_raw_pose(self, dev, out);
@@ -708,8 +767,11 @@ static uint64_t raw_pose(void *self, uint32_t dev, void *out)
 		// prediction, shook the stream. vrcompositor corrects it exactly since 1efbd78 (2026-11-16), and the low-pass
 		// only delayed the rate: the PC's prediction overshot as the head stopped and the picture "bounced" (user,
 		// 2026-11-17). On the user's recorded head (85 s, 92 ms ahead) the low-pass made the prediction error 4.6 deg
-		// rms against 2.9 without, for 10 % less frame-to-frame shake (docs/streaming.md item 15).
-		memcpy(o + RAW_ANGULAR, p.ang, sizeof(p.ang));
+		// rms against 2.9 without, for 10 % less frame-to-frame shake (docs/streaming.md item 15). It goes as
+		// measured but while the head brakes (brake_rate).
+		double ang[3];
+		brake_rate(p.time_ns, p.ang, ang);
+		memcpy(o + RAW_ANGULAR, ang, sizeof(ang));
 	}
 	pthread_mutex_unlock(&lock);
 	return r;
