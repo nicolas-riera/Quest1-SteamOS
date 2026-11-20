@@ -825,7 +825,7 @@ int main()
 			close(sf);
 		}
 	}
-	auto Rec =[&](int c, int k) { return (uint32_t *)(b + kRec0 + c * kCamStride + k * kRecStride); };
+	auto Rec = [&](int c, int k) { return (uint32_t *)(b + kRec0 + c * kCamStride + k * kRecStride); };
 	const int64_t period = 1000000000LL / hz;
 	int64_t next = NowNs();
 	while (!g_quit) {
