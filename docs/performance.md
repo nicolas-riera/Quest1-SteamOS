@@ -3,6 +3,19 @@
 Where the frame time goes and what was tried. Current numbers and the direct scanout path:
 docs/direct-scanout.md; Steam's UI: docs/steam-gpu.md.
 
+## 2026-11-20: a vrserver thread spins for the client that started vrcompositor
+
+vrserver runs a thread per OpenVR client (named "<pid>: <name>"). One of them takes 25-30 % of a core for the whole
+SteamVR session (per-thread CPU from `/proc/<vrserver>/task/*/stat` over 5 s, stream running): the thread of the client
+whose VRMsg_StartVRCompositor started vrcompositor (vrserver.txt). It keeps spinning after that client exits, until
+SteamVR restarts. Seen on q1-handviz (connected first, its overlays started the compositor) and, once handviz waited 10 s
+before VR_Init, on the keep-alive `vrcmd --waitforquit` (quest1-vrsession.service, connected at 8 s, two threads in
+vrserver). A tool started once SteamVR is up costs nothing there (handviz restarted alone: 0 % over 2 min). Not
+fixed: it is inside vrserver. To try: let vrserver start vrcompositor itself (no client asking for it), or have the
+client that asks exit and see whether the thread ends then; measure the same way.
+
+q1-handviz also asks OpenVR nothing now while no hand is tracked (it made two calls every 50 ms, hands on or off).
+
 ## 2026-11-16: Valve's shared memory left behind at each restart
 
 Steam and SteamVR share memory through files in `/dev/shm` (`u1000-Shm_*`: IPC blocks, and a pair of 25 MiB buffers

@@ -109,14 +109,15 @@ struct HandOv
 
 int main()
 {
+	// One VR_Init per process, once SteamVR had time to come up (as q1-perfhud); on failure the process ends and systemd
+	// starts it again. Connected first, this tool created its overlays before the keep-alive vrcmd and became the client
+	// that starts vrcompositor, whose thread in vrserver then spins (docs/performance.md, 2026-11-20).
+	sleep(10);
 	EVRInitError err = VRInitError_None;
-	for (int i = 0;; i++) { // SteamVR may not be up yet
-		VR_Init(&err, VRApplication_Background);
-		if (err == VRInitError_None)
-			break;
-		sleep(3);
-		if (i > 100)
-			return 1;
+	VR_Init(&err, VRApplication_Background);
+	if (err != VRInitError_None) {
+		fprintf(stderr, "VR_Init: %s\n", VR_GetVRInitErrorAsEnglishDescription(err));
+		return 1;
 	}
 	HandOv ov[2];
 	for (int h = 0; h < 2; h++) {
@@ -135,8 +136,13 @@ int main()
 	}
 	q1handviz_shm *m = nullptr;
 	double last[2] = {0, 0};
+	// No OpenVR round trip while no hand is tracked (a check every 0.5 s), and a hand's device index asked once a second
+	// (it was two calls every 50 ms, hands or not).
+	TrackedDeviceIndex_t devCache[2] = {k_unTrackedDeviceIndexInvalid, k_unTrackedDeviceIndexInvalid};
+	double devAsked[2] = {0, 0};
+	bool idle = true;
 	for (;;) {
-		usleep(1000000 / 20);
+		usleep(idle ? 500000 : 1000000 / 20);
 		if (!m) {
 			int fd = open(Q1HANDVIZ_PATH, O_RDONLY | O_CLOEXEC);
 			struct stat st;
@@ -153,6 +159,7 @@ int main()
 		clock_gettime(CLOCK_MONOTONIC, &ts);
 		double now = ts.tv_sec + ts.tv_nsec * 1e-9;
 		bool fresh = now - m->updateNs * 1e-9 < 0.5 && m->magic == Q1HANDVIZ_MAGIC;
+		idle = !fresh || (!m->hand[0].tracked && !m->hand[1].tracked);
 		for (int h = 0; h < 2; h++) {
 			q1handviz_hand c;
 			uint32_t a;
@@ -161,9 +168,16 @@ int main()
 				a = m->seq;
 				memcpy(&c, (const void *)&m->hand[h], sizeof(c));
 			} while (((a & 1) || a != m->seq) && ++tries < 5);
-			TrackedDeviceIndex_t dev = VRSystem()->GetTrackedDeviceIndexForControllerRole(
-			    h ? TrackedControllerRole_RightHand : TrackedControllerRole_LeftHand);
-			bool on = fresh && c.tracked && dev != k_unTrackedDeviceIndexInvalid;
+			TrackedDeviceIndex_t dev = k_unTrackedDeviceIndexInvalid;
+			if (fresh && c.tracked) {
+				if (now - devAsked[h] > 1.0 || devCache[h] == k_unTrackedDeviceIndexInvalid) {
+					devAsked[h] = now;
+					devCache[h] = VRSystem()->GetTrackedDeviceIndexForControllerRole(
+					    h ? TrackedControllerRole_RightHand : TrackedControllerRole_LeftHand);
+				}
+				dev = devCache[h];
+			}
+			bool on = dev != k_unTrackedDeviceIndexInvalid;
 			HandOv &o = ov[h];
 			if (!on) {
 				if (o.skelShown)
