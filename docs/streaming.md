@@ -823,6 +823,36 @@ vrlink writes its own log, `~/.local/share/Steam/logs/vrlink.txt` (the PC's side
       both links, 141 Mbit/s over USB and 145 over Wi-Fi, ~0.5 core of receive threads and USB interrupt work. Kept:
       the user wants Valve's multilink as it is.
 
+### Decoding: every frame "DecodeSlow" for the PC (2026-11-20)
+
+The PC's `driver_vrlink.txt` put "DecodeSlow" on nearly every frame (1,060-1,075 of ~1,075 every 15 s), and its
+`vrlink_aftm_*.csv` gave 19.3 ms from vrlink queuing a packet to taking the frame (p90 38, p99 119) for the 1024x4096
+Main10 stream, against a frame every 13.9 ms. Venus was at its top clock (533 MHz, `video_core_clk_src`), its DDR
+vote ~4.9 GB/s, the instance's operating rate 90 (the "fps: 15" of its debugfs `info` is not what the load uses).
+ftrace (`msm_vidc` buffer events, `v4l2`/`vb2` dqbuf, default buffer size) split the 19 ms:
+- the firmware, from the packet (ETB) to the frame (FBD): 13.2 ms (p90 13.8), little more for big frames (12.6 ms at
+  68-179 kB, 13.7 at 222-274 kB);
+- from the FBD to vrlink's DQBUF: 4.2 ms (p90 10.3, max 23.5). Two causes:
+  - vrlink's decoder thread (`V4L2MediaThread`) is a normal thread in 2.19, on CPUs 4-7 at a load of ~16: it waited
+    for a CPU. The shim makes it realtime (FIFO 39, `quest1_vrlink.c` rt_threads): 2.4 ms (p90 2.9, max 3.8).
+  - the remaining ~2.1 ms were inside the DQBUF: venus's driver invalidates a cached ION frame from the CPU caches
+    (`output_buffer_cache_invalidate`, 6 MB), and vrlink's frames were cached gralloc buffers (usage "CPU read
+    often"). Gralloc's private uncached bit makes them uncached (`QNV_AHB_USAGE`, quest1_modifier_extfmt.c; "CPU read
+    rarely" or no CPU usage still gave cached ones): 0.2 ms (p90 0.3, max 1.1).
+
+Result, same PC, same stream, panels on with nobody wearing it: the PC's packet-to-frame 13.0 ms (p90 13.9, p99 17.7)
+instead of 19.3 (38, 119); "DecodeSlow" on 48-192 frames every 15 s instead of all of them; the picture checked in a
+cropped snapshot, no black or green picture in the shim's log. Left: the firmware's 13 ms itself (an 8-bit stream
+skips the split mode's two outputs, ~1.5-2 ms in the 2026-11-11 measures, but it is the PC's `driver_vrlink` "10bit"
+setting: the user's call), and the ~50 ms from the decoded frame to its display ("Submit Illumination").
+
+The strong lags of 2026-11-17 (the video gone, the sound far behind, back, gone again): in that session's CSV the
+network delay and vrlink's ping climbed to ~1,000 ms in three episodes of ~6 s in the first 25 s, with "ClientRxLoss",
+"PingSpike", "StreamReset" and "AudioClientDrop" in the PC's log. A ceiling that flat is a queue, not the radio:
+~1 s is what the 8 MB socket buffers (item 16) hold at that bitrate, so the receiving side fell that far behind,
+with the decoder at the edge of its budget (DecodeSlow on every frame, the PC's frame rate rising and falling). Not
+reproduced yet with the faster decoder.
+
 ### Picture quality (2026-11-16, read in driver_vrlink and the PC's settings)
 
 The PC alone sizes the stream: an atlas of four square views (each eye's wide view and inset), `streamFormatWidth`

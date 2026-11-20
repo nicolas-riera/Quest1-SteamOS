@@ -11,7 +11,14 @@
 // dedicated to it; its YCbCr conversions and views take the external format instead of NV12.
 
 #define QNV_AHB_FORMAT 0x23 // AHARDWAREBUFFER_FORMAT_Y8Cb8Cr8_420: venus's NV12 with the video usage
-#define QNV_AHB_USAGE (3ull | (1ull << 8) | (1ull << 16)) // CPU read often, GPU sampled image, video encode
+// CPU read rarely, GPU sampled image, video encode, and Qualcomm gralloc's private "uncached" (bit 29, an
+// AHardwareBuffer vendor bit, GRALLOC_USAGE_PRIVATE_UNCACHED). With "CPU read often" the frames were cached ION and
+// venus's driver invalidated the whole 6 MB frame from the caches at each DQBUF: ~2.1 ms of vrlink's decoder thread a
+// frame (ftrace, 2026-11-20), for memory only the GPU reads (the shim's flash check reads ~640 bytes of it, fine
+// uncached). No CPU usage, or "rarely" alone, still gave cached buffers (tried: the same 2.4 ms); with bit 29 the
+// frame reaches vrlink 0.2 ms after venus is done (p90 0.3). Steam Link 2D's frames are uncached for the same reason
+// (quest1_streamdrm.c).
+#define QNV_AHB_USAGE (2ull | (1ull << 8) | (1ull << 16) | (1ull << 29))
 
 static struct
 {

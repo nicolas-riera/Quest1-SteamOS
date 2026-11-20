@@ -310,12 +310,15 @@ EXPORT int sched_setscheduler(pid_t pid, int policy, const struct sched_param *s
 // "Bad link event"s and receive losses, throttled the stream, and pictures came late or not at all (a second without
 // one: a black flash), worst when the dashboard opened (2026-11-17). They are made realtime like vrlink's own network
 // threads in 2.17 (RT_MAX).
+// Its decoder thread too (V4L2MediaThread: it takes each decoded frame from venus and queues the packets' buffers
+// back), a normal thread in 2.19: with the load at ~16 a frame venus had finished waited 4.2 ms for it (p90 10 ms,
+// up to 23 ms; ftrace, venus's FBD to the thread's DQBUF, 2026-11-20), 2.4 ms (p90 2.9, max 3.8) once realtime.
 static const struct
 {
 	const char *name; //!< the thread's name, or its start when it ends with '*'
 	int prio;
 } rt_threads[] = {{"vrlinkrunthread", RT_MAX - 2}, {"EventsThread", RT_MAX - 2}, {"data-loop.0", RT_MAX - 4},
-                  {"RXT*", RT_MAX}};
+                  {"RXT*", RT_MAX}, {"V4L2MediaThread", RT_MAX - 1}};
 
 static bool rt_name_is(const char *comm, const char *name)
 {

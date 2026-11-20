@@ -51,6 +51,9 @@ unusable as it is), then the tracking, then the stability; the rest after.
     What it looks like (user, 2026-11-17): the video is gone (the headset falls back to its own Aurora home), the
     audio lags very strongly, then it comes back, goes again, comes back, and so on. Only lead so far: it happens
     when the PC's frame rate varies a lot.
+    2026-11-20 (docs/streaming.md "Decoding: every frame DecodeSlow"): in those logs the delay hits a flat ~1 s
+    (a full receive queue) in episodes of ~6 s, with the decoder late on every frame; the decoder's path is now
+    ~6 ms shorter and steady (13.0 ms, p90 13.9). To judge worn: whether the lags still come.
     Logs of the night 2026-11-17 saved outside the repo (they hold connection IDs): `../vrlink-logs-2026-11-17/`
     (`pc/`: driver_vrlink, vrserver, vrcompositor, vrmonitor and 10 `vrlink_aftm_*.csv`; `headset/vlk/`: shim
     journal, vrlink, vrclient_vrlink, vrserver, vrcompositor, layer logs, meminfo; `headset/vlk2/`: Steam's
