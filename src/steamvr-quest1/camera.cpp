@@ -1330,6 +1330,23 @@ private:
 		return depthSetting;
 	}
 
+	//! Whether vrcompositor shows the roomview: q1-ptprovider touches /dev/shm/quest1-roomview.shown while the compositor
+	//! takes its frames. The cameras' frames come all the time (the provider keeps a frame ready), and the depth was
+	//! computed on all of them: 25-30 % of a core with no roomview shown (perf on vrserver, 2026-11-20). No file at all
+	//! (a provider without it): computed as before. Checked five times a second.
+	bool RoomviewShown()
+	{
+		const int64_t now = MonoNs();
+		if (now - shownCheckedAt > 200000000LL) {
+			shownCheckedAt = now;
+			struct stat st;
+			shown = stat("/dev/shm/quest1-roomview.shown", &st) != 0 || time(nullptr) - st.st_mtime <= 2;
+		}
+		return shown;
+	}
+	int64_t shownCheckedAt = 0;
+	bool shown = true;
+
 	//! back to the fixed sphere
 	void ResetSphere()
 	{
@@ -1615,8 +1632,10 @@ private:
 					if (ring)
 						CLog("quest1 camera: passthrough depth on\n");
 				}
-				if (!ring || !want || !ring->Acquire(denseOn ? std::vector<int>{0, 2, 1, 3} : std::vector<int>{0, 2}, img, cap, 100)) {
-					if (!ring || !want) { // the sphere follows the head
+				const bool shownNow = RoomviewShown();
+				if (!ring || !want || !shownNow ||
+				    !ring->Acquire(denseOn ? std::vector<int>{0, 2, 1, 3} : std::vector<int>{0, 2}, img, cap, 100)) {
+					if (!ring || !want || !shownNow) { // the mesh (sphere or last depth) follows the head
 						usleep(33000);
 						if (MeshPose(MonoNs(), false, meshPose))
 							PublishMesh(++meshId, false, meshPose);

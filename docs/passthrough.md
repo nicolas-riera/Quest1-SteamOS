@@ -486,6 +486,10 @@ driver_quest1:
 
 ## Dense stereo depth (2026-11-17)
 
+Only while the roomview shows (2026-11-20): q1-ptprovider marks `/dev/shm/quest1-roomview.shown` while vrcompositor takes
+its frames, and the driver computes the depth only then (it had run on every frame set, ~25 % of a core, roomview
+shown or not; docs/performance.md).
+
 How Meta's OS does it on the Quest 1 (libmrengine, read for the method only): a "MotionVectorDisparityPipeline". The
 left/right pair is composed into one picture and run through the Venus H.264 hardware encoder; the macroblock motion
 vectors read back from its bitstream are the disparity (640x480 input). Then fixed-point rectification warps,

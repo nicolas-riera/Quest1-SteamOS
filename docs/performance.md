@@ -3,16 +3,20 @@
 Where the frame time goes and what was tried. Current numbers and the direct scanout path:
 docs/direct-scanout.md; Steam's UI: docs/steam-gpu.md.
 
-## 2026-11-20: a vrserver thread spins for the client that started vrcompositor
+## 2026-11-20: the passthrough's depth ran with no roomview shown (25-30 % of a core)
 
-vrserver runs a thread per OpenVR client (named "<pid>: <name>"). One of them takes 25-30 % of a core for the whole
-SteamVR session (per-thread CPU from `/proc/<vrserver>/task/*/stat` over 5 s, stream running): the thread of the client
-whose VRMsg_StartVRCompositor started vrcompositor (vrserver.txt). It keeps spinning after that client exits, until
-SteamVR restarts. Seen on q1-handviz (connected first, its overlays started the compositor) and, once handviz waited 10 s
-before VR_Init, on the keep-alive `vrcmd --waitforquit` (quest1-vrsession.service, connected at 8 s, two threads in
-vrserver). A tool started once SteamVR is up costs nothing there (handviz restarted alone: 0 % over 2 min). Not
-fixed: it is inside vrserver. To try: let vrserver start vrcompositor itself (no client asking for it), or have the
-client that asks exit and see whether the thread ends then; measure the same way.
+A thread in vrserver took 25-30 % of a core for the whole SteamVR session, on CPUs 4-7 (per-thread CPU from
+`/proc/<vrserver>/task/*/stat`). It carries the name of a vrserver client thread ("<pid>: q1-handviz", later "<pid>:
+vrcmd") because it is created from one, which first looked like a vrserver bug. `perf record -t <tid> -g` showed it is
+driver_quest1's own `CompositorGate` thread: the passthrough's dense stereo depth (DenseMatcher, StereoDenseRig,
+Census: ~90 % of its samples). The cameras' frames come all the time, because q1-ptprovider keeps a frame ready for the
+next opening of the roomview, and the depth was computed on all of them, roomview shown or not.
+
+Now q1-ptprovider marks `/dev/shm/quest1-roomview.shown` (its mtime, at most four times a second) while vrcompositor
+takes its frames, and makes the file dated 1970 at its start. The driver computes the depth only while that mark is
+less than 2 s old; without the file at all it computes as before. Checked on the headset, no stream, nobody wearing
+it: the thread 25 % before, absent after (load ~12 to ~10.5); the roomview switched on through vrcompositor's system
+layer (`vrmailbox ... set_camera_roomview_enabled`): the mark fresh and the depth back at 25 %; switched off: stopped.
 
 q1-handviz also asks OpenVR nothing now while no hand is tracked (it made two calls every 50 ms, hands on or off).
 

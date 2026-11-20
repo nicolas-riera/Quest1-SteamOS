@@ -33,6 +33,12 @@
 #include <time.h>
 #include <unistd.h>
 
+// Touched (mtime) at most four times a second while the compositor takes our frames, i.e. while the roomview shows:
+// driver_quest1 computes the passthrough's depth only then (camera.cpp RoomviewShown). The cameras' frames keep coming
+// whether it shows or not (this provider keeps a frame ready for the next opening), and the depth ran on them all the
+// time: 25-30 % of a core of CPUs 4-7 with no roomview at all (perf, 2026-11-20).
+static const char *const kShownPath = "/dev/shm/quest1-roomview.shown";
+
 #include <arm_neon.h>
 
 #include <algorithm>
@@ -810,7 +816,16 @@ int main()
 	int readyIdx[2] = {-1, -1}; // the one ready record per camera (-1: none)
 	int64_t lastTake = 0;       // when the compositor last took a frame of ours
 	int64_t stallSince = 0, lastStallLog = 0;
-	auto Rec = [&](int c, int k) { return (uint32_t *)(b + kRec0 + c * kCamStride + k * kRecStride); };
+	int64_t lastShownMark = 0; // when kShownPath was last touched
+	{ // made at once, dated 1970: "not shown" (no file at all means a provider that does not say, depth computed always)
+		int sf = open(kShownPath, O_WRONLY | O_CREAT | O_CLOEXEC, 0666);
+		if (sf >= 0) {
+			const struct timespec old[2] = {{0, 0}, {0, 0}};
+			futimens(sf, old);
+			close(sf);
+		}
+	}
+	auto Rec =[&](int c, int k) { return (uint32_t *)(b + kRec0 + c * kCamStride + k * kRecStride); };
 	const int64_t period = 1000000000LL / hz;
 	int64_t next = NowNs();
 	while (!g_quit) {
@@ -1005,8 +1020,17 @@ int main()
 				// the previous ready frame is now stale: free it, unless the compositor took it meanwhile
 				uint32_t ready = 1;
 				if (readyIdx[c] >= 0 && readyIdx[c] != slot[c] &&
-				    !__atomic_compare_exchange_n(Rec(c, readyIdx[c]), &ready, 0u, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+				    !__atomic_compare_exchange_n(Rec(c, readyIdx[c]), &ready, 0u, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
 					lastTake = now; // it was taken: the compositor is reading
+					if (now - lastShownMark > 250000000LL) { // the roomview shows: driver_quest1 computes its depth
+						lastShownMark = now;
+						int sf = open(kShownPath, O_WRONLY | O_CREAT | O_CLOEXEC, 0666);
+						if (sf >= 0) {
+							futimens(sf, nullptr);
+							close(sf);
+						}
+					}
+				}
 				readyIdx[c] = slot[c];
 				slot[c] = (slot[c] + 1) % N;
 			}

@@ -156,7 +156,8 @@ unusable as it is), then the tracking, then the stability; the rest after.
   Meta's tracking threads starving when worn (Android pins syncboss to CPUs 0-3); memory (~500 MB available after
   boot; kswapd and loop0 busy while Steam is used).
 - Passthrough depth (on by default since 2026-11-17, docs/passthrough.md "Dense stereo depth"): its artifacts are
-  still too visible (user), and it costs CPU; Meta's route (disparity from the Venus encoder's motion vectors) next.
+  still too visible (user), and it costs CPU while the roomview shows (~25 % of a core; no longer when hidden,
+  2026-11-20); Meta's route (disparity from the Venus encoder's motion vectors) next.
 - Audio: a click at each Steam start (user, 2026-11-12: still there; the crackle is gone). The output no longer
   closes between sounds (docs/audio.md), so find what Steam does at its start: a sound of its own, or a stream it
   opens and closes.
