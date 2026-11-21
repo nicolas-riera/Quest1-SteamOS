@@ -152,6 +152,19 @@ it got that way were never in a script. Found by reading the scripts, fixed, not
 
 The `prebuilt` branch was not published yet, which is why that build went through `build-native.sh` itself.
 
+Second run the same day, with those fixes: the Android parts, Monado, SteamVR, Steam, Bluetooth and the battery
+service all started. Left, fixed since (not run again yet):
+- `q1trackd` stopped at `cannot locate symbol "sqrtf"`: `build-native.sh` linked the bionic tools against stubs
+  of `libc.so`/`libdl.so` only, so the math functions were looked for in bionic's libc. It now makes a `libm.so`
+  stub too (cross-checked in WSL: `q1trackd` needs `libm.so`, the libc stub has no math function left);
+- `q1handsd` needs Meta's `VrDriver.apk` (21.5 MB, its runtime library gives the hand skeleton), which the
+  `./system/priv-app` exclusion took out: `build_image.py` puts it back, as it does the charging sound;
+- Steam, with no network yet, stopped at "Steam needs to be online to update" and restarted every ~7 s. The
+  Frame starts its client with `-skipinitialbootstrap` (its preinstalled client has no install record either:
+  `package/` holds only `beta`); `steam.service` now does too, so the first-boot setup (Wi-Fi, login) runs
+  offline.
+- `quest1-vrsession` failed once with "HMD not found": probably the missing tracking; to look at again.
+
 ## The app
 
 [`app/`](../app/README.md): Go, one exe (~20 MB with adb/fastboot), Edge WebView2 for the window. Its install

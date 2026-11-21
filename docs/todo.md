@@ -400,9 +400,11 @@ unusable as it is), then the tracking, then the stability; the rest after.
   - 2026-11-21, first full install by someone else, following AGENTS.md section 5: every build step and the flash
     went through, SteamOS booted, but `holo-android-blobs` failed (no `/system` mount point), so Monado and SteamVR
     never started. Fixed with the other things only the development headset had (`/vendor`, Meta's tracking by
-    default, `libxcomposite` in the build deps): installer/README.md, "To check on the headset". To see on a fresh
-    install: the VR side up, tracking, controllers, Wi-Fi, Steam's login; Steam wrote crash dumps there on first
-    boot (no Wi-Fi yet, clock in 2026-07: not confirmed as the cause).
+    default, `libxcomposite` in the build deps). A second run got Monado, SteamVR and Steam up; then q1trackd
+    (libm), q1handsd (VrDriver.apk) and Steam offline (`-skipinitialbootstrap`) were fixed: installer/README.md,
+    "To check on the headset". To see on a fresh install: tracking, controllers, the Frame setup connecting the
+    Wi-Fi with no network at first, Steam's login, quest1-vrsession's "HMD not found". On the development headset:
+    `-skipinitialbootstrap` changes nothing visible (the client still updates itself).
   - The `prebuilt` branch the installer downloads our binaries from (installer/sources.json) is not published yet:
     build `tools/build-native.sh` and `tools/build-boot.sh` and push it, or the installer's default path fails.
 - While the headset's install system (the small Linux that builds the image on the headset) is building, the

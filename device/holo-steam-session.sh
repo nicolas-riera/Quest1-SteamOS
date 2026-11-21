@@ -2,7 +2,7 @@
 # Steam session on the native Quest 1: the arm64 Steam client (Big Picture) on a virtual X server,
 # shown in the headset by xscreen (an OpenXR quad layer on Monado) and controllable from the PC over VNC.
 #   xvfb.service      Xvfb :1, 1280x720 (the Frame's gamescope screen), framebuffer exported as an XWD file in /run/xvfb
-#   steam.service     steam-q1 -gamepadui -steamos3 -steamdeck -steamframe (Frame identity: ON_FRAME, Frame OOBE; docs/frame-mode.md) as steamos (restarts itself after client self-updates)
+#   steam.service     steam-q1 -gamepadui -steamos3 -steamdeck -steamframe -skipinitialbootstrap (Frame identity: ON_FRAME, Frame OOBE; docs/frame-mode.md) as steamos (restarts itself after client self-updates)
 #   x11vnc.service    VNC on port 5900, password in /etc/x11vnc/passwd
 #   steam-screen.service  shows the Steam screen in VR (xscreen); the Monado target keeps the
 #                     panels off while the proximity sensor says the headset is not worn
@@ -368,7 +368,12 @@ BindReadOnlyPaths=/usr/share/quest1/steam-dt-model:/sys/firmware/devicetree/base
 Environment=QUEST1_STEAM_VR=1 QUEST1_STEAM_CEF_ARGS=
 Environment="MESA_EXTENSION_OVERRIDE=-GL_EXT_memory_object -GL_EXT_memory_object_fd -GL_EXT_semaphore -GL_EXT_semaphore_fd"
 # -pipewire: Remote Play captures the screen through the ScreenCast portal (q1screencast above), not with OpenGL
-ExecStart=/usr/local/bin/steam-q1 -gamepadui -steamos3 -steamdeck -steamframe -pipewire
+# -skipinitialbootstrap, as the Frame's RUNSTEAM.sh: the client is already installed (the image's), so it starts
+# without asking Valve's servers first and its first-boot setup (Wi-Fi, then login) runs offline. Without it a fresh
+# install with no network yet stopped at "Steam needs to be online to update" and restarted every ~7 s (first
+# outside install, 2026-11-21). The Frame's own preinstalled client has no install record either (package/ holds
+# only "beta"): this flag is what lets it start.
+ExecStart=/usr/local/bin/steam-q1 -gamepadui -steamos3 -steamdeck -steamframe -pipewire -skipinitialbootstrap
 # Chromium makes its audio threads SCHED_RR 8 itself when RLIMIT_RTPRIO allows it (desktops grant it through rtkit).
 # At 0 Steam's "Realtime AudioW" stayed a normal thread that waited longer for a CPU than it ran (0.99 s against
 # 0.29 s six minutes after boot, up to 24 ms at once): its sounds crackled while the headset was busy (2026-11-08).

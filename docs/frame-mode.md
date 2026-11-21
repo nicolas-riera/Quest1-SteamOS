@@ -13,7 +13,7 @@ How the arm64 Steam client decides it runs on a Steam Frame (found by static ana
 ## What is installed
 
 `steam.service` drop-in `/etc/systemd/system/steam.service.d/vr.conf` runs
-`steam-q1 -gamepadui -steamos3 -steamdeck -steamframe` (also the default ExecStart in device/holo-steam-session.sh).
+`steam-q1 -gamepadui -steamos3 -steamdeck -steamframe -skipinitialbootstrap` (also the default ExecStart in device/holo-steam-session.sh).
 Revert: put the old args back (`/etc/systemd/system/steam.service.d/vr.conf.bak-frameid` is the pre-change copy), `systemctl daemon-reload`, restart steam.
 
 ## Caveats found
