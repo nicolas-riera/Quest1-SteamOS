@@ -11,7 +11,8 @@ M=/usr/lib/quest1/meta
 src() { if [ -f "$M/$1.img" ]; then echo "-o loop $M/$1.img"; else echo "$(part ${1}_a)"; fi; }
 
 # /android = system_a (system-as-root); /system, /vendor, /apex like on Android
-mkdir -p /android /firmware /apex
+# /system too: a fresh image has no such directory (the development image already had one, so this went unseen)
+mkdir -p /android /system /firmware /apex
 if [ -d $M/system/system ]; then
 	mountpoint -q /android || { mount --bind $M/system /android && mount -o remount,bind,ro /android; }
 else
