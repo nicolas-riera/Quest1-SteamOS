@@ -2,7 +2,8 @@
 # Everything else is kept: the native 64-bit userspace the system runs from /android (bionic, the HALs, the
 # tracking stack, the GPU driver, the Wi-Fi/modem daemons, configs, firmware) and the DSP code.
 # Native Holo runs no Android framework, no Java, no app and no 32-bit process, so these are never used:
-# apps and their data
+# apps and their data (installer/build_image.py puts back the two files used in place: the charging sound and
+# VrDriver.apk, for q1handsd)
 ./system/app
 ./system/priv-app
 ./system/product

@@ -438,15 +438,20 @@ class Build:
             dst.stdin.close()
             if src.wait() or dst.wait():
                 sys.exit("copying Meta's system tree failed")
-            # the one file of ./system/product kept: Meta's charging sound, played in place by q1-chargesound
-            # (device/holo-chargesound.sh); never put in the repository
-            snd = "./system/product/media/audio/ui/ChargingStarted.ogg"
-            if os.path.isfile(os.path.join(m, snd)):
-                s1 = subprocess.Popen(["tar", "-C", m, "-c", "--xattrs", "--numeric-owner", snd],
+            # files kept from excluded folders, used in place (never put in the repository):
+            # - Meta's charging sound, played by q1-chargesound (device/holo-chargesound.sh);
+            # - VrDriver.apk (21.5 MB), whose runtime library q1handsd unpacks at start for the hand skeleton
+            #   (device/q1-vrapi-extract.sh): without it q1handsd failed in a loop (first outside install, 2026-11-21)
+            for keep in ("./system/product/media/audio/ui/ChargingStarted.ogg",
+                         "./system/priv-app/VrDriver/VrDriver.apk"):
+                if not os.path.isfile(os.path.join(m, keep)):
+                    log("meta: %s not in this system image" % keep)
+                    continue
+                s1 = subprocess.Popen(["tar", "-C", m, "-c", "--xattrs", "--numeric-owner", keep],
                                       stdout=subprocess.PIPE)
                 if subprocess.run(["tar", "-C", out, "-x", "--xattrs", "--numeric-owner", "-p"],
                                   stdin=s1.stdout).returncode or s1.wait():
-                    sys.exit("copying Meta's charging sound failed")
+                    sys.exit("copying %s from Meta's system failed" % keep)
         finally:
             run("umount", m)
         shutil.copyfile(modem, os.path.join(d, "modem.img"))

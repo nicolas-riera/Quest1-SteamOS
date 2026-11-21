@@ -113,19 +113,28 @@ gcc -std=gnu11 -O2 -fPIE -fno-stack-protector -U_FORTIFY_SOURCE -c -o $B/q1track
 gcc -std=gnu11 -O2 -fPIE -fno-stack-protector -U_FORTIFY_SOURCE -c -o $B/q1handsd.o q1track/q1handsd.c
 gcc -std=gnu11 -O2 -fPIC -mno-outline-atomics -fno-stack-protector -U_FORTIFY_SOURCE -fvisibility=hidden \
 	-c -o $B/camtap.o camtap/camtap.c
+# Math functions go to a libm.so stub: bionic's libc does not export them, so a binary that looks for sqrtf in
+# libc.so fails at start ("cannot locate symbol", first outside install, 2026-11-21; src/q1track/build.sh, the
+# headset's own recipe, links bionic's libm.so too). Which symbols are libm's: those glibc's libm exports.
 nm -u $B/q1trackd.o $B/q1handsd.o $B/camtap.o | awk 'NF==2{print $2}' | sort -u > $B/syms
+nm -D --defined-only /usr/lib/libm.so.6 | awk '{sub(/@.*/, "", $3); print $3}' | sort -u > $B/libm-exports
+grep -Fxf $B/libm-exports $B/syms > $B/msyms || true
 { grep -E '^(stdin|stdout|stderr|environ)$' $B/syms | sed 's/.*/void *&;/'
-  grep -vE '^(stdin|stdout|stderr|environ|dl[a-z_]*|android_dlopen_ext)$' $B/syms | sed 's/.*/void &(void) {}/'; } > $B/libc.c
+  grep -vE '^(stdin|stdout|stderr|environ|dl[a-z_]*|android_dlopen_ext)$' $B/syms | grep -vFxf $B/msyms |
+	sed 's/.*/void &(void) {}/'; } > $B/libc.c
 grep -E '^(dl[a-z_]*|android_dlopen_ext)$' $B/syms | sed 's/.*/void &(void) {}/' > $B/libdl.c
+sed 's/.*/void &(void) {}/' $B/msyms > $B/libm.c
 gcc -w -shared -nostdlib -Wl,-soname,libc.so -o $B/libc.so $B/libc.c
 gcc -w -shared -nostdlib -Wl,-soname,libdl.so -o $B/libdl.so $B/libdl.c
+gcc -w -shared -nostdlib -Wl,-soname,libm.so -o $B/libm.so $B/libm.c
+BL="$B/libc.so $B/libdl.so $B/libm.so"
 gcc -fPIE -pie -nostdlib -nostartfiles -Wl,--dynamic-linker=/system/bin/linker64 -Wl,-z,now -Wl,--no-undefined \
-	-Wl,--allow-shlib-undefined -o $D/usr/local/lib/q1track/q1trackd $B/q1trackd.o $B/libc.so $B/libdl.so
+	-Wl,--allow-shlib-undefined -o $D/usr/local/lib/q1track/q1trackd $B/q1trackd.o $BL
 gcc -fPIE -pie -nostdlib -nostartfiles -Wl,--dynamic-linker=/system/bin/linker64 -Wl,-z,now -Wl,--no-undefined \
-	-Wl,--allow-shlib-undefined -o $D/usr/local/lib/q1track/q1handsd $B/q1handsd.o $B/libc.so $B/libdl.so
+	-Wl,--allow-shlib-undefined -o $D/usr/local/lib/q1track/q1handsd $B/q1handsd.o $BL
 install -D -m 755 ../device/q1-vrapi-extract.sh $D/usr/local/sbin/q1-vrapi-extract
 gcc -shared -nostdlib -Wl,-z,now -Wl,--no-undefined -Wl,--allow-shlib-undefined \
-	-o $D/data/local/tmp/libq1camtap.so $B/camtap.o $B/libc.so $B/libdl.so
+	-o $D/data/local/tmp/libq1camtap.so $B/camtap.o $BL
 
 step steamvr
 fetch $OPENVR $OPENVR_TAG $S/openvr
