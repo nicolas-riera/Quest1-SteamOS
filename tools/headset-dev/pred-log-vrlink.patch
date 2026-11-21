@@ -1,9 +1,12 @@
-# Test-only patch (never commit it applied): /tmp/q1-predlog logs each vrlink submit's pose (/tmp/q1pred-sub.txt)
-# and the head's true pose (/tmp/q1pred-head.txt); /tmp/q1-angtau MS low-passes the angular rate again for an A/B.
-# Analysis: tools/headset-dev/predfit.py (tools/headset-dev/README.md).
---- a/src/v4l2shim/quest1_vrlink.c
-+++ b/src/v4l2shim/quest1_vrlink.c
-@@ -448,6 +448,28 @@
+# Test-only patch (never commit it applied): the head the PC predicts from, replayed, and what the PC rendered, logged.
+# /tmp/q1-shimreplay: the head recorded in /tmp/q1hd/headrec.txt (lines "t_ns qx qy qz qw wx wy wz", angular rate in
+# the head frame; the user's: keep it local, delete it after) replaces the head's orientation and rate given to vrlink,
+# from its start each time the flag appears, looped. /tmp/q1-predlog: each vrlink submit's pose (/tmp/q1pred-sub.txt)
+# and the head given (/tmp/q1pred-head.txt). Analysis: tools/headset-dev/predfit.py (tools/headset-dev/README.md).
+# Compare settings within one stream session only: the PC's prediction horizon changes between sessions (30-97 ms).
+--- a/src/v4l2shim/quest1_vrlink.c	2026-11-21 01:57:52.049243000 +0100
++++ b/src/v4l2shim/quest1_vrlink.c	2026-11-21 01:57:52.101262200 +0100
+@@ -605,6 +605,28 @@
  	else if (!eye_l && !eye_r && !count && last_picture && now - last_picture < 200000000ull) {
  		return 0; // VRCompositorError_None
  	}
@@ -29,32 +32,80 @@
 +			fprintf(lf, "\n");
 +		}
 +	}
- 	return real_submit_set(self, index, count, handles, eye_l, eye_r, bounds_l, bounds_r, flags, seconds);
+ 	flash_watch(frame, picture, !picture && !eye_l && !eye_r && !count, now);
+ 	if (picture)
+ 		publish_pose(eye_l, frame, now);
+@@ -730,6 +752,58 @@
+ 	}
  }
  
-@@ -551,6 +573,46 @@
- 		// 2026-11-17). On the user's recorded head (85 s, 92 ms ahead) the low-pass made the prediction error 4.6 deg
- 		// rms against 2.9 without, for 10 % less frame-to-frame shake (docs/streaming.md item 15).
- 		memcpy(o + RAW_ANGULAR, p.ang, sizeof(p.ang));
-+		{ // test only (pred-log-vrlink.patch): /tmp/q1-angtau MS low-passes the angular velocity again (A/B)
-+			static uint64_t chk, last;
-+			static double tau, sm[3];
-+			if (now - chk > 300000000ull) {
-+				chk = now;
-+				FILE *f = fopen("/tmp/q1-angtau", "r");
-+				if (!f || fscanf(f, "%lf", &tau) != 1)
-+					tau = 0;
-+				if (f)
-+					fclose(f);
-+			}
-+			double dt = last ? (double)(now - last) * 1e-9 : 0;
-+			last = now;
-+			double k = tau > 0 && dt > 0 && dt < 0.1 ? 1 - exp(-dt / (tau * 1e-3)) : 1;
-+			for (int i = 0; i < 3; i++)
-+				sm[i] += k * (p.ang[i] - sm[i]);
-+			if (tau > 0)
-+				memcpy(o + RAW_ANGULAR, sm, sizeof(sm));
++
++// test only: /tmp/q1-shimreplay: the head recorded in /tmp/q1hd/headrec.txt ("t qx qy qz qw wx wy wz"), from its start
++// when the flag appears, looped, replaces the head's orientation and rate given to the PC
++#define RP_MAX 40000
++static int64_t rp_t[RP_MAX];
++static double rp_q[RP_MAX][4], rp_w[RP_MAX][3];
++static int rp_n = -1;
++static int64_t rp_t0;
++static bool replay_head(int64_t now, struct q1_hmd_pose *p)
++{
++	static uint64_t chk;
++	static bool on;
++	if ((uint64_t)now - chk > 300000000ull) {
++		chk = now;
++		bool want = access("/tmp/q1-shimreplay", F_OK) == 0;
++		if (want && !on)
++			rp_t0 = now;
++		on = want;
++	}
++	if (!on)
++		return false;
++	if (rp_n < 0) {
++		rp_n = 0;
++		FILE *f = fopen("/tmp/q1hd/headrec.txt", "r");
++		long long t;
++		double q[4], w[3];
++		while (f && rp_n < RP_MAX && fscanf(f, "%lld %lf %lf %lf %lf %lf %lf %lf", &t, &q[0], &q[1], &q[2], &q[3], &w[0], &w[1], &w[2]) == 8) {
++			rp_t[rp_n] = t;
++			rp_q[rp_n][0] = q[3], rp_q[rp_n][1] = q[0], rp_q[rp_n][2] = q[1], rp_q[rp_n][3] = q[2];
++			memcpy(rp_w[rp_n], w, sizeof(w));
++			rp_n++;
 +		}
++		if (f)
++			fclose(f);
++		fprintf(stderr, "quest1_v4l2: vrlink: replay: %d head poses\n", rp_n);
++	}
++	if (rp_n < 2)
++		return false;
++	int64_t span = rp_t[rp_n - 1] - rp_t[0], at = rp_t[0] + (now - rp_t0) % span;
++	int lo = 0, hi = rp_n - 1;
++	while (hi - lo > 1) {
++		int mid = (lo + hi) / 2;
++		if (rp_t[mid] <= at)
++			lo = mid;
++		else
++			hi = mid;
++	}
++	memcpy(p->q, rp_q[lo], sizeof(p->q));
++	memcpy(p->ang, rp_w[lo], sizeof(p->ang));
++	return true;
++}
++
+ static uint64_t raw_pose(void *self, uint32_t dev, void *out)
+ {
+ 	uint64_t r = real_raw_pose(self, dev, out);
+@@ -757,6 +831,7 @@
+ 		memcpy(&p, shm, sizeof(p));
+ 		__atomic_thread_fence(__ATOMIC_ACQUIRE);
+ 	} while (((seq & 1) || seq != __atomic_load_n(&shm->seq, __ATOMIC_RELAXED)) && ++tries < 100);
++	replay_head(p.time_ns, &p);
+ 	double q[4];
+ 	memcpy(q, o + RAW_ROTATION, sizeof(q));
+ 	double qn = q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3];
+@@ -779,6 +854,27 @@
+ 		double ang[3];
+ 		brake_rate(p.time_ns, p.ang, ang);
+ 		memcpy(o + RAW_ANGULAR, ang, sizeof(ang));
 +		{ // test only (pred-log-vrlink.patch): the head's pose as the driver gave it, to /tmp/q1pred-head.txt
 +			static uint64_t chk;
 +			static int64_t lastt;

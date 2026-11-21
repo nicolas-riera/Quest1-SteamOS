@@ -665,16 +665,22 @@ static bool raw_pose_lead(int64_t sample, int64_t *lead)
 	return true;
 }
 
-// The head's angular velocity for the PC's prediction, which turns the head on at that constant rate for ~83-97 ms
-// (docs/todo.md): as the head stops, the picture went past it and came back ("it bounces", user, 2026-11-21). While
-// the head brakes, the rate given is the one that turns it as far as a constant deceleration takes it before it
-// stops: never more than the rate measured, never reversed, unchanged while the head turns steadily or speeds up.
-// The deceleration is the rate's least-squares slope over its last 30 ms (the driver's poses, 250 a second), along
-// the turn. Simulated on the user's recorded head (85 s, worn, 83 ms ahead, 72 frames a second): the overshoot past
-// the head p99 6.5 -> 3.3 deg (max 15.5 -> 9.8), the error 2.38 -> 1.94 deg rms, and the frame-to-frame shake of the
-// PC's predicted pose 0.40 -> 0.50 deg rms. A constant-acceleration rate (extended too) halved the error but shook
-// two to three times more (the slope's noise times the horizon); a slope over 20 ms, or smoothed, did no better.
-#define BRAKE_SPAN_NS 30000000ll
+// The head's angular velocity for the PC's prediction, which turns the head on at that constant rate for ~30-97 ms
+// (the PC's horizon changes from session to session): as the head stopped, the picture went past it and came back ("it
+// bounces", user, 2026-11-21). While the head brakes, the rate given turns it as far as a constant deceleration takes
+// it before it stops: never more than measured, never reversed. The deceleration is the rate's least-squares slope over
+// its last 20 ms (the driver's poses, 250 a second) along the turn, taken twice over (BRAKE_GAIN: the head stops harder
+// than a constant deceleration says, and the slope comes late); and the rate is given at 0.9 of the measure.
+// Measured in the stream (2026-11-21, tools/headset-dev: the user's recorded sharp turns and stops given to the PC in
+// place of the head, each frame's pose against the head when it is shown, 30 ms after its submit), against the rate as
+// measured, in the same session: past the head p99 13.5-15.1 -> 2.9 deg (another session 10.8 -> 1.8-1.9), error rms
+// about the same or less (5.6-5.9 -> 5.5; 8.1 -> 6.3-6.7). Tried there too: braking over 30 ms x1, p99 5.3 past; the
+// pose's time 10-15 ms earlier (the PC predicting further) cut the error a little more but brought the bounce back
+// whenever the PC's horizon was long (p99 6.5-9.6 past); the rate x0.7, 0 past but much later (10.4 deg rms).
+// Offline, a constant-acceleration rate (also extending it) halved the error but shook 2-3 times more.
+#define BRAKE_SPAN_NS 20000000ll
+#define BRAKE_GAIN 2.0
+#define BRAKE_SCALE 0.9
 #define BRAKE_HORIZON_S 0.09 // the PC's horizon, about (83 ms on a bench, 97 worn)
 #define BRAKE_HIST 32
 
@@ -686,7 +692,8 @@ static void brake_rate(int64_t t_ns, const double w[3], double out[3])
 		double w[3];
 	} hist[BRAKE_HIST];
 	static unsigned n, next;
-	memcpy(out, w, 3 * sizeof(double));
+	for (int c = 0; c < 3; c++)
+		out[c] = w[c] * BRAKE_SCALE;
 	if (!n || hist[(next + BRAKE_HIST - 1) % BRAKE_HIST].t != t_ns) { // a new pose of the driver
 		hist[next].t = t_ns;
 		memcpy(hist[next].w, w, sizeof(hist[next].w));
@@ -706,11 +713,11 @@ static void brake_rate(int64_t t_ns, const double w[3], double out[3])
 			sw[c] += hist[i].w[c], swt[c] += hist[i].w[c] * x;
 	}
 	double den = m * stt - st * st, wn = sqrt(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]);
-	if (m < 4 || den <= 0 || wn < 1e-6)
+	if (m < 3 || den <= 0 || wn < 1e-6)
 		return;
 	double a = 0; // the rate's change along the turn, rad/s^2 (< 0: braking)
 	for (int c = 0; c < 3; c++)
-		a += (m * swt[c] - st * sw[c]) / den * (w[c] / wn);
+		a += (m * swt[c] - st * sw[c]) / den * (w[c] / wn) * BRAKE_GAIN;
 	if (a >= 0)
 		return;
 	const double h = BRAKE_HORIZON_S;
@@ -719,7 +726,7 @@ static void brake_rate(int64_t t_ns, const double w[3], double out[3])
 	if (braked < ang) {
 		double k = (braked > 0 ? braked : 0) / ang;
 		for (int c = 0; c < 3; c++)
-			out[c] = w[c] * k;
+			out[c] = w[c] * k * BRAKE_SCALE;
 	}
 }
 

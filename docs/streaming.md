@@ -853,6 +853,26 @@ network delay and vrlink's ping climbed to ~1,000 ms in three episodes of ~6 s i
 with the decoder at the edge of its budget (DecodeSlow on every frame, the PC's frame rate rising and falling). Not
 reproduced yet with the faster decoder.
 
+### The head's rate brakes with the head (2026-11-21)
+
+The PC predicts the head at the rate the shim gives (vrlink's raw pose) for its horizon, which changes from session to
+session (30-97 ms in the PC's `vrlink_aftm` logs that day): as the head stopped, the frames went past it and came back
+(the user: "it bounces"). The shim now gives, while the head brakes, the rate that turns it as far as a constant
+deceleration takes it before it stops (`brake_rate`: the rate's slope over 20 ms along the turn, doubled; the rate at
+0.9 of the measure).
+
+- Measured in the stream without wearing the headset: the user recorded 45 s of sharp turns and stops worn (from
+  q1trackd's shared memory), and a test build of the shim gave that head to vrlink in place of the real one
+  (`tools/headset-dev/pred-log-vrlink.patch`); each frame's pose against the head 30 ms after its submit (when it is
+  shown). Same session, the rate as measured against the braking: past the head p99 13.5-15.1 -> 2.9 deg, error rms
+  5.6-5.9 -> 5.5 deg. Another session: 10.8 -> 1.8-1.9, error 8.1 -> 6.3-6.7. Ordinary motion (85 s): error 2.4 ->
+  1.4 deg rms, past p99 3.1 -> 1.2-2.0 (with a 10-15 ms earlier pose time).
+- On average the frames match the head at their submit, ~30 ms before they are shown. Giving the pose a time 10-15 ms
+  earlier (the PC predicting further) cut the error by another 10-20 % but brought the bounce back in a session with a
+  long horizon (p99 6.5-9.6 past): not kept. The rate x0.7: no bounce at all, but the frames 30 % further behind.
+- Offline on the recordings, a constant-acceleration rate (extending it as well) halved the error but shook 2-3 times
+  more; in the stream the braking did not add shake measurably (the bounce's back and forth went).
+
 ### Session start: the stream's size kept across sessions (2026-11-21)
 
 Each Steam Link VR session is a new vrlink process. Its first decoder never knew the stream's size: the shim set its

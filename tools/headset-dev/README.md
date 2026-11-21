@@ -66,11 +66,13 @@ Stream picture placement (docs/streaming.md, "Measuring where the stream's frame
 - `stream-load.sh [SECONDS]` (as root, during a Steam Link VR session, panels on): desktop mode plus 500 MB taken, with
   the memory, load and fps every 5 s, then the shim's flash log of that time (docs/streaming.md item 16).
 - `pred-log-vrlink.patch` (test only, to the shim) and `predfit.py TAG...` (on the PC): with `/tmp/q1-predlog`, each
-  vrlink submit's pose and the head's true pose are logged (`/tmp/q1pred-sub.txt`, `/tmp/q1pred-head.txt`, renamed
-  `sub-TAG.txt` / `head-TAG.txt`); predfit gives how many ms after its submit each frame's pose matches the head, and
-  the error at the display. With `replay-head-monado.patch` (`/tmp/q1-replay` 1; write 0 then 1 to restart the
-  recording, so that runs compare the same motion) no one needs to wear the headset. `/tmp/q1-angtau MS` puts a
-  low-pass of the rate back for an A/B (docs/streaming.md item 15).
+  vrlink submit's pose and the head's pose given to vrlink are logged (`/tmp/q1pred-sub.txt`, `/tmp/q1pred-head.txt`,
+  renamed `sub-TAG.txt` / `head-TAG.txt`); predfit gives how many ms after its submit each frame's pose matches the
+  head, and the error at the display (~30 ms after the submit). With `/tmp/q1-shimreplay` the shim gives vrlink a
+  recorded head (`/tmp/q1hd/headrec.txt`, from its start each time the flag appears) instead of the head: no one
+  wears the headset, Monado is untouched, and runs compare the same motion. Compare settings within one stream session
+  only (the PC's horizon changes between sessions, 30-97 ms). A head to replay is recorded worn from q1trackd's shared
+  memory (500 poses a second, "t_ns qx qy qz qw wx wy wz"); it is the user's: keep it local, delete it after.
 - `vrc-trace-layer.patch` (test only, to the layer, never commit it applied): traces of vrcompositor's descriptors,
   buffer bindings, uniform updates and buffer copies (with the copied data), and a lock-in on its mapped memory, to
   find where it keeps the stream frame's pose (its header has the trigger files).

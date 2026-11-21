@@ -66,9 +66,10 @@ unusable as it is), then the tracking, then the stability; the rest after.
     so it is not a wrong latency figure: it is a constant-velocity guess over ~90 ms (~27 deg at 300 deg/s). Of the
     83 ms: encode 7, network 4-5, decode 13, then ~26 ms between the decoded frame and vrlink taking it, and 29 ms from
     vrlink's submit to the photons.
-    2026-11-21: the shim now gives vrlink a braking rate while the head slows down (`brake_rate`: the turn stops
-    where a constant deceleration stops it); simulated on the user's recorded head, the overshoot p99 6.7 -> 3.2 deg
-    (max 16.8 -> 9.4), the PC's predicted pose shaking 0.46 -> 0.56 deg rms. To judge worn: fast turns and stops. Levers: shorten that hold (vrlink's own queue; the PC's
+    2026-11-21: the shim gives vrlink a braking rate while the head slows down (`brake_rate`, docs/streaming.md
+    "The head's rate brakes"): in the stream, on the user's recorded sharp turns, the frames past the head p99
+    13.5-15.1 -> 2.9 deg. To judge worn: fast turns and stops. Left: the frames still match the head ~30 ms before
+    they are shown on average (moving the pose's time earlier helped the error but brought the bounce back). Levers: shorten that hold (vrlink's own queue; the PC's
     `driver_vrlink/maxVideoQueueLatencyUs` is the user's call), a deceleration-aware rate in the shim (`raw_pose`,
     to simulate on a recorded head first). Controllers: driver_quest1 gives SteamVR Monado's world-frame angular rate
     (controllers.cpp, ~line 1125) where the HMD's is device-local: check with a constant rate on a yawed controller.
