@@ -88,9 +88,10 @@ unusable as it is), then the tracking, then the stability; the rest after.
     journal, vrlink, vrclient_vrlink, vrserver, vrcompositor, layer logs, meminfo; `headset/vlk2/`: Steam's
     `*.previous.txt`, q1trackd, monado, warnings, coredump list).
   - Stopping the stream crashed all of Steam and SteamVR on the headset (user, 2026-11-17 night; no coredump kept).
-    2026-11-21: every vrlink of a boot (8 sessions) crashes (SIGSEGV) on its way out, after its 15 s "Timed out
-    getting information from the server" once the PC's SteamVR is closed: start there (coredumps are refused,
-    "Failed to send coredump datagram").
+    2026-11-21: vrlink crashed (SIGSEGV) on its way out after most sessions: a vrclient.so thread raced the
+    libraries' destructors (core dump). Fixed in the shim (vrlink ends at exit() before them, 4 of 4 sessions clean
+    after, 2 of 3 crashed before). Whether that was what took Steam and SteamVR down at the stream's stop: to see
+    worn (stop a stream from the headset).
     Find the crash in the logs above (Steam's `*.previous.txt`, vrserver, warnings) and reproduce it.
   - Position: vrlink submits no depth, so a position error of the PC's prediction is not corrected at all.
   - On a system that had run for hours, the stream was 16.6 px rms off the world in Monado's output (2.5-3 px fresh).

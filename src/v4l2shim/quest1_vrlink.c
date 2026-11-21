@@ -407,6 +407,20 @@ static void *rt_watch(void *arg)
 	return NULL;
 }
 
+// vrlink crashed (SIGSEGV) on its way out after many sessions (8 of 8 on 2026-11-20, 1 of 3 on 11-21): a thread of
+// vrclient.so still waited on an object (null by then) while the main thread ran the shared libraries' destructors
+// (core dump: the main thread in libstdc++'s __do_global_dtors_aux, the other in vrclient.so, x0 = 0). vrlink has shut
+// SteamVR's client down itself by then ("SVLRoot::Shutdown() complete"). So exit() ends the process with its status
+// before the libraries' destructors (and vrlink's own static ones): the handler is registered once vrlink asks for
+// SteamVR's interfaces, after main started (registered in this library's constructor it would run last, after
+// ld.so's, which glibc registers when main starts).
+static void vrlink_exit(int status, void *arg)
+{
+	(void)arg;
+	fflush(NULL);
+	_exit(status);
+}
+
 __attribute__((constructor)) static void rt_watch_start(void)
 {
 	pthread_t t;
@@ -834,6 +848,9 @@ EXPORT void *VR_GetGenericInterface(const char *version, int *err)
 	static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 	if (p && version && is_vrlink()) {
 		pthread_mutex_lock(&lock);
+		static bool exit_set;
+		if (!exit_set)
+			exit_set = on_exit(vrlink_exit, NULL) == 0;
 		if (!strcmp(version, "IVRSystem_026"))
 			patch(p);
 		else if (!strcmp(version, "IVRClientInternal_XXX"))
