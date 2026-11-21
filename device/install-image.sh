@@ -100,6 +100,10 @@ sh holo-wifi.sh install
 sh holo-android-hals.sh
 sh holo-android-modem.sh install
 sh holo-android-tracking.sh install
+# Meta's 6DoF tracking (and with it the controllers) from the first boot: without this file Monado falls back
+# to its 3DoF SyncBoss IMU and Meta's stack never starts. The development headset got it from a hand-run
+# `holo-android-tracking meta-on`.
+[ -f /etc/quest1-tracking ] || echo meta > /etc/quest1-tracking
 sh holo-monado.sh
 sh holo-audio.sh install
 systemctl enable holo-audio.service

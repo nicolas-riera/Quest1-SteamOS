@@ -11,7 +11,7 @@ M=/usr/lib/quest1/meta
 src() { if [ -f "$M/$1.img" ]; then echo "-o loop $M/$1.img"; else echo "$(part ${1}_a)"; fi; }
 
 # /android = system_a (system-as-root); /system, /vendor, /apex like on Android
-# /system too: a fresh image has no such directory (the development image already had one, so this went unseen)
+# /system too: a fresh image has none (the development image got it from device/enter.sh, so this went unseen)
 mkdir -p /android /system /firmware /apex
 if [ -d $M/system/system ]; then
 	mountpoint -q /android || { mount --bind $M/system /android && mount -o remount,bind,ro /android; }
@@ -19,6 +19,9 @@ else
 	mountpoint -q /android || mount -t ext4 -o ro,noload $(src system) /android
 fi
 mountpoint -q /system || mount --bind /android/system /system
+# /vendor as on a Quest 1 (no vendor partition: a link into system): libhybris's library path and Android's
+# linker config look there first. The development image got it from device/enter.sh, a fresh image has none.
+[ -L /vendor ] || [ -e /vendor ] || ln -s /system/vendor /vendor
 mountpoint -q /apex || mount -t tmpfs -o mode=755 tmpfs /apex
 for a in /android/system/apex/*; do
 	n=$(basename "$a"); n=${n%.release}
