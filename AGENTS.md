@@ -176,9 +176,14 @@ this is the command sequence.
    `vision` are never touched. **For an agent this is the one exception to section 2: it writes partitions, so only
    with the user's explicit go, given for that flash.**
 
-Status (2026-11-20): the build has run in WSL (2026-11-04) and on the headset's micro Linux (the fixes are in the
-`Installer:` and `Image build:` commits). The flash itself has not been done on the development headset yet: it
-still boots the development layout, `/data/steamos/holo.img` inside Android's `userdata`, by `fastboot boot`.
+Status (2026-11-21): the build has run in WSL (2026-11-04) and on the headset's micro Linux (the fixes are in the
+`Installer:` and `Image build:` commits). The development headset has never been flashed: it still boots the
+development layout, `/data/steamos/holo.img` inside Android's `userdata`, by `fastboot boot`. Someone else ran the
+whole sequence on their Quest 1 (2026-11-21): it booted, but the VR side did not start, because of things the
+development image had only by hand (fixed since, not yet run again: [installer/README.md](installer/README.md),
+"To check on the headset"). So a change that works on the development headset can still fail on a fresh image:
+anything it needs at the root (`/system`, `/vendor`, files in `/etc`) must be made by a `device/` script. The
+`prebuilt` branch the installer downloads from is not published yet.
 
 ## 6. Verifying a change
 

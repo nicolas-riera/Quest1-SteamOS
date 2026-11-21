@@ -140,6 +140,18 @@ SteamVR driver registration (`openvrpaths.vrpath`), the libhybris commit and Mon
 (`tools/build-native.sh`), the vrcompositor Vulkan shim (built as Steam's), the bionic stubs `q1trackd` and
 `libq1camtap.so` link against, the Meta exclusions, the micro Linux on the 4.4 kernel (Alpine's musl).
 
+2026-11-21, the first full install by someone else (WSL build, then the flash): every step went through and
+SteamOS booted, but `holo-android-blobs` stopped at `mount: /system: mount point does not exist`, so Monado and
+SteamVR never started. The development image was made by hand from Android (`device/enter.sh`), and a few things
+it got that way were never in a script. Found by reading the scripts, fixed, not yet run on a fresh install:
+- the `/system` mount point and the `/vendor -> /system/vendor` link (libhybris and Android's linker look in
+  `/vendor/lib64` first): made by `device/holo-android-blobs.sh` at boot;
+- `/etc/quest1-tracking` = `meta` (Meta's 6DoF tracking and the controllers; Monado falls back to its 3DoF IMU
+  without it): written by `device/install-image.sh`;
+- `libxcomposite` in `tools/native-deps.txt` (`q1apps` links it): `build-native.sh` stopped there.
+
+The `prebuilt` branch was not published yet, which is why that build went through `build-native.sh` itself.
+
 ## The app
 
 [`app/`](../app/README.md): Go, one exe (~20 MB with adb/fastboot), Edge WebView2 for the window. Its install

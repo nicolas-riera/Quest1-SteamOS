@@ -60,6 +60,11 @@ patch. What stays on the headset only:
 - libhybris: no local change (`git -C /root/libhybris status` lists only the autotools
   `COPYING`/`INSTALL` it generates).
 
+2026-11-21: that check missed what is not a file our scripts write: the `/system` mount point and the `/vendor`
+link (made by `device/enter.sh` in the Android-chroot days) and `/etc/quest1-tracking` (a hand-run
+`holo-android-tracking meta-on`). The first outside install failed on the first of them; all three are now made by
+`device/` scripts (installer/README.md, "To check on the headset").
+
 ## Proposed build
 
 1. **Base image in CI.** GitHub's `ubuntu-24.04-arm` runners are arm64, so the Holo rootfs

@@ -396,9 +396,15 @@ unusable as it is), then the tracking, then the stability; the rest after.
 - Quest 3 controllers (Touch Plus): github.com/Noculus-VR/TouchPlus-on-Quest-1 (user, 2026-11-13) pairs them with the
   Quest 1 by patching `libsyncboss.so` (no MCU or firmware change). Not finished: wait until it is, then see what our
   stack (q1trackd, libossdk) needs.
-- The installer app (app/, installer/); later a Linux version that builds the image on the PC. The Steam Frame's
-  files can come from Valve's public update store (`frame_source` "ota", SteamVR 2.19.3, installer/README.md): check
-  2.19.3 on the headset (it runs 2.17 now), then make it the default over the 0.3.0 recovery image.
+- The installer app (app/, installer/); later a Linux version that builds the image on the PC.
+  - 2026-11-21, first full install by someone else, following AGENTS.md section 5: every build step and the flash
+    went through, SteamOS booted, but `holo-android-blobs` failed (no `/system` mount point), so Monado and SteamVR
+    never started. Fixed with the other things only the development headset had (`/vendor`, Meta's tracking by
+    default, `libxcomposite` in the build deps): installer/README.md, "To check on the headset". To see on a fresh
+    install: the VR side up, tracking, controllers, Wi-Fi, Steam's login; Steam wrote crash dumps there on first
+    boot (no Wi-Fi yet, clock in 2026-07: not confirmed as the cause).
+  - The `prebuilt` branch the installer downloads our binaries from (installer/sources.json) is not published yet:
+    build `tools/build-native.sh` and `tools/build-boot.sh` and push it, or the installer's default path fails.
 - While the headset's install system (the small Linux that builds the image on the headset) is building, the
   power LED blinks white <-> purple.
 - Dual boot with a boot selector in the headset (very low priority).

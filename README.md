@@ -85,8 +85,9 @@ from Valve's servers and from Meta's last Quest 1 update image.
 - **Charging while off.** Once SteamOS is flashed, plugging in a headset that is off must show a charging
   screen, as Meta's system does, instead of starting the whole system.
 - **x86 games** (FEX, Proton).
-- **The installer** (see above): downloads and the image build work end to end; flashing the
-  built image is to do.
+- **The installer** (see above): downloads, the image build and the flash work end to end (first
+  full install by someone else on 2026-11-21); on that first boot the VR side did not start, fixed
+  since and not yet run again ([installer/README.md](installer/README.md)).
 
 ## How it works
 
